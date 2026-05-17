@@ -1,20 +1,21 @@
 import { StructuredToolInterface } from '@langchain/core/tools';
-import { createGetFinancials, createGetMarketData, createReadFilings, createScreenStocks } from './finance/index.js';
-import { exaSearch, perplexitySearch, tavilySearch, WEB_SEARCH_DESCRIPTION, xSearchTool, X_SEARCH_DESCRIPTION } from './search/index.js';
-import { skillTool, SKILL_TOOL_DESCRIPTION } from './skill.js';
-import { webFetchTool, WEB_FETCH_DESCRIPTION } from './fetch/web-fetch.js';
-import { browserTool, BROWSER_DESCRIPTION } from './browser/browser.js';
-import { readFileTool, READ_FILE_DESCRIPTION } from './filesystem/read-file.js';
-import { writeFileTool, WRITE_FILE_DESCRIPTION } from './filesystem/write-file.js';
-import { editFileTool, EDIT_FILE_DESCRIPTION } from './filesystem/edit-file.js';
+import { discoverSkills } from '../skills/index.js';
+import { BROWSER_DESCRIPTION, browserTool } from './browser/browser.js';
+import { CRON_TOOL_DESCRIPTION, cronTool } from './cron/cron-tool.js';
+import { WEB_FETCH_DESCRIPTION, webFetchTool } from './fetch/web-fetch.js';
+import { EDIT_FILE_DESCRIPTION, editFileTool } from './filesystem/edit-file.js';
+import { READ_FILE_DESCRIPTION, readFileTool } from './filesystem/read-file.js';
+import { WRITE_FILE_DESCRIPTION, writeFileTool } from './filesystem/write-file.js';
 import { GET_FINANCIALS_DESCRIPTION } from './finance/get-financials.js';
 import { GET_MARKET_DATA_DESCRIPTION } from './finance/get-market-data.js';
+import { createGetFinancials, createGetMarketData, createReadFilings, createScreenStocks } from './finance/index.js';
 import { READ_FILINGS_DESCRIPTION } from './finance/read-filings.js';
 import { SCREEN_STOCKS_DESCRIPTION } from './finance/screen-stocks.js';
-import { heartbeatTool, HEARTBEAT_TOOL_DESCRIPTION } from './heartbeat/heartbeat-tool.js';
-import { cronTool, CRON_TOOL_DESCRIPTION } from './cron/cron-tool.js';
-import { memoryGetTool, MEMORY_GET_DESCRIPTION, memorySearchTool, MEMORY_SEARCH_DESCRIPTION, memoryUpdateTool, MEMORY_UPDATE_DESCRIPTION } from './memory/index.js';
-import { discoverSkills } from '../skills/index.js';
+import { HEARTBEAT_TOOL_DESCRIPTION, heartbeatTool } from './heartbeat/heartbeat-tool.js';
+import { createIbkrAccount, createIbkrHistorical, createIbkrMarketData, createIbkrOrders, createIbkrScanner, createRiskManager, createSignalScorer, createTechnicalAnalysis, IBKR_ACCOUNT_DESCRIPTION, IBKR_HISTORICAL_DESCRIPTION, IBKR_MARKET_DATA_DESCRIPTION, IBKR_ORDERS_DESCRIPTION, IBKR_SCANNER_DESCRIPTION, RISK_MANAGER_DESCRIPTION, SIGNAL_SCORER_DESCRIPTION, TECHNICAL_ANALYSIS_DESCRIPTION } from './ibkr/index.js';
+import { MEMORY_GET_DESCRIPTION, MEMORY_SEARCH_DESCRIPTION, MEMORY_UPDATE_DESCRIPTION, memoryGetTool, memorySearchTool, memoryUpdateTool } from './memory/index.js';
+import { exaSearch, perplexitySearch, tavilySearch, WEB_SEARCH_DESCRIPTION, X_SEARCH_DESCRIPTION, xSearchTool } from './search/index.js';
+import { SKILL_TOOL_DESCRIPTION, skillTool } from './skill.js';
 
 /**
  * A registered tool with its rich description for system prompt injection.
@@ -140,6 +141,68 @@ export function getToolRegistry(model: string): RegisteredTool[] {
       concurrencySafe: false,
     },
   ];
+
+  // Include IBKR tools if IBKR_HOST or IBKR_PORT is configured
+  if (process.env.IBKR_HOST || process.env.IBKR_PORT) {
+    tools.push(
+      {
+        name: 'ibkr_market_data',
+        tool: createIbkrMarketData(),
+        description: IBKR_MARKET_DATA_DESCRIPTION,
+        compactDescription: 'Real-time market data snapshot from Interactive Brokers (bid, ask, last, OHLC, volume).',
+        concurrencySafe: true,
+      },
+      {
+        name: 'ibkr_historical',
+        tool: createIbkrHistorical(),
+        description: IBKR_HISTORICAL_DESCRIPTION,
+        compactDescription: 'Historical OHLCV bars from Interactive Brokers (1s to 1M bars, flexible duration).',
+        concurrencySafe: true,
+      },
+      {
+        name: 'technical_analysis',
+        tool: createTechnicalAnalysis(),
+        description: TECHNICAL_ANALYSIS_DESCRIPTION,
+        compactDescription: 'Compute TA indicators (RSI, MACD, Bollinger, ATR, VWAP, EMAs, volume) for a ticker from live IBKR data.',
+        concurrencySafe: true,
+      },
+      {
+        name: 'signal_scorer',
+        tool: createSignalScorer(),
+        description: SIGNAL_SCORER_DESCRIPTION,
+        compactDescription: 'Multi-factor signal score (0–100) for a trade candidate. Evaluates momentum, mean-reversion, volume, and trend alignment.',
+        concurrencySafe: true,
+      },
+      {
+        name: 'risk_manager',
+        tool: createRiskManager(),
+        description: RISK_MANAGER_DESCRIPTION,
+        compactDescription: 'Validate a trade against risk rules (position size, R/R, stops, overnight limits). Returns PASS/FAIL.',
+        concurrencySafe: true,
+      },
+      {
+        name: 'ibkr_scanner',
+        tool: createIbkrScanner(),
+        description: IBKR_SCANNER_DESCRIPTION,
+        compactDescription: 'IBKR market scanner: top gainers, losers, most active, gappers, unusual volume. Returns ranked results.',
+        concurrencySafe: true,
+      },
+      {
+        name: 'ibkr_orders',
+        tool: createIbkrOrders(),
+        description: IBKR_ORDERS_DESCRIPTION,
+        compactDescription: 'Place, cancel, or list orders through IBKR. Supports MKT, LMT, STP, trailing stop, MOC, etc.',
+        concurrencySafe: false,
+      },
+      {
+        name: 'ibkr_account',
+        tool: createIbkrAccount(),
+        description: IBKR_ACCOUNT_DESCRIPTION,
+        compactDescription: 'Query IBKR account: balances, margin, positions, daily P&L.',
+        concurrencySafe: true,
+      },
+    );
+  }
 
   // Include web_search if Exa, Perplexity, or Tavily API key is configured (Exa → Perplexity → Tavily)
   if (process.env.EXASEARCH_API_KEY) {

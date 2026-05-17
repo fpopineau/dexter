@@ -1,8 +1,9 @@
 import { AIMessage } from '@langchain/core/messages';
 import type { ToolCall } from '@langchain/core/messages/tool';
 import { StructuredToolInterface } from '@langchain/core/tools';
-import { createProgressChannel } from '../utils/progress-channel.js';
 import { all } from '../utils/concurrency.js';
+import { createProgressChannel } from '../utils/progress-channel.js';
+import type { RunContext } from './run-context.js';
 import type {
   ApprovalDecision,
   ToolApprovalEvent,
@@ -13,7 +14,6 @@ import type {
   ToolProgressEvent,
   ToolStartEvent,
 } from './types.js';
-import type { RunContext } from './run-context.js';
 
 type ToolExecutionEvent =
   | ToolStartEvent
@@ -24,7 +24,7 @@ type ToolExecutionEvent =
   | ToolDeniedEvent
   | ToolLimitEvent;
 
-const TOOLS_REQUIRING_APPROVAL = ['write_file', 'edit_file'] as const;
+const TOOLS_REQUIRING_APPROVAL = ['write_file', 'edit_file', 'ibkr_orders'] as const;
 const DEFAULT_MAX_CONCURRENCY = 10;
 
 interface ToolCallBatch {
