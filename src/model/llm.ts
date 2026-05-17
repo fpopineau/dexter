@@ -1,19 +1,18 @@
-import { AIMessage, AIMessageChunk, BaseMessage } from '@langchain/core/messages';
-import { ChatOpenAI } from '@langchain/openai';
-import { ChatAnthropic } from '@langchain/anthropic';
-import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
-import { ChatOllama } from '@langchain/ollama';
-import { ChatPromptTemplate } from '@langchain/core/prompts';
-import { SystemMessage, HumanMessage } from '@langchain/core/messages';
-import { BaseChatModel } from '@langchain/core/language_models/chat_models';
-import { StructuredToolInterface } from '@langchain/core/tools';
-import { Runnable } from '@langchain/core/runnables';
-import { z } from 'zod';
 import { DEFAULT_SYSTEM_PROMPT } from '@/agent/prompts';
 import type { TokenUsage } from '@/agent/types';
+import { getProviderById, resolveProvider } from '@/providers';
 import { logger } from '@/utils';
 import { classifyError, isNonRetryableError } from '@/utils/errors';
-import { resolveProvider, getProviderById } from '@/providers';
+import { ChatAnthropic } from '@langchain/anthropic';
+import { BaseChatModel } from '@langchain/core/language_models/chat_models';
+import { AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage } from '@langchain/core/messages';
+import { ChatPromptTemplate } from '@langchain/core/prompts';
+import { Runnable } from '@langchain/core/runnables';
+import { StructuredToolInterface } from '@langchain/core/tools';
+import { ChatGoogleGenerativeAI } from '@langchain/google-genai';
+import { ChatOllama } from '@langchain/ollama';
+import { ChatOpenAI } from '@langchain/openai';
+import { z } from 'zod';
 
 export const DEFAULT_PROVIDER = 'openai';
 export const DEFAULT_MODEL = 'gpt-5.4';
@@ -119,6 +118,15 @@ const MODEL_FACTORIES: Record<string, ModelFactory> = {
       model: name.replace(/^ollama:/, ''),
       ...opts,
       ...(process.env.OLLAMA_BASE_URL ? { baseUrl: process.env.OLLAMA_BASE_URL } : {}),
+    }),
+  vllm: (name, opts) =>
+    new ChatOpenAI({
+      model: name.replace(/^vllm:/, ''),
+      ...opts,
+      apiKey: 'not-needed',
+      configuration: {
+        baseURL: process.env.VLLM_BASE_URL || 'http://127.0.0.1:8000/v1',
+      },
     }),
 };
 
