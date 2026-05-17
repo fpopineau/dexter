@@ -1,0 +1,29 @@
+# Risk Management Rules
+# Used by the risk_manager tool to validate trade recommendations.
+# All values are configurable — adjust to match your risk tolerance.
+
+# --- Position Sizing ---
+max_position_pct: 5 # Max % of account value per position
+max_open_positions: 10 # Max number of simultaneous positions
+
+# --- Daily Limits ---
+max_daily_loss_pct: 2 # Stop trading after this % drawdown in a day
+max_daily_trades: 20 # Max number of round-trip trades per day
+
+# --- Sector Exposure ---
+max_sector_exposure_pct: 20 # Max % of account in a single sector
+
+# --- Risk/Reward ---
+min_risk_reward: 2.0 # Minimum reward-to-risk ratio for new trades
+mandatory_stop_loss: true # Every trade must have a stop loss
+
+# --- Overnight ---
+max_overnight_exposure_pct: 30 # Max % of account held overnight
+max_overnight_position_pct: 3 # Max % per position held overnight (tighter than intraday)
+
+# --- Price & Liquidity Filters ---
+min_price: 5.0 # Avoid penny stocks
+min_avg_volume: 500000 # Minimum average daily volume
+
+# --- ATR-Based Stops ---
+stop_atr_multiplier: 1.5 # Default stop = entry ± 1.5 × ATR
