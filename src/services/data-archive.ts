@@ -5,7 +5,7 @@
  * Designed to be invoked by a cron job during market hours.
  */
 
-import { allocReqId, getIBApi } from '@/tools/ibkr/connection.js';
+import { allocReqId, getIBApi, isNonFatalIbkrError } from '@/tools/ibkr/connection.js';
 import { logger } from '@/utils';
 import type { Bar } from '@stoqey/ib';
 import { BarSizeSetting, Contract, EventName, SecType, WhatToShow } from '@stoqey/ib';
@@ -165,6 +165,7 @@ async function archiveSymbol(
 
         const onError = (err: Error, code: number, id: number) => {
             if (id !== reqId) return;
+            if (isNonFatalIbkrError(code)) return;
             clearTimeout(timeout);
             cleanup();
             reject(new Error(`[DataArchive] Error ${code} for ${symbol}: ${err.message}`));

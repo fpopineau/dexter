@@ -12,7 +12,7 @@ import type { Contract } from '@stoqey/ib';
 import { EventName } from '@stoqey/ib';
 import { z } from 'zod';
 import { formatToolResult } from '../types.js';
-import { allocReqId, getIBApi } from './connection.js';
+import { allocReqId, getIBApi, isNonFatalIbkrError } from './connection.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -159,6 +159,7 @@ async function getAccountSummary(
 
         const onError = (err: Error, code: number, id: number) => {
             if (id !== reqId && id !== -1) return;
+            if (isNonFatalIbkrError(code)) return;
             clearTimeout(timeout);
             api.cancelAccountSummary(reqId);
             cleanup();
@@ -236,6 +237,7 @@ async function getPositions(api: import('@stoqey/ib').IBApi): Promise<string> {
 
         const onError = (err: Error, code: number, id: number) => {
             if (id !== -1) return;
+            if (isNonFatalIbkrError(code)) return;
             clearTimeout(timeout);
             api.cancelPositions();
             cleanup();
@@ -298,6 +300,7 @@ async function getAccountPnl(
 
         const onError = (err: Error, code: number, id: number) => {
             if (id !== reqId && id !== -1) return;
+            if (isNonFatalIbkrError(code)) return;
             clearTimeout(timeout);
             api.cancelPnL(reqId);
             cleanup();

@@ -9,7 +9,7 @@
  * but caches results in memory for subsequent queries within the session.
  */
 
-import { allocReqId, getIBApi } from '@/tools/ibkr/connection.js';
+import { allocReqId, getIBApi, isNonFatalIbkrError } from '@/tools/ibkr/connection.js';
 import { logger } from '@/utils';
 import type { ContractDetails, ScannerSubscription } from '@stoqey/ib';
 import { EventName } from '@stoqey/ib';
@@ -130,6 +130,7 @@ export async function runScan(
 
         const onError = (err: Error, code: number, id: number) => {
             if (id !== reqId) return;
+            if (isNonFatalIbkrError(code)) return;
             clearTimeout(timeout);
             cleanup();
             // Common: code 162 = "Historical Market Data Service error message: No scanner results"

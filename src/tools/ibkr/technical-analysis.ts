@@ -8,7 +8,7 @@ import type { Bar } from '@stoqey/ib';
 import { BarSizeSetting, Contract, EventName, SecType, WhatToShow } from '@stoqey/ib';
 import { z } from 'zod';
 import { formatToolResult } from '../types.js';
-import { allocReqId, getIBApi } from './connection.js';
+import { allocReqId, getIBApi, isNonFatalIbkrError } from './connection.js';
 import {
     type AllIndicators,
     type OHLCV,
@@ -115,6 +115,7 @@ async function fetchBars(
 
         const onError = (err: Error, code: number, id: number) => {
             if (id !== reqId) return;
+            if (isNonFatalIbkrError(code)) return;
             clearTimeout(timeout);
             cleanup();
             reject(new Error(`[TA] Historical data error ${code}: ${err.message}`));

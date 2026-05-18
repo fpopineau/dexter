@@ -13,7 +13,7 @@ import type { Contract, Order, OrderState } from '@stoqey/ib';
 import { EventName, OrderAction, OrderStatus, OrderType, SecType, TimeInForce } from '@stoqey/ib';
 import { z } from 'zod';
 import { formatToolResult } from '../types.js';
-import { allocReqId, getIBApi } from './connection.js';
+import { allocReqId, getIBApi, isNonFatalIbkrError } from './connection.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -264,6 +264,7 @@ async function placeOrder(
 
         const onError = (err: Error, code: number, id: number) => {
             if (id !== orderId && id !== -1) return;
+            if (isNonFatalIbkrError(code)) return;
             clearTimeout(timeout);
             cleanup();
             reject(new Error(`[IBKR] Order error ${code}: ${err.message}`));
@@ -331,6 +332,7 @@ async function cancelOrder(
 
         const onError = (err: Error, code: number, id: number) => {
             if (id !== input.orderId && id !== -1) return;
+            if (isNonFatalIbkrError(code)) return;
             clearTimeout(timeout);
             cleanup();
             reject(new Error(`[IBKR] Cancel error ${code}: ${err.message}`));
@@ -410,6 +412,7 @@ async function listOpenOrders(api: import('@stoqey/ib').IBApi): Promise<string> 
         const onError = (err: Error, code: number, id: number) => {
             // Only catch global errors (id = -1) for open order requests
             if (id !== -1) return;
+            if (isNonFatalIbkrError(code)) return;
             clearTimeout(timeout);
             cleanup();
             reject(new Error(`[IBKR] Open orders error ${code}: ${err.message}`));
