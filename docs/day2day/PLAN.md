@@ -845,12 +845,28 @@ src/backtest/sentiment-loader.ts
 - [x] Mark Phase 0–5 ✅ in this document
 - [x] Default `IBKR_PORT=4002` (paper Gateway) in `env.example`
 
-### Sprint B — Prove it end-to-end against IB Gateway (Next)
-- [ ] Bring up IB Gateway paper on port 4002
-- [ ] Verify `ibkr_market_data AAPL`, `ibkr_historical NVDA`, `technical_analysis NVDA 5 mins`
-- [ ] Verify a full signal_scorer + risk_manager flow on one ticker
-- [ ] Trigger the `day-trade-scan` skill end-to-end; confirm output lands in WhatsApp
+### Sprint B — Prove it end-to-end against IB Gateway (in progress, 2026-05-18)
+- [x] Bring up IB Gateway paper on port 4002
+- [x] Verify `ibkr_market_data AAPL`, `ibkr_historical AAPL`, `technical_analysis AAPL 5 mins`
+- [x] Verify full `signal_scorer` + `risk_manager` flow on AAPL
+- [x] `ibkr_scanner` connects (returns empty pre-market, expected)
+- [ ] Trigger the `day-trade-scan` skill end-to-end via the LLM; confirm output lands in WhatsApp
 - [ ] Smoke-test backtest on one ticker against FirstRate archive
+- [ ] Follow-up: fix DELAYED_VOLUME tick (code 74) unit scaling — current value is ~10⁴× too large
+
+Sprint B uncovered three real bugs in the IBKR tools (all fixed in
+[a7c2f24](https://github.com/fpopineau/dexter/commit/a7c2f24)):
+- Informational IBKR codes were treated as fatal in every per-tool
+  error handler — added `isNonFatalIbkrError` filter.
+- No path to use delayed market data — added `IBKR_MARKET_DATA_TYPE`
+  env var and `reqMarketDataType` call at connect.
+- `market-data.ts` only mapped live tick codes; delayed feed (codes
+  66–76) was silently dropped. Now mapped to the same labels with a
+  `delayed: true` flag.
+
+The single throwaway script that found these is
+[scripts/smoke-ibkr.ts](../../scripts/smoke-ibkr.ts) — drives each
+IBKR tool directly with the LLM bypassed.
 
 ### Sprint B+ — Close the obvious wiring gaps
 - [ ] Expose `addSymbol` / `getLatestPrice` from `ibkr-stream` as agent tools (or as a watchlist hook)
