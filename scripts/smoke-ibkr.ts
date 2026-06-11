@@ -1,7 +1,7 @@
 /**
  * Sprint B smoke test — drives each IBKR tool directly without the LLM.
  * Confirms the @stoqey/ib wiring, IB Gateway connection, and that each
- * tool returns sensible data. Not committed to git; throwaway script.
+ * tool returns sensible data. Read-only: never places orders.
  *
  * Run: bun run scripts/smoke-ibkr.ts [TICKER]
  */

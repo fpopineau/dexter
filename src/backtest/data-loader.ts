@@ -45,7 +45,8 @@ export interface LoadOptions {
 // FirstRate ZIP loader
 // ---------------------------------------------------------------------------
 
-const DEFAULT_FIRSTRATE_DIR = join('ActivTradesFX', 'data', 'FirstRate', 'stock');
+const DEFAULT_FIRSTRATE_DIR =
+    process.env.FIRSTRATE_DATA_DIR || join('ActivTradesFX', 'data', 'FirstRate', 'stock');
 
 /**
  * Load 1-minute bars for a ticker from FirstRate ZIP archives.

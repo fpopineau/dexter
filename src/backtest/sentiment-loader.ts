@@ -156,7 +156,8 @@ function matchTicker(headline: string, actor1?: string, actor2?: string): string
 // Parquet loading
 // ---------------------------------------------------------------------------
 
-const DEFAULT_GDELT_DIR = join('GDELT', 'gdelt_cleaned', 'parts_monthly');
+const DEFAULT_GDELT_DIR =
+    process.env.GDELT_DATA_DIR || join('GDELT', 'gdelt_cleaned', 'parts_monthly');
 
 /**
  * Load GDELT sentiment for a date range, matched to tickers.

@@ -2,7 +2,7 @@
 
 Dexter is an autonomous financial research agent that thinks, plans, and learns as it works. It performs analysis using task planning, self-reflection, and real-time market data. Think Claude Code, but built specifically for financial research.
 
-<img width="665" height="452" alt="Screenshot 2026-04-02 at 4 16 57 PM" src="https://github.com/user-attachments/assets/02418111-5f48-4a66-be5d-dc9bf9806284" />
+<img width="665" height="452" alt="Screenshot 2026-04-02 at 4 16 57 PM" src="https://github.com/user-attachments/assets/02418111-5f48-4a66-be5d-dc9bf9806284" />
 
 ## Table of Contents
 
@@ -13,6 +13,7 @@ Dexter is an autonomous financial research agent that thinks, plans, and learns 
 - [📊 How to Evaluate](#-how-to-evaluate)
 - [🐛 How to Debug](#-how-to-debug)
 - [📱 How to Use with WhatsApp](#-how-to-use-with-whatsapp)
+- [📈 Day2Day Trading Extension](#-day2day-trading-extension)
 - [🤝 How to Contribute](#-how-to-contribute)
 - [📄 License](#-license)
 
@@ -30,7 +31,7 @@ Dexter takes complex financial questions and turns them into clear, step-by-step
 
 [![Twitter Follow](https://img.shields.io/twitter/follow/virattt?style=social)](https://twitter.com/virattt) [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?style=social&logo=discord)](https://discord.gg/jpGHv2XB6T)
 
-<img width="1042" height="638" alt="Screenshot 2026-02-18 at 12 21 25 PM" src="https://github.com/user-attachments/assets/2a6334f9-863f-4bd2-a56f-923e42f4711e" />
+<img width="1042" height="638" alt="Screenshot 2026-02-18 at 12 21 25 PM" src="https://github.com/user-attachments/assets/2a6334f9-863f-4bd2-a56f-923e42f4711e" />
 
 
 ## ✅ Prerequisites
@@ -163,6 +164,30 @@ bun run gateway
 Then open WhatsApp, go to your own chat (message yourself), and ask Dexter a question.
 
 For detailed setup instructions, configuration options, and troubleshooting, see the [WhatsApp Gateway README](src/gateway/channels/whatsapp/README.md).
+
+## 📈 Day2Day Trading Extension
+
+The `day2day` branch extends Dexter into a day/overnight trading **recommendation** system (advisory-first: explicit entry/stop/target; execution is opt-in and gated by user approval plus a paper/live safety lock). See [docs/day2day/PLAN.md](docs/day2day/PLAN.md) for the full architecture.
+
+**Additional prerequisites:**
+- [IB Gateway](https://www.interactivebrokers.com/en/trading/ibgateway-stable.php) or TWS, logged into a **paper** account (port 4002 for IB Gateway paper, 7497 for TWS paper)
+- Optional: a local [vLLM](https://docs.vllm.ai) server exposing an OpenAI-compatible API for latency-sensitive tasks (`VLLM_BASE_URL`)
+- Optional, for backtests: FirstRate 1-minute OHLCV ZIP archives (`FIRSTRATE_DATA_DIR`) and cleaned GDELT sentiment parquet files (`GDELT_DATA_DIR`) — proprietary data, not included
+
+**Setup:**
+```bash
+cp env.example .env
+# Set IBKR_HOST / IBKR_PORT (4002 = paper) / IBKR_CLIENT_ID.
+# On paper accounts without a market-data subscription, set IBKR_MARKET_DATA_TYPE=3 (delayed).
+# Keep IBKR_ALLOW_LIVE=false — order placement is refused on live ports/accounts otherwise.
+
+# Verify the IBKR wiring end-to-end (read-only, never places orders):
+bun run scripts/smoke-ibkr.ts AAPL
+```
+
+**What's included:** IBKR tools (market data, historical bars, orders, account, scanner, risk manager, signal scorer, technical analysis), a realtime streaming sidecar with automatic reconnection, trading skills (`pre-market`, `day-trade`, `overnight`), seeded trading cron jobs (gateway), risk rules in `src/config/risk-rules.yaml`, and a backtest pipeline (`src/backtest/`) with Sharpe/Sortino/drawdown metrics.
+
+**Safety model:** orders always require interactive user approval; placement is additionally refused when connected to a live port (4001/7496) or a non-paper account unless `IBKR_ALLOW_LIVE=true`; risk rules cap position size, daily loss, and overnight exposure; file logs land in `.dexter/logs/` (JSONL, daily rotation).
 
 ## 🤝 How to Contribute
 
