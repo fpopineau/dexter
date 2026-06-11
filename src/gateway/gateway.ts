@@ -3,6 +3,7 @@ import type { GroupContext } from '../agent/prompts.js';
 import { ensureHeartbeatCronJob } from '../cron/heartbeat-migration.js';
 import { startCronRunner } from '../cron/runner.js';
 import { ensureTradingCronJobs } from '../cron/trading-schedules.js';
+import { isOpportunityEngineEnabled, startOpportunityEngine, stopOpportunityEngine } from '../services/opportunity-engine.js';
 import { getSetting } from '../utils/config.js';
 import { dexterPath } from '../utils/paths.js';
 import { enqueueForSession, isSessionRunning, runAgentForMessage } from './agent-runner.js';
@@ -231,12 +232,16 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
   ensureHeartbeatCronJob(params.configPath);
   if (process.env.IBKR_HOST || process.env.IBKR_PORT) {
     ensureTradingCronJobs();
+    if (isOpportunityEngineEnabled()) {
+      startOpportunityEngine();
+    }
   }
   const cron = startCronRunner({ configPath: params.configPath });
 
   return {
     stop: async () => {
       cron.stop();
+      stopOpportunityEngine();
       await manager.stopAll();
     },
     snapshot: () => manager.getSnapshot(),
