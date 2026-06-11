@@ -2,7 +2,9 @@
  * IBKR Order Management tool — place, modify, cancel orders and query open orders.
  *
  * Safety features:
- * - Paper-trading by default (port 4002)
+ * - Paper-trading by default (connection default is port 7497 = TWS paper)
+ * - SAFETY LOCK: order placement is refused on live ports (4001/7496) and on
+ *   non-paper managed accounts unless IBKR_ALLOW_LIVE=true (see connection.ts)
  * - Registered in TOOLS_REQUIRING_APPROVAL so the agent must get user consent
  * - transmit=true by default but can be set to false for "what-if" orders
  * - Quantity and price sanity checks
@@ -13,7 +15,7 @@ import type { Contract, Order, OrderState } from '@stoqey/ib';
 import { EventName, OrderAction, OrderStatus, OrderType, SecType, TimeInForce } from '@stoqey/ib';
 import { z } from 'zod';
 import { formatToolResult } from '../types.js';
-import { allocReqId, getIBApi, isNonFatalIbkrError } from './connection.js';
+import { allocReqId, assertOrderingAllowed, getIBApi, isNonFatalIbkrError } from './connection.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -53,7 +55,8 @@ Manage orders through Interactive Brokers. Supports three actions:
 
 IMPORTANT: This tool requires user approval before execution.
 Orders go to the connected IB Gateway (paper or live depending on port).
-Always verify you are on paper trading (port 4002) before placing real orders.
+A safety lock refuses order placement on live ports (4001/7496) or live
+accounts unless the IBKR_ALLOW_LIVE environment variable is set to true.
 `.trim();
 
 // ---------------------------------------------------------------------------
@@ -127,6 +130,10 @@ export function createIbkrOrders() {
 
             switch (input.action) {
                 case 'place':
+                    // Paper/live safety lock — throws on live port/account
+                    // unless IBKR_ALLOW_LIVE=true. Cancel and list stay
+                    // available in all cases (they only reduce risk).
+                    assertOrderingAllowed();
                     return placeOrder(api, input);
                 case 'cancel':
                     return cancelOrder(api, input);

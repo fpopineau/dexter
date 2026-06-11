@@ -7,7 +7,7 @@
  * Other tools/services query the buffer via getLatestBars() / getLatestPrice().
  */
 
-import { allocReqId, getIBApi } from '@/tools/ibkr/connection.js';
+import { allocReqId, getIBApi, onReconnect } from '@/tools/ibkr/connection.js';
 import { logger } from '@/utils';
 import { Contract, EventName, SecType, WhatToShow } from '@stoqey/ib';
 import { mkdir } from 'node:fs/promises';
@@ -43,6 +43,30 @@ interface SymbolState {
 
 const subscriptions = new Map<string, SymbolState>();
 let running = false;
+let reconnectHookRegistered = false;
+
+/**
+ * After an automatic reconnection the IBApi instance is brand new: the old
+ * realtimeBar listeners and request IDs died with the previous socket.
+ * Re-subscribe every tracked symbol from scratch on the fresh instance.
+ */
+function registerReconnectHook(): void {
+    if (reconnectHookRegistered) return;
+    reconnectHookRegistered = true;
+    onReconnect(async () => {
+        if (!running || subscriptions.size === 0) return;
+        const previous = [...subscriptions.values()].map((s) => ({ symbol: s.symbol, maxBars: s.maxBars }));
+        subscriptions.clear();
+        logger.info(`[ibkr-stream] Re-subscribing ${previous.length} symbol(s) after reconnect`);
+        for (const { symbol, maxBars } of previous) {
+            try {
+                await subscribe(symbol, maxBars);
+            } catch (err) {
+                logger.error(`[ibkr-stream] Re-subscribe failed for ${symbol}: ${err}`);
+            }
+        }
+    });
+}
 
 // ---------------------------------------------------------------------------
 // SQLite persistence (optional, lazy init)
@@ -201,6 +225,7 @@ async function persistBar(symbol: string, bar: StreamBar): Promise<void> {
 export async function start(symbols: string[]): Promise<void> {
     if (running && symbols.length === 0) return;
     running = true;
+    registerReconnectHook();
     for (const sym of symbols) {
         await subscribe(sym.toUpperCase());
     }
