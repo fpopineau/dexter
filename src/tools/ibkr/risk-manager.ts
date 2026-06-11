@@ -32,7 +32,7 @@ Does not require IBKR connection — works on the proposed numbers alone.
 // Risk rules loading
 // ---------------------------------------------------------------------------
 
-interface RiskRules {
+export interface RiskRules {
     max_position_pct: number;
     max_open_positions: number;
     max_daily_loss_pct: number;
@@ -92,6 +92,11 @@ function loadRules(): RiskRules {
         cachedRules = DEFAULT_RULES;
     }
     return cachedRules;
+}
+
+/** Public accessor for the risk rules (shared with the daily-loss guard). */
+export function getRiskRules(): RiskRules {
+    return loadRules();
 }
 
 // ---------------------------------------------------------------------------
