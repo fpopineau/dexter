@@ -443,7 +443,7 @@ async function listOpenOrders(api: import('@stoqey/ib').IBApi): Promise<string> 
 // Next valid order ID helper
 // ---------------------------------------------------------------------------
 
-function getNextValidOrderId(api: import('@stoqey/ib').IBApi): Promise<number> {
+export function getNextValidOrderId(api: import('@stoqey/ib').IBApi): Promise<number> {
     return new Promise<number>((resolve, reject) => {
         const timeout = setTimeout(() => {
             cleanup();
