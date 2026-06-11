@@ -13,12 +13,13 @@ interface Provider {
 
 const PROVIDER_MODELS: Record<string, Model[]> = {
   openai: [
+    { id: 'gpt-5.5', displayName: 'GPT 5.5' },
     { id: 'gpt-5.4', displayName: 'GPT 5.4' },
-    { id: 'gpt-4.1', displayName: 'GPT 4.1' },
   ],
   anthropic: [
     { id: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6' },
-    { id: 'claude-opus-4-7', displayName: 'Opus 4.7' },
+    { id: 'claude-opus-4-8', displayName: 'Opus 4.8' },
+    { id: 'claude-fable-5', displayName: 'Fable 5' },
   ],
   google: [
     { id: 'gemini-3-flash-preview', displayName: 'Gemini 3 Flash' },
@@ -30,8 +31,8 @@ const PROVIDER_MODELS: Record<string, Model[]> = {
   ],
   moonshot: [{ id: 'kimi-k2-5', displayName: 'Kimi K2.5' }],
   deepseek: [
-    { id: 'deepseek-chat', displayName: 'DeepSeek V3' },
-    { id: 'deepseek-reasoner', displayName: 'DeepSeek R1' },
+    { id: 'deepseek-v4-pro', displayName: 'DeepSeek V4 Pro' },
+    { id: 'deepseek-v4-flash', displayName: 'DeepSeek V4 Flash' },
   ],
 };
 

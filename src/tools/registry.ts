@@ -1,8 +1,10 @@
 import { StructuredToolInterface } from '@langchain/core/tools';
 import { discoverSkills } from '../skills/index.js';
+import { getSetting } from '../utils/config.js';
+import type { SearchProviderId } from '../utils/env.js';
 import { BROWSER_DESCRIPTION, browserTool } from './browser/browser.js';
 import { CRON_TOOL_DESCRIPTION, cronTool } from './cron/cron-tool.js';
-import { WEB_FETCH_DESCRIPTION, webFetchTool } from './fetch/web-fetch.js';
+import { createWebFetch, WEB_FETCH_DESCRIPTION } from './fetch/web-fetch.js';
 import { EDIT_FILE_DESCRIPTION, editFileTool } from './filesystem/edit-file.js';
 import { READ_FILE_DESCRIPTION, readFileTool } from './filesystem/read-file.js';
 import { WRITE_FILE_DESCRIPTION, writeFileTool } from './filesystem/write-file.js';
@@ -14,8 +16,10 @@ import { SCREEN_STOCKS_DESCRIPTION } from './finance/screen-stocks.js';
 import { HEARTBEAT_TOOL_DESCRIPTION, heartbeatTool } from './heartbeat/heartbeat-tool.js';
 import { createIbkrAccount, createIbkrHistorical, createIbkrMarketData, createIbkrOrders, createIbkrScanner, createRiskManager, createSignalScorer, createTechnicalAnalysis, IBKR_ACCOUNT_DESCRIPTION, IBKR_HISTORICAL_DESCRIPTION, IBKR_MARKET_DATA_DESCRIPTION, IBKR_ORDERS_DESCRIPTION, IBKR_SCANNER_DESCRIPTION, RISK_MANAGER_DESCRIPTION, SIGNAL_SCORER_DESCRIPTION, TECHNICAL_ANALYSIS_DESCRIPTION } from './ibkr/index.js';
 import { MEMORY_GET_DESCRIPTION, MEMORY_SEARCH_DESCRIPTION, MEMORY_UPDATE_DESCRIPTION, memoryGetTool, memorySearchTool, memoryUpdateTool } from './memory/index.js';
-import { exaSearch, perplexitySearch, tavilySearch, WEB_SEARCH_DESCRIPTION, X_SEARCH_DESCRIPTION, xSearchTool } from './search/index.js';
+import { exaSearch, langSearch, perplexitySearch, tavilySearch, WEB_SEARCH_DESCRIPTION, X_SEARCH_DESCRIPTION, xSearchTool } from './search/index.js';
+import { createWebSearchTool, type WebSearchProvider } from './search/web-search.js';
 import { SKILL_TOOL_DESCRIPTION, skillTool } from './skill.js';
+import { createSpawnSubagent, SPAWN_SUBAGENT_DESCRIPTION } from './subagent/spawn-subagent.js';
 
 /**
  * A registered tool with its rich description for system prompt injection.
@@ -46,7 +50,7 @@ export function getToolRegistry(model: string): RegisteredTool[] {
       name: 'get_financials',
       tool: createGetFinancials(model),
       description: GET_FINANCIALS_DESCRIPTION,
-      compactDescription: 'Financial statements, metrics, and analyst estimates. Handles multi-company/multi-metric queries in one call.',
+      compactDescription: 'Financial statements and metrics. Handles multi-company/multi-metric queries in one call.',
       concurrencySafe: true,
     },
     {
@@ -71,10 +75,17 @@ export function getToolRegistry(model: string): RegisteredTool[] {
       concurrencySafe: true,
     },
     {
+      name: 'spawn_subagent',
+      tool: createSpawnSubagent(model),
+      description: SPAWN_SUBAGENT_DESCRIPTION,
+      compactDescription: 'Delegate a focused sub-task to an isolated subagent. Emit multiple calls in one turn to run independent sub-tasks in parallel.',
+      concurrencySafe: true,
+    },
+    {
       name: 'web_fetch',
-      tool: webFetchTool,
+      tool: createWebFetch(model),
       description: WEB_FETCH_DESCRIPTION,
-      compactDescription: 'Fetch and extract content from a URL as markdown. Use when you need full article text beyond headlines.',
+      compactDescription: 'Fetch a URL and answer a prompt about its content (HTML→markdown, fast-model summarized).',
       concurrencySafe: true,
     },
     {
@@ -204,27 +215,34 @@ export function getToolRegistry(model: string): RegisteredTool[] {
     );
   }
 
-  // Include web_search if Exa, Perplexity, or Tavily API key is configured (Exa → Perplexity → Tavily)
+  // Build web_search as a fallback chain over whichever providers have keys configured.
+  // The user's preferred provider (set via /search) is tried first; the others act as fallbacks.
+  const allWebSearchProviders: WebSearchProvider[] = [];
   if (process.env.EXASEARCH_API_KEY) {
+    allWebSearchProviders.push({ id: 'exa', name: 'Exa', tool: exaSearch });
+  }
+  if (process.env.PERPLEXITY_API_KEY) {
+    allWebSearchProviders.push({ id: 'perplexity', name: 'Perplexity', tool: perplexitySearch });
+  }
+  if (process.env.TAVILY_API_KEY) {
+    allWebSearchProviders.push({ id: 'tavily', name: 'Tavily', tool: tavilySearch });
+  }
+  if (process.env.LANGSEARCH_API_KEY) {
+    allWebSearchProviders.push({ id: 'langsearch', name: 'LangSearch', tool: langSearch });
+  }
+
+  if (allWebSearchProviders.length > 0) {
+    const preferred = getSetting<SearchProviderId | undefined>('webSearchPreferredProvider', undefined);
+    const orderedProviders = preferred
+      ? [
+          ...allWebSearchProviders.filter((p) => p.id === preferred),
+          ...allWebSearchProviders.filter((p) => p.id !== preferred),
+        ]
+      : allWebSearchProviders;
+
     tools.push({
       name: 'web_search',
-      tool: exaSearch,
-      description: WEB_SEARCH_DESCRIPTION,
-      compactDescription: 'Search the web for current information. Returns titles, URLs, and highlights.',
-      concurrencySafe: true,
-    });
-  } else if (process.env.PERPLEXITY_API_KEY) {
-    tools.push({
-      name: 'web_search',
-      tool: perplexitySearch,
-      description: WEB_SEARCH_DESCRIPTION,
-      compactDescription: 'Search the web for current information. Returns an answer with citations.',
-      concurrencySafe: true,
-    });
-  } else if (process.env.TAVILY_API_KEY) {
-    tools.push({
-      name: 'web_search',
-      tool: tavilySearch,
+      tool: createWebSearchTool(orderedProviders),
       description: WEB_SEARCH_DESCRIPTION,
       compactDescription: 'Search the web for current information. Returns titles, URLs, and snippets.',
       concurrencySafe: true,

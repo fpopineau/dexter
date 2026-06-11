@@ -187,27 +187,91 @@ export function formatInsiderTrades(data: unknown): string {
   return lines.join('\n');
 }
 
-export function formatAnalystEstimates(data: unknown): string {
+export function formatInstitutionalHoldings(data: unknown, args?: Rec): string {
   const items = Array.isArray(data) ? data : [];
-  if (items.length === 0) return 'No analyst estimates available.';
-  const lines = ['Analyst Estimates', ''];
-  lines.push('| Period | Est. Revenue | Est. EPS | # Analysts |');
-  lines.push('|--------|-------------|----------|------------|');
-  for (const row of items as Rec[]) {
-    lines.push(`| ${fmtDate(row.report_period ?? row.date)} | ${fmtNum(row.estimated_revenue_avg ?? row.revenue_estimate)} | ${fmtPrice(row.estimated_eps_avg ?? row.eps_estimate)} | ${row.number_of_analysts ?? '—'} |`);
+  if (items.length === 0) return 'No institutional holdings found.';
+  const byTicker = Boolean(args?.ticker);
+  const lines: string[] = [];
+  if (byTicker) {
+    const ticker = (args?.ticker as string)?.toUpperCase() ?? '';
+    lines.push(`Institutional Holders — ${ticker}`, '');
+    lines.push('| Filer | Shares | Value (USD) | Report |');
+    lines.push('|-------|--------|-------------|--------|');
+    for (const row of items.slice(0, 15) as Rec[]) {
+      lines.push(`| ${row.filer_name ?? row.filer_cik ?? '—'} | ${fmtNum(row.shares)} | ${fmtNum(row.value_usd)} | ${fmtDate(row.report_period)} |`);
+    }
+  } else {
+    const filer = ((items[0] as Rec)?.filer_name as string)
+      ?? (args?.filer_name as string)
+      ?? (args?.filer_cik as string)
+      ?? '';
+    lines.push(`13F Holdings — ${filer}`, '');
+    lines.push('| Issuer | Ticker | Shares | Value (USD) | Report |');
+    lines.push('|--------|--------|--------|-------------|--------|');
+    for (const row of items.slice(0, 15) as Rec[]) {
+      lines.push(`| ${row.name_of_issuer ?? '—'} | ${row.ticker ?? '—'} | ${fmtNum(row.shares)} | ${fmtNum(row.value_usd)} | ${fmtDate(row.report_period)} |`);
+    }
   }
+  if (items.length > 15) lines.push('', `(showing 15 of ${items.length})`);
   return lines.join('\n');
 }
 
-export function formatEarnings(data: unknown): string {
+export function formatEarnings(data: unknown, args?: Rec): string {
+  if (Array.isArray(data)) {
+    if (data.length === 0) return 'No earnings data available.';
+
+    const rows = data as Rec[];
+    const ticker = (args?.ticker as string | undefined)?.toUpperCase();
+    const cell = (value: unknown) => String(value ?? '—').replace(/\|/g, '\\|');
+    const title = ticker
+      ? `${ticker} Earnings`
+      : (rows.length === 1
+        ? `${String(rows[0].ticker ?? '').toUpperCase()} Earnings`
+        : 'Latest Earnings Feed');
+    const lines = [title, ''];
+    lines.push('| Ticker | Period | Fiscal | Source | Filed | Revenue | EPS | Signals |');
+    lines.push('|--------|--------|--------|--------|-------|---------|-----|---------|');
+
+    for (const row of rows.slice(0, 15)) {
+      const figures = ((row.quarterly ?? row.annual) && typeof (row.quarterly ?? row.annual) === 'object')
+        ? (row.quarterly ?? row.annual) as Rec
+        : {};
+      const eps = figures.earnings_per_share ?? figures.eps;
+      const signals = Array.isArray(row.signals)
+        ? row.signals
+          .slice(0, 2)
+          .map((signal) => signal && typeof signal === 'object' ? (signal as Rec).headline : null)
+          .filter(Boolean)
+          .join('; ')
+        : '';
+
+      lines.push(`| ${cell(String(row.ticker ?? '—').toUpperCase())} | ${cell(fmtDate(row.report_period))} | ${cell(row.fiscal_period)} | ${cell(row.source_type)} | ${cell(fmtDate(row.filing_date))} | ${cell(fmtNum(figures.revenue))} | ${cell(fmtPrice(eps))} | ${cell(signals || '—')} |`);
+    }
+
+    if (rows.length > 15) lines.push('', `(showing 15 of ${rows.length})`);
+    return lines.join('\n');
+  }
+
   const d = (data && typeof data === 'object') ? data as Rec : {};
   if (Object.keys(d).length === 0) return 'No earnings data available.';
+  // Flat shape: each entry IS one filing. data.earnings[0] (already unwrapped upstream)
+  // lands on the most recent period's 8-K when present (sorted report_period DESC, filing_date ASC).
+  const figures = ((d.quarterly ?? d.annual) && typeof (d.quarterly ?? d.annual) === 'object')
+    ? (d.quarterly ?? d.annual) as Rec
+    : {};
+  const ticker = (d.ticker as string)?.toUpperCase() ?? '';
   const lines: string[] = [];
-  if (d.revenue !== undefined) lines.push(`Revenue: ${fmtNum(d.revenue)}`);
-  if (d.eps !== undefined) lines.push(`EPS: ${fmtPrice(d.eps)}`);
-  if (d.revenue_surprise !== undefined) lines.push(`Revenue Surprise: ${fmtPct(d.revenue_surprise)}`);
-  if (d.eps_surprise !== undefined) lines.push(`EPS Surprise: ${fmtPct(d.eps_surprise)}`);
-  return lines.length > 0 ? lines.join('\n') : JSON.stringify(d);
+  const header = `${ticker} Earnings — ${fmtDate(d.report_period)}${d.fiscal_period ? ` (${d.fiscal_period})` : ''}${d.currency ? ` [${d.currency}]` : ''}`;
+  lines.push(header.trim());
+  lines.push('');
+  lines.push(`Source: ${d.source_type ?? '—'} | Filed: ${String(d.filing_date ?? '—').slice(0, 10)} | Accession: ${d.accession_number ?? '—'}`);
+  if (figures.revenue !== undefined) lines.push(`Revenue: ${fmtNum(figures.revenue)}`);
+  if (figures.net_income !== undefined) lines.push(`Net Income: ${fmtNum(figures.net_income)}`);
+  const eps = figures.earnings_per_share ?? figures.eps;
+  if (eps !== undefined) lines.push(`EPS: ${fmtPrice(eps)}`);
+  if (figures.revenue_surprise !== undefined) lines.push(`Revenue Surprise: ${fmtPct(figures.revenue_surprise)}`);
+  if (figures.eps_surprise !== undefined) lines.push(`EPS Surprise: ${fmtPct(figures.eps_surprise)}`);
+  return lines.join('\n');
 }
 
 export function formatCryptoPrice(data: unknown): string {
@@ -216,21 +280,52 @@ export function formatCryptoPrice(data: unknown): string {
   return `${ticker}: ${fmtPrice(d.close ?? d.price)} (H: ${fmtPrice(d.high)} L: ${fmtPrice(d.low)}) Vol: ${fmtNum(d.volume)}`;
 }
 
-export function formatSegmentedRevenues(data: unknown, args?: Rec): string {
+export function formatFinancialSegments(data: unknown, args?: Rec): string {
   const items = Array.isArray(data) ? data : [];
   if (items.length === 0) return 'No segment data available.';
   const ticker = (args?.ticker as string)?.toUpperCase() ?? '';
-  const lines = [`${ticker} Revenue Segments`, ''];
+  const lines = [`${ticker} Financial Segments`, ''];
+
+  const STATEMENTS = ['income_statement', 'balance_sheet', 'cash_flow_statement'] as const;
+
   for (const period of items as Rec[]) {
-    lines.push(`**${fmtDate(period.report_period)}**`);
-    const segments = (period.segments ?? period.revenue_segments) as Rec[] | undefined;
-    if (Array.isArray(segments)) {
-      for (const seg of segments) {
-        lines.push(`- ${seg.label ?? seg.name ?? 'Unknown'}: ${fmtNum(seg.value ?? seg.revenue)}`);
+    const header = period.fiscal_period
+      ? `${fmtDate(period.report_period)} (${period.fiscal_period})`
+      : fmtDate(period.report_period);
+    lines.push(`**${header}**`);
+
+    let wroteAny = false;
+    for (const statementKey of STATEMENTS) {
+      const statement = period[statementKey] as Rec | null | undefined;
+      if (!statement || typeof statement !== 'object') continue;
+
+      for (const [metricName, metricValue] of Object.entries(statement)) {
+        if (!metricValue || typeof metricValue !== 'object') continue;
+        const breakdowns = metricValue as Rec;
+
+        for (const [axisName, axisValue] of Object.entries(breakdowns)) {
+          if (!Array.isArray(axisValue) || axisValue.length === 0) continue;
+          const metricLabel = formatLabel(metricName);
+          const axisLabel = formatLabel(axisName);
+          lines.push(`${metricLabel} · ${axisLabel}:`);
+          for (const entry of axisValue as Rec[]) {
+            const label = entry.label ?? entry.name ?? 'Unknown';
+            lines.push(`- ${label}: ${fmtNum(entry.value ?? entry.revenue)}`);
+          }
+          wroteAny = true;
+        }
       }
     }
+    if (!wroteAny) {
+      lines.push('No segment breakdowns reported.');
+    }
+    lines.push('');
   }
-  return lines.join('\n');
+  return lines.join('\n').trimEnd();
+}
+
+function formatLabel(s: string): string {
+  return s.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 }
 
 // ---------------------------------------------------------------------------
@@ -244,9 +339,8 @@ export const FINANCIAL_FORMATTERS: Record<string, (data: unknown, args?: Rec) =>
   get_all_financial_statements: formatAllFinancials,
   get_key_ratios: formatKeyRatios,
   get_historical_key_ratios: formatHistoricalKeyRatios,
-  get_analyst_estimates: formatAnalystEstimates,
   get_earnings: formatEarnings,
-  get_segmented_revenues: formatSegmentedRevenues,
+  get_financial_segments: formatFinancialSegments,
 };
 
 export const MARKET_DATA_FORMATTERS: Record<string, (data: unknown, args?: Rec) => string> = {
@@ -256,4 +350,5 @@ export const MARKET_DATA_FORMATTERS: Record<string, (data: unknown, args?: Rec) 
   get_crypto_prices: formatStockPrices,
   get_company_news: formatNews,
   get_insider_trades: formatInsiderTrades,
+  get_institutional_holdings: formatInstitutionalHoldings,
 };
