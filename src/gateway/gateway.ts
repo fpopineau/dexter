@@ -24,8 +24,10 @@ import {
   noteGroupMember,
   recordGroupMessage,
 } from './group/index.js';
+import { handleProposalCommand } from './proposal-commands.js';
 import { resolveRoute } from './routing/resolve-route.js';
 import { resolveSessionStorePath, upsertSessionMeta } from './sessions/store.js';
+import { registerTriggerAlerts } from './trigger-alerts.js';
 import { cleanMarkdownForWhatsApp } from './utils.js';
 
 const LOG_PATH = dexterPath('gateway-debug.log');
@@ -131,6 +133,22 @@ async function handleInbound(cfg: GatewayConfig, inbound: WhatsAppInboundMessage
       return;
     }
 
+    // --- Deterministic trade-proposal commands (DMs only, no LLM) ---
+    // An explicit "accept P-XXXX" message IS the human approval: it routes
+    // straight to the proposal executor (safety lock + daily-loss kill-switch).
+    if (!isGroup) {
+      const commandReply = await handleProposalCommand(inbound.body);
+      if (commandReply !== null) {
+        debugLog(`[gateway] proposal command handled deterministically`);
+        await sendMessageWhatsApp({
+          to: inbound.replyToJid,
+          body: cleanMarkdownForWhatsApp(commandReply).trim(),
+          accountId: inbound.accountId,
+        });
+        return;
+      }
+    }
+
     await startTypingLoop();
 
     // --- Build query: for groups, include buffered history context ---
@@ -233,6 +251,7 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
   if (process.env.IBKR_HOST || process.env.IBKR_PORT) {
     ensureTradingCronJobs();
     if (isOpportunityEngineEnabled()) {
+      registerTriggerAlerts();
       startOpportunityEngine();
     }
   }

@@ -95,6 +95,21 @@ const IDLE_POLL_MS = 5 * 60_000;
 const SCORE_PACING_MS = 300;
 const SNAPSHOT_RETENTION_MS = 7 * 24 * 3600_000;
 
+function triggerScore(): number {
+    const n = Number(process.env.OPP_TRIGGER_SCORE);
+    return Number.isFinite(n) && n > 0 ? n : 75;
+}
+
+function triggerCooldownMs(): number {
+    const n = Number(process.env.OPP_TRIGGER_COOLDOWN_MIN);
+    return (Number.isFinite(n) && n > 0 ? n : 30) * 60_000;
+}
+
+function triggerMaxPerDay(): number {
+    const n = Number(process.env.OPP_TRIGGER_MAX_PER_DAY);
+    return Number.isFinite(n) && n > 0 ? n : 10;
+}
+
 // ---------------------------------------------------------------------------
 // Phase planning (US Eastern session awareness)
 // ---------------------------------------------------------------------------
@@ -419,6 +434,67 @@ async function syncStreamSubscriptions(snapshot: OpportunitySnapshot): Promise<v
 }
 
 // ---------------------------------------------------------------------------
+// Event triggers — fired from loop cycles only (not tool refreshes), when a
+// candidate enters the top 3 with compositeRank >= OPP_TRIGGER_SCORE.
+// Debounced per symbol (OPP_TRIGGER_COOLDOWN_MIN) and capped per trading day
+// (OPP_TRIGGER_MAX_PER_DAY).
+// ---------------------------------------------------------------------------
+
+export type TriggerCallback = (opp: Opportunity, snapshot: OpportunitySnapshot) => void | Promise<void>;
+
+const triggerCallbacks = new Set<TriggerCallback>();
+const lastTriggerAt = new Map<string, number>();
+let triggersToday = 0;
+let triggersDate = '';
+
+/** Register a callback fired when a candidate crosses the trigger threshold. */
+export function onOpportunityTrigger(cb: TriggerCallback): () => void {
+    triggerCallbacks.add(cb);
+    return () => triggerCallbacks.delete(cb);
+}
+
+function etDateString(): string {
+    const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    return `${et.getFullYear()}-${String(et.getMonth() + 1).padStart(2, '0')}-${String(et.getDate()).padStart(2, '0')}`;
+}
+
+async function evaluateTriggers(snapshot: OpportunitySnapshot): Promise<void> {
+    if (triggerCallbacks.size === 0 || !snapshot.marketOpen) return;
+
+    const today = etDateString();
+    if (today !== triggersDate) {
+        triggersDate = today;
+        triggersToday = 0;
+        lastTriggerAt.clear();
+    }
+
+    const threshold = triggerScore();
+    const cooldown = triggerCooldownMs();
+    const now = Date.now();
+
+    for (const opp of snapshot.opportunities.slice(0, 3)) {
+        if (opp.compositeRank < threshold) continue;
+        if (triggersToday >= triggerMaxPerDay()) {
+            logger.info('[opportunity-engine] trigger cap reached for today');
+            return;
+        }
+        const last = lastTriggerAt.get(opp.symbol) ?? 0;
+        if (now - last < cooldown) continue;
+
+        lastTriggerAt.set(opp.symbol, now);
+        triggersToday++;
+        logger.info(`[opportunity-engine] TRIGGER ${opp.symbol} (${opp.direction}, rank ${opp.compositeRank})`);
+        for (const cb of [...triggerCallbacks]) {
+            try {
+                await cb(opp, snapshot);
+            } catch (err) {
+                logger.error(`[opportunity-engine] trigger callback failed: ${err}`);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Engine loop
 // ---------------------------------------------------------------------------
 
@@ -435,7 +511,8 @@ function scheduleNext(): void {
         const current = planForNow();
         if (current.phase !== 'idle') {
             try {
-                await runCycleOnce();
+                const snapshot = await runCycleOnce();
+                await evaluateTriggers(snapshot);
             } catch (err) {
                 logger.error(`[opportunity-engine] cycle failed: ${err}`);
             }
@@ -451,7 +528,9 @@ export function startOpportunityEngine(): void {
     const plan = planForNow();
     logger.info(`[opportunity-engine] started (phase: ${plan.phase}, next cycle in ~${Math.round(plan.cadenceMs / 60000)} min)`);
     if (plan.phase !== 'idle') {
-        void runCycleOnce().catch((err) => logger.error(`[opportunity-engine] initial cycle failed: ${err}`));
+        void runCycleOnce()
+            .then((snapshot) => evaluateTriggers(snapshot))
+            .catch((err) => logger.error(`[opportunity-engine] initial cycle failed: ${err}`));
     }
     scheduleNext();
 }
