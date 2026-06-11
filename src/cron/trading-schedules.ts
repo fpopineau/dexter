@@ -40,9 +40,9 @@ const TRADING_JOBS: TradingJobDef[] = [
     },
     {
         name: 'Market Open Scan',
-        description: 'Day trade setup scan 5 minutes after market open.',
+        description: 'Ranked intraday opportunities 5 minutes after market open (Opportunity Engine).',
         cronExpr: '35 9 * * 1-5',
-        message: 'Scan for day trade setups. Focus on momentum plays from the open, unusual volume, and any gap continuations.',
+        message: 'Produce the morning intraday brief. Call the opportunities tool (action "latest"; if missing or older than 10 minutes, action "refresh"). Take the top 5 ranked candidates and for each verify the catalyst with web_search and validate sizing/stops with risk_manager. Output a ranked list of at most 3 actionable intraday recommendations, each with direction, entry, stop, target, position size, and a one-line rationale. If no candidate has signalScore >= 60, say so explicitly — never force a trade. Do not place orders.',
         model: undefined,
         activeStart: '09:30',
         activeEnd: '10:30',
@@ -58,9 +58,9 @@ const TRADING_JOBS: TradingJobDef[] = [
     },
     {
         name: 'Pre-Close Review',
-        description: 'End-of-day position review and overnight planning.',
+        description: 'End-of-day review and ranked overnight candidates (Opportunity Engine).',
         cronExpr: '30 15 * * 1-5',
-        message: 'Run overnight position review. Evaluate which positions to hold, trim, or close before the bell. Identify swing setups for tomorrow.',
+        message: 'Run the pre-close review. First, evaluate open positions (ibkr_account): hold, trim, or close before the bell, applying the overnight limits from the risk rules. Then call the opportunities tool (action "latest"; refresh if older than 15 minutes) and assess the top candidates for overnight holds: check the earnings calendar and news catalysts (web_search), prefer lower-ATR names, and validate each with risk_manager using the overnight position limits. Propose at most 2 overnight setups with direction, entry, stop, target, size, and rationale. Be explicit when nothing qualifies. Do not place orders.',
         model: undefined,
         activeStart: '15:00',
         activeEnd: '16:00',
@@ -69,12 +69,23 @@ const TRADING_JOBS: TradingJobDef[] = [
 
 export function ensureTradingCronJobs(): void {
     const store = loadCronStore();
-    const existingNames = new Set(store.jobs.map((j) => j.name));
+    const existingByName = new Map(store.jobs.map((j) => [j.name, j]));
     let changed = false;
     const now = Date.now();
 
     for (const def of TRADING_JOBS) {
-        if (existingNames.has(def.name)) continue;
+        const existing = existingByName.get(def.name);
+        if (existing) {
+            // Keep seeded jobs in sync when their prompt evolves in code.
+            // Schedule and activeHours are left untouched (user-tunable).
+            if (existing.payload.message !== def.message || existing.description !== def.description) {
+                existing.payload.message = def.message;
+                existing.description = def.description;
+                existing.updatedAtMs = now;
+                changed = true;
+            }
+            continue;
+        }
 
         const schedule = { kind: 'cron' as const, expr: def.cronExpr, tz: 'America/New_York' };
         const job: CronJob = {
