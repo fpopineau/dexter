@@ -24,7 +24,7 @@ type ToolExecutionEvent =
   | ToolDeniedEvent
   | ToolLimitEvent;
 
-const TOOLS_REQUIRING_APPROVAL = ['write_file', 'edit_file', 'ibkr_orders'] as const;
+const TOOLS_REQUIRING_APPROVAL = ['write_file', 'edit_file', 'ibkr_orders', 'accept_proposal'] as const;
 const DEFAULT_MAX_CONCURRENCY = 10;
 
 interface ToolCallBatch {
