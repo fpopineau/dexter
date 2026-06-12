@@ -14,10 +14,76 @@
 import { DynamicStructuredTool } from '@langchain/core/tools';
 import type { Bar } from '@stoqey/ib';
 import { BarSizeSetting, Contract, EventName, SecType, WhatToShow } from '@stoqey/ib';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { z } from 'zod';
 import { formatToolResult } from '../types.js';
 import { allocReqId, getIBApi, isNonFatalIbkrError } from './connection.js';
 import { type AllIndicators, type OHLCV, computeAll } from './ta-indicators.js';
+
+// ---------------------------------------------------------------------------
+// Factor weights — calibratable via scripts/calibrate-scorer.ts
+//
+// Resolution order: explicit `weights` argument > setActiveWeights() override
+// (used by the calibration grid search) > .dexter/data/scorer-weights.json
+// (written by calibration --apply) > equal DEFAULT_WEIGHTS.
+// ---------------------------------------------------------------------------
+
+export interface FactorWeights {
+    momentum: number;
+    meanReversion: number;
+    volume: number;
+    trend: number;
+}
+
+export const DEFAULT_WEIGHTS: FactorWeights = {
+    momentum: 0.25,
+    meanReversion: 0.25,
+    volume: 0.25,
+    trend: 0.25,
+};
+
+function normalizeWeights(w: FactorWeights): FactorWeights {
+    const m = Math.max(0, w.momentum);
+    const r = Math.max(0, w.meanReversion);
+    const v = Math.max(0, w.volume);
+    const t = Math.max(0, w.trend);
+    const sum = m + r + v + t;
+    if (!(sum > 0)) return DEFAULT_WEIGHTS;
+    return { momentum: m / sum, meanReversion: r / sum, volume: v / sum, trend: t / sum };
+}
+
+let weightsOverride: FactorWeights | null = null;
+let fileWeights: FactorWeights | null | undefined; // undefined = not yet loaded
+
+/** Set (or clear with null) an in-process weights override — calibration use. */
+export function setActiveWeights(w: FactorWeights | null): void {
+    weightsOverride = w ? normalizeWeights(w) : null;
+}
+
+function loadFileWeights(): FactorWeights | null {
+    if (fileWeights !== undefined) return fileWeights;
+    try {
+        const dir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
+        const raw = JSON.parse(readFileSync(join(dir, 'scorer-weights.json'), 'utf-8')) as Partial<FactorWeights>;
+        if (
+            typeof raw.momentum === 'number' && typeof raw.meanReversion === 'number' &&
+            typeof raw.volume === 'number' && typeof raw.trend === 'number'
+        ) {
+            fileWeights = normalizeWeights(raw as FactorWeights);
+        } else {
+            fileWeights = null;
+        }
+    } catch {
+        fileWeights = null;
+    }
+    return fileWeights;
+}
+
+/** Weights in effect right now (override > file > defaults). */
+export function getActiveWeights(): FactorWeights {
+    return weightsOverride ?? loadFileWeights() ?? DEFAULT_WEIGHTS;
+}
 
 // ---------------------------------------------------------------------------
 // Description
@@ -584,10 +650,10 @@ export interface SignalResult {
     compositeScore: number;
     rating: string;
     factors: {
-        momentum: { score: number; weight: 0.25; weighted: number; components: FactorScore['components'] };
-        meanReversion: { score: number; weight: 0.25; weighted: number; components: FactorScore['components'] };
-        volume: { score: number; weight: 0.25; weighted: number; components: FactorScore['components'] };
-        trend: { score: number; weight: 0.25; weighted: number; components: FactorScore['components'] };
+        momentum: { score: number; weight: number; weighted: number; components: FactorScore['components'] };
+        meanReversion: { score: number; weight: number; weighted: number; components: FactorScore['components'] };
+        volume: { score: number; weight: number; weighted: number; components: FactorScore['components'] };
+        trend: { score: number; weight: number; weighted: number; components: FactorScore['components'] };
     };
     snapshot: {
         price: number | null;
@@ -605,14 +671,16 @@ export function computeSignalScore(
     barSize: string,
     indicators: AllIndicators,
     ohlcv: OHLCV,
+    weights?: FactorWeights,
 ): SignalResult {
+    const w = weights ? normalizeWeights(weights) : getActiveWeights();
     const mom = scoreMomentum(indicators, ohlcv.close, direction);
     const mr = scoreMeanReversion(indicators, ohlcv.close, direction);
     const vol = scoreVolume(indicators, ohlcv.volume);
     const trend = scoreTrend(indicators, ohlcv, direction);
 
     const composite = Math.round(
-        mom.score * 0.25 + mr.score * 0.25 + vol.score * 0.25 + trend.score * 0.25,
+        mom.score * w.momentum + mr.score * w.meanReversion + vol.score * w.volume + trend.score * w.trend,
     );
 
     let rating: string;
@@ -630,10 +698,10 @@ export function computeSignalScore(
         compositeScore: composite,
         rating,
         factors: {
-            momentum: { score: mom.score, weight: 0.25, weighted: Math.round(mom.score * 0.25), components: mom.components },
-            meanReversion: { score: mr.score, weight: 0.25, weighted: Math.round(mr.score * 0.25), components: mr.components },
-            volume: { score: vol.score, weight: 0.25, weighted: Math.round(vol.score * 0.25), components: vol.components },
-            trend: { score: trend.score, weight: 0.25, weighted: Math.round(trend.score * 0.25), components: trend.components },
+            momentum: { score: mom.score, weight: w.momentum, weighted: Math.round(mom.score * w.momentum), components: mom.components },
+            meanReversion: { score: mr.score, weight: w.meanReversion, weighted: Math.round(mr.score * w.meanReversion), components: mr.components },
+            volume: { score: vol.score, weight: w.volume, weighted: Math.round(vol.score * w.volume), components: vol.components },
+            trend: { score: trend.score, weight: w.trend, weighted: Math.round(trend.score * w.trend), components: trend.components },
         },
         snapshot: {
             price: n > 0 ? ohlcv.close[n - 1] : null,
