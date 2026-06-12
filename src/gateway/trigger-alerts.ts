@@ -13,6 +13,8 @@
  */
 
 import { onOpportunityTrigger, type Opportunity } from '@/services/opportunity-engine.js';
+import { autoExecuteProposal, isAutoExecuteEnabled } from '@/services/proposal-executor.js';
+import { listProposals } from '@/services/trade-proposals.js';
 import { getSetting } from '@/utils/config.js';
 import { logger } from '@/utils';
 import { runAgentForMessage } from './agent-runner.js';
@@ -94,6 +96,26 @@ export function registerTriggerAlerts(): void {
             accountId: session.lastAccountId,
         });
         logger.info(`[trigger-alerts] ${opp.symbol}: alert delivered`);
+
+        // Optional paper-only auto-execution (AUTO_EXECUTE_PAPER=true):
+        // pick the freshest open proposal the evaluation just registered for
+        // this symbol and run it through the auto-executor (paper assertion,
+        // daily cap, then the standard gates). Outcome is reported back.
+        if (isAutoExecuteEnabled()) {
+            const open = await listProposals('open');
+            const candidate = open
+                .filter((p) => p.symbol === opp.symbol && Date.now() - p.createdAt < 10 * 60_000)
+                .sort((a, b) => b.createdAt - a.createdAt)[0];
+            if (candidate) {
+                const outcome = await autoExecuteProposal(candidate.id);
+                logger.info(`[trigger-alerts] ${opp.symbol}: auto-execute ${candidate.id} → ${outcome.ok ? 'ok' : 'refused'}`);
+                await sendMessageWhatsApp({
+                    to: session.lastTo,
+                    body: cleanMarkdownForWhatsApp(outcome.message).trim(),
+                    accountId: session.lastAccountId,
+                });
+            }
+        }
     });
 
     logger.info('[trigger-alerts] registered');

@@ -13,7 +13,7 @@
  */
 
 import { placeBracketOrder } from '@/tools/ibkr/bracket.js';
-import { assertOrderingAllowed } from '@/tools/ibkr/connection.js';
+import { assertOrderingAllowed, getManagedAccounts, isLivePort } from '@/tools/ibkr/connection.js';
 import { logger } from '@/utils';
 import { assertDailyLossOk } from './daily-loss-guard.js';
 import {
@@ -70,6 +70,75 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         logger.error(`[proposal-executor] ${p.id} failed: ${msg}`);
         return { ok: false, message: `❌ ${p.id} NOT executed — ${msg}` };
     }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-execution (paper ONLY, behind AUTO_EXECUTE_PAPER)
+//
+// Stricter than manual acceptance: refuses live ports/accounts REGARDLESS of
+// IBKR_ALLOW_LIVE, and enforces a daily cap (AUTO_EXECUTE_MAX_PER_DAY,
+// default 5). Auto-execution is never available for live trading by design —
+// going live always requires an explicit human acceptance per trade.
+// ---------------------------------------------------------------------------
+
+export function isAutoExecuteEnabled(): boolean {
+    return (process.env.AUTO_EXECUTE_PAPER ?? '').trim().toLowerCase() === 'true';
+}
+
+function assertPaperOnly(): void {
+    if (isLivePort()) {
+        throw new Error('auto-execute is paper-only: refusing on a live port (4001/7496), regardless of IBKR_ALLOW_LIVE');
+    }
+    const liveAccounts = getManagedAccounts().filter((a) => !a.toUpperCase().startsWith('D'));
+    if (liveAccounts.length > 0) {
+        throw new Error('auto-execute is paper-only: connected account does not look like a paper account');
+    }
+}
+
+function autoExecMaxPerDay(): number {
+    const n = Number(process.env.AUTO_EXECUTE_MAX_PER_DAY);
+    return Number.isFinite(n) && n > 0 ? n : 5;
+}
+
+function etDate(): string {
+    const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    return `${et.getFullYear()}-${String(et.getMonth() + 1).padStart(2, '0')}-${String(et.getDate()).padStart(2, '0')}`;
+}
+
+let autoExecDate = '';
+let autoExecCount = 0;
+
+/**
+ * Auto-execute a proposal on PAPER. Returns a non-ok outcome (never throws)
+ * when disabled, capped, non-paper, or when the underlying acceptance fails.
+ */
+export async function autoExecuteProposal(id: string): Promise<ExecutionOutcome> {
+    if (!isAutoExecuteEnabled()) {
+        return { ok: false, message: 'auto-execute is disabled (AUTO_EXECUTE_PAPER != true)' };
+    }
+    const today = etDate();
+    if (today !== autoExecDate) {
+        autoExecDate = today;
+        autoExecCount = 0;
+    }
+    const max = autoExecMaxPerDay();
+    if (autoExecCount >= max) {
+        return { ok: false, message: `auto-execute daily cap reached (${max}/day)` };
+    }
+    try {
+        assertPaperOnly();
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[proposal-executor] auto-execute refused: ${msg}`);
+        return { ok: false, message: `auto-execute refused — ${msg}` };
+    }
+
+    const outcome = await acceptProposal(id);
+    if (outcome.ok) autoExecCount++;
+    return {
+        ok: outcome.ok,
+        message: `🤖 AUTO-EXECUTE (paper, ${autoExecCount}/${max} today) — ${outcome.message}`,
+    };
 }
 
 export async function rejectProposal(id: string): Promise<ExecutionOutcome> {
