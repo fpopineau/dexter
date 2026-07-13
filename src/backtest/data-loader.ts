@@ -10,9 +10,9 @@
 
 import type { OHLCV } from '@/tools/ibkr/ta-indicators.js';
 import { logger } from '@/utils';
-import AdmZip from 'adm-zip';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { open as yauzlOpen, type Entry, type ZipFile } from 'yauzl';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -48,18 +48,77 @@ export interface LoadOptions {
 const DEFAULT_FIRSTRATE_DIR =
     process.env.FIRSTRATE_DATA_DIR || join('ActivTradesFX', 'data', 'FirstRate', 'stock');
 
+/** Entry naming varies across FirstRate downloads: older bundles ship
+ *  SYMBOL.txt, the 2025-07 "full" bundles ship
+ *  SYMBOL_full_1min_adjsplitdiv.txt — accept both. */
+function entryMatchesSymbol(entryName: string, symbol: string): boolean {
+    return entryName === `${symbol}.txt` ||
+        (entryName.startsWith(`${symbol}_`) && entryName.endsWith('.txt'));
+}
+
+/** Extracted-CSV cache: walk-forward folds re-request the same ticker with
+ *  different date windows — extract from the (multi-GB) ZIP once. */
+const csvCache = new Map<string, string>();
+const CSV_CACHE_MAX = 3;
+
+/**
+ * Stream a single ticker's CSV out of a FirstRate ZIP. The per-letter
+ * archives are several GB — reading them whole (as adm-zip does) exhausts
+ * memory; yauzl reads the central directory and inflates just one entry.
+ */
+function extractTickerCsv(symbol: string, zipPath: string): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+        yauzlOpen(zipPath, { lazyEntries: true }, (err: Error | null, zipfile?: ZipFile) => {
+            if (err || !zipfile) {
+                reject(err ?? new Error(`[data-loader] could not open ${zipPath}`));
+                return;
+            }
+            let found = false;
+            zipfile.on('entry', (entry: Entry) => {
+                if (!entryMatchesSymbol(entry.fileName, symbol)) {
+                    zipfile.readEntry();
+                    return;
+                }
+                found = true;
+                zipfile.openReadStream(entry, (streamErr: Error | null, stream?: NodeJS.ReadableStream) => {
+                    if (streamErr || !stream) {
+                        zipfile.close();
+                        reject(streamErr ?? new Error(`[data-loader] could not read ${entry.fileName}`));
+                        return;
+                    }
+                    const chunks: Buffer[] = [];
+                    stream.on('data', (c: Buffer) => chunks.push(c));
+                    stream.on('end', () => {
+                        zipfile.close();
+                        resolve(Buffer.concat(chunks).toString('utf-8'));
+                    });
+                    stream.on('error', (e: Error) => {
+                        zipfile.close();
+                        reject(e);
+                    });
+                });
+            });
+            zipfile.on('end', () => {
+                if (!found) reject(new Error(`[data-loader] No ${symbol}.txt or ${symbol}_*.txt entry in ${zipPath}`));
+            });
+            zipfile.on('error', reject);
+            zipfile.readEntry();
+        });
+    });
+}
+
 /**
  * Load 1-minute bars for a ticker from FirstRate ZIP archives.
  *
  * @param ticker  e.g. 'AAPL'
  * @param options date range and resampling
- * @param dataDir override FirstRate directory (default: ActivTradesFX/data/FirstRate/stock/)
+ * @param dataDir override FirstRate directory (default: FIRSTRATE_DATA_DIR)
  */
-export function loadFirstRate(
+export async function loadFirstRate(
     ticker: string,
     options: LoadOptions = {},
     dataDir: string = DEFAULT_FIRSTRATE_DIR,
-): Bar[] {
+): Promise<Bar[]> {
     const symbol = ticker.toUpperCase();
     const letter = symbol.charAt(0);
     const zipPath = join(dataDir, `stock-${letter}.zip`);
@@ -68,18 +127,19 @@ export function loadFirstRate(
         throw new Error(`[data-loader] ZIP not found: ${zipPath}`);
     }
 
-    logger.info(`[data-loader] Loading ${symbol} from ${zipPath}`);
-    const zip = new AdmZip(zipPath);
-    const entry = zip.getEntry(`${symbol}.txt`);
-
-    if (!entry) {
-        throw new Error(`[data-loader] Ticker ${symbol}.txt not found in ${zipPath}`);
+    let csv = csvCache.get(symbol);
+    if (csv === undefined) {
+        logger.info(`[data-loader] Extracting ${symbol} from ${zipPath}`);
+        csv = await extractTickerCsv(symbol, zipPath);
+        if (csvCache.size >= CSV_CACHE_MAX) {
+            const oldest = csvCache.keys().next().value;
+            if (oldest !== undefined) csvCache.delete(oldest);
+        }
+        csvCache.set(symbol, csv);
     }
 
-    const csv = entry.getData().toString('utf-8');
     const bars = parseCsv(csv, options.startDate, options.endDate);
-
-    logger.info(`[data-loader] Loaded ${bars.length} 1-min bars for ${symbol}`);
+    logger.info(`[data-loader] Loaded ${bars.length} 1-min bars for ${symbol} (${options.startDate ?? '…'}→${options.endDate ?? '…'})`);
 
     const tf = options.timeframe ?? '5m';
     if (tf === '1m') return bars;
@@ -304,20 +364,35 @@ export function barsToOHLCV(bars: Bar[]): OHLCV {
 }
 
 /**
- * Get list of available tickers in a FirstRate ZIP.
+ * Get list of available tickers in a FirstRate ZIP (streamed — the
+ * archives are several GB and must not be buffered whole).
  */
 export function listFirstRateTickers(
     letter: string,
     dataDir: string = DEFAULT_FIRSTRATE_DIR,
-): string[] {
+): Promise<string[]> {
     const zipPath = join(dataDir, `stock-${letter.toUpperCase()}.zip`);
-    if (!existsSync(zipPath)) return [];
-    const zip = new AdmZip(zipPath);
-    return zip
-        .getEntries()
-        .map((e) => e.entryName.replace('.txt', ''))
-        .filter((n) => n.length > 0)
-        .sort();
+    if (!existsSync(zipPath)) return Promise.resolve([]);
+    return new Promise<string[]>((resolve, reject) => {
+        yauzlOpen(zipPath, { lazyEntries: true }, (err: Error | null, zipfile?: ZipFile) => {
+            if (err || !zipfile) {
+                reject(err ?? new Error(`[data-loader] could not open ${zipPath}`));
+                return;
+            }
+            const tickers: string[] = [];
+            zipfile.on('entry', (entry: Entry) => {
+                const name = entry.fileName;
+                if (name.endsWith('.txt')) {
+                    // 'AAPL.txt' or 'AAPL_full_1min_adjsplitdiv.txt' → 'AAPL'
+                    tickers.push(name.replace(/\.txt$/, '').split('_')[0]);
+                }
+                zipfile.readEntry();
+            });
+            zipfile.on('end', () => resolve(tickers.filter((n) => n.length > 0).sort()));
+            zipfile.on('error', reject);
+            zipfile.readEntry();
+        });
+    });
 }
 
 /**

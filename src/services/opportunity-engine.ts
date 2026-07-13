@@ -110,6 +110,17 @@ function triggerMaxPerDay(): number {
     return Number.isFinite(n) && n > 0 ? n : 10;
 }
 
+/** Optional market-cap band for engine scans (USD). Unset = unchanged
+ *  default behavior (scanner-loop's $500M floor, no ceiling). */
+function marketCapBand(): { marketCapAbove?: number; marketCapBelow?: number } {
+    const min = Number(process.env.OPP_MARKET_CAP_MIN);
+    const max = Number(process.env.OPP_MARKET_CAP_MAX);
+    return {
+        ...(Number.isFinite(min) && min > 0 ? { marketCapAbove: min } : {}),
+        ...(Number.isFinite(max) && max > 0 ? { marketCapBelow: max } : {}),
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Phase planning (US Eastern session awareness)
 // ---------------------------------------------------------------------------
@@ -284,13 +295,17 @@ async function persistSnapshot(snapshot: OpportunitySnapshot): Promise<void> {
 // Scoring (delegates to the signal_scorer tool pipeline)
 // ---------------------------------------------------------------------------
 
-const scorerTool = createSignalScorer();
+// Created lazily: this module sits in an import cycle with signal-scorer
+// (via the tool registry), so a module-scope createSignalScorer() call can
+// hit signal-scorer before its schema is initialized (TDZ crash under bun).
+let scorerTool: ReturnType<typeof createSignalScorer> | null = null;
 
 async function scoreSymbol(
     symbol: string,
     direction: 'long' | 'short',
 ): Promise<SignalResult | null> {
     try {
+        scorerTool ??= createSignalScorer();
         const raw = await scorerTool.invoke({
             ticker: symbol,
             direction,
@@ -339,9 +354,10 @@ export async function runCycleOnce(forcePhase?: EnginePhase): Promise<Opportunit
 
         // 1. Scans (parallel, scanner-loop caches per code for 5 min)
         const found = new Map<string, { result: ScanResult; direction: 'long' | 'short'; sources: string[] }>();
+        const capBand = marketCapBand();
         await Promise.all(plan.scans.map(async ({ code, direction }) => {
             try {
-                const results = await runScan(code, { aboveVolume: 500_000 });
+                const results = await runScan(code, { aboveVolume: 500_000, ...capBand });
                 for (const r of results) {
                     if (!r.symbol || r.secType !== 'STK') continue;
                     const existing = found.get(r.symbol);
@@ -552,6 +568,31 @@ export function stopOpportunityEngine(): void {
 /** Latest in-memory snapshot (null until the first cycle completes). */
 export function getLatestSnapshot(): OpportunitySnapshot | null {
     return latestSnapshot;
+}
+
+/**
+ * Distinct symbols that appeared in persisted snapshots since the given
+ * epoch ms — the day's "watched universe", consumed by the data-archive
+ * scheduler to decide which bars are worth keeping.
+ */
+export async function getSnapshotSymbolsSince(sinceMs: number): Promise<string[]> {
+    const database = await getDb();
+    if (!database) {
+        return latestSnapshot && latestSnapshot.timestamp >= sinceMs
+            ? [...new Set(latestSnapshot.opportunities.map((o) => o.symbol))]
+            : [];
+    }
+    const rows = database.query<{ json: string }>(
+        `SELECT json FROM opportunity_snapshots WHERE ts >= ?`,
+    ).all(sinceMs);
+    const symbols = new Set<string>();
+    for (const row of rows) {
+        try {
+            const snap = JSON.parse(row.json) as OpportunitySnapshot;
+            for (const o of snap.opportunities) symbols.add(o.symbol);
+        } catch { /* skip malformed row */ }
+    }
+    return [...symbols];
 }
 
 /** Engine status for diagnostics. */

@@ -6,7 +6,9 @@
  *   1. proposal exists, is open, not expired
  *   2. paper/live safety lock (assertOrderingAllowed)
  *   3. daily-loss kill-switch (assertDailyLossOk — fail-safe on uncertainty)
- *   4. bracket placement (entry + OCA stop/target)
+ *   4. risk gate with live account context (position size vs net
+ *      liquidation, max open positions, max trades per day)
+ *   5. bracket placement (entry + OCA stop/target)
  *
  * Callers: the WhatsApp command router (explicit human message) and the
  * approval-gated accept_proposal tool (interactive TUI confirmation).
@@ -16,7 +18,12 @@ import { placeBracketOrder } from '@/tools/ibkr/bracket.js';
 import { assertOrderingAllowed, getManagedAccounts, isLivePort } from '@/tools/ibkr/connection.js';
 import { logger } from '@/utils';
 import { assertDailyLossOk } from './daily-loss-guard.js';
+import { trackExecutedProposal } from './outcome-tracker.js';
+import { assertProposalRisk } from './proposal-risk-gate.js';
 import {
+    countExecutedSince,
+    countOpenExecuted,
+    etDayStartMs,
     expireStale,
     formatProposalLine,
     getProposal,
@@ -41,7 +48,26 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
     try {
         // Safety gates — order matters: cheap static lock first, then live P&L.
         assertOrderingAllowed();
-        await assertDailyLossOk();
+        const lossStatus = await assertDailyLossOk();
+
+        // Risk gate with live account context. Re-runs the static checks too:
+        // rules may have been tightened since the proposal was created.
+        assertProposalRisk(
+            {
+                symbol: p.symbol,
+                direction: p.direction,
+                entryType: p.entryType,
+                entry: p.entry,
+                stop: p.stop,
+                target: p.target,
+                quantity: p.quantity,
+            },
+            {
+                netLiquidation: lossStatus.netLiquidation,
+                openPositions: await countOpenExecuted(),
+                executedToday: await countExecutedSince(etDayStartMs()),
+            },
+        );
 
         const result = await placeBracketOrder({
             symbol: p.symbol,
@@ -54,8 +80,16 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         });
 
         const orderIds = [result.parentOrderId, result.takeProfitOrderId, result.stopOrderId];
-        await setProposalStatus(p.id, 'executed', { orderIds });
+        await setProposalStatus(p.id, 'executed', { orderIds, executedAt: Date.now() });
         logger.info(`[proposal-executor] ${p.id} executed (orders ${orderIds.join('/')})`);
+
+        // Hand the bracket to the outcome tracker (fills, exit, realized P&L).
+        const executed = await getProposal(p.id);
+        if (executed) {
+            try { trackExecutedProposal(executed); } catch (err) {
+                logger.warn(`[proposal-executor] outcome tracking failed for ${p.id}: ${err}`);
+            }
+        }
 
         return {
             ok: true,

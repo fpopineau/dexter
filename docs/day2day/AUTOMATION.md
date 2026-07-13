@@ -25,10 +25,14 @@ IBKR scanners ──> filter ──> signal scorer ──> composite ranking ─
    (multi-code, session-aware cadence, no LLM)            │
                                                           ├──> cron briefs 09:35 / 15:30 ──> LLM ──> proposals ──> WhatsApp
                                                           └──> threshold triggers ─────────> LLM ──> proposals ──> WhatsApp
-                                                                                                          │
-                                                  human "accept P-XXXX" (WhatsApp) or TUI approval ──────┘
+                                                                            (risk gate at creation) ──┐
+                                                  human "accept P-XXXX" (WhatsApp) or TUI approval ───┘
                                                           │
-                              safety lock ──> daily-loss kill-switch ──> paper bracket order (entry + OCA stop/target)
+        safety lock ──> daily-loss kill-switch ──> risk gate (live account) ──> paper bracket order (entry + OCA stop/target)
+                                                          │
+                             outcome tracker: fills ──> exit reason + realized P&L ──> proposal 'closed' ──> WhatsApp
+                                                          │
+                                   'performance' command / pre-market recap / archive scheduler (16:20 ET)
 ```
 
 ## 2. Components
@@ -59,13 +63,54 @@ Starts/stops with the gateway when IBKR is configured; opt-out with
 - **`opportunities`** — `latest` (cached snapshot) / `refresh` (run a cycle,
   ~30–60 s). Advisory; snapshots taken while the market is closed carry
   `marketOpen=false`.
-- **`trade_proposals`** — `create` / `list` / `get` / `reject`. Creating a
-  proposal NEVER trades: it persists a record in `.dexter/data/proposals.db`
-  (`P-XXXX` ids, statuses open/executed/rejected/expired/failed, default
-  expiry 2 h).
+- **`trade_proposals`** — `create` / `list` / `get` / `reject` /
+  `performance`. Creating a proposal NEVER trades: it persists a record in
+  `.dexter/data/proposals.db` (`P-XXXX` ids, statuses
+  open/executed/closed/rejected/expired/failed, default expiry 2 h).
+  Creation passes the **deterministic risk gate** (below); the entry price
+  is required even for MKT proposals (indicative, anchors the risk math).
+  `performance` returns closed-trade outcomes over the last N days.
 - **`accept_proposal`** — executes an open proposal. Listed in
   `TOOLS_REQUIRING_APPROVAL`: interactive confirmation in the TUI,
   **auto-denied in headless runs** (cron, gateway, triggers).
+
+### Risk gate — `src/services/proposal-risk-gate.ts`
+Deterministic enforcement of `risk-rules.yaml` (the `risk_manager` tool is
+advisory; this gate is mandatory):
+- at **creation** (`createProposal`): coherent stop/target, min price,
+  min risk/reward, integer quantity — violating proposals are never persisted;
+- at **acceptance** (executor): position value vs `max_position_pct` of the
+  live NetLiquidation, `max_open_positions` (executed-not-closed count),
+  `max_daily_trades` (executed today, ET).
+
+### Outcome tracker — `src/services/outcome-tracker.ts`
+Closes the feedback loop on executed proposals. Watches the bracket's three
+orders via `orderStatus`/`execDetails`/`commissionReport` and writes back:
+entry fill price/time, exit fill price, exit reason (`target` / `stop` /
+`cancelled` / `manual` / `unknown`), gross realized P&L and commissions —
+then flips the proposal to `closed` and pushes a WhatsApp close alert.
+Survives restarts (state rebuilt from the DB, today's executions replayed
+via `reqExecutions`) and reconnects (listeners re-attach). Trades whose
+outcome is unrecoverable (executed while tracking was down for days) are
+swept as `unknown`, never guessed.
+
+### Archive scheduler — `src/services/archive-scheduler.ts`
+Daily post-close data collection (16:20 ET, holidays skipped): archives
+1-min (1 day) and 5-min (2 days) bars for today's snapshot symbols ∪
+proposal symbols ∪ `DATA_ARCHIVE_SYMBOLS` watchlist (capped by
+`DATA_ARCHIVE_MAX_SYMBOLS`, watchlist never dropped) into
+`DATA_ARCHIVE_PATH`. This is the training corpus for the ML phase.
+Disable with `DATA_ARCHIVE=false`. Historical ranges are backfilled with
+`scripts/backfill-bars.ts` (chunked, paced, resumable).
+
+### Universe sweep — `src/services/universe-sweep.ts` (OPT-IN)
+`UNIVERSE_SWEEP=true` adds a nightly job (18:00 ET): US common-stock
+directory (nasdaqtrader) + shares outstanding (SEC EDGAR, no key) →
+market caps → ~400 days of daily bars archived for names in the
+`UNIVERSE_CAP_MIN..MAX` band (default $1–5B). Substrate for the planned
+swing / cup-and-handle pattern scanners. The engine's intraday scans can
+be restricted to the same band via `OPP_MARKET_CAP_MIN/MAX` (unset =
+unchanged behavior), and the `ibkr_scanner` tool accepts `maxMarketCap`.
 
 ### Scheduled briefs — `src/cron/trading-schedules.ts`
 Seeded at gateway startup (prompt changes in code are re-synced to already
@@ -95,15 +140,18 @@ Inbound DMs are pre-routed **before** the agent (deterministic, no LLM):
 | `reject P-XXXX` (or `no`) | reject the proposal |
 | `proposals` | list open proposals |
 | `halt status` | kill-switch state and daily P&L headroom |
+| `performance` (or `perf`, `performance 30`) | closed-trade P&L summary (default 7 days) |
 
 The explicit human message IS the approval — execution still passes every
 safety gate below.
 
 ### Execution path — `src/services/proposal-executor.ts` + `src/tools/ibkr/bracket.ts`
 Single code path to orders: proposal open & unexpired → **paper/live safety
-lock** → **daily-loss kill-switch** → bracket placement (entry LMT/MKT +
-take-profit + stop linked by `parentId` and an OCA group; the stop carries
-`transmit=true` so the bracket transmits atomically).
+lock** → **daily-loss kill-switch** → **risk gate with live account
+context** → bracket placement (entry LMT/MKT + take-profit + stop linked by
+`parentId` and an OCA group; the stop carries `transmit=true` so the
+bracket transmits atomically). The executed proposal is handed to the
+outcome tracker.
 
 ## 3. Safety model (layered, independent gates)
 
@@ -119,9 +167,12 @@ take-profit + stop linked by `parentId` and an OCA group; the stop carries
    `.dexter/data/trading-halt.json`, survives restarts) and **fail-safe**
    (P&L unverifiable → refuse). Inspect with `halt status`; deliberate reset
    via `clearTradingHalt()`.
-4. **Risk rules** — `src/config/risk-rules.yaml` caps position size, daily
-   trades, overnight exposure; enforced advisorily by `risk_manager` in every
-   brief/evaluation prompt.
+4. **Risk gate (deterministic)** — `src/services/proposal-risk-gate.ts`
+   enforces `risk-rules.yaml` at proposal creation (min R/R, min price,
+   coherent stops, quantity sanity) and again at acceptance with the live
+   account numbers (position size vs NetLiquidation, max open positions,
+   max daily trades). The `risk_manager` tool remains available to the LLM
+   for richer advisory checks (sector exposure, overnight limits).
 5. **Auto-execution (optional) is paper-only by construction** — see §5.
 
 ## 4. Calibration (walk-forward grid search)
@@ -175,11 +226,16 @@ human reply.
 | `AUTO_EXECUTE_PAPER` | false | paper-only auto-execution of trigger proposals |
 | `AUTO_EXECUTE_MAX_PER_DAY` | 5 | auto-execution cap per ET day |
 | `IBKR_ALLOW_LIVE` | false | manual-acceptance live unlock (never affects auto) |
+| `DATA_ARCHIVE` | true | daily post-close bar archival (16:20 ET) |
+| `DATA_ARCHIVE_SYMBOLS` | — | always-archived watchlist (comma-separated) |
+| `DATA_ARCHIVE_MAX_SYMBOLS` | 30 | per-day archival cap (IBKR pacing) |
 | `max_daily_loss_pct` (risk-rules.yaml) | 2 | kill-switch threshold |
 
 Data files (under `DEXTER_DATA_DIR`, default `.dexter/data/`):
 `opportunities.db`, `proposals.db`, `trading-halt.json`,
-`scorer-weights.json`, `stream-bars.db`. Logs: `.dexter/logs/dexter-<date>.jsonl`.
+`scorer-weights.json`, `stream-bars.db`, plus the market archive at
+`DATA_ARCHIVE_PATH` (default `.dexter/data/market-archive.db`).
+Logs: `.dexter/logs/dexter-<date>.jsonl`.
 
 ## 7. Operations
 
@@ -192,11 +248,19 @@ bun run scripts/smoke-ibkr.ts AAPL           # IBKR wiring check (read-only)
 ```
 
 Monitoring: `tail` the JSONL logs (`[opportunity-engine]`, `[trigger-alerts]`,
-`[proposal-executor]`, `[daily-loss-guard]` prefixes); `proposals` and
-`halt status` over WhatsApp; `opportunities` / `trade_proposals` tools in the
-TUI.
+`[proposal-executor]`, `[outcome-tracker]`, `[archive-scheduler]`,
+`[daily-loss-guard]` prefixes); `proposals`, `halt status` and `performance`
+over WhatsApp; `opportunities` / `trade_proposals` tools in the TUI.
 
-Known limits: IBKR scanner pacing bounds cycle depth (~25 rows/scan); the
+Tests: `bun test` (primary) or `npm run test:jest` on machines without bun
+(same colocated files; `bun:test` imports are bridged to jest).
+
+See also the extensive handbook: [docs/handbook/](../handbook/README.md).
+
+Known limits: IBKR scanners require a real-time US equity market-data
+subscription (shared to the paper account; Gateway re-login to load the
+entitlement) and pacing bounds cycle depth (~25 rows/scan); the
 kill-switch trusts IBKR's `reqPnL` daily figure; trigger evaluations use the
 default configured model (point a local vLLM via the model picker for cheap
-triage); calibration requires proprietary FirstRate data.
+triage — launch vLLM with `--enable-auto-tool-choice --tool-call-parser …`);
+calibration requires proprietary FirstRate data.

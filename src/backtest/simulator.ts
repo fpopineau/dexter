@@ -410,17 +410,25 @@ export class Simulator {
     // -----------------------------------------------------------------------
 
     /** Unrealized P&L across all open positions at the given bar's close. */
+    /**
+     * Current VALUE of open positions (not just unrealized P&L): entry
+     * debits cash by the full notional, so the equity curve needs the
+     * notional back plus the unrealized move — otherwise every open
+     * position punches a hole of one position size into the curve.
+     */
     private markToMarket(bar: Bar): number {
-        let unrealized = 0;
+        let value = 0;
         for (const pos of this.positions.values()) {
             // In single-symbol backtests, bar.close is the current price.
             // For multi-symbol, we'd need a price lookup — the engine handles this.
             if (pos.direction === 'long') {
-                unrealized += (bar.close - pos.entryPrice) * pos.quantity;
+                value += bar.close * pos.quantity;
             } else {
-                unrealized += (pos.entryPrice - bar.close) * pos.quantity;
+                // Shorts also debit entry×qty at entry (as margin):
+                // value = margin + unrealized = (2×entry − close) × qty.
+                value += (2 * pos.entryPrice - bar.close) * pos.quantity;
             }
         }
-        return unrealized;
+        return value;
     }
 }

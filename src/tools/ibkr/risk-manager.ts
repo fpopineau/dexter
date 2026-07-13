@@ -7,10 +7,12 @@
  */
 
 import { DynamicStructuredTool } from '@langchain/core/tools';
-import { readFileSync } from 'fs';
-import { resolve } from 'path';
 import { z } from 'zod';
 import { formatToolResult } from '../types.js';
+import { getRiskRules, type RiskRules } from './risk-rules.js';
+
+// Re-exported for existing importers (daily-loss-guard, tests).
+export { getRiskRules, type RiskRules } from './risk-rules.js';
 
 // ---------------------------------------------------------------------------
 // Description
@@ -27,77 +29,6 @@ Validate a proposed trade against risk management rules. Checks:
 Returns PASS or FAIL with a breakdown of each rule checked.
 Does not require IBKR connection — works on the proposed numbers alone.
 `.trim();
-
-// ---------------------------------------------------------------------------
-// Risk rules loading
-// ---------------------------------------------------------------------------
-
-export interface RiskRules {
-    max_position_pct: number;
-    max_open_positions: number;
-    max_daily_loss_pct: number;
-    max_daily_trades: number;
-    max_sector_exposure_pct: number;
-    min_risk_reward: number;
-    mandatory_stop_loss: boolean;
-    max_overnight_exposure_pct: number;
-    max_overnight_position_pct: number;
-    min_price: number;
-    min_avg_volume: number;
-    stop_atr_multiplier: number;
-}
-
-const DEFAULT_RULES: RiskRules = {
-    max_position_pct: 5,
-    max_open_positions: 10,
-    max_daily_loss_pct: 2,
-    max_daily_trades: 20,
-    max_sector_exposure_pct: 20,
-    min_risk_reward: 2.0,
-    mandatory_stop_loss: true,
-    max_overnight_exposure_pct: 30,
-    max_overnight_position_pct: 3,
-    min_price: 5.0,
-    min_avg_volume: 500_000,
-    stop_atr_multiplier: 1.5,
-};
-
-let cachedRules: RiskRules | null = null;
-
-function loadRules(): RiskRules {
-    if (cachedRules) return cachedRules;
-    try {
-        // Simple YAML parser — the file has only flat key: value pairs
-        const raw = readFileSync(
-            resolve(import.meta.dirname ?? '.', '../../config/risk-rules.yaml'),
-            'utf-8',
-        );
-        const parsed: Record<string, unknown> = {};
-        for (const line of raw.split('\n')) {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed.startsWith('#')) continue;
-            const [key, ...rest] = trimmed.split(':');
-            const valueStr = rest.join(':').split('#')[0].trim(); // strip inline comments
-            if (!key || valueStr === '') continue;
-            const k = key.trim();
-            if (valueStr === 'true') parsed[k] = true;
-            else if (valueStr === 'false') parsed[k] = false;
-            else {
-                const num = Number(valueStr);
-                parsed[k] = isNaN(num) ? valueStr : num;
-            }
-        }
-        cachedRules = { ...DEFAULT_RULES, ...parsed } as RiskRules;
-    } catch {
-        cachedRules = DEFAULT_RULES;
-    }
-    return cachedRules;
-}
-
-/** Public accessor for the risk rules (shared with the daily-loss guard). */
-export function getRiskRules(): RiskRules {
-    return loadRules();
-}
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -165,7 +96,7 @@ function validateTrade(input: z.infer<typeof RiskManagerSchema>): {
     riskReward: number | null;
     positionValuePct: number | null;
 } {
-    const rules = loadRules();
+    const rules: RiskRules = getRiskRules();
     const checks: RuleCheck[] = [];
     const accountValue = input.accountValue ?? 100_000;
     let allPassed = true;

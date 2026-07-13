@@ -253,12 +253,26 @@ export function computeTradeStats(trades: Trade[]) {
 /**
  * Compute all backtest metrics from trades + equity curve.
  */
+/** Collapse a bar-level equity curve to one point per calendar day (the
+ *  day's last equity). Return statistics (Sharpe, Sortino, CAGR) assume
+ *  DAILY periodicity — feeding them per-bar points annualizes 5-minute
+ *  noise by √252 and produces absurd values. */
+function toDailyEquity(equity: EquityPoint[]): EquityPoint[] {
+    const byDay = new Map<string, EquityPoint>();
+    for (const pt of equity) {
+        byDay.set(pt.time.slice(0, 10), pt); // last point of the day wins
+    }
+    return [...byDay.values()];
+}
+
 export function computeMetrics(
     trades: Trade[],
     equity: EquityPoint[],
     startingCapital: number,
 ): BacktestMetrics {
-    const dr = dailyReturns(equity);
+    const dailyEquity = toDailyEquity(equity);
+    const dr = dailyReturns(dailyEquity);
+    // Drawdown stays bar-level: intraday excursions are real risk.
     const dd = maxDrawdown(equity);
     const tradeStats = computeTradeStats(trades);
 
@@ -267,10 +281,10 @@ export function computeMetrics(
     const totalReturn = endEq - startEq;
     const totalReturnPct = startEq !== 0 ? totalReturn / startEq : 0;
 
-    // Estimate years from equity curve
+    // Estimate years from the number of distinct trading days
     const startDate = equity.length > 0 ? equity[0].time : '';
     const endDate = equity.length > 0 ? equity[equity.length - 1].time : '';
-    const tradingDays = equity.length;
+    const tradingDays = dailyEquity.length;
     const years = tradingDays / 252;
 
     const vol = annualizedVolatility(dr);

@@ -5,7 +5,10 @@ export {
   checkApiKeyExistsForProvider,
   saveApiKeyForProvider,
 } from './env.js';
-export { InMemoryChatHistory } from './in-memory-chat-history.js';
+// NOTE: InMemoryChatHistory is deliberately NOT re-exported from this barrel.
+// It imports model/llm → agent/prompts → tools/registry, which would drag the
+// whole agent/tool graph (and an import cycle with the IBKR modules) into
+// every consumer of '@/utils'. Import it from './in-memory-chat-history.js'.
 export { logger } from './logger.js';
 export type { LogEntry, LogLevel } from './logger.js';
 export { extractTextContent, hasToolCalls } from './ai-message.js';

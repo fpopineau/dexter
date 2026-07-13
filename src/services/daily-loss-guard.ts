@@ -13,7 +13,7 @@
  *   - Manual reset: clearTradingHalt() (exposed for deliberate operator use).
  */
 
-import { getRiskRules } from '@/tools/ibkr/risk-manager.js';
+import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
 import { allocReqId, getIBApi, getManagedAccounts, isNonFatalIbkrError } from '@/tools/ibkr/connection.js';
 import { logger } from '@/utils';
 import { EventName } from '@stoqey/ib';
@@ -238,8 +238,10 @@ export async function getDailyLossStatus(): Promise<DailyLossStatus> {
 /**
  * Throw unless new risk-increasing orders are allowed right now.
  * Call before placing any new order or accepting a proposal.
+ * Returns the (non-halted) status so callers can reuse the live account
+ * numbers (net liquidation) without a second IBKR round-trip.
  */
-export async function assertDailyLossOk(): Promise<void> {
+export async function assertDailyLossOk(): Promise<DailyLossStatus> {
     const status = await getDailyLossStatus();
     if (status.halted) {
         throw new Error(
@@ -248,4 +250,5 @@ export async function assertDailyLossOk(): Promise<void> {
             `The halt persists until the next trading day (or deliberate clearTradingHalt()).`,
         );
     }
+    return status;
 }

@@ -12,7 +12,7 @@
 import { allocReqId, getIBApi, isNonFatalIbkrError } from '@/tools/ibkr/connection.js';
 import { logger } from '@/utils';
 import type { ContractDetails, ScannerSubscription } from '@stoqey/ib';
-import { EventName } from '@stoqey/ib';
+import { EventName, ScanCode as IbScanCode } from '@stoqey/ib';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -70,10 +70,15 @@ export async function runScan(
         abovePrice?: number;
         aboveVolume?: number;
         marketCapAbove?: number;
+        /** Upper market-cap bound in USD (e.g. 5e9 for midcap bands). */
+        marketCapBelow?: number;
     } = {},
 ): Promise<ScanResult[]> {
-    // Check cache
-    const cached = cache.get(scanCode);
+    // Cache key includes the filters: the same scan code with different
+    // bounds (e.g. a midcap band vs the default) must not share entries.
+    const cacheKey = `${scanCode}|${options.locationCode ?? ''}|${options.abovePrice ?? ''}|` +
+        `${options.aboveVolume ?? ''}|${options.marketCapAbove ?? ''}|${options.marketCapBelow ?? ''}`;
+    const cached = cache.get(cacheKey);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
         return cached.results;
     }
@@ -81,14 +86,24 @@ export async function runScan(
     const api = await getIBApi();
     const reqId = allocReqId();
 
+    // ScannerSubscription.scanCode is the NUMERIC ScanCode enum — the wire
+    // encoder reverse-maps it to the string. Passing the string directly
+    // makes the encoder send the enum's number instead, and IBKR answers
+    // "Scanner type with code <n> is disabled" for every scan.
+    const ibScanCode = IbScanCode[scanCode as keyof typeof IbScanCode];
+    if (ibScanCode === undefined) {
+        throw new Error(`[scanner-loop] unknown scan code '${scanCode}'`);
+    }
+
     const subscription: ScannerSubscription = {
         numberOfRows: options.numberOfRows ?? 25,
         instrument: (options.instrument ?? 'STK') as unknown as ScannerSubscription['instrument'],
         locationCode: (options.locationCode ?? 'STK.US.MAJOR') as unknown as ScannerSubscription['locationCode'],
-        scanCode: scanCode as unknown as ScannerSubscription['scanCode'],
+        scanCode: ibScanCode,
         abovePrice: options.abovePrice ?? 5,
         aboveVolume: options.aboveVolume ?? 100_000,
         marketCapAbove: options.marketCapAbove ?? 500_000_000, // $500M+
+        ...(options.marketCapBelow !== undefined ? { marketCapBelow: options.marketCapBelow } : {}),
     };
 
     const results: ScanResult[] = [];
@@ -133,8 +148,11 @@ export async function runScan(
             if (isNonFatalIbkrError(code)) return;
             clearTimeout(timeout);
             cleanup();
-            // Common: code 162 = "Historical Market Data Service error message: No scanner results"
-            if (code === 162) {
+            // Code 162 is overloaded. Genuine "no results" resolves empty
+            // (and caches — quiet markets shouldn't be re-hammered), but
+            // "disabled"/pacing/permission variants are REAL failures and
+            // must reject loudly instead of masquerading as a quiet market.
+            if (code === 162 && !/disabled|pacing|violation|permission/i.test(err.message)) {
                 finalize(); // empty results
             } else {
                 reject(new Error(`[scanner-loop] Error ${code}: ${err.message}`));
@@ -154,7 +172,7 @@ export async function runScan(
                 timestamp: Date.now(),
                 results,
             };
-            cache.set(scanCode, snapshot);
+            cache.set(cacheKey, snapshot);
             resolve(results);
         }
 

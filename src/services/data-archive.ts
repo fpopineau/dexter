@@ -111,20 +111,27 @@ const BAR_SIZE_MAP: Record<string, BarSizeSetting> = {
 };
 
 /**
- * Fetch historical bars for a single symbol and upsert into SQLite.
- * Returns the number of bars written.
+ * One reqHistoricalData round-trip. Returns the received bars.
+ *
+ * endDateTime '' means "duration ending now". IBKR reuses error code 162
+ * for both "no data in this window" (benign — resolves empty) and pacing
+ * violations (thrown with `pacing` in the message so callers can back off).
+ * When partialOk is false, a stalled request rejects instead of returning
+ * whatever arrived — backfill must never silently record a hole.
  */
-async function archiveSymbol(
-    symbol: string,
-    barSize: BarSizeSetting,
-    barSizeLabel: string,
-    duration: string,
-    whatToShow: string,
-    useRTH: boolean,
-): Promise<number> {
+async function fetchHistoricalBars(params: {
+    symbol: string;
+    endDateTime: string;
+    duration: string;
+    barSize: BarSizeSetting;
+    whatToShow: string;
+    useRTH: boolean;
+    partialOk: boolean;
+    timeoutMs?: number;
+}): Promise<Bar[]> {
     const api = await getIBApi();
     const reqId = allocReqId();
-    const database = await getDb();
+    const { symbol } = params;
 
     const contract: Contract = {
         symbol,
@@ -138,8 +145,9 @@ async function archiveSymbol(
     await new Promise<void>((resolve, reject) => {
         const timeout = setTimeout(() => {
             cleanup();
-            resolve(); // partial is fine
-        }, 30_000);
+            if (params.partialOk) resolve();
+            else reject(new Error(`[DataArchive] timeout for ${symbol} (${params.endDateTime || 'now'}, ${params.duration})`));
+        }, params.timeoutMs ?? 60_000);
 
         const onHistoricalData = (
             id: number,
@@ -166,6 +174,13 @@ async function archiveSymbol(
         const onError = (err: Error, code: number, id: number) => {
             if (id !== reqId) return;
             if (isNonFatalIbkrError(code)) return;
+            if (code === 162 && /no data/i.test(err.message)) {
+                // Benign: the window has no bars (holiday, halted, not yet listed).
+                clearTimeout(timeout);
+                cleanup();
+                resolve();
+                return;
+            }
             clearTimeout(timeout);
             cleanup();
             reject(new Error(`[DataArchive] Error ${code} for ${symbol}: ${err.message}`));
@@ -182,22 +197,26 @@ async function archiveSymbol(
         api.reqHistoricalData(
             reqId,
             contract,
-            '', // empty = now
-            duration,
-            barSize,
-            whatToShow as WhatToShow,
-            useRTH ? 1 : 0,
+            params.endDateTime,
+            params.duration,
+            params.barSize,
+            params.whatToShow as WhatToShow,
+            params.useRTH ? 1 : 0,
             1, // formatDate
             false, // keepUpToDate
         );
     });
 
-    // Upsert bars into SQLite
+    return bars;
+}
+
+/** Upsert bars into the archive. Returns the number of rows written. */
+async function upsertBars(symbol: string, barSizeLabel: string, bars: Bar[]): Promise<number> {
+    const database = await getDb();
     const insert = database.query<void>(
         `INSERT OR REPLACE INTO bars (symbol, bar_size, time, open, high, low, close, volume, count, wap)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
-
     for (const bar of bars) {
         insert.run(
             symbol,
@@ -212,8 +231,32 @@ async function archiveSymbol(
             bar.WAP ?? null,
         );
     }
-
     return bars.length;
+}
+
+/**
+ * Fetch historical bars for a single symbol (duration ending now) and
+ * upsert into SQLite. Returns the number of bars written.
+ */
+async function archiveSymbol(
+    symbol: string,
+    barSize: BarSizeSetting,
+    barSizeLabel: string,
+    duration: string,
+    whatToShow: string,
+    useRTH: boolean,
+): Promise<number> {
+    const bars = await fetchHistoricalBars({
+        symbol,
+        endDateTime: '',
+        duration,
+        barSize,
+        whatToShow,
+        useRTH,
+        partialOk: true, // daily post-close collection: partial beats nothing
+        timeoutMs: 30_000,
+    });
+    return upsertBars(symbol, barSizeLabel, bars);
 }
 
 /**
@@ -255,6 +298,183 @@ export async function archiveBars(options: ArchiveOptions): Promise<Record<strin
     }
 
     return results;
+}
+
+// ---------------------------------------------------------------------------
+// Range backfill (historical gap filling)
+// ---------------------------------------------------------------------------
+
+export interface ArchiveRangeOptions {
+    /** Ticker symbols to backfill. */
+    symbols: string[];
+    /** Inclusive start date, YYYY-MM-DD. */
+    from: string;
+    /** Inclusive end date, YYYY-MM-DD. */
+    to: string;
+    /** Bar size. Defaults to '1 min'. */
+    barSize?: string;
+    /** Calendar days per request chunk. Defaults to 7 (safe for 1-min bars). */
+    chunkDays?: number;
+    /** Regular trading hours only. Defaults to false (extended hours,
+     *  matching the FirstRate archives). */
+    useRTH?: boolean;
+    /** What to show. Defaults to 'TRADES' (as-traded — see the note below). */
+    whatToShow?: string;
+    /** Delay between historical requests. Defaults to 11 s
+     *  (IBKR pacing: max 60 historical requests / 10 min). */
+    paceMs?: number;
+    /** Skip the part of the range already in the archive. Defaults to true. */
+    resume?: boolean;
+    /** Also store a daily ADJUSTED_LAST series (label '1 day adj') so
+     *  split/dividend adjustment factors can be derived. Defaults to true. */
+    withDailyAdjusted?: boolean;
+    /** Progress callback (chunk-level). */
+    onProgress?: (msg: string) => void;
+}
+
+export interface ArchiveRangeResult {
+    /** Bars written per symbol (−1 = failed). */
+    bars: Record<string, number>;
+    chunksFetched: number;
+    chunksFailed: number;
+}
+
+const DAY_MS = 24 * 3600_000;
+
+function ymdCompact(d: Date): string {
+    return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function parseYmd(s: string): Date {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s.trim());
+    if (!m) throw new Error(`[DataArchive] invalid date '${s}' (expected YYYY-MM-DD)`);
+    return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+}
+
+/** Latest archived bar date (YYYYMMDD) for (symbol, barSize), or null. */
+async function latestArchivedDay(symbol: string, barSizeLabel: string): Promise<string | null> {
+    const database = await getDb();
+    const row = database.query<{ t: string | null }>(
+        `SELECT MAX(time) AS t FROM bars WHERE symbol = ? AND bar_size = ?`,
+    ).get(symbol, barSizeLabel);
+    const t = row?.t;
+    return t && t.length >= 8 ? t.slice(0, 8) : null;
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Backfill a date range of historical bars into the archive.
+ *
+ * Chunked (endDateTime + duration), paced for IBKR limits, resumable
+ * (re-runs skip what is already archived; upserts make overlap harmless),
+ * with one retry after a 60 s back-off per failed chunk.
+ *
+ * Adjustment note: IBKR's ADJUSTED_LAST is only served for requests ending
+ * "now", so ranged chunks use TRADES (as-traded prices). To keep the data
+ * adjustable, withDailyAdjusted also stores a daily ADJUSTED_LAST series
+ * per symbol ('1 day adj'): dividing it by the as-traded daily closes gives
+ * the per-day factor to adjust intraday bars when a split/dividend matters.
+ */
+export async function archiveBarsRange(options: ArchiveRangeOptions): Promise<ArchiveRangeResult> {
+    const barSizeLabel = options.barSize || '1 min';
+    const barSize = BAR_SIZE_MAP[barSizeLabel];
+    if (!barSize) {
+        throw new Error(`[DataArchive] Invalid barSize '${barSizeLabel}'. Valid: ${Object.keys(BAR_SIZE_MAP).join(', ')}`);
+    }
+    const from = parseYmd(options.from);
+    const to = parseYmd(options.to);
+    if (from > to) throw new Error(`[DataArchive] from ${options.from} is after to ${options.to}`);
+
+    const chunkDays = Math.max(1, options.chunkDays ?? 7);
+    const useRTH = options.useRTH ?? false;
+    const whatToShow = options.whatToShow || 'TRADES';
+    const paceMs = Math.max(2_000, options.paceMs ?? 11_000);
+    const resume = options.resume ?? true;
+    const progress = options.onProgress ?? ((msg: string) => logger.info(`[DataArchive] ${msg}`));
+
+    const result: ArchiveRangeResult = { bars: {}, chunksFetched: 0, chunksFailed: 0 };
+
+    for (const rawSymbol of options.symbols) {
+        const symbol = rawSymbol.trim().toUpperCase();
+        let written = 0;
+        let failed = false;
+
+        // Resume: start after the last archived day (repeat it, upsert dedupes).
+        let start = from;
+        if (resume) {
+            const latest = await latestArchivedDay(symbol, barSizeLabel);
+            if (latest) {
+                const latestDate = new Date(
+                    Number(latest.slice(0, 4)), Number(latest.slice(4, 6)) - 1, Number(latest.slice(6, 8)),
+                );
+                if (latestDate > start) start = latestDate;
+                if (start > to) {
+                    progress(`${symbol}: already archived through ${latest}, nothing to do`);
+                    result.bars[symbol] = 0;
+                    continue;
+                }
+            }
+        }
+
+        // Walk the range in chunks, oldest first.
+        for (let chunkStart = start; chunkStart <= to; chunkStart = new Date(chunkStart.getTime() + chunkDays * DAY_MS)) {
+            const chunkEnd = new Date(Math.min(chunkStart.getTime() + (chunkDays - 1) * DAY_MS, to.getTime()));
+            const endDateTime = `${ymdCompact(chunkEnd)} 23:59:59 US/Eastern`;
+            const duration = `${chunkDays} D`;
+
+            let bars: Bar[] | null = null;
+            for (let attempt = 0; attempt < 2 && bars === null; attempt++) {
+                try {
+                    bars = await fetchHistoricalBars({
+                        symbol, endDateTime, duration, barSize, whatToShow, useRTH, partialOk: false,
+                    });
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : String(err);
+                    if (attempt === 0) {
+                        progress(`${symbol} ${options.barSize ?? '1 min'} ← ${endDateTime}: ${msg} — backing off 60s and retrying`);
+                        await sleep(60_000);
+                    } else {
+                        logger.error(`[DataArchive] ${symbol} chunk ending ${endDateTime} failed twice: ${msg}`);
+                        result.chunksFailed++;
+                        failed = true;
+                    }
+                }
+            }
+            if (bars !== null) {
+                written += await upsertBars(symbol, barSizeLabel, bars);
+                result.chunksFetched++;
+                progress(`${symbol}: ${bars.length} bars ← ${ymdCompact(chunkStart)}..${ymdCompact(chunkEnd)} (total ${written})`);
+            }
+            await sleep(paceMs);
+        }
+
+        // Daily ADJUSTED_LAST series for adjustment factors (ending now by
+        // IBKR constraint; covers the whole backfilled window and then some).
+        if (options.withDailyAdjusted ?? true) {
+            try {
+                const spanYears = Math.min(5, Math.ceil((Date.now() - from.getTime()) / (365 * DAY_MS)) + 1);
+                const daily = await fetchHistoricalBars({
+                    symbol,
+                    endDateTime: '',
+                    duration: `${spanYears} Y`,
+                    barSize: BarSizeSetting.DAYS_ONE,
+                    whatToShow: 'ADJUSTED_LAST',
+                    useRTH: true,
+                    partialOk: false,
+                });
+                await upsertBars(symbol, '1 day adj', daily);
+                progress(`${symbol}: ${daily.length} daily ADJUSTED_LAST bars stored ('1 day adj')`);
+            } catch (err) {
+                logger.warn(`[DataArchive] ${symbol}: daily ADJUSTED_LAST fetch failed: ${err}`);
+            }
+            await sleep(paceMs);
+        }
+
+        result.bars[symbol] = failed && written === 0 ? -1 : written;
+    }
+
+    return result;
 }
 
 /**

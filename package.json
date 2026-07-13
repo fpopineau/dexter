@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "test:watch": "bun test --watch",
+    "test:jest": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "postinstall": "playwright install chromium"
   },
   "dependencies": {
@@ -28,6 +29,7 @@
     "@mariozechner/pi-tui": "^0.52.12",
     "@mozilla/readability": "^0.6.0",
     "@stoqey/ib": "1.5.3",
+    "@types/yauzl": "^3.4.0",
     "@whiskeysockets/baileys": "7.0.0-rc.9",
     "adm-zip": "^0.5.17",
     "axios": "^1.17.0",
@@ -44,6 +46,7 @@
     "playwright": "^1.58.2",
     "qrcode-terminal": "^0.12.0",
     "turndown": "^7.2.4",
+    "yauzl": "^3.4.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

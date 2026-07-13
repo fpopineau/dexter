@@ -20,6 +20,7 @@ Day Trade Scan Progress:
 - [ ] Step 4: Score signals
 - [ ] Step 5: Validate against risk rules
 - [ ] Step 6: Generate trade plans
+- [ ] Step 7: Register actionable setups as proposals
 ```
 
 ## Step 1: Check Market Session & Conditions
@@ -40,17 +41,26 @@ Check broad market context with `get_market_data`:
 
 Build a candidate list from multiple sources (use tools in parallel where possible):
 
-### 2.1 News & Catalyst Scan
-Call `get_market_data`:
-- **Query:** `"market news today"` — identify sector themes, breaking catalysts.
-- **Query:** `"[sector] news"` for any sector showing unusual moves.
+### 2.1 Opportunity Engine (preferred)
+Call `opportunities` (action `latest`; if missing or older than 10 minutes,
+action `refresh`) — this is the ranked, pre-scored scanner universe. When it
+returns candidates, use its top entries as the primary candidate list and
+skip 2.2.
 
-### 2.2 Volume & Momentum Screening
-Call `stock_screener` to find candidates matching day-trade profiles:
-- **Momentum query:** `"stocks with market cap above 1 billion, volume above 2 million, and price above 10"`
+### 2.2 Scanners & Screening (fallback)
+- Call `ibkr_scanner` (e.g. `TOP_PERC_GAIN`, `MOST_ACTIVE`, `HOT_BY_VOLUME`).
+  Note: IBKR scanners return empty without a real-time market-data
+  subscription — if empty, fall back to direct TA on liquid large caps
+  (SPY/QQQ leaders, recent movers from context).
+- Call `stock_screener` if available (requires FINANCIAL_DATASETS_API_KEY):
+  `"stocks with market cap above 1 billion, volume above 2 million, and price above 10"`.
 - Prefer liquid names (avg volume > 1M) with tight spreads.
 
-### 2.3 Watchlist
+### 2.3 News & Catalyst Scan
+Call `web_search` (or `get_market_data` if available) for market news and
+sector themes; verify any candidate's move has a catalyst.
+
+### 2.4 Watchlist
 If the user has a watchlist in memory, call `memory_search`:
 - **Query:** `"watchlist"` or `"tickers to watch"`
 - Include any tickers the user mentioned in the conversation.
@@ -135,6 +145,24 @@ For each validated setup, output a structured trade plan:
 ```
 
 **Rank** all recommendations by signal score, highest first.
+
+## Step 7: Register Proposals
+
+For each **actionable** setup (score ≥ 60 AND risk-validated), register it
+with `trade_proposals` (action `create`, at most 3 per scan):
+- `entry` is REQUIRED even for MKT proposals (pass the current price — it
+  anchors the deterministic risk validation).
+- `quantity` from the risk_manager suggestion, `expiresMinutes` 90,
+  `rationale` one line (setup + catalyst + risk note), include the signal
+  `score`.
+- Creation NEVER trades. Include each returned proposal ID in your answer
+  with: "Reply 'accept <ID>' to execute (paper), or 'reject <ID>'."
+- If the create is refused with `[risk-gate] REFUSED …`, the numbers violate
+  the risk rules — fix the entry/stop/target/size and retry once; never
+  loosen the rules to force a trade.
+- During pre-market, register proposals only if the user explicitly wants
+  pre-market entries; otherwise present the plans and offer to register at
+  the open.
 
 **Important reminders:**
 - Never recommend more trades than the risk rules allow simultaneously.

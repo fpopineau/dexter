@@ -10,16 +10,23 @@
  *   reject|no P-XXXX        reject the proposal
  *   proposals               list open proposals
  *   halt status             show the daily-loss kill-switch state
+ *   performance [N]         closed-trade P&L summary over the last N days (default 7)
  */
 
 import { getDailyLossStatus } from '@/services/daily-loss-guard.js';
 import { acceptProposal, rejectProposal } from '@/services/proposal-executor.js';
-import { formatProposalLine, listProposals } from '@/services/trade-proposals.js';
+import {
+    formatPerformanceReport,
+    formatProposalLine,
+    getPerformanceSummary,
+    listProposals,
+} from '@/services/trade-proposals.js';
 
 const ACCEPT_RE = /^\s*(accept|ok|go)\s+(P-[A-Za-z0-9]{4})\s*$/i;
 const REJECT_RE = /^\s*(reject|no)\s+(P-[A-Za-z0-9]{4})\s*$/i;
 const LIST_RE = /^\s*proposals?\s*$/i;
 const HALT_RE = /^\s*halt\s+status\s*$/i;
+const PERF_RE = /^\s*(performance|perf)(?:\s+(\d{1,3})\s*d?)?\s*$/i;
 
 /**
  * Try to handle the message as a proposal command.
@@ -46,6 +53,13 @@ export async function handleProposalCommand(body: string): Promise<string | null
             ...open.map((p) => `• ${formatProposalLine(p)}`),
             "Reply 'accept <ID>' to execute (paper) or 'reject <ID>'.",
         ].join('\n');
+    }
+
+    const perf = PERF_RE.exec(body);
+    if (perf) {
+        const days = perf[2] ? Math.max(1, Number(perf[2])) : 7;
+        const summary = await getPerformanceSummary(Date.now() - days * 24 * 3600_000);
+        return formatPerformanceReport(summary, `last ${days}d`);
     }
 
     if (HALT_RE.test(body)) {

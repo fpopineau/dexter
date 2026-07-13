@@ -10,7 +10,7 @@
  * Run:
  *   bun run scripts/demo-backtest.ts                       # AAPL, 6 months, walk-forward
  *   bun run scripts/demo-backtest.ts NVDA TSLA             # custom tickers
- *   bun run scripts/demo-backtest.ts AAPL 2024-01-02 2024-06-28
+ *   bun run scripts/demo-backtest.ts AAPL 2024-01-02 2024-12-30
  */
 
 import 'dotenv/config';
@@ -25,7 +25,7 @@ const config = {
     tickers: tickers.length ? tickers : ['AAPL'],
     dataSource: 'firstrate' as const,
     startDate: dates[0] ?? '2024-01-02',
-    endDate: dates[1] ?? '2024-06-28',
+    endDate: dates[1] ?? '2024-12-30',
     timeframe: '5m' as const,
     minSignalScore: 60,
     direction: 'long' as const,

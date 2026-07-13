@@ -189,6 +189,13 @@ async function runWalkForward(
     const folds: WalkForwardFold[] = [];
     const allTrades: Trade[] = [];
     const allEquity: EquityPoint[] = [];
+    const startingCapital = config.simulator?.startingCapital ?? 100_000;
+
+    // Each fold's simulator restarts at startingCapital; chain the
+    // out-of-sample curves multiplicatively so the aggregate equity curve
+    // compounds across folds instead of resetting (which made the headline
+    // metrics reflect only the LAST fold).
+    let chainScale = 1;
 
     let foldIdx = 0;
     let cursor = startDate;
@@ -235,15 +242,26 @@ async function runWalkForward(
         });
 
         allTrades.push(...testResult.trades);
-        allEquity.push(...testResult.equityCurve);
+        for (const pt of testResult.equityCurve) {
+            allEquity.push({ ...pt, equity: pt.equity * chainScale });
+        }
+        if (testResult.equityCurve.length > 0) {
+            const foldEnd = testResult.equityCurve[testResult.equityCurve.length - 1].equity;
+            chainScale *= foldEnd / startingCapital;
+        }
 
         cursor = addDays(cursor, testDays); // step forward by test window
         foldIdx++;
     }
 
-    const startingCapital = config.simulator?.startingCapital ?? 100_000;
     const metrics = computeMetrics(allTrades, allEquity, startingCapital);
 
+    if (folds.length === 0) {
+        logger.warn(
+            `[engine] Walk-forward produced 0 folds: period ${startDate}→${endDate} is shorter than ` +
+            `one train+test window (${trainDays}+${testDays} days). Extend the period or shrink trainDays/testDays.`,
+        );
+    }
     logger.info(`[engine] Walk-forward complete: ${folds.length} folds, ${allTrades.length} OOS trades, Sharpe=${metrics.sharpeRatio.toFixed(2)}`);
 
     return { config, metrics, trades: allTrades, equityCurve: allEquity, folds };

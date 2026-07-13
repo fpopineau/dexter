@@ -3,7 +3,10 @@ import type { GroupContext } from '../agent/prompts.js';
 import { ensureHeartbeatCronJob } from '../cron/heartbeat-migration.js';
 import { startCronRunner } from '../cron/runner.js';
 import { ensureTradingCronJobs } from '../cron/trading-schedules.js';
+import { isArchiveSchedulerEnabled, startArchiveScheduler, stopArchiveScheduler } from '../services/archive-scheduler.js';
 import { isOpportunityEngineEnabled, startOpportunityEngine, stopOpportunityEngine } from '../services/opportunity-engine.js';
+import { startOutcomeTracker, stopOutcomeTracker } from '../services/outcome-tracker.js';
+import { isUniverseSweepEnabled, startUniverseSweep, stopUniverseSweep } from '../services/universe-sweep.js';
 import { getSetting } from '../utils/config.js';
 import { dexterPath } from '../utils/paths.js';
 import { enqueueForSession, isSessionRunning, runAgentForMessage } from './agent-runner.js';
@@ -24,6 +27,7 @@ import {
   noteGroupMember,
   recordGroupMessage,
 } from './group/index.js';
+import { registerOutcomeAlerts } from './outcome-alerts.js';
 import { handleProposalCommand } from './proposal-commands.js';
 import { resolveRoute } from './routing/resolve-route.js';
 import { resolveSessionStorePath, upsertSessionMeta } from './sessions/store.js';
@@ -250,9 +254,17 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
   ensureHeartbeatCronJob(params.configPath);
   if (process.env.IBKR_HOST || process.env.IBKR_PORT) {
     ensureTradingCronJobs();
+    registerOutcomeAlerts();
+    await startOutcomeTracker();
     if (isOpportunityEngineEnabled()) {
       registerTriggerAlerts();
       startOpportunityEngine();
+    }
+    if (isArchiveSchedulerEnabled()) {
+      startArchiveScheduler();
+    }
+    if (isUniverseSweepEnabled()) {
+      startUniverseSweep();
     }
   }
   const cron = startCronRunner({ configPath: params.configPath });
@@ -260,7 +272,10 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
   return {
     stop: async () => {
       cron.stop();
+      stopUniverseSweep();
+      stopArchiveScheduler();
       stopOpportunityEngine();
+      stopOutcomeTracker();
       await manager.stopAll();
     },
     snapshot: () => manager.getSnapshot(),

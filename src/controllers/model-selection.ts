@@ -10,6 +10,7 @@ import {
   type Model,
 } from '../utils/model.js';
 import { getOllamaModels } from '../utils/ollama.js';
+import { getVllmModels } from '../utils/vllm.js';
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from '../model/llm.js';
 import { InMemoryChatHistory } from '../utils/in-memory-chat-history.js';
 
@@ -109,6 +110,15 @@ export class ModelSelectionController {
       return;
     }
 
+    if (providerId === 'vllm') {
+      // Discover the served model(s) from the local vLLM endpoint.
+      const vllmModelIds = await getVllmModels();
+      this.pendingModelsValue = vllmModelIds.map((id) => ({ id, displayName: id }));
+      this.appStateValue = 'model_select';
+      this.emitChange();
+      return;
+    }
+
     this.pendingModelsValue = getModelsForProvider(providerId);
     this.appStateValue = 'model_select';
     this.emitChange();
@@ -126,6 +136,12 @@ export class ModelSelectionController {
 
     if (this.pendingProviderValue === 'ollama') {
       this.completeModelSwitch(this.pendingProviderValue, `ollama:${modelId}`);
+      return;
+    }
+
+    if (this.pendingProviderValue === 'vllm') {
+      // Local endpoint, no API key: prefix-route and switch directly.
+      this.completeModelSwitch(this.pendingProviderValue, `vllm:${modelId}`);
       return;
     }
 

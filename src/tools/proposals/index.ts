@@ -17,7 +17,9 @@ import { z } from 'zod';
 import { acceptProposal } from '@/services/proposal-executor.js';
 import {
     createProposal,
+    formatPerformanceReport,
     formatProposalLine,
+    getPerformanceSummary,
     getProposal,
     listProposals,
 } from '@/services/trade-proposals.js';
@@ -29,11 +31,17 @@ Manage trade proposals — persisted, human-actionable trade recommendations.
 
 **create** — register a recommendation (symbol, direction, entryType LMT/MKT, entry,
   stop, target, quantity, score, rationale, expiresMinutes default 120). Creating a
-  proposal does NOT trade. Always include the returned proposal id in your answer,
-  with the instruction "reply 'accept <ID>' to execute (paper)".
-**list** — list proposals (status filter: open/executed/rejected/expired/failed; default open).
+  proposal does NOT trade. The entry price is REQUIRED even for MKT proposals (pass the
+  current price — it anchors deterministic risk validation; execution is still at market).
+  Every proposal passes a mandatory risk gate (min risk/reward, min price, coherent
+  stop/target) — a rejected create returns the violations; fix the numbers, don't fight it.
+  Always include the returned proposal id in your answer, with the instruction
+  "reply 'accept <ID>' to execute (paper)".
+**list** — list proposals (status filter: open/executed/closed/rejected/expired/failed; default open).
 **get** — fetch one proposal by id.
 **reject** — mark an open proposal rejected (risk-reducing, always allowed).
+**performance** — closed-trade outcomes over the last N days (default 7): wins/losses,
+  win rate, gross/net P&L, best/worst, exit reasons. Use it for daily recaps.
 
 Execution is human-only: the accept_proposal tool requires interactive approval, and
 WhatsApp users execute by replying 'accept <ID>'. Prices must be coherent: for long,
@@ -53,8 +61,9 @@ const CreateSchema = z.object({
     action: z.literal('create'),
     symbol: z.string().describe("US equity ticker, e.g. 'AAPL'."),
     direction: z.enum(['long', 'short']),
-    entryType: z.enum(['LMT', 'MKT']).default('LMT').describe('LMT requires entry price; MKT enters at market.'),
-    entry: z.number().positive().optional().describe('Entry price (required for LMT).'),
+    entryType: z.enum(['LMT', 'MKT']).default('LMT').describe('LMT places a limit entry; MKT enters at market.'),
+    entry: z.number().positive()
+        .describe('Entry price. Required for LMT; for MKT pass the current price (indicative, used for risk validation).'),
     stop: z.number().positive().describe('Stop-loss price.'),
     target: z.number().positive().describe('Take-profit price.'),
     quantity: z.number().int().positive().describe('Number of shares.'),
@@ -66,7 +75,7 @@ const CreateSchema = z.object({
 
 const ListSchema = z.object({
     action: z.literal('list'),
-    status: z.enum(['open', 'executed', 'rejected', 'expired', 'failed']).optional()
+    status: z.enum(['open', 'executed', 'closed', 'rejected', 'expired', 'failed']).optional()
         .describe('Filter by status. Omit for all (recent first).'),
 });
 
@@ -80,19 +89,20 @@ const RejectSchema = z.object({
     id: z.string().describe('Proposal id to reject.'),
 });
 
-const ProposalsSchema = z.discriminatedUnion('action', [CreateSchema, ListSchema, GetSchema, RejectSchema]);
+const PerformanceSchema = z.object({
+    action: z.literal('performance'),
+    days: z.number().int().positive().max(365).default(7)
+        .describe('Look-back window in days for closed-trade outcomes. Defaults to 7.'),
+});
+
+const ProposalsSchema = z.discriminatedUnion('action', [CreateSchema, ListSchema, GetSchema, RejectSchema, PerformanceSchema]);
 
 function coherent(input: z.infer<typeof CreateSchema>): string | null {
-    if (input.entryType === 'LMT') {
-        if (input.entry == null) return 'entry price is required for LMT proposals';
-        if (input.direction === 'long' && !(input.stop < input.entry && input.entry < input.target)) {
-            return 'long proposal requires stop < entry < target';
-        }
-        if (input.direction === 'short' && !(input.target < input.entry && input.entry < input.stop)) {
-            return 'short proposal requires target < entry < stop';
-        }
-    } else if (input.direction === 'long' ? !(input.stop < input.target) : !(input.target < input.stop)) {
-        return 'stop and target are inconsistent with the direction';
+    if (input.direction === 'long' && !(input.stop < input.entry && input.entry < input.target)) {
+        return 'long proposal requires stop < entry < target';
+    }
+    if (input.direction === 'short' && !(input.target < input.entry && input.entry < input.stop)) {
+        return 'short proposal requires target < entry < stop';
     }
     return null;
 }
@@ -108,23 +118,29 @@ export function createTradeProposalsTool() {
                 case 'create': {
                     const problem = coherent(input);
                     if (problem) return formatToolResult({ error: problem });
-                    const p = await createProposal({
-                        symbol: input.symbol,
-                        direction: input.direction,
-                        entryType: input.entryType,
-                        entry: input.entry,
-                        stop: input.stop,
-                        target: input.target,
-                        quantity: input.quantity,
-                        score: input.score,
-                        rationale: input.rationale,
-                        source: 'agent',
-                        expiresMinutes: input.expiresMinutes,
-                    });
-                    return formatToolResult({
-                        created: p,
-                        userInstruction: `Reply 'accept ${p.id}' to execute on paper, or 'reject ${p.id}'. Expires ${new Date(p.expiresAt).toISOString()}.`,
-                    });
+                    try {
+                        const p = await createProposal({
+                            symbol: input.symbol,
+                            direction: input.direction,
+                            entryType: input.entryType,
+                            entry: input.entry,
+                            stop: input.stop,
+                            target: input.target,
+                            quantity: input.quantity,
+                            score: input.score,
+                            rationale: input.rationale,
+                            source: 'agent',
+                            expiresMinutes: input.expiresMinutes,
+                        });
+                        return formatToolResult({
+                            created: p,
+                            userInstruction: `Reply 'accept ${p.id}' to execute on paper, or 'reject ${p.id}'. Expires ${new Date(p.expiresAt).toISOString()}.`,
+                        });
+                    } catch (err) {
+                        // Risk-gate refusal: return the violations so the numbers
+                        // can be corrected — do not weaken them to force a trade.
+                        return formatToolResult({ error: err instanceof Error ? err.message : String(err) });
+                    }
                 }
                 case 'list': {
                     const items = await listProposals(input.status);
@@ -140,6 +156,14 @@ export function createTradeProposalsTool() {
                 case 'reject': {
                     const outcome = await rejectProposal(input.id);
                     return formatToolResult(outcome);
+                }
+                case 'performance': {
+                    const summary = await getPerformanceSummary(Date.now() - input.days * 24 * 3600_000);
+                    return formatToolResult({
+                        days: input.days,
+                        summary,
+                        report: formatPerformanceReport(summary, `last ${input.days}d`),
+                    });
                 }
             }
         },

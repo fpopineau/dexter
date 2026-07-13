@@ -31,9 +31,9 @@ interface TradingJobDef {
 const TRADING_JOBS: TradingJobDef[] = [
     {
         name: 'Pre-Market Brief',
-        description: 'Morning market briefing: overnight recap, calendar, gap analysis, watchlist levels.',
+        description: 'Morning market briefing: performance recap, overnight recap, calendar, gap analysis, watchlist levels.',
         cronExpr: '0 8 * * 1-5',
-        message: 'Run pre-market brief. Summarize overnight moves, today\'s earnings/economic calendar, pre-market movers, and watchlist key levels.',
+        message: 'Run pre-market brief. Start with the trading performance recap: call trade_proposals (action performance, days 1) and report the closed trades, win/loss, net P&L, and anything still executing — include the provided report verbatim, then one sentence of interpretation (e.g. stops hit on longs in a weak tape). Then summarize overnight moves, today\'s earnings/economic calendar, pre-market movers, and watchlist key levels.',
         model: undefined, // use default (Claude for deep reasoning)
         activeStart: '07:00',
         activeEnd: '09:30',

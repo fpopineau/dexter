@@ -68,6 +68,10 @@ function getConfig() {
 const NON_FATAL_CODES = new Set<number>([
     2100, 2101, 2102, 2103, 2104, 2105, 2106, 2107, 2108, 2109, 2110,
     2148, 2158, 2168, 2169,
+    // 365 — "no scanner subscription found for ticker id": emitted when a
+    // scanner subscription is cancelled after it failed to establish
+    // (scanner-loop's cleanup cancels unconditionally). Informational.
+    365,
     10090, 10091, 10167,
 ]);
 

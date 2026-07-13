@@ -45,7 +45,8 @@ export interface BracketResult {
     targetPrice: number;
 }
 
-function validate(req: BracketRequest): void {
+/** Structural validation of a bracket request (exported for tests). */
+export function validateBracketRequest(req: BracketRequest): void {
     if (!Number.isInteger(req.quantity) || req.quantity <= 0) {
         throw new Error('[bracket] quantity must be a positive integer');
     }
@@ -77,7 +78,7 @@ function validate(req: BracketRequest): void {
  * tracked by IBKR itself.
  */
 export async function placeBracketOrder(req: BracketRequest): Promise<BracketResult> {
-    validate(req);
+    validateBracketRequest(req);
 
     const api = await getIBApi();
     const parentId = await getNextValidOrderId(api);

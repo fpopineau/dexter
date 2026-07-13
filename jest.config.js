@@ -1,9 +1,21 @@
-/** @type {import('ts-jest').JestConfigWithTsJest} */
+/**
+ * Jest configuration — secondary test runner.
+ *
+ * The primary runner is `bun test` (package.json "test"). This config lets
+ * the same colocated .test.ts files under src run with jest on machines
+ * without bun: `npm run test:jest`. 'bun:test' imports are bridged to
+ * @jest/globals via test/bun-test-shim.ts.
+ *
+ * @type {import('ts-jest').JestConfigWithTsJest}
+ */
 export default {
   preset: 'ts-jest/presets/default-esm',
   testEnvironment: 'node',
   extensionsToTreatAsEsm: ['.ts', '.tsx'],
   moduleNameMapper: {
+    '^bun:test$': '<rootDir>/test/bun-test-shim.ts',
+    '^@/(.*)\\.js$': '<rootDir>/src/$1',
+    '^@/(.*)$': '<rootDir>/src/$1',
     '^(\\.{1,2}/.*)\\.js$': '$1',
   },
   transform: {
@@ -27,15 +39,14 @@ export default {
   transformIgnorePatterns: [
     'node_modules/(?!(p-retry|is-network-error|@langchain)/)',
   ],
-  testMatch: ['**/__tests__/**/*.test.ts'],
-  moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
-  collectCoverageFrom: [
-    'src/agent/**/*.ts',
-    '!src/agent/**/*.test.ts',
-    '!src/agent/__tests__/**',
-    '!src/agent/index.ts',
+  testMatch: ['**/src/**/*.test.ts'],
+  testPathIgnorePatterns: [
+    '\\\\node_modules\\\\',
+    '/node_modules/',
+    // bun-only (uses mock.module); runs under `bun test`
+    'agent-runner\\.test\\.ts$',
   ],
+  moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
   coverageDirectory: 'coverage',
   verbose: true,
 };
-

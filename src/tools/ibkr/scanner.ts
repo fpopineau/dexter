@@ -66,6 +66,10 @@ const ScannerSchema = z.object({
         .number()
         .default(500000000)
         .describe('Minimum market cap filter in USD. Defaults to $500M.'),
+    maxMarketCap: z
+        .number()
+        .optional()
+        .describe('Maximum market cap filter in USD (e.g. 5000000000 to scan the 1–5B midcap band). No upper bound by default.'),
     locationCode: z
         .string()
         .default('STK.US.MAJOR')
@@ -88,6 +92,7 @@ export function createIbkrScanner() {
                 abovePrice: input.minPrice,
                 aboveVolume: input.minVolume,
                 marketCapAbove: input.minMarketCap,
+                marketCapBelow: input.maxMarketCap,
                 locationCode: input.locationCode,
             });
 
