@@ -882,8 +882,44 @@ src/backtest/sentiment-loader.ts
   hill-climbing the LoRA training recipe on the RTX 6000 Pro)
 
 ### Phase 8 — Additional Data Sources (Ongoing)
+- [ ] **`src/tools/macro/prediction-markets.ts` — Polymarket (PROMOTED: build
+  first, ahead of the FRED calendar — it covers event timing AND adds
+  crowd probabilities in one free feed).** APIs verified 2026-07: Gamma
+  API (gamma-api.polymarket.com) is fully public, no key, plain REST;
+  CLOB public endpoints for prices/history. Two integration modes:
+
+  **Mode A — decision context (build first, ~half a day):**
+  One tool, two actions: `events` (high-volume markets resolving soon,
+  filtered by tags economics/fed/geopolitics: question, outcome odds,
+  24h odds change, volume, resolution date) and `search` (by term).
+  Pure parsers over Gamma JSON (fixture-tested), 5-min cache. Wire into
+  prompts (auto re-synced): Pre-Market Brief quotes market-implied
+  probabilities next to analyst forecasts and flags divergences;
+  Pre-Close Review weighs tomorrow's event odds in overnight-hold
+  decisions; trigger evaluations get relevant event odds as context.
+  Later, once observed useful: a deterministic "event-risk dial"
+  (high-volume markets resolving <24h with wide uncertainty → briefs
+  instructed to size down). Purely additive to the judgment layer — no
+  execution-path changes.
+
+  **Mode B — proposal SOURCE (odds moves generate candidates):**
+  A new trigger source parallel to the scanner engine, reusing the
+  existing trigger→evaluation→proposal→risk-gate→human-accept pipeline:
+  1. Deterministic detector polls high-volume markets and fires on
+     significant odds moves (Δprobability over a window above a
+     threshold, volume-qualified) — debounced per market, daily-capped,
+     mirroring OPP_TRIGGER_* semantics.
+  2. Event→instrument mapping resolves the tradable expression: a
+     curated YAML table for the recurring cases (oil/OPEC/Hormuz →
+     XLE/XOM/OXY; Fed-cut repricing → TLT/KRE; etc.), with the LLM
+     evaluation refining/overriding per event.
+  3. The standard trigger evaluation then verifies the move against
+     news (the odds move is the catalyst candidate, not its proof),
+     runs TA on the mapped tickers for entry/stop/target as usual, and
+     registers proposals through the normal gates — human accept only.
+  Mode B builds on Mode A's tool; nothing bypasses the safety model.
 - [ ] `src/tools/macro/economic-calendar.ts` — FRED + ECB integration
-- [ ] `src/tools/macro/prediction-markets.ts` — Polymarket + Kalshi
+- [ ] Kalshi (deferred — overlapping coverage, more setup than Polymarket)
 - [ ] `src/tools/ibkr/options-flow.ts` — unusual activity, IV rank, put/call
 - [ ] `src/tools/macro/geopolitical-signals.ts` — ACLED, IMF PortWatch, NASA FIRMS, EIA
 - [ ] `src/tools/sentiment/social.ts` — Reddit + StockTwits + X aggregate
