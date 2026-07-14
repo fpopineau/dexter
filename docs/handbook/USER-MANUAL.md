@@ -245,6 +245,7 @@ tokens). Anything else goes to the agent as a normal question.
 | `accept P-1A2B` | `ok P-1A2B`, `go P-1A2B` | Execute the proposal (all gates re-checked) |
 | `reject P-1A2B` | `no P-1A2B` | Reject it |
 | `proposals` | `proposal` | List open proposals |
+| `positions` | `position` | Current holdings + daily P&L straight from IBKR |
 | `performance` | `perf`, `performance 30` | Closed-trade summary (default 7 days) |
 | `halt status` | | Kill-switch state + daily P&L headroom |
 
