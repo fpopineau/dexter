@@ -170,6 +170,10 @@ export interface ToolDeniedEvent {
   args: Record<string, unknown>;
   /** Unique tool_call ID from the AIMessage (for concurrent execution ordering). */
   toolCallId?: string;
+  /** True when denied automatically because no approval channel exists
+   *  (headless runs: gateway, cron, triggers) — as opposed to an
+   *  interactive user pressing "deny". */
+  auto?: boolean;
 }
 
 /**

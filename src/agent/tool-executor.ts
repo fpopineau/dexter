@@ -131,10 +131,12 @@ export class AgentToolExecutor {
 
     // Approval flow for sensitive tools
     if (this.requiresApproval(toolName) && !this.sessionApprovedTools.has(toolName)) {
+      // No approval channel (headless: gateway/cron/trigger runs) → auto-deny.
+      const headless = this.requestToolApproval === undefined;
       const decision = (await this.requestToolApproval?.({ tool: toolName, args: toolArgs })) ?? 'deny';
       yield { type: 'tool_approval', tool: toolName, args: toolArgs, approved: decision };
       if (decision === 'deny') {
-        yield { type: 'tool_denied', tool: toolName, args: toolArgs, toolCallId };
+        yield { type: 'tool_denied', tool: toolName, args: toolArgs, toolCallId, auto: headless };
         return;
       }
       if (decision === 'allow-session') {

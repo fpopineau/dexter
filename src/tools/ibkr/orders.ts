@@ -41,7 +41,11 @@ const SUPPORTED_ORDER_TYPES = [
 // ---------------------------------------------------------------------------
 
 export const IBKR_ORDERS_DESCRIPTION = `
-Manage orders through Interactive Brokers. Supports three actions:
+Manage orders through Interactive Brokers. Requires interactive user
+approval — in headless contexts (WhatsApp gateway, cron briefs, trigger
+evaluations) this tool is AUTO-DENIED by design and will never succeed;
+there, create a trade_proposal instead and tell the user to reply
+'accept <ID>'. Supports three actions:
 
 **place** — Submit a new order. Requires ticker, action (BUY/SELL), quantity, and order type.
   Order types: MKT (market), LMT (limit), STP (stop), STP_LMT (stop-limit),

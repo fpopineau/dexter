@@ -395,8 +395,18 @@ export class Agent {
           name: event.tool,
         }));
       } else if (event.type === 'tool_denied' && event.toolCallId) {
+        // The wording matters: the model acts on it. An auto-denial must say
+        // the tool can NEVER work in this context and point at the working
+        // path, or the model loops offering the same impossible action.
+        const content = event.auto
+          ? `Tool '${event.tool}' is NOT available in this context and will NEVER succeed here — do not retry it. ` +
+            'It requires interactive user approval, which headless runs (WhatsApp/cron/triggers) auto-deny by design. ' +
+            "To execute a trade from here: create a proposal with trade_proposals (action create — entry, stop, target, quantity all required; " +
+            "propose an ATR-based stop if the user gave none) and tell the user to reply 'accept <ID>'. " +
+            'That reply is the human approval and executes through the safety gates.'
+          : 'Tool execution denied by the user. Ask how they want to proceed; do not retry unprompted.';
         toolMessageMap.set(event.toolCallId, new ToolMessage({
-          content: 'Tool execution denied by user.',
+          content,
           tool_call_id: event.toolCallId,
           name: event.tool,
         }));
