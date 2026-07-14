@@ -839,6 +839,37 @@ src/backtest/sentiment-loader.ts
   fits `--max-model-len 32768` + prefix caching). First experiment: a
   GDELT tone-history question, fully offline, zero trading-system risk.
 
+- [ ] **Evaluate an autoresearch-style overnight scorer-research loop** —
+  [karpathy/autoresearch](https://github.com/karpathy/autoresearch): a
+  coding agent autonomously hill-climbs code against a fast scalar
+  metric (modify → run 5-min experiment → keep/discard → repeat, ~100
+  experiments/night). The preconditions already exist here: the
+  backtest is deterministic (~20 s/ticker-year), the metric is average
+  out-of-sample Sharpe across walk-forward folds, and the calibration
+  apply-guard (+0.05 Sharpe) is the keep/discard primitive. Target:
+  let an agent iterate on signal-scorer factor code, exit geometry,
+  composite-rank formula, and pattern-detector thresholds overnight
+  (GPU idle window; compatible with the universe sweep).
+
+  **MANDATORY anti-overfitting protocol** (backtest Sharpe does not
+  generalize the way autoresearch's val_bpb does — an unsupervised
+  hill-climber on it is an overfitting machine):
+  1. **Locked holdout**: reserve tickers AND years the agent never
+     sees; evaluated exactly once, by a human, after the run ends.
+  2. **Multi-regime evaluation**: candidate changes must be scored
+     across 2015–2025 FirstRate history (bull/bear/chop regimes),
+     never a single year or a single mega-cap.
+  3. **Walk-forward only**: the agent optimizes average OOS fold
+     Sharpe; in-sample results are never the objective.
+  4. **Complexity penalty**: prefer fewer parameters/branches; reject
+     changes whose improvement vanishes when any one fold is dropped.
+  5. **Human gate**: nothing the loop produces is applied to the live
+     scorer without explicit review; the +0.05-Sharpe apply-guard stays
+     as a floor, not a substitute for review.
+  6. **Researcher agent = frontier model** (Claude), not the local
+     model — autonomous code modification is where local-model
+     brittleness costs the most; experiment cost is minutes, not tokens.
+
 ### Phase 7 — Sentiment Fine-Tuning (3+ months after Phase 0 verification)
 - [ ] Build GDELT headline → ticker → outcome training set
 - [ ] Train sentiment LoRA adapter on Llama 3.3 70B
@@ -846,6 +877,9 @@ src/backtest/sentiment-loader.ts
 - [ ] Train trade quality classifier LoRA (needs 500+ paper trade outcomes)
 - [ ] (pairs with the RLM item above: RLM-style orchestration can also
   drive the training-set construction sweep over the GDELT archive)
+- [ ] (pairs with the autoresearch item above: the same harness pattern —
+  fixed time budget, scalar metric, keep/discard — applies to
+  hill-climbing the LoRA training recipe on the RTX 6000 Pro)
 
 ### Phase 8 — Additional Data Sources (Ongoing)
 - [ ] `src/tools/macro/economic-calendar.ts` — FRED + ECB integration
