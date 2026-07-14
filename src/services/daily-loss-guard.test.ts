@@ -77,8 +77,7 @@ describe('daily-loss guard halt latching', () => {
 
 describe('NetLiq baseline (PnL-proxy fallback)', () => {
     test('absent → null; first write wins; same-day rewrite is a no-op', () => {
-        const { rmSync: rm } = require('node:fs') as typeof import('node:fs');
-        try { rm(join(dir, 'netliq-baseline.json')); } catch { /* absent */ }
+        try { rmSync(join(dir, 'netliq-baseline.json')); } catch { /* absent */ }
 
         expect(readNetLiqBaseline()).toBeNull();
 
@@ -93,8 +92,7 @@ describe('NetLiq baseline (PnL-proxy fallback)', () => {
     });
 
     test('a stale baseline (previous day) reads as absent', () => {
-        const { writeFileSync: wf } = require('node:fs') as typeof import('node:fs');
-        wf(join(dir, 'netliq-baseline.json'), JSON.stringify({
+        writeFileSync(join(dir, 'netliq-baseline.json'), JSON.stringify({
             date: '2020-01-02', netLiq: 123, capturedAt: 'past',
         }));
         expect(readNetLiqBaseline()).toBeNull();

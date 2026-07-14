@@ -40,6 +40,9 @@ export interface TradeProposal {
     stop: number;
     target: number;
     quantity: number;
+    /** Bracket time-in-force: DAY (intraday, expires at the close) or GTC
+     *  (overnight/swing — the bracket survives the close). */
+    tif: 'DAY' | 'GTC';
     score: number | null;
     rationale: string;
     /** Who created it: cron job name, 'trigger', 'tui', … */
@@ -144,6 +147,7 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     ['realized_pnl', 'REAL'],
     ['commissions', 'REAL'],
     ['closed_at', 'INTEGER'],
+    ['tif', 'TEXT'],
 ];
 
 function migrate(database: SqliteDatabase): void {
@@ -179,6 +183,7 @@ interface Row {
     entry_filled_at: number | null;
     exit_fill_price: number | null;
     exit_reason: ExitReason | null;
+    tif: string | null;
     realized_pnl: number | null;
     commissions: number | null;
     closed_at: number | null;
@@ -208,6 +213,7 @@ function fromRow(r: Row): TradeProposal {
         entryFilledAt: r.entry_filled_at ?? null,
         exitFillPrice: r.exit_fill_price ?? null,
         exitReason: r.exit_reason ?? null,
+        tif: r.tif === 'GTC' ? 'GTC' : 'DAY',
         realizedPnl: r.realized_pnl ?? null,
         commissions: r.commissions ?? null,
         closedAt: r.closed_at ?? null,
@@ -226,6 +232,8 @@ export interface CreateProposalInput {
     stop: number;
     target: number;
     quantity: number;
+    /** DAY (default) or GTC for overnight/swing brackets. */
+    tif?: 'DAY' | 'GTC';
     score?: number;
     rationale: string;
     source: string;
@@ -261,12 +269,13 @@ export async function createProposal(input: CreateProposalInput): Promise<TradeP
     database.query<void>(
         `INSERT INTO proposals
          (id, created_at, expires_at, updated_at, status, symbol, direction, entry_type,
-          entry, stop, target, quantity, score, rationale, source, order_ids, note)
-         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+          entry, stop, target, quantity, tif, score, rationale, source, order_ids, note)
+         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
     ).run(
         id, now, expiry, now,
         input.symbol.trim().toUpperCase(), input.direction, input.entryType,
         input.entry ?? null, input.stop, input.target, input.quantity,
+        input.tif === 'GTC' ? 'GTC' : 'DAY',
         input.score ?? null, input.rationale, input.source,
     );
 

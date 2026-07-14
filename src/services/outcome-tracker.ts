@@ -484,7 +484,9 @@ export async function startOutcomeTracker(): Promise<void> {
     const now = Date.now();
     for (const p of trackable) {
         const age = now - (p.executedAt ?? p.updatedAt);
-        if (age > STALE_TRACKING_MS) {
+        // GTC brackets legitimately live for weeks (swing trades) — they are
+        // reconciled against live orders on attach instead of age-swept.
+        if (age > STALE_TRACKING_MS && p.tif !== 'GTC') {
             // IBKR can only replay the current day's executions — the outcome
             // of this trade is unrecoverable. Label honestly and move on.
             await closeProposal(p.id, {

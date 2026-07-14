@@ -55,10 +55,16 @@ describe('proposal store lifecycle', () => {
         expect(p.id).toMatch(/^P-[0-9A-F]{4}$/);
         expect(p.status).toBe('open');
         expect(p.symbol).toBe('NVDA');
+        expect(p.tif).toBe('DAY'); // default: intraday bracket
         const fetched = await getProposal(p.id.toLowerCase());
         expect(fetched?.id).toBe(p.id);
         expect(fetched?.executedAt).toBeNull();
         expect(fetched?.realizedPnl).toBeNull();
+    });
+
+    test('GTC tif persists (overnight/swing brackets)', async () => {
+        const p = await createProposal(validInput({ tif: 'GTC' }));
+        expect((await getProposal(p.id))?.tif).toBe('GTC');
     });
 
     test('creation is refused by the risk gate on bad numbers', async () => {

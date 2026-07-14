@@ -67,6 +67,8 @@ const CreateSchema = z.object({
     stop: z.coerce.number().positive().describe('Stop-loss price.'),
     target: z.coerce.number().positive().describe('Take-profit price.'),
     quantity: z.coerce.number().int().positive().describe('Number of shares.'),
+    tif: z.enum(['DAY', 'GTC']).default('DAY')
+        .describe("Bracket time-in-force. Use 'GTC' for overnight/swing setups so the stop and target SURVIVE the market close; 'DAY' brackets expire at the bell and can leave a filled position unprotected overnight."),
     score: z.coerce.number().min(0).max(150).optional().describe('Signal/composite score backing this proposal.'),
     rationale: z.string().min(5).describe('One or two sentences: why this trade, catalyst, risk note.'),
     expiresMinutes: z.coerce.number().int().positive().max(24 * 60).default(120)
@@ -127,6 +129,7 @@ export function createTradeProposalsTool() {
                             stop: input.stop,
                             target: input.target,
                             quantity: input.quantity,
+                            tif: input.tif,
                             score: input.score,
                             rationale: input.rationale,
                             source: 'agent',

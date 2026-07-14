@@ -92,6 +92,7 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
             entryPrice: p.entry ?? undefined,
             stopPrice: p.stop,
             targetPrice: p.target,
+            tif: p.tif, // GTC brackets survive the close (overnight/swing)
         });
 
         const orderIds = [result.parentOrderId, result.takeProfitOrderId, result.stopOrderId];
