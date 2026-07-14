@@ -80,7 +80,7 @@ export function registerTriggerAlerts(): void {
             query: buildPrompt(opp),
             model,
             modelProvider,
-            maxIterations: 6,
+            maxIterations: 10, // catalyst search + risk check + proposal + reply
             isolatedSession: true,
             channel: 'whatsapp',
         });

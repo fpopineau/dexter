@@ -25,6 +25,9 @@ export type CronPayload = {
   message: string;
   model?: string;
   modelProvider?: string;
+  /** Agent iteration budget for this job. Multi-step trading briefs
+   *  (scan → verify → risk → propose) need far more than the default 6. */
+  maxIterations?: number;
 };
 
 // --- Job State ---

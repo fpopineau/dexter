@@ -95,6 +95,13 @@ export async function runScan(
         throw new Error(`[scanner-loop] unknown scan code '${scanCode}'`);
     }
 
+    // IBKR's market-cap filter is keyed `marketCapAbove1e6` on the wire —
+    // the unit is MILLIONS of USD. Callers pass plain USD; convert here.
+    // (Sending raw USD makes the floor a trillion-fold too high and every
+    // scan answers "no items retrieved".)
+    const capAboveMm = (options.marketCapAbove ?? 500_000_000) / 1e6;
+    const capBelowMm = options.marketCapBelow !== undefined ? options.marketCapBelow / 1e6 : undefined;
+
     const subscription: ScannerSubscription = {
         numberOfRows: options.numberOfRows ?? 25,
         instrument: (options.instrument ?? 'STK') as unknown as ScannerSubscription['instrument'],
@@ -102,8 +109,8 @@ export async function runScan(
         scanCode: ibScanCode,
         abovePrice: options.abovePrice ?? 5,
         aboveVolume: options.aboveVolume ?? 100_000,
-        marketCapAbove: options.marketCapAbove ?? 500_000_000, // $500M+
-        ...(options.marketCapBelow !== undefined ? { marketCapBelow: options.marketCapBelow } : {}),
+        marketCapAbove: capAboveMm, // $500M+ by default
+        ...(capBelowMm !== undefined ? { marketCapBelow: capBelowMm } : {}),
     };
 
     const results: ScanResult[] = [];
@@ -148,11 +155,11 @@ export async function runScan(
             if (isNonFatalIbkrError(code)) return;
             clearTimeout(timeout);
             cleanup();
-            // Code 162 is overloaded. Genuine "no results" resolves empty
-            // (and caches — quiet markets shouldn't be re-hammered), but
-            // "disabled"/pacing/permission variants are REAL failures and
-            // must reject loudly instead of masquerading as a quiet market.
-            if (code === 162 && !/disabled|pacing|violation|permission/i.test(err.message)) {
+            // Codes 162/165 are overloaded. Genuine "no results" resolves
+            // empty (and caches — quiet markets shouldn't be re-hammered),
+            // but "disabled"/pacing/permission variants are REAL failures
+            // and must reject loudly instead of masquerading as quiet.
+            if ((code === 162 || code === 165) && !/disabled|pacing|violation|permission/i.test(err.message)) {
                 finalize(); // empty results
             } else {
                 reject(new Error(`[scanner-loop] Error ${code}: ${err.message}`));

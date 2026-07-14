@@ -24,6 +24,8 @@ interface TradingJobDef {
     cronExpr: string;
     message: string;
     model?: string;
+    /** Agent iteration budget — sized to the job's workflow depth. */
+    maxIterations: number;
     activeStart: string;
     activeEnd: string;
 }
@@ -35,6 +37,7 @@ const TRADING_JOBS: TradingJobDef[] = [
         cronExpr: '0 8 * * 1-5',
         message: 'Run pre-market brief. Start with the trading performance recap: call trade_proposals (action performance, days 1) and report the closed trades, win/loss, net P&L, and anything still executing — include the provided report verbatim, then one sentence of interpretation (e.g. stops hit on longs in a weak tape). Then summarize overnight moves, today\'s earnings/economic calendar, pre-market movers, and watchlist key levels.',
         model: undefined, // use default (Claude for deep reasoning)
+        maxIterations: 12,
         activeStart: '07:00',
         activeEnd: '09:30',
     },
@@ -44,6 +47,7 @@ const TRADING_JOBS: TradingJobDef[] = [
         cronExpr: '35 9 * * 1-5',
         message: 'Produce the morning intraday brief. Call the opportunities tool (action "latest"; if missing or older than 10 minutes, action "refresh"). Take the top 5 ranked candidates and for each verify the catalyst with web_search and validate sizing/stops with risk_manager. Register each actionable recommendation (at most 3) with trade_proposals (action create, expiresMinutes 90) and output the ranked list with, for each: direction, entry, stop, target, size, one-line rationale, and the proposal ID with "Reply \'accept <ID>\' to execute (paper)". If no candidate has signalScore >= 60, say so explicitly — never force a trade. Do not place orders yourself.',
         model: undefined,
+        maxIterations: 24,
         activeStart: '09:30',
         activeEnd: '10:30',
     },
@@ -53,6 +57,7 @@ const TRADING_JOBS: TradingJobDef[] = [
         cronExpr: '0 12 * * 1-5',
         message: 'Review open positions and scan for midday opportunities. Check for mean-reversion setups and any developing trends.',
         model: undefined,
+        maxIterations: 12,
         activeStart: '11:00',
         activeEnd: '13:00',
     },
@@ -62,6 +67,7 @@ const TRADING_JOBS: TradingJobDef[] = [
         cronExpr: '30 15 * * 1-5',
         message: 'Run the pre-close review. First, evaluate open positions (ibkr_account): hold, trim, or close before the bell, applying the overnight limits from the risk rules. Then call the opportunities tool (action "latest"; refresh if older than 15 minutes) and assess the top candidates for overnight holds: check the earnings calendar and news catalysts (web_search), prefer lower-ATR names, and validate each with risk_manager using the overnight position limits. Register at most 2 qualifying overnight setups with trade_proposals (action create, expiresMinutes 45) and present each with direction, entry, stop, target, size, rationale, and the proposal ID with "Reply \'accept <ID>\' to execute (paper)". Be explicit when nothing qualifies. Do not place orders yourself.',
         model: undefined,
+        maxIterations: 24,
         activeStart: '15:00',
         activeEnd: '16:00',
     },
@@ -76,11 +82,15 @@ export function ensureTradingCronJobs(): void {
     for (const def of TRADING_JOBS) {
         const existing = existingByName.get(def.name);
         if (existing) {
-            // Keep seeded jobs in sync when their prompt evolves in code.
-            // Schedule and activeHours are left untouched (user-tunable).
-            if (existing.payload.message !== def.message || existing.description !== def.description) {
+            // Keep seeded jobs in sync when their prompt or iteration budget
+            // evolves in code. Schedule and activeHours are left untouched
+            // (user-tunable).
+            if (existing.payload.message !== def.message ||
+                existing.description !== def.description ||
+                existing.payload.maxIterations !== def.maxIterations) {
                 existing.payload.message = def.message;
                 existing.description = def.description;
+                existing.payload.maxIterations = def.maxIterations;
                 existing.updatedAtMs = now;
                 changed = true;
             }
@@ -99,6 +109,7 @@ export function ensureTradingCronJobs(): void {
             payload: {
                 message: def.message,
                 model: def.model,
+                maxIterations: def.maxIterations,
             },
             fulfillment: 'keep',
             activeHours: {

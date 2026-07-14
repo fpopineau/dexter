@@ -143,7 +143,7 @@ export async function executeCronJob(
       query,
       model,
       modelProvider,
-      maxIterations: 6,
+      maxIterations: job.payload.maxIterations ?? 6,
       isolatedSession: true,
       channel: 'whatsapp',
     });
