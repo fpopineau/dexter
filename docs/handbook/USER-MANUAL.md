@@ -204,10 +204,28 @@ setting from `.dexter/settings.json`):
 - **vLLM (local)** — served models are auto-discovered from
   `VLLM_BASE_URL`. Launch vLLM with tool parsing or every agent request
   fails: `--enable-auto-tool-choice --tool-call-parser <hermes|qwen3_xml>`
-  (plus `--reasoning-parser qwen3` for Qwen3-family thinking models, and a
-  sane `--max-model-len` like 32768). Keep only ONE local serving stack
-  resident — a loaded Ollama model plus vLLM overcommits the GPU and decode
-  slows to a crawl via driver memory spillover.
+  (plus `--reasoning-parser qwen3` for Qwen3-family thinking models).
+  Keep only ONE local serving stack resident — a loaded Ollama model plus
+  vLLM overcommits the GPU and decode slows to a crawl via driver memory
+  spillover. The model id in settings must match the served name exactly
+  (suffix included) — re-run `/model` after changing the served model.
+
+  Reference launch command (validated 2026-07, Qwen3.6-27B-FP8 on the
+  RTX 6000 Pro, run from WSL2):
+  ```bash
+  python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen3.6-27B-FP8 --port 8000 --dtype auto \
+    --trust-remote-code --attention-backend flashinfer \
+    --kv-cache-dtype fp8 --mamba-ssm-cache-dtype float16 \
+    --max-model-len 131072 --gpu-memory-utilization 0.92 \
+    --enable-chunked-prefill --enable-prefix-caching \
+    --enable-auto-tool-choice --tool-call-parser qwen3_xml \
+    --reasoning-parser qwen3 --language-model-only \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}'
+  ```
+  At 0.92 GPU utilization the card must be exclusive: unload Ollama
+  (`ollama stop <model>`) and quit LM Studio before launch, or decode
+  silently degrades via sysmem spillover.
 - **Ollama** — usable fallback; prefer tool-trained models (qwen3 family);
   older models (llama3, qwen2.5) mishandle tool results.
 
