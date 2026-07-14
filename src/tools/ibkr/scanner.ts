@@ -51,23 +51,23 @@ const ScannerSchema = z.object({
         ])
         .describe('The type of market scan to run.'),
     numberOfRows: z
-        .number()
+        .coerce.number()
         .default(15)
         .describe('Number of results to return (max 50). Defaults to 15.'),
     minPrice: z
-        .number()
+        .coerce.number()
         .default(5)
         .describe('Minimum stock price filter. Defaults to $5.'),
     minVolume: z
-        .number()
+        .coerce.number()
         .default(100000)
         .describe('Minimum volume filter. Defaults to 100,000.'),
     minMarketCap: z
-        .number()
+        .coerce.number()
         .default(500000000)
         .describe('Minimum market cap filter in USD. Defaults to $500M.'),
     maxMarketCap: z
-        .number()
+        .coerce.number()
         .optional()
         .describe('Maximum market cap filter in USD (e.g. 5000000000 to scan the 1–5B midcap band). No upper bound by default.'),
     locationCode: z

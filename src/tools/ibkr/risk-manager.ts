@@ -42,26 +42,26 @@ const RiskManagerSchema = z.object({
         .enum(['long', 'short'])
         .describe("Trade direction: 'long' or 'short'."),
     entryPrice: z
-        .number()
+        .coerce.number()
         .describe('Proposed entry price.'),
     stopPrice: z
-        .number()
+        .coerce.number()
         .optional()
         .describe('Proposed stop-loss price. Required if mandatory_stop_loss is true.'),
     targetPrice: z
-        .number()
+        .coerce.number()
         .optional()
         .describe('Proposed target/take-profit price.'),
     shares: z
-        .number()
+        .coerce.number()
         .optional()
         .describe('Number of shares to trade. If omitted, the tool suggests a position size.'),
     accountValue: z
-        .number()
+        .coerce.number()
         .optional()
         .describe('Total account value in USD. Used for position sizing. Defaults to $100,000 if not provided.'),
     currentOpenPositions: z
-        .number()
+        .coerce.number()
         .optional()
         .describe('Number of currently open positions. Used for max-positions check.'),
     holdOvernight: z
@@ -69,11 +69,11 @@ const RiskManagerSchema = z.object({
         .default(false)
         .describe('Whether this position will be held overnight.'),
     avgVolume: z
-        .number()
+        .coerce.number()
         .optional()
         .describe('Average daily volume of the stock.'),
     atr: z
-        .number()
+        .coerce.number()
         .optional()
         .describe('Current ATR value. Used to suggest stops if none provided.'),
 });

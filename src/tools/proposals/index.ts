@@ -62,14 +62,14 @@ const CreateSchema = z.object({
     symbol: z.string().describe("US equity ticker, e.g. 'AAPL'."),
     direction: z.enum(['long', 'short']),
     entryType: z.enum(['LMT', 'MKT']).default('LMT').describe('LMT places a limit entry; MKT enters at market.'),
-    entry: z.number().positive()
+    entry: z.coerce.number().positive()
         .describe('Entry price. Required for LMT; for MKT pass the current price (indicative, used for risk validation).'),
-    stop: z.number().positive().describe('Stop-loss price.'),
-    target: z.number().positive().describe('Take-profit price.'),
-    quantity: z.number().int().positive().describe('Number of shares.'),
-    score: z.number().min(0).max(150).optional().describe('Signal/composite score backing this proposal.'),
+    stop: z.coerce.number().positive().describe('Stop-loss price.'),
+    target: z.coerce.number().positive().describe('Take-profit price.'),
+    quantity: z.coerce.number().int().positive().describe('Number of shares.'),
+    score: z.coerce.number().min(0).max(150).optional().describe('Signal/composite score backing this proposal.'),
     rationale: z.string().min(5).describe('One or two sentences: why this trade, catalyst, risk note.'),
-    expiresMinutes: z.number().int().positive().max(24 * 60).default(120)
+    expiresMinutes: z.coerce.number().int().positive().max(24 * 60).default(120)
         .describe('Validity window in minutes. Defaults to 120.'),
 });
 
@@ -91,7 +91,7 @@ const RejectSchema = z.object({
 
 const PerformanceSchema = z.object({
     action: z.literal('performance'),
-    days: z.number().int().positive().max(365).default(7)
+    days: z.coerce.number().int().positive().max(365).default(7)
         .describe('Look-back window in days for closed-trade outcomes. Defaults to 7.'),
 });
 

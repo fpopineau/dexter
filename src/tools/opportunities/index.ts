@@ -40,7 +40,7 @@ const OpportunitiesSchema = z.object({
         .default('latest')
         .describe("'latest' returns the cached snapshot; 'refresh' runs a new scan cycle (~30-60s)."),
     limit: z
-        .number()
+        .coerce.number()
         .int()
         .positive()
         .max(25)

@@ -67,14 +67,14 @@ const PlaceOrderSchema = z.object({
     action: z.literal('place'),
     ticker: z.string().describe("US equity ticker symbol, e.g. 'AAPL'."),
     side: z.enum(['BUY', 'SELL']).describe('Order side: BUY or SELL.'),
-    quantity: z.number().int().positive().describe('Number of shares. Must be a positive integer.'),
+    quantity: z.coerce.number().int().positive().describe('Number of shares. Must be a positive integer.'),
     orderType: z
         .enum(SUPPORTED_ORDER_TYPES)
         .describe('Order type: MKT, LMT, STP, STP_LMT, TRAIL, TRAIL_LIMIT, MOC, LOC, MIDPRICE.'),
-    limitPrice: z.number().positive().optional().describe('Limit price (required for LMT, STP_LMT, LOC, TRAIL_LIMIT).'),
-    stopPrice: z.number().positive().optional().describe('Stop/trigger price (required for STP, STP_LMT).'),
-    trailingAmount: z.number().positive().optional().describe('Trailing amount in dollars (for TRAIL / TRAIL_LIMIT).'),
-    trailingPercent: z.number().positive().optional().describe('Trailing percent (for TRAIL / TRAIL_LIMIT). Use this OR trailingAmount, not both.'),
+    limitPrice: z.coerce.number().positive().optional().describe('Limit price (required for LMT, STP_LMT, LOC, TRAIL_LIMIT).'),
+    stopPrice: z.coerce.number().positive().optional().describe('Stop/trigger price (required for STP, STP_LMT).'),
+    trailingAmount: z.coerce.number().positive().optional().describe('Trailing amount in dollars (for TRAIL / TRAIL_LIMIT).'),
+    trailingPercent: z.coerce.number().positive().optional().describe('Trailing percent (for TRAIL / TRAIL_LIMIT). Use this OR trailingAmount, not both.'),
     timeInForce: z.enum(['DAY', 'GTC', 'IOC', 'OPG', 'MOC']).default('DAY').describe("Time in force. Defaults to 'DAY'."),
     outsideRth: z.boolean().default(false).describe('Allow execution outside regular trading hours.'),
     exchange: z.string().default('SMART').describe("Exchange routing. Defaults to 'SMART'."),
@@ -84,7 +84,7 @@ const PlaceOrderSchema = z.object({
 
 const CancelOrderSchema = z.object({
     action: z.literal('cancel'),
-    orderId: z.number().int().positive().describe('The order ID to cancel.'),
+    orderId: z.coerce.number().int().positive().describe('The order ID to cancel.'),
 });
 
 const ListOrdersSchema = z.object({
