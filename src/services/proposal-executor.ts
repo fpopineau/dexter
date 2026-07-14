@@ -45,8 +45,11 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         return { ok: false, message: `Proposal ${p.id} is ${p.status}, not open. ${formatProposalLine(p)}` };
     }
 
+    // Safety gates — order matters: cheap static lock first, then live P&L.
+    // A gate REFUSAL leaves the proposal OPEN: gates re-run on every accept,
+    // and transient conditions (P&L verification timeout, a halt cleared
+    // later) must not permanently kill a valid proposal before its expiry.
     try {
-        // Safety gates — order matters: cheap static lock first, then live P&L.
         assertOrderingAllowed();
         const lossStatus = await assertDailyLossOk();
 
@@ -68,7 +71,19 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 executedToday: await countExecutedSince(etDayStartMs()),
             },
         );
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.warn(`[proposal-executor] ${p.id} refused by gates (proposal stays open): ${msg}`);
+        return {
+            ok: false,
+            message:
+                `⛔ ${p.id} NOT executed — ${msg}\n` +
+                `The proposal remains OPEN (expires ${new Date(p.expiresAt).toISOString()}); ` +
+                `resolve the issue and reply 'accept ${p.id}' to retry.`,
+        };
+    }
 
+    try {
         const result = await placeBracketOrder({
             symbol: p.symbol,
             direction: p.direction,

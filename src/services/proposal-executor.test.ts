@@ -70,6 +70,33 @@ describe('executor refusal gates (no IBKR needed)', () => {
     });
 });
 
+describe('gate refusals keep proposals retryable', () => {
+    test('kill-switch refusal leaves the proposal OPEN, not failed', async () => {
+        const { writeFileSync, mkdirSync } = await import('node:fs');
+        const { join } = await import('node:path');
+        // Latch a halt for today so assertDailyLossOk throws WITHOUT IBKR.
+        const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+        const today = `${et.getFullYear()}-${String(et.getMonth() + 1).padStart(2, '0')}-${String(et.getDate()).padStart(2, '0')}`;
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, 'trading-halt.json'), JSON.stringify({
+            date: today, reason: 'test halt', dailyPnL: -9999, netLiquidation: 100_000, trippedAt: 'now',
+        }));
+
+        try {
+            const p = await openProposal();
+            const outcome = await acceptProposal(p.id);
+            expect(outcome.ok).toBe(false);
+            expect(outcome.message).toContain('KILL-SWITCH');
+            expect(outcome.message).toContain('remains OPEN');
+            // The refusal must NOT consume the proposal — retry is possible
+            // until expiry (the halt may clear, or verification may recover).
+            expect((await getProposal(p.id))?.status).toBe('open');
+        } finally {
+            writeFileSync(join(dir, 'trading-halt.json'), JSON.stringify({ date: '1970-01-01' }));
+        }
+    });
+});
+
 describe('auto-execution gates (paper-only by construction)', () => {
     test('disabled unless AUTO_EXECUTE_PAPER=true', async () => {
         const p = await openProposal();

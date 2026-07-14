@@ -178,6 +178,10 @@ function fetchNetLiquidation(api: import('@stoqey/ib').IBApi, account: string): 
 
 export interface DailyLossStatus {
     halted: boolean;
+    /** True when the halt is the LATCHED daily kill-switch (persists for the
+     *  ET day); false when it is a fail-safe refusal because P&L could not
+     *  be verified (transient — clears as soon as verification succeeds). */
+    latched?: boolean;
     reason?: string;
     dailyPnL?: number;
     netLiquidation?: number;
@@ -197,6 +201,7 @@ export async function getDailyLossStatus(): Promise<DailyLossStatus> {
     if (active) {
         return {
             halted: true,
+            latched: true,
             reason: `Trading halted since ${active.trippedAt}: ${active.reason}`,
             dailyPnL: active.dailyPnL,
             netLiquidation: active.netLiquidation,
@@ -223,7 +228,7 @@ export async function getDailyLossStatus(): Promise<DailyLossStatus> {
             };
             writeHalt(rec);
             logger.error(`[daily-loss-guard] KILL-SWITCH TRIPPED: ${rec.reason}`);
-            return { halted: true, reason: rec.reason, dailyPnL, netLiquidation: netLiq, limitPct, limitDollars };
+            return { halted: true, latched: true, reason: rec.reason, dailyPnL, netLiquidation: netLiq, limitPct, limitDollars };
         }
 
         return { halted: false, dailyPnL, netLiquidation: netLiq, limitPct, limitDollars };
@@ -231,7 +236,7 @@ export async function getDailyLossStatus(): Promise<DailyLossStatus> {
         // Fail-safe: cannot verify → do not allow new risk.
         const reason = `daily P&L could not be verified (${err instanceof Error ? err.message : err})`;
         logger.error(`[daily-loss-guard] ${reason} — refusing new orders`);
-        return { halted: true, reason, limitPct };
+        return { halted: true, latched: false, reason, limitPct };
     }
 }
 
@@ -244,10 +249,13 @@ export async function getDailyLossStatus(): Promise<DailyLossStatus> {
 export async function assertDailyLossOk(): Promise<DailyLossStatus> {
     const status = await getDailyLossStatus();
     if (status.halted) {
+        const tail = status.latched
+            ? 'The halt persists until the next trading day (or deliberate clearTradingHalt()).'
+            : 'This is a FAIL-SAFE refusal (P&L verification failed), not a latched halt — ' +
+              'check the IB Gateway connection and retry.';
         throw new Error(
             `[daily-loss-guard] KILL-SWITCH: new orders are blocked — ${status.reason}. ` +
-            `Limit: ${status.limitPct}% of net liquidation per day. ` +
-            `The halt persists until the next trading day (or deliberate clearTradingHalt()).`,
+            `Limit: ${status.limitPct}% of net liquidation per day. ${tail}`,
         );
     }
     return status;
