@@ -39,6 +39,11 @@ function formatCloseMessage(p: TradeProposal): string {
     } else if (p.exitReason === 'manual') {
         lines.push('P&L unknown — position was closed or left unprotected outside the bracket. Check ibkr_account.');
     }
+    // The why matters most for cancellations (broker rejections carry the
+    // reason, e.g. IBKR 201 trading-permission refusals).
+    if ((p.exitReason === 'cancelled' || p.exitReason === 'manual') && p.note) {
+        lines.push(`Reason: ${p.note.slice(0, 220)}`);
+    }
     lines.push("Send 'performance' for the running summary.");
     return lines.join('\n');
 }

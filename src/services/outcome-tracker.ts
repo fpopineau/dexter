@@ -30,7 +30,7 @@
  *       bracket; P&L unknown — recorded as null, never guessed).
  */
 
-import { allocReqId, getIBApi, onReconnect } from '@/tools/ibkr/connection.js';
+import { allocReqId, getIBApi, isNonFatalIbkrError, onReconnect } from '@/tools/ibkr/connection.js';
 import { logger } from '@/utils';
 import type { CommissionReport, Contract, Execution, IBApi } from '@stoqey/ib';
 import { EventName } from '@stoqey/ib';
@@ -90,6 +90,8 @@ interface TrackedTrade {
     exitReason: ExitReason | null;
     /** execIds seen for this trade — attributes commissionReports. */
     execIds: Set<string>;
+    /** Last IBKR error for any of this trade's orders (rejection reason). */
+    lastOrderError?: string;
     commissions: number;
     /** Terminal (cancelled/inactive) state per exit order id. */
     terminalExits: Set<number>;
@@ -138,6 +140,12 @@ function unregister(trade: TrackedTrade): void {
 async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string): Promise<void> {
     if (trade.closed) return;
     trade.closed = true;
+
+    // Surface the broker's rejection reason — 'cancelled' without a why
+    // forces log archaeology (e.g. IBKR 201 permission rejections).
+    if (trade.lastOrderError) {
+        note = note ? `${note} — ${trade.lastOrderError}` : trade.lastOrderError;
+    }
 
     const realizedPnl =
         reason === 'cancelled'
@@ -271,6 +279,13 @@ function handleExecDetails(_reqId: number, _contract: Contract, execution: Execu
     }
 }
 
+function handleOrderError(err: Error, code: number, id: number): void {
+    const entry = byOrderId.get(id);
+    if (!entry || entry.trade.closed) return;
+    if (isNonFatalIbkrError(code)) return;
+    entry.trade.lastOrderError = `IBKR ${code}: ${err.message}`;
+}
+
 function handleCommissionReport(report: CommissionReport): void {
     const execId = report.execId;
     if (!execId) return;
@@ -395,6 +410,7 @@ async function attach(): Promise<void> {
     api.on(EventName.orderStatus, handleOrderStatus);
     api.on(EventName.execDetails, handleExecDetails);
     api.on(EventName.commissionReport, handleCommissionReport);
+    api.on(EventName.error, handleOrderError);
 
     // Replay today's executions (recovers fills missed while down), THEN
     // reconcile tracked trades against the orders that still exist.
@@ -500,6 +516,7 @@ export function stopOutcomeTracker(): void {
         attachedApi.off(EventName.orderStatus, handleOrderStatus);
         attachedApi.off(EventName.execDetails, handleExecDetails);
         attachedApi.off(EventName.commissionReport, handleCommissionReport);
+        attachedApi.off(EventName.error, handleOrderError);
         attachedApi = null;
     }
     for (const trade of [...byProposalId.values()]) {
