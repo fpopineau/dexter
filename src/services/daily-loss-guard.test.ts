@@ -9,7 +9,13 @@ const dir = mkdtempSync(join(tmpdir(), 'dexter-halt-'));
 const prevDataDir = process.env.DEXTER_DATA_DIR;
 process.env.DEXTER_DATA_DIR = dir;
 
-import { assertDailyLossOk, clearTradingHalt, getActiveHalt } from './daily-loss-guard.js';
+import {
+    assertDailyLossOk,
+    clearTradingHalt,
+    getActiveHalt,
+    readNetLiqBaseline,
+    writeNetLiqBaselineIfAbsent,
+} from './daily-loss-guard.js';
 
 function etToday(): string {
     const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
@@ -66,5 +72,34 @@ describe('daily-loss guard halt latching', () => {
         expect(getActiveHalt()).toBeNull();
         // idempotent: nothing left to clear
         expect(clearTradingHalt()).toBe(false);
+    });
+});
+
+describe('NetLiq baseline (PnL-proxy fallback)', () => {
+    test('absent → null; first write wins; same-day rewrite is a no-op', () => {
+        const { rmSync: rm } = require('node:fs') as typeof import('node:fs');
+        try { rm(join(dir, 'netliq-baseline.json')); } catch { /* absent */ }
+
+        expect(readNetLiqBaseline()).toBeNull();
+
+        const first = writeNetLiqBaselineIfAbsent(1_000_000);
+        expect(first.netLiq).toBe(1_000_000);
+        expect(readNetLiqBaseline()?.netLiq).toBe(1_000_000);
+
+        // The session's FIRST value is the reference — later values ignored.
+        const second = writeNetLiqBaselineIfAbsent(950_000);
+        expect(second.netLiq).toBe(1_000_000);
+        expect(readNetLiqBaseline()?.netLiq).toBe(1_000_000);
+    });
+
+    test('a stale baseline (previous day) reads as absent', () => {
+        const { writeFileSync: wf } = require('node:fs') as typeof import('node:fs');
+        wf(join(dir, 'netliq-baseline.json'), JSON.stringify({
+            date: '2020-01-02', netLiq: 123, capturedAt: 'past',
+        }));
+        expect(readNetLiqBaseline()).toBeNull();
+        // …and the next write replaces it with today's
+        expect(writeNetLiqBaselineIfAbsent(500_000).netLiq).toBe(500_000);
+        expect(readNetLiqBaseline()?.date).not.toBe('2020-01-02');
     });
 });

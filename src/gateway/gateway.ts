@@ -1,6 +1,7 @@
 import { appendFileSync } from 'node:fs';
 import type { GroupContext } from '../agent/prompts.js';
 import { ensureHeartbeatCronJob } from '../cron/heartbeat-migration.js';
+import { captureNetLiqBaseline } from '../services/daily-loss-guard.js';
 import { startCronRunner } from '../cron/runner.js';
 import { ensureTradingCronJobs } from '../cron/trading-schedules.js';
 import { isArchiveSchedulerEnabled, startArchiveScheduler, stopArchiveScheduler } from '../services/archive-scheduler.js';
@@ -256,6 +257,9 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     ensureTradingCronJobs();
     registerOutcomeAlerts();
     await startOutcomeTracker();
+    // Session NetLiq baseline: the kill-switch's P&L fallback references
+    // pre-trading equity. Best-effort; retried on the first gate check.
+    void captureNetLiqBaseline();
     if (isOpportunityEngineEnabled()) {
       registerTriggerAlerts();
       startOpportunityEngine();

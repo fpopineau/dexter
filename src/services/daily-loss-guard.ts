@@ -79,6 +79,74 @@ export function clearTradingHalt(): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// NetLiquidation baseline — the PnL fallback.
+//
+// IBKR's reqPnL service is flaky on paper accounts (it can stop answering
+// for hours while everything else works). When it fails, daily P&L is
+// approximated as: current NetLiquidation − the session's baseline
+// NetLiquidation (first value seen today, captured at gateway startup).
+// The proxy includes overnight moves and any deposits/withdrawals — an
+// acceptable, conservative-enough stand-in for a personal account.
+// ---------------------------------------------------------------------------
+
+interface NetLiqBaseline {
+    /** Trading date (YYYY-MM-DD, America/New_York). */
+    date: string;
+    netLiq: number;
+    capturedAt: string;
+}
+
+function baselinePath(): string {
+    const dir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
+    return join(dir, 'netliq-baseline.json');
+}
+
+/** Today's baseline, or null when absent/stale. */
+export function readNetLiqBaseline(): NetLiqBaseline | null {
+    try {
+        const p = baselinePath();
+        if (!existsSync(p)) return null;
+        const rec = JSON.parse(readFileSync(p, 'utf-8')) as NetLiqBaseline;
+        return rec?.date === tradingDate() && Number.isFinite(rec.netLiq) ? rec : null;
+    } catch {
+        return null;
+    }
+}
+
+/** Persist a baseline for today unless one already exists (first wins —
+ *  the earliest NetLiq of the session is the reference). */
+export function writeNetLiqBaselineIfAbsent(netLiq: number): NetLiqBaseline {
+    const existing = readNetLiqBaseline();
+    if (existing) return existing;
+    const rec: NetLiqBaseline = { date: tradingDate(), netLiq, capturedAt: new Date().toISOString() };
+    try {
+        const p = baselinePath();
+        mkdirSync(dirname(p), { recursive: true });
+        writeFileSync(p, JSON.stringify(rec, null, 2));
+        logger.info(`[daily-loss-guard] NetLiq baseline captured for ${rec.date}: ${netLiq.toFixed(0)}`);
+    } catch (err) {
+        logger.error(`[daily-loss-guard] failed to persist NetLiq baseline: ${err}`);
+    }
+    return rec;
+}
+
+/**
+ * Capture the session baseline early (called at gateway startup) so the
+ * PnL proxy references pre-trading equity, not a mid-day value.
+ * Best-effort: failures are logged, never thrown.
+ */
+export async function captureNetLiqBaseline(): Promise<void> {
+    try {
+        const api = await getIBApi();
+        const account = await detectAccount(api);
+        const netLiq = await fetchNetLiquidation(api, account);
+        writeNetLiqBaselineIfAbsent(netLiq);
+    } catch (err) {
+        logger.warn(`[daily-loss-guard] baseline capture failed (will retry on first gate check): ${err}`);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // IBKR daily P&L + net liquidation (compact one-shot fetchers)
 // ---------------------------------------------------------------------------
 
@@ -209,35 +277,56 @@ export async function getDailyLossStatus(): Promise<DailyLossStatus> {
         };
     }
 
+    // NetLiquidation is the load-bearing quantity: the limit derives from
+    // it, and it doubles as the P&L fallback. If IT is unavailable, refuse.
+    let netLiq: number;
+    let api: import('@stoqey/ib').IBApi;
+    let account: string;
     try {
-        const api = await getIBApi();
-        const account = await detectAccount(api);
-        const [dailyPnL, netLiq] = await Promise.all([
-            fetchDailyPnl(api, account),
-            fetchNetLiquidation(api, account),
-        ]);
-        const limitDollars = (limitPct / 100) * netLiq;
-
-        if (dailyPnL <= -limitDollars) {
-            const rec: HaltRecord = {
-                date: tradingDate(),
-                reason: `daily P&L ${dailyPnL.toFixed(0)} breached -${limitPct}% of net liquidation (${netLiq.toFixed(0)})`,
-                dailyPnL,
-                netLiquidation: netLiq,
-                trippedAt: new Date().toISOString(),
-            };
-            writeHalt(rec);
-            logger.error(`[daily-loss-guard] KILL-SWITCH TRIPPED: ${rec.reason}`);
-            return { halted: true, latched: true, reason: rec.reason, dailyPnL, netLiquidation: netLiq, limitPct, limitDollars };
-        }
-
-        return { halted: false, dailyPnL, netLiquidation: netLiq, limitPct, limitDollars };
+        api = await getIBApi();
+        account = await detectAccount(api);
+        netLiq = await fetchNetLiquidation(api, account);
     } catch (err) {
-        // Fail-safe: cannot verify → do not allow new risk.
+        // Fail-safe: cannot verify anything → do not allow new risk.
         const reason = `daily P&L could not be verified (${err instanceof Error ? err.message : err})`;
         logger.error(`[daily-loss-guard] ${reason} — refusing new orders`);
         return { halted: true, latched: false, reason, limitPct };
     }
+
+    const limitDollars = (limitPct / 100) * netLiq;
+    const baseline = writeNetLiqBaselineIfAbsent(netLiq);
+
+    // Preferred source: IBKR's own daily P&L. Known-flaky on paper
+    // accounts — fall back to the NetLiq-vs-session-baseline proxy.
+    let dailyPnL: number;
+    let source: 'ibkr' | 'netliq-proxy';
+    try {
+        dailyPnL = await fetchDailyPnl(api, account);
+        source = 'ibkr';
+    } catch (err) {
+        dailyPnL = Math.round((netLiq - baseline.netLiq) * 100) / 100;
+        source = 'netliq-proxy';
+        logger.warn(
+            `[daily-loss-guard] reqPnL failed (${err instanceof Error ? err.message : err}) — ` +
+            `using NetLiq proxy: ${netLiq.toFixed(0)} − baseline ${baseline.netLiq.toFixed(0)} = ${dailyPnL.toFixed(0)}`,
+        );
+    }
+
+    if (dailyPnL <= -limitDollars) {
+        const rec: HaltRecord = {
+            date: tradingDate(),
+            reason: `daily P&L ${dailyPnL.toFixed(0)}${source === 'netliq-proxy' ? ' (NetLiq proxy vs session baseline)' : ''} ` +
+                `breached -${limitPct}% of net liquidation (${netLiq.toFixed(0)})`,
+            dailyPnL,
+            netLiquidation: netLiq,
+            trippedAt: new Date().toISOString(),
+        };
+        writeHalt(rec);
+        logger.error(`[daily-loss-guard] KILL-SWITCH TRIPPED: ${rec.reason}`);
+        return { halted: true, latched: true, reason: rec.reason, dailyPnL, netLiquidation: netLiq, limitPct, limitDollars };
+    }
+
+    return { halted: false, dailyPnL, netLiquidation: netLiq, limitPct, limitDollars };
 }
 
 /**

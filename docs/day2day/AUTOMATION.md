@@ -166,8 +166,13 @@ outcome tracker.
    blocked once IBKR daily P&L ≤ −`max_daily_loss_pct` × NetLiquidation
    (risk-rules.yaml, default 2 %). **Latching** (rest of the ET day, stored in
    `.dexter/data/trading-halt.json`, survives restarts) and **fail-safe**
-   (P&L unverifiable → refuse). Inspect with `halt status`; deliberate reset
-   via `clearTradingHalt()`.
+   (nothing verifiable → refuse). IBKR's `reqPnL` is flaky on paper
+   accounts, so when it fails the guard falls back to a **NetLiq proxy**:
+   current NetLiquidation − the session baseline captured at gateway
+   startup (`netliq-baseline.json`); only when NetLiquidation itself is
+   unavailable does the guard refuse. Gate refusals leave the proposal
+   OPEN for retry. Inspect with `halt status`; deliberate reset via
+   `clearTradingHalt()`.
 4. **Risk gate (deterministic)** — `src/services/proposal-risk-gate.ts`
    enforces `risk-rules.yaml` at proposal creation (min R/R, min price,
    coherent stops, quantity sanity) and again at acceptance with the live

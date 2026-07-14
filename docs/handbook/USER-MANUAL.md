@@ -315,8 +315,15 @@ evaluation instead of chasing a stale price.
 Once the account's daily P&L breaches −`max_daily_loss_pct` ×
 NetLiquidation (default −2%), all new orders are refused for the rest of
 the ET day. It **latches** (P&L recovering does not un-halt; restarts do
-not clear it) and **fails safe** (if P&L cannot be verified — IBKR down —
-orders are refused too).
+not clear it) and **fails safe** (if nothing can be verified, orders are
+refused).
+
+P&L verification has two sources: IBKR's `reqPnL` (preferred), falling
+back to a **NetLiq proxy** — current NetLiquidation minus the session
+baseline captured at gateway startup — because `reqPnL` is notoriously
+flaky on paper accounts. A fail-safe refusal (both sources dead) does
+NOT latch: the proposal stays open, and a retry after the Gateway
+recovers succeeds.
 
 - Inspect: `halt status` on WhatsApp.
 - What still works while halted: rejecting proposals, closing positions
