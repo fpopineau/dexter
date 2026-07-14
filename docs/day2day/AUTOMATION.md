@@ -140,6 +140,7 @@ Inbound DMs are pre-routed **before** the agent (deterministic, no LLM):
 | `reject P-XXXX` (or `no`) | reject the proposal |
 | `proposals` | list open proposals |
 | `positions` | current holdings + daily P&L from IBKR |
+| `orders` | working (unfilled) orders at IBKR |
 | `halt status` | kill-switch state and daily P&L headroom |
 | `performance` (or `perf`, `performance 30`) | closed-trade P&L summary (default 7 days) |
 

@@ -109,9 +109,11 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         return {
             ok: true,
             message:
-                `✅ ${p.id} executed: ${p.direction.toUpperCase()} ${p.quantity} ${p.symbol} ` +
+                `✅ ${p.id} bracket placed: ${p.direction.toUpperCase()} ${p.quantity} ${p.symbol} ` +
                 `${p.entryType === 'MKT' ? 'at market' : `limit ${p.entry}`}, stop ${p.stop}, target ${p.target} ` +
-                `(orders ${orderIds.join('/')}, OCA ${result.ocaGroup}).`,
+                `(orders ${orderIds.join('/')}, OCA ${result.ocaGroup}).\n` +
+                `The entry order is now WORKING — you hold a position once it fills. ` +
+                `Track with 'orders' (resting orders) and 'positions' (fills).`,
         };
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

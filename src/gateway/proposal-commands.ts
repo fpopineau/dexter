@@ -10,6 +10,7 @@
  *   reject|no P-XXXX        reject the proposal
  *   proposals               list open proposals
  *   positions               current account holdings + daily P&L
+ *   orders                  working (unfilled) orders at IBKR
  *   halt status             show the daily-loss kill-switch state
  *   performance [N]         closed-trade P&L summary over the last N days (default 7)
  */
@@ -23,11 +24,13 @@ import {
     listProposals,
 } from '@/services/trade-proposals.js';
 import { createIbkrAccount } from '@/tools/ibkr/account.js';
+import { createIbkrOrders } from '@/tools/ibkr/orders.js';
 
 const ACCEPT_RE = /^\s*(accept|ok|go)\s+(P-[A-Za-z0-9]{4})\s*$/i;
 const REJECT_RE = /^\s*(reject|no)\s+(P-[A-Za-z0-9]{4})\s*$/i;
 const LIST_RE = /^\s*proposals?\s*$/i;
 const POSITIONS_RE = /^\s*positions?\s*$/i;
+const ORDERS_RE = /^\s*orders?\s*$/i;
 const HALT_RE = /^\s*halt\s+status\s*$/i;
 const PERF_RE = /^\s*(performance|perf)(?:\s+(\d{1,3})\s*d?)?\s*$/i;
 
@@ -36,6 +39,42 @@ interface PositionRow {
     symbol: string;
     quantity: number;
     avgCost: number;
+}
+
+interface OpenOrderRow {
+    orderId?: number;
+    symbol: string;
+    action: string;
+    quantity: number;
+    orderType: string;
+    limitPrice?: number;
+    auxPrice?: number;
+    status?: string;
+}
+
+/** Deterministic working-orders snapshot from IBKR (no LLM) — the state
+ *  between "proposal executed" (bracket placed) and "position" (entry
+ *  filled), which is otherwise invisible from the phone. */
+async function formatOrdersReply(): Promise<string> {
+    try {
+        const raw = await createIbkrOrders().invoke({ action: 'list' });
+        const data = (JSON.parse(String(raw)) as { data: { openOrderCount: number; orders: OpenOrderRow[] } }).data;
+        if (!data.orders?.length) {
+            return '📭 No working orders at IBKR.';
+        }
+        const lines = [`📬 Working orders (${data.orders.length}):`];
+        for (const o of data.orders) {
+            // IBKR reports unset prices as 0 — a LMT shows lmtPrice, a STP
+            // shows auxPrice (the trigger), never a legitimate 0.
+            const price = (o.limitPrice || undefined) ?? (o.auxPrice || undefined);
+            lines.push(`• #${o.orderId ?? '?'} ${o.action} ${o.quantity} ${o.symbol} ${o.orderType}${price !== undefined ? ` @ ${price}` : ''} [${o.status ?? '?'}]`);
+        }
+        lines.push("These are resting orders — a position appears only when an entry fills ('positions').");
+        return lines.join('\n');
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return `⚠️ Could not fetch orders — IBKR connection issue: ${msg}`;
+    }
 }
 
 /** Deterministic positions + daily P&L snapshot from IBKR (no LLM).
@@ -111,6 +150,10 @@ export async function handleProposalCommand(body: string): Promise<string | null
 
     if (POSITIONS_RE.test(body)) {
         return formatPositionsReply();
+    }
+
+    if (ORDERS_RE.test(body)) {
+        return formatOrdersReply();
     }
 
     const perf = PERF_RE.exec(body);

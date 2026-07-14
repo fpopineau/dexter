@@ -264,6 +264,7 @@ tokens). Anything else goes to the agent as a normal question.
 | `reject P-1A2B` | `no P-1A2B` | Reject it |
 | `proposals` | `proposal` | List open proposals |
 | `positions` | `position` | Current holdings + daily P&L straight from IBKR |
+| `orders` | `order` | Working (unfilled) orders — the state between an accepted proposal and a position |
 | `performance` | `perf`, `performance 30` | Closed-trade summary (default 7 days) |
 | `halt status` | | Kill-switch state + daily P&L headroom |
 
