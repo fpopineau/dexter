@@ -289,6 +289,104 @@ let attachedApi: IBApi | null = null;
 let started = false;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
+/** Replay today's executions and wait for the end marker (or timeout). */
+function replayExecutions(api: IBApi): Promise<void> {
+    return new Promise<void>((resolve) => {
+        const reqId = allocReqId();
+        const timer = setTimeout(() => {
+            cleanup();
+            resolve();
+        }, 10_000);
+        const onEnd = (id: number) => {
+            if (id !== reqId) return;
+            clearTimeout(timer);
+            cleanup();
+            resolve();
+        };
+        function cleanup() {
+            api.off(EventName.execDetailsEnd, onEnd);
+        }
+        api.on(EventName.execDetailsEnd, onEnd);
+        try {
+            api.reqExecutions(reqId, {});
+        } catch (err) {
+            logger.warn(`[outcome-tracker] reqExecutions failed: ${err}`);
+            clearTimeout(timer);
+            cleanup();
+            resolve();
+        }
+    });
+}
+
+/**
+ * Reconcile tracked trades against the orders that actually exist.
+ *
+ * An IB Gateway restart (or the day rollover) can destroy an unfilled
+ * bracket: the tracked order ids then reference nothing, no orderStatus
+ * event will ever arrive, and the proposal would linger as 'executed'
+ * for days — silently consuming max_open_positions headroom. After the
+ * executions replay (so fills are already accounted for), any tracked
+ * trade with NO live order and NO recorded fill is closed honestly.
+ */
+async function reconcileAgainstOpenOrders(api: IBApi): Promise<void> {
+    if (byProposalId.size === 0) return;
+
+    const openIds = new Set<number>();
+    let endSeen = false;
+    await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+            cleanup();
+            resolve();
+        }, 10_000);
+        const onOpen = (id: number) => {
+            openIds.add(id);
+        };
+        const onEnd = () => {
+            endSeen = true;
+            clearTimeout(timer);
+            cleanup();
+            resolve();
+        };
+        function cleanup() {
+            api.off(EventName.openOrder, onOpen);
+            api.off(EventName.openOrderEnd, onEnd);
+        }
+        api.on(EventName.openOrder, onOpen);
+        api.on(EventName.openOrderEnd, onEnd);
+        try {
+            api.reqAllOpenOrders();
+        } catch (err) {
+            logger.warn(`[outcome-tracker] reqAllOpenOrders failed: ${err}`);
+            clearTimeout(timer);
+            cleanup();
+            resolve();
+        }
+    });
+
+    if (!endSeen) {
+        // Snapshot may be incomplete — never close trades on partial data.
+        logger.warn('[outcome-tracker] open-orders snapshot incomplete, skipping reconciliation');
+        return;
+    }
+
+    for (const trade of [...byProposalId.values()]) {
+        if (trade.closed || trade.finalizeTimer) continue;
+        const anyAlive =
+            openIds.has(trade.entryOrderId) ||
+            openIds.has(trade.takeProfitOrderId) ||
+            openIds.has(trade.stopOrderId);
+        if (anyAlive) continue;
+
+        if (!trade.entryRecorded) {
+            logger.warn(`[outcome-tracker] ${trade.proposalId}: bracket orders no longer exist and entry never filled — closing as cancelled`);
+            void finalize(trade, 'cancelled', 'bracket orders no longer exist (Gateway restart or day expiry); entry never filled');
+        } else if (trade.exitReason === null) {
+            logger.warn(`[outcome-tracker] ${trade.proposalId}: exits no longer exist with entry filled — closing as manual`);
+            void finalize(trade, 'manual', 'bracket exits no longer exist — reconcile the position manually (ibkr_account)');
+        }
+    }
+}
+
 async function attach(): Promise<void> {
     const api = await getIBApi();
     if (api === attachedApi) return;
@@ -298,15 +396,11 @@ async function attach(): Promise<void> {
     api.on(EventName.execDetails, handleExecDetails);
     api.on(EventName.commissionReport, handleCommissionReport);
 
-    // Replay today's executions: recovers fills that happened while the
-    // gateway (or this tracker) was down. Emitted through the same
-    // execDetails/commissionReport handlers above.
+    // Replay today's executions (recovers fills missed while down), THEN
+    // reconcile tracked trades against the orders that still exist.
     if (byOrderId.size > 0) {
-        try {
-            api.reqExecutions(allocReqId(), {});
-        } catch (err) {
-            logger.warn(`[outcome-tracker] reqExecutions failed: ${err}`);
-        }
+        await replayExecutions(api);
+        await reconcileAgainstOpenOrders(api);
     }
     logger.info(`[outcome-tracker] attached (${byProposalId.size} trade(s) tracked)`);
 }
