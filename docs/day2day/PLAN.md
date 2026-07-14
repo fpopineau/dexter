@@ -822,12 +822,30 @@ src/backtest/sentiment-loader.ts
 - [ ] XGBoost signal weight optimizer (CPU)
 - [ ] HMM/GMM regime detector (CPU)
 - [ ] Integrate regime detection into signal scorer
+- [ ] **Evaluate RLM (Recursive Language Models) for long-context research
+  workloads** — [alexzhang13/rlm](https://github.com/alexzhang13/rlm):
+  root LM drives a REPL where the corpus is a variable, recursively
+  calling sub-LMs over slices. Deliberately NOT for the intraday loop
+  (small contexts, latency-critical, root-model reliability); target
+  workloads where it fits:
+  - GDELT corpus questions (tone history across ~50k headlines/monthly parquets)
+  - the Phase-5 LLM-augmented backtest (hundreds of independent evaluations
+    over reconstructed context windows)
+  - filing (10-K) analysis and multi-week JSONL log forensics
+  Recommended shape: Python sidecar (`pip install rlms`) exposed as a
+  `deep_research` dexter tool; **hybrid routing — Anthropic as root
+  (orchestration quality), local vLLM as the recursive worker fleet**
+  (sub-calls free, parallel short-context batches are vLLM's sweet spot,
+  fits `--max-model-len 32768` + prefix caching). First experiment: a
+  GDELT tone-history question, fully offline, zero trading-system risk.
 
 ### Phase 7 — Sentiment Fine-Tuning (3+ months after Phase 0 verification)
 - [ ] Build GDELT headline → ticker → outcome training set
 - [ ] Train sentiment LoRA adapter on Llama 3.3 70B
 - [ ] Deploy via vLLM multi-LoRA serving
 - [ ] Train trade quality classifier LoRA (needs 500+ paper trade outcomes)
+- [ ] (pairs with the RLM item above: RLM-style orchestration can also
+  drive the training-set construction sweep over the GDELT archive)
 
 ### Phase 8 — Additional Data Sources (Ongoing)
 - [ ] `src/tools/macro/economic-calendar.ts` — FRED + ECB integration
