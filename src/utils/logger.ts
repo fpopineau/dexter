@@ -39,6 +39,13 @@ class FileSink {
     this.dir = process.env.DEXTER_LOG_DIR || join('.dexter', 'logs');
     const lvl = (process.env.DEXTER_LOG_LEVEL || 'info').trim().toLowerCase();
     this.minRank = lvl === 'off' ? null : LEVEL_RANK[lvl as LogLevel] ?? LEVEL_RANK.info;
+    // Test runs (bun test / jest set NODE_ENV=test) deliberately exercise
+    // refusal paths — their log lines must NOT land in the production
+    // JSONL logs, where they read as real trading events. Tests that want
+    // file logs can set DEXTER_LOG_DIR explicitly.
+    if (process.env.NODE_ENV === 'test' && !process.env.DEXTER_LOG_DIR) {
+      this.minRank = null;
+    }
     const keep = Number(process.env.DEXTER_LOG_KEEP);
     this.keep = Number.isFinite(keep) && keep > 0 ? keep : 14;
   }
