@@ -62,6 +62,52 @@ cp env.example .env     # then edit — see §5
 bun run scripts/smoke-ibkr.ts AAPL
 ```
 
+### 3.1 Gateway session lifetime — auto-restart and the weekly re-login
+
+IB Gateway sessions do not live forever
+([IBKR auto-restart considerations](https://www.ibkrguides.com/traderworkstation/auto-restart-considerations.htm)):
+
+- **Daily**: with *Auto restart* enabled (Configure → Lock and Exit —
+  choose Auto restart, NOT Auto logoff), the Gateway restarts itself once
+  a day at the configured time without needing a login.
+- **Weekly**: security tokens are invalidated every **Sunday 01:00 ET**.
+  The first restart after that CANNOT re-authenticate itself — a **manual
+  login with 2FA (IB Key)** is required, or the Gateway stays down.
+- **Silent killers**: the nightly restart also fails if the machine is
+  asleep/hibernating, or if a Windows Update reboots the box.
+
+How to run dexter around this:
+
+1. **Pick a quiet restart time** — recommended ~**03:00 ET** (09:00
+   Paris): after the 16:20 ET archive job and the 18:00 ET universe
+   sweep, before the 08:00 ET Pre-Market Brief, and at an hour when
+   you're awake to notice a failure.
+2. **Dexter absorbs the daily restart automatically**: the connection
+   manager reconnects with backoff indefinitely, the realtime stream
+   re-subscribes, and the outcome tracker re-attaches and replays the
+   day's executions. A job interrupted mid-restart (archival chunk)
+   fails that attempt and is retried/resumed on the next run — all
+   archival writes are idempotent.
+3. **Make the Sunday login a ritual**: log into the Gateway manually on
+   **Sunday evening (Paris time)**, before Monday's pre-market. Miss it
+   and Monday runs blind — no scans, no briefs with data, and the
+   kill-switch fail-safe refusing orders (see below).
+4. **Failure is safe but silent-ish**: a dead Gateway cannot cause harm —
+   the daily-loss guard fails closed ("P&L could not be verified"), so
+   nothing trades. Detection: send `halt status` on WhatsApp in the
+   morning — a connection problem shows up in the reply; the JSONL log
+   shows `[IBKR] Scheduling reconnect attempt N` climbing.
+5. **Machine hygiene**: disable sleep/hibernation on this box and set
+   Windows Update active hours so forced reboots don't land in the
+   trading day or the restart window.
+6. **Full automation (advanced, optional)**: [IBC](https://github.com/IbcAlpha/IBC)
+   (or the ib-gateway Docker images built on it) automates the login and
+   restart dialogs. Trade-offs: credentials stored on disk, and the
+   weekly 2FA still needs an IB Key approval on your phone — it reduces
+   clicks, it does not remove the Sunday ritual. Revisit when the system
+   earns unattended live operation; for the paper phase, the manual
+   Sunday login is simpler and safer.
+
 ## 4. WhatsApp pairing
 
 ```bash
@@ -501,6 +547,7 @@ P&L math, market-hours. Live-socket behavior is exercised by
 | `Scanner type with code N is disabled` | was a dexter wire-format bug (string passed where the numeric ScanCode enum was expected) — fixed; if it recurs, check `@stoqey/ib` upgrade notes |
 | `client id is already in use` | one client ID per concurrent process: the gateway owns `IBKR_CLIENT_ID=1`; run ad-hoc scripts with `IBKR_CLIENT_ID=2 bun run scripts/…` |
 | Gateway alive but API silent / partial | check the Gateway log for `java.lang.OutOfMemoryError` — raise Memory Allocation to 2–4 GB (Configure → Settings, or `-Xmx` in `ibgateway.vmoptions`) and restart |
+| Everything dead on a Monday morning; log shows climbing `[IBKR] Scheduling reconnect attempt N` | the weekly token invalidation (Sunday 01:00 ET) — the Gateway needs a manual 2FA login; see §3.1 |
 | `SAFETY LOCK: refusing to place orders on live port` | you pointed at 4001/7496 — use the paper port (this is the lock working) |
 | `KILL-SWITCH: new orders are blocked` | daily loss breached, or P&L unverifiable (IBKR down). `halt status` for details |
 | `[risk-gate] REFUSED …` on create | the proposal's numbers violate risk-rules.yaml — fix R/R / price / quantity, don't loosen rules mid-day |

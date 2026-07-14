@@ -298,6 +298,7 @@ bracketed prefix (`[opportunity-engine]`, `[outcome-tracker]`, …).
 | Failure | Handling |
 |---|---|
 | IB Gateway disconnect | `connection.ts` reconnects with exponential backoff (1 s → 60 s, jitter, indefinitely); services re-establish per-connection state via `onReconnect` callbacks (stream re-subscribes, tracker re-attaches + replays executions) |
+| Gateway daily auto-restart / weekly token invalidation (Sun 01:00 ET) | daily restart is absorbed like any disconnect; the weekly one requires a manual 2FA login — until then the kill-switch fails closed (no P&L → no orders). Operating procedure: [USER-MANUAL §3.1](USER-MANUAL.md#31-gateway-session-lifetime--auto-restart-and-the-weekly-re-login) |
 | Gateway process restart | Kill-switch halt persists on disk; tracker rebuilds from `proposals.db` and replays today's executions via `reqExecutions`; cron jobs and engine restart with the gateway |
 | Tracker down for days | IBKR only replays current-day executions → affected trades are swept `closed/unknown` (honest label), never guessed |
 | P&L unverifiable | Kill-switch fails safe: orders refused |
