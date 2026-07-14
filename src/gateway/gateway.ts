@@ -227,13 +227,30 @@ async function handleInbound(cfg: GatewayConfig, inbound: WhatsAppInboundMessage
       debugLog(`[gateway] reply sent`);
     } else {
       console.log(`Agent returned empty response (${durationMs}ms)`);
-      debugLog(`[gateway] empty answer, not sending`);
+      debugLog(`[gateway] empty answer, notifying`);
+      // Never leave the chat hanging: an empty answer usually means the run
+      // was absorbed by a follow-up message or ended without output.
+      const notice = '⚠️ That run ended without an answer (it may have been absorbed by a follow-up message). Ask again in one message.';
+      if (isGroup) {
+        await inbound.reply(notice);
+      } else {
+        await sendMessageWhatsApp({ to: inbound.replyToJid, body: notice, accountId: inbound.accountId });
+      }
     }
   } catch (err) {
     stopTypingLoop();
     const msg = err instanceof Error ? err.message : String(err);
     console.log(`Error: ${msg}`);
     debugLog(`[gateway] ERROR: ${msg}`);
+    // Surface failures to the chat instead of dying silently.
+    try {
+      const notice = `⚠️ Agent run failed: ${msg.slice(0, 200)}`;
+      if (isGroup) {
+        await inbound.reply(notice);
+      } else {
+        await sendMessageWhatsApp({ to: inbound.replyToJid, body: notice, accountId: inbound.accountId });
+      }
+    } catch { /* outbound also failing — nothing more to do */ }
   }
 }
 
