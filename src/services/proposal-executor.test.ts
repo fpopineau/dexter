@@ -14,7 +14,7 @@ const prevEnv = {
 process.env.DEXTER_DATA_DIR = dir;
 delete process.env.AUTO_EXECUTE_PAPER;
 
-import { acceptProposal, autoExecuteProposal, cancelProposalBracket, rejectProposal } from './proposal-executor.js';
+import { acceptProposal, autoExecuteProposal, cancelProposalBracket, cancelProposalForSymbol, rejectProposal } from './proposal-executor.js';
 import { createProposal, getProposal, markEntryFilled, setProposalStatus } from './trade-proposals.js';
 
 afterEach(() => {
@@ -116,6 +116,44 @@ describe('cancelProposalBracket refusals', () => {
         // countOpenExecuted assertions.
         const { closeProposal } = await import('./trade-proposals.js');
         await closeProposal(filled.id, { exitReason: 'manual' });
+    });
+});
+
+describe('cancel by symbol', () => {
+    test('unknown symbol, filled entry, and ambiguity are all refused with guidance', async () => {
+        const { closeProposal } = await import('./trade-proposals.js');
+        const make = async (symbol: string) => {
+            const p = await createProposal({
+                symbol, direction: 'long', entryType: 'LMT',
+                entry: 100, stop: 95, target: 110, quantity: 10,
+                rationale: 'cancel-by-symbol test', source: 'test',
+            });
+            await setProposalStatus(p.id, 'executed', { orderIds: [61, 62, 63], executedAt: Date.now() });
+            return p;
+        };
+
+        const none = await cancelProposalForSymbol('ZZZQ');
+        expect(none.ok).toBe(false);
+        expect(none.message).toContain('No working bracket');
+
+        // entry filled → same protection refusal as cancel-by-id
+        const filled = await make('CBSF');
+        await markEntryFilled(filled.id, 100.01);
+        const onFilled = await cancelProposalForSymbol('cbsf');
+        expect(onFilled.ok).toBe(false);
+        expect(onFilled.message).toContain('unprotected');
+        await closeProposal(filled.id, { exitReason: 'manual' });
+
+        // two working brackets on one symbol → must cancel by id
+        const a = await make('CBSA');
+        const b = await make('CBSA');
+        const ambiguous = await cancelProposalForSymbol('CBSA');
+        expect(ambiguous.ok).toBe(false);
+        expect(ambiguous.message).toContain(a.id);
+        expect(ambiguous.message).toContain(b.id);
+        expect(ambiguous.message).toContain('cancel by id');
+        await closeProposal(a.id, { exitReason: 'cancelled' });
+        await closeProposal(b.id, { exitReason: 'cancelled' });
     });
 });
 

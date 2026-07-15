@@ -13,7 +13,7 @@
  *   orders                  working (unfilled) orders at IBKR
  *   protect SYM STOP [TGT]  attach GTC protective exits to an open position
  *   close SYM               market-close the full position (risk-reducing)
- *   cancel P-XXXX           cancel an executed-but-unfilled bracket (risk-reducing)
+ *   cancel P-XXXX|SYM       cancel an executed-but-unfilled bracket (risk-reducing)
  *   halt status             show the daily-loss kill-switch state
  *   performance [N]         closed-trade P&L summary over the last N days (default 7)
  */
@@ -25,8 +25,9 @@ import {
     formatProposalLine,
     getPerformanceSummary,
     listProposals,
+    listTrackable,
 } from '@/services/trade-proposals.js';
-import { cancelProposalBracket } from '@/services/proposal-executor.js';
+import { cancelProposalBracket, cancelProposalForSymbol } from '@/services/proposal-executor.js';
 import { closePosition, protectPosition } from '@/services/position-actions.js';
 import { createIbkrAccount } from '@/tools/ibkr/account.js';
 import { createIbkrOrders } from '@/tools/ibkr/orders.js';
@@ -38,7 +39,7 @@ const POSITIONS_RE = /^\s*positions?\s*$/i;
 const ORDERS_RE = /^\s*orders?\s*$/i;
 const PROTECT_RE = /^\s*protect\s+([A-Za-z.]{1,6})\s+(\d+(?:\.\d+)?)(?:\s+(\d+(?:\.\d+)?))?\s*$/i;
 const CLOSE_RE = /^\s*close\s+([A-Za-z.]{1,6})\s*$/i;
-const CANCEL_RE = /^\s*cancel\s+(P-[A-Za-z0-9]{4})\s*$/i;
+const CANCEL_RE = /^\s*cancel\s+(P-[A-Za-z0-9]{4}|[A-Za-z.]{1,6})\s*$/i;
 const HALT_RE = /^\s*halt\s+status\s*$/i;
 const PERF_RE = /^\s*(performance|perf)(?:\s+(\d{1,3})\s*d?)?\s*$/i;
 
@@ -80,6 +81,16 @@ async function formatOrdersReply(): Promise<string> {
             bySymbol.set(o.symbol, list);
         }
 
+        // orderId → proposal id, so each group names the P-XXXX it belongs
+        // to ('cancel' takes either). Orders placed outside the proposal
+        // flow (manual TWS, 'protect') simply carry no id.
+        const proposalByOrderId = new Map<number, string>();
+        try {
+            for (const t of await listTrackable()) {
+                for (const oid of t.orderIds ?? []) proposalByOrderId.set(oid, t.id);
+            }
+        } catch { /* annotation only — never break the order list */ }
+
         const fmt = (o: OpenOrderRow) => {
             // IBKR reports unset prices as 0 — a LMT shows lmtPrice, a STP
             // shows auxPrice (the trigger), never a legitimate 0.
@@ -89,12 +100,16 @@ async function formatOrdersReply(): Promise<string> {
 
         const lines = [`📬 Working orders (${data.orders.length}):`];
         for (const [symbol, orders] of bySymbol) {
+            const ids = [...new Set(orders
+                .map((o) => (o.orderId !== undefined ? proposalByOrderId.get(o.orderId) : undefined))
+                .filter((id): id is string => id !== undefined))];
+            const tag = ids.length ? ` [${ids.join(', ')}]` : '';
             const sides = new Set(orders.map((o) => o.action));
             const label = sides.size > 1
-                ? `${symbol} — bracket, entry still working:`
+                ? `${symbol}${tag} — bracket, entry still working:`
                 : orders.length > 1
-                    ? `${symbol} — exits protecting the position (OCA: one fills, the other cancels):`
-                    : `${symbol}:`;
+                    ? `${symbol}${tag} — exits protecting the position (OCA: one fills, the other cancels):`
+                    : `${symbol}${tag}:`;
             lines.push(label, ...orders.map(fmt));
         }
         lines.push("A position appears only when an entry fills ('positions').");
@@ -205,7 +220,10 @@ export async function handleProposalCommand(body: string): Promise<string | null
 
     const cancel = CANCEL_RE.exec(body);
     if (cancel) {
-        const outcome = await cancelProposalBracket(cancel[1].toUpperCase());
+        const arg = cancel[1].toUpperCase();
+        const outcome = /^P-/.test(arg)
+            ? await cancelProposalBracket(arg)
+            : await cancelProposalForSymbol(arg);
         return outcome.message;
     }
 

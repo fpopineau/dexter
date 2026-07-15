@@ -28,6 +28,7 @@ import {
     expireStale,
     formatProposalLine,
     getProposal,
+    listTrackable,
     setProposalStatus,
 } from './trade-proposals.js';
 
@@ -259,6 +260,28 @@ export async function cancelProposalBracket(id: string): Promise<ExecutionOutcom
         const msg = err instanceof Error ? err.message : String(err);
         return { ok: false, message: `❌ Could not cancel ${p.id} — ${msg}` };
     }
+}
+
+/** Resolve 'cancel SYM' to the working bracket for that symbol. */
+export async function cancelProposalForSymbol(symbol: string): Promise<ExecutionOutcome> {
+    const sym = symbol.toUpperCase();
+    const candidates = (await listTrackable()).filter((p) => p.symbol === sym);
+    if (candidates.length === 0) {
+        return {
+            ok: false,
+            message: `No working bracket for ${sym}. 'orders' shows what is live; an open proposal is removed with 'reject P-XXXX'.`,
+        };
+    }
+    const unfilled = candidates.filter((p) => p.entryFillPrice == null);
+    if (unfilled.length > 1) {
+        return {
+            ok: false,
+            message: `${sym} has ${unfilled.length} working brackets (${unfilled.map((p) => p.id).join(', ')}) — cancel by id.`,
+        };
+    }
+    // Zero unfilled → every bracket's entry has filled; delegate so the
+    // standard "position would be unprotected" refusal explains it.
+    return cancelProposalBracket((unfilled[0] ?? candidates[0]).id);
 }
 
 export async function rejectProposal(id: string): Promise<ExecutionOutcome> {
