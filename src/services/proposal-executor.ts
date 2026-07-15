@@ -15,11 +15,12 @@
  */
 
 import { placeBracketOrder } from '@/tools/ibkr/bracket.js';
-import { assertOrderingAllowed, getManagedAccounts, isLivePort } from '@/tools/ibkr/connection.js';
+import { assertOrderingAllowed, getIBApi, getManagedAccounts, isLivePort } from '@/tools/ibkr/connection.js';
+import { createIbkrMarketData } from '@/tools/ibkr/market-data.js';
 import { logger } from '@/utils';
 import { assertDailyLossOk } from './daily-loss-guard.js';
 import { trackExecutedProposal } from './outcome-tracker.js';
-import { assertProposalRisk } from './proposal-risk-gate.js';
+import { assertProposalRisk, checkPriceRun } from './proposal-risk-gate.js';
 import {
     countExecutedSince,
     countOpenExecuted,
@@ -33,6 +34,19 @@ import {
 export interface ExecutionOutcome {
     ok: boolean;
     message: string;
+}
+
+/** Best-effort live last price (null when unavailable). */
+async function fetchLastPrice(symbol: string): Promise<number | null> {
+    try {
+        const raw = await createIbkrMarketData().invoke({ ticker: symbol, exchange: 'SMART', currency: 'USD' });
+        const data = (JSON.parse(String(raw)) as { data?: { last?: number; bid?: number; ask?: number } }).data;
+        if (data?.last && Number.isFinite(data.last) && data.last > 0) return data.last;
+        if (data?.bid && data?.ask && data.bid > 0 && data.ask > 0) return (data.bid + data.ask) / 2;
+        return null;
+    } catch {
+        return null;
+    }
 }
 
 export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
@@ -61,6 +75,7 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 direction: p.direction,
                 entryType: p.entryType,
                 entry: p.entry,
+                entryLimit: p.entryLimit,
                 stop: p.stop,
                 target: p.target,
                 quantity: p.quantity,
@@ -71,6 +86,20 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 executedToday: await countExecutedSince(etDayStartMs()),
             },
         );
+
+        // Chase/invalidation gate: proposal levels are anchored at creation
+        // time; on a fast mover the edge may be gone by accept time. Best
+        // effort — an unavailable quote does not block (the hard gates
+        // above already ran), it is only noted.
+        const last = await fetchLastPrice(p.symbol);
+        if (last !== null) {
+            const run = checkPriceRun(p, last);
+            if (!run.ok) {
+                throw new Error(`[chase-gate] ${run.reason}. Ask for re-evaluated levels instead of accepting stale ones.`);
+            }
+        } else {
+            logger.warn(`[proposal-executor] ${p.id}: live quote unavailable — chase check skipped`);
+        }
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.warn(`[proposal-executor] ${p.id} refused by gates (proposal stays open): ${msg}`);
@@ -90,6 +119,7 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
             quantity: p.quantity,
             entryType: p.entryType,
             entryPrice: p.entry ?? undefined,
+            entryLimitPrice: p.entryLimit ?? undefined,
             stopPrice: p.stop,
             targetPrice: p.target,
             tif: p.tif, // GTC brackets survive the close (overnight/swing)
@@ -191,6 +221,44 @@ export async function autoExecuteProposal(id: string): Promise<ExecutionOutcome>
         ok: outcome.ok,
         message: `🤖 AUTO-EXECUTE (paper, ${autoExecCount}/${max} today) — ${outcome.message}`,
     };
+}
+
+/**
+ * Cancel the bracket orders of an EXECUTED, still-unfilled proposal
+ * (risk-reducing: it removes a pending entry). Refused once the entry has
+ * filled — a position exists then; use protect/close instead. The outcome
+ * tracker observes the cancellations and closes the proposal honestly.
+ */
+export async function cancelProposalBracket(id: string): Promise<ExecutionOutcome> {
+    const p = await getProposal(id);
+    if (!p) {
+        return { ok: false, message: `Proposal ${id.toUpperCase()} not found.` };
+    }
+    if (p.status !== 'executed' || !p.orderIds?.length) {
+        return { ok: false, message: `Proposal ${p.id} has no working bracket (status: ${p.status}). Use 'reject ${p.id}' for open proposals.` };
+    }
+    if (p.entryFillPrice != null) {
+        return {
+            ok: false,
+            message: `⛔ ${p.id}: the entry has FILLED — cancelling the exits would leave the ${p.symbol} position unprotected. ` +
+                `Use 'close ${p.symbol}' to exit, or leave the bracket working.`,
+        };
+    }
+    try {
+        const api = await getIBApi();
+        for (const orderId of p.orderIds) {
+            try { api.cancelOrder(orderId); } catch { /* already gone */ }
+        }
+        logger.info(`[proposal-executor] ${p.id}: cancel requested for orders ${p.orderIds.join('/')}`);
+        return {
+            ok: true,
+            message: `🚫 ${p.id}: cancel requested for the ${p.symbol} bracket (orders ${p.orderIds.join('/')}). ` +
+                `The close alert confirms once IBKR processes it.`,
+        };
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { ok: false, message: `❌ Could not cancel ${p.id} — ${msg}` };
+    }
 }
 
 export async function rejectProposal(id: string): Promise<ExecutionOutcome> {

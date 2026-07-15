@@ -267,6 +267,7 @@ tokens). Anything else goes to the agent as a normal question.
 | `orders` | `order` | Working (unfilled) orders — the state between an accepted proposal and a position |
 | `protect SYM STOP [TGT]` | | Attach GTC protective exits to an open position (refuses if GTC exits already stand) |
 | `close SYM` | | Market-close the full position — risk-reducing, allowed even under the kill-switch |
+| `cancel P-XXXX` | | Cancel an executed-but-unfilled bracket (refused once the entry has filled — use `close`) |
 | `performance` | `perf`, `performance 30` | Closed-trade summary (default 7 days) |
 | `halt status` | | Kill-switch state + daily P&L headroom |
 

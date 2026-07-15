@@ -35,8 +35,10 @@ export interface TradeProposal {
     status: ProposalStatus;
     symbol: string;
     direction: 'long' | 'short';
-    entryType: 'LMT' | 'MKT';
+    entryType: 'LMT' | 'MKT' | 'STP_LMT';
     entry: number | null;
+    /** STP_LMT only: the limit cap above/below the trigger (entry). */
+    entryLimit: number | null;
     stop: number;
     target: number;
     quantity: number;
@@ -148,6 +150,7 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     ['commissions', 'REAL'],
     ['closed_at', 'INTEGER'],
     ['tif', 'TEXT'],
+    ['entry_limit', 'REAL'],
 ];
 
 function migrate(database: SqliteDatabase): void {
@@ -168,8 +171,9 @@ interface Row {
     status: ProposalStatus;
     symbol: string;
     direction: 'long' | 'short';
-    entry_type: 'LMT' | 'MKT';
+    entry_type: 'LMT' | 'MKT' | 'STP_LMT';
     entry: number | null;
+    entry_limit: number | null;
     stop: number;
     target: number;
     quantity: number;
@@ -200,6 +204,7 @@ function fromRow(r: Row): TradeProposal {
         direction: r.direction,
         entryType: r.entry_type,
         entry: r.entry,
+        entryLimit: r.entry_limit ?? null,
         stop: r.stop,
         target: r.target,
         quantity: r.quantity,
@@ -227,8 +232,10 @@ function fromRow(r: Row): TradeProposal {
 export interface CreateProposalInput {
     symbol: string;
     direction: 'long' | 'short';
-    entryType: 'LMT' | 'MKT';
+    entryType: 'LMT' | 'MKT' | 'STP_LMT';
     entry?: number;
+    /** Required for STP_LMT: the limit cap for the triggered entry. */
+    entryLimit?: number;
     stop: number;
     target: number;
     quantity: number;
@@ -269,12 +276,12 @@ export async function createProposal(input: CreateProposalInput): Promise<TradeP
     database.query<void>(
         `INSERT INTO proposals
          (id, created_at, expires_at, updated_at, status, symbol, direction, entry_type,
-          entry, stop, target, quantity, tif, score, rationale, source, order_ids, note)
-         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+          entry, entry_limit, stop, target, quantity, tif, score, rationale, source, order_ids, note)
+         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
     ).run(
         id, now, expiry, now,
         input.symbol.trim().toUpperCase(), input.direction, input.entryType,
-        input.entry ?? null, input.stop, input.target, input.quantity,
+        input.entry ?? null, input.entryLimit ?? null, input.stop, input.target, input.quantity,
         input.tif === 'GTC' ? 'GTC' : 'DAY',
         input.score ?? null, input.rationale, input.source,
     );
@@ -516,10 +523,17 @@ export async function expireStale(): Promise<number> {
 
 /** One-line human summary (used in WhatsApp messages). */
 export function formatProposalLine(p: TradeProposal): string {
-    const entry = p.entryType === 'MKT' ? `MKT~${p.entry ?? '?'}` : `@${p.entry}`;
+    const entry = p.entryType === 'MKT' ? `MKT~${p.entry ?? '?'}`
+        : p.entryType === 'STP_LMT' ? `STP@${p.entry}/lim${p.entryLimit ?? '?'}`
+        : `@${p.entry}`;
     const outcome = p.status === 'closed' && p.realizedPnl != null
         ? ` ${p.exitReason ?? '?'} ${p.realizedPnl >= 0 ? '+' : ''}$${p.realizedPnl.toFixed(2)}`
         : '';
+    // Freshness stamp: levels are anchored around creation time — on fast
+    // movers this is the difference between a fill and a chase.
+    const asOf = p.status === 'open'
+        ? ` · levels as of ${new Date(p.createdAt).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false })} ET`
+        : '';
     return `${p.id} ${p.direction.toUpperCase()} ${p.quantity} ${p.symbol} ${entry} stop ${p.stop} target ${p.target}` +
-        (p.score != null ? ` (score ${p.score})` : '') + ` [${p.status}${outcome}]`;
+        (p.score != null ? ` (score ${p.score})` : '') + ` [${p.status}${outcome}]${asOf}`;
 }

@@ -143,6 +143,7 @@ Inbound DMs are pre-routed **before** the agent (deterministic, no LLM):
 | `orders` | working (unfilled) orders at IBKR |
 | `protect SYM STOP [TGT]` | attach GTC protective exits to an open position |
 | `close SYM` | market-close the full position (risk-reducing) |
+| `cancel P-XXXX` | cancel an executed-but-unfilled bracket |
 | `halt status` | kill-switch state and daily P&L headroom |
 | `performance` (or `perf`, `performance 30`) | closed-trade P&L summary (default 7 days) |
 
@@ -152,7 +153,10 @@ safety gate below.
 ### Execution path — `src/services/proposal-executor.ts` + `src/tools/ibkr/bracket.ts`
 Single code path to orders: proposal open & unexpired → **paper/live safety
 lock** → **daily-loss kill-switch** → **risk gate with live account
-context** → bracket placement (entry LMT/MKT + take-profit + stop linked by
+context** → **chase gate** (live quote vs proposal levels: refuses when the
+price has consumed >25% of the entry→target edge or traded through the
+stop — stale accepts on fast movers stay open for re-evaluation) → bracket
+placement (entry LMT/MKT + take-profit + stop linked by
 `parentId` and an OCA group; the stop carries `transmit=true` so the
 bracket transmits atomically). The executed proposal is handed to the
 outcome tracker.

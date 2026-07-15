@@ -20,9 +20,13 @@ export interface BracketRequest {
     symbol: string;
     direction: 'long' | 'short';
     quantity: number;
-    /** 'LMT' places the entry at entryPrice; 'MKT' enters at market. */
-    entryType: 'LMT' | 'MKT';
+    /** 'LMT' places the entry at entryPrice; 'MKT' enters at market;
+     *  'STP_LMT' is a momentum entry — triggers at entryPrice and fills up
+     *  to entryLimitPrice (enters WITH strength instead of on a pullback). */
+    entryType: 'LMT' | 'MKT' | 'STP_LMT';
     entryPrice?: number;
+    /** STP_LMT only: the limit cap for the triggered entry. */
+    entryLimitPrice?: number;
     stopPrice: number;
     targetPrice: number;
     outsideRth?: boolean;
@@ -39,7 +43,7 @@ export interface BracketResult {
     symbol: string;
     direction: 'long' | 'short';
     quantity: number;
-    entryType: 'LMT' | 'MKT';
+    entryType: 'LMT' | 'MKT' | 'STP_LMT';
     entryPrice?: number;
     stopPrice: number;
     targetPrice: number;
@@ -53,17 +57,31 @@ export function validateBracketRequest(req: BracketRequest): void {
     if (req.entryType === 'LMT' && !(req.entryPrice && req.entryPrice > 0)) {
         throw new Error('[bracket] entryPrice is required for LMT entries');
     }
+    if (req.entryType === 'STP_LMT') {
+        if (!(req.entryPrice && req.entryPrice > 0) || !(req.entryLimitPrice && req.entryLimitPrice > 0)) {
+            throw new Error('[bracket] STP_LMT entries require entryPrice (trigger) and entryLimitPrice (cap)');
+        }
+        if (req.direction === 'long' && !(req.entryLimitPrice >= req.entryPrice)) {
+            throw new Error('[bracket] long STP_LMT: entryLimitPrice must be at or above the trigger');
+        }
+        if (req.direction === 'short' && !(req.entryLimitPrice <= req.entryPrice)) {
+            throw new Error('[bracket] short STP_LMT: entryLimitPrice must be at or below the trigger');
+        }
+    }
     if (!(req.stopPrice > 0) || !(req.targetPrice > 0)) {
         throw new Error('[bracket] stopPrice and targetPrice must be positive');
     }
-    const ref = req.entryType === 'LMT' ? req.entryPrice! : (req.direction === 'long' ? req.targetPrice : req.stopPrice);
+    // LMT and STP_LMT both carry an entry reference price (the limit or the
+    // trigger); only MKT lacks one.
+    const hasEntryRef = req.entryType !== 'MKT';
+    const ref = hasEntryRef ? req.entryPrice! : (req.direction === 'long' ? req.targetPrice : req.stopPrice);
     if (req.direction === 'long') {
         if (!(req.stopPrice < ref)) throw new Error('[bracket] long: stopPrice must be below entry');
-        if (!(req.targetPrice > (req.entryType === 'LMT' ? req.entryPrice! : req.stopPrice))) {
+        if (!(req.targetPrice > (hasEntryRef ? req.entryPrice! : req.stopPrice))) {
             throw new Error('[bracket] long: targetPrice must be above entry');
         }
     } else {
-        if (req.entryType === 'LMT') {
+        if (hasEntryRef) {
             if (!(req.stopPrice > req.entryPrice!)) throw new Error('[bracket] short: stopPrice must be above entry');
             if (!(req.targetPrice < req.entryPrice!)) throw new Error('[bracket] short: targetPrice must be below entry');
         } else if (!(req.targetPrice < req.stopPrice)) {
@@ -101,8 +119,11 @@ export async function placeBracketOrder(req: BracketRequest): Promise<BracketRes
         orderId: parentId,
         action: entryAction,
         totalQuantity: req.quantity,
-        orderType: req.entryType === 'LMT' ? OrderType.LMT : OrderType.MKT,
+        orderType: req.entryType === 'LMT' ? OrderType.LMT
+            : req.entryType === 'STP_LMT' ? OrderType.STP_LMT
+            : OrderType.MKT,
         ...(req.entryType === 'LMT' ? { lmtPrice: req.entryPrice } : {}),
+        ...(req.entryType === 'STP_LMT' ? { auxPrice: req.entryPrice, lmtPrice: req.entryLimitPrice } : {}),
         tif,
         outsideRth: req.outsideRth ?? false,
         transmit: false,

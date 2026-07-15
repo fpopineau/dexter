@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { DEFAULT_RULES } from '@/tools/ibkr/risk-rules.js';
-import { assertProposalRisk, checkProposalRisk, type RiskGateProposal } from './proposal-risk-gate.js';
+import { assertProposalRisk, checkPriceRun, checkProposalRisk, type RiskGateProposal } from './proposal-risk-gate.js';
 
 const RULES = { ...DEFAULT_RULES }; // min_rr 2.0, min_price 5, max_position 5%, max_open 10, max_daily 20
 
@@ -113,6 +113,67 @@ describe('proposal risk gate — account context checks', () => {
     test('context checks are skipped when context is not provided', () => {
         const r = checkProposalRisk(longProposal({ quantity: 100_000 }), {}, RULES);
         expect(r.ok).toBe(true); // no netLiquidation → no sizing check at creation
+    });
+});
+
+describe('STP_LMT (momentum) entries', () => {
+    test('valid long stop-limit entry passes', () => {
+        // risk 2.2 (102.2−100.0), reward 4.6 (106.8−102.2) → R/R 2.09 ≥ 2.0
+        const r = checkProposalRisk(
+            longProposal({ entryType: 'STP_LMT', entry: 102.2, entryLimit: 102.8, stop: 100.0, target: 106.8 }),
+            {},
+            RULES,
+        );
+        expect(r.ok).toBe(true);
+    });
+
+    test('STP_LMT without entryLimit is refused', () => {
+        const r = checkProposalRisk(longProposal({ entryType: 'STP_LMT', entry: 102.2 }), {}, RULES);
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('entryLimit');
+    });
+
+    test('long STP_LMT with cap below the trigger is refused', () => {
+        const r = checkProposalRisk(
+            longProposal({ entryType: 'STP_LMT', entry: 102.2, entryLimit: 101.9, stop: 99.4, target: 106.8 }),
+            {},
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('at or above the trigger');
+    });
+});
+
+describe('checkPriceRun (chase/invalidation gate)', () => {
+    const p = { direction: 'long' as const, entry: 101.87, stop: 99.44, target: 106.8 };
+
+    test('price near entry → ok', () => {
+        expect(checkPriceRun(p, 102.1).ok).toBe(true);
+    });
+
+    test('price past 25% of the way to target → chasing refused', () => {
+        // chase line = 101.87 + 0.25 × (106.80 − 101.87) = 103.10
+        const r = checkPriceRun(p, 104.0); // the actual AEHR case
+        expect(r.ok).toBe(false);
+        expect(r.reason).toContain('price has run');
+    });
+
+    test('price through the stop → invalidated', () => {
+        const r = checkPriceRun(p, 99.1);
+        expect(r.ok).toBe(false);
+        expect(r.reason).toContain('invalidated');
+    });
+
+    test('short direction is mirrored', () => {
+        const s = { direction: 'short' as const, entry: 100, stop: 105, target: 90 };
+        expect(checkPriceRun(s, 99).ok).toBe(true);
+        expect(checkPriceRun(s, 97).ok).toBe(false);  // past 25% toward target
+        expect(checkPriceRun(s, 105.5).ok).toBe(false); // through the stop
+    });
+
+    test('no entry or bad price → permissive', () => {
+        expect(checkPriceRun({ ...p, entry: null }, 104).ok).toBe(true);
+        expect(checkPriceRun(p, 0).ok).toBe(true);
     });
 });
 

@@ -14,8 +14,8 @@ const prevEnv = {
 process.env.DEXTER_DATA_DIR = dir;
 delete process.env.AUTO_EXECUTE_PAPER;
 
-import { acceptProposal, autoExecuteProposal, rejectProposal } from './proposal-executor.js';
-import { createProposal, getProposal } from './trade-proposals.js';
+import { acceptProposal, autoExecuteProposal, cancelProposalBracket, rejectProposal } from './proposal-executor.js';
+import { createProposal, getProposal, markEntryFilled, setProposalStatus } from './trade-proposals.js';
 
 afterEach(() => {
     delete process.env.AUTO_EXECUTE_PAPER;
@@ -94,6 +94,28 @@ describe('gate refusals keep proposals retryable', () => {
         } finally {
             writeFileSync(join(dir, 'trading-halt.json'), JSON.stringify({ date: '1970-01-01' }));
         }
+    });
+});
+
+describe('cancelProposalBracket refusals', () => {
+    test('refuses open proposals (reject is the right verb) and filled entries', async () => {
+        const open = await openProposal();
+        const onOpen = await cancelProposalBracket(open.id);
+        expect(onOpen.ok).toBe(false);
+        expect(onOpen.message).toContain('reject');
+
+        const filled = await openProposal();
+        await setProposalStatus(filled.id, 'executed', { orderIds: [41, 42, 43], executedAt: Date.now() });
+        await markEntryFilled(filled.id, 100.02);
+        const onFilled = await cancelProposalBracket(filled.id);
+        expect(onFilled.ok).toBe(false);
+        expect(onFilled.message).toContain('unprotected');
+
+        // Clean up: the store module caches its DB across test FILES in a
+        // single-process run — a leaked 'executed' row skews other files'
+        // countOpenExecuted assertions.
+        const { closeProposal } = await import('./trade-proposals.js');
+        await closeProposal(filled.id, { exitReason: 'manual' });
     });
 });
 

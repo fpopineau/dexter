@@ -61,9 +61,12 @@ const CreateSchema = z.object({
     action: z.literal('create'),
     symbol: z.string().describe("US equity ticker, e.g. 'AAPL'."),
     direction: z.enum(['long', 'short']),
-    entryType: z.enum(['LMT', 'MKT']).default('LMT').describe('LMT places a limit entry; MKT enters at market.'),
+    entryType: z.enum(['LMT', 'MKT', 'STP_LMT']).default('LMT')
+        .describe('LMT: limit entry (mean-reversion — waits for a pullback). MKT: enter at market. STP_LMT: MOMENTUM entry — triggers at `entry` and fills up to `entryLimit`; use for continuation setups on fast movers, where a below-market limit would never fill.'),
     entry: z.coerce.number().positive()
-        .describe('Entry price. Required for LMT; for MKT pass the current price (indicative, used for risk validation).'),
+        .describe('Entry price. LMT: the limit. MKT: current price (indicative, risk validation). STP_LMT: the TRIGGER price (above market for longs).'),
+    entryLimit: z.coerce.number().positive().optional()
+        .describe('STP_LMT only: the limit cap for the triggered entry (slightly beyond the trigger, e.g. trigger +0.3–0.6%).'),
     stop: z.coerce.number().positive().describe('Stop-loss price.'),
     target: z.coerce.number().positive().describe('Take-profit price.'),
     quantity: z.coerce.number().int().positive().describe('Number of shares.'),
@@ -126,6 +129,7 @@ export function createTradeProposalsTool() {
                             direction: input.direction,
                             entryType: input.entryType,
                             entry: input.entry,
+                            entryLimit: input.entryLimit,
                             stop: input.stop,
                             target: input.target,
                             quantity: input.quantity,

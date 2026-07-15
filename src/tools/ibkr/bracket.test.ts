@@ -62,6 +62,22 @@ describe('bracket request validation', () => {
         ).toThrow(/targetPrice must be below stopPrice/);
     });
 
+    test('valid long STP_LMT (momentum) bracket passes', () => {
+        expect(() => validateBracketRequest(longLmt({
+            entryType: 'STP_LMT', entryPrice: 102.2, entryLimitPrice: 102.8, stopPrice: 99.4, targetPrice: 106.8,
+        }))).not.toThrow();
+    });
+
+    test('STP_LMT without a limit cap is refused', () => {
+        expect(() => validateBracketRequest(longLmt({ entryType: 'STP_LMT', entryPrice: 102.2, entryLimitPrice: undefined })))
+            .toThrow(/require entryPrice \(trigger\) and entryLimitPrice/);
+    });
+
+    test('long STP_LMT with cap below trigger is refused', () => {
+        expect(() => validateBracketRequest(longLmt({ entryType: 'STP_LMT', entryPrice: 102.2, entryLimitPrice: 101.5 })))
+            .toThrow(/at or above the trigger/);
+    });
+
     test('non-positive stop or target is refused', () => {
         expect(() => validateBracketRequest(longLmt({ stopPrice: 0 }))).toThrow(/must be positive/);
         expect(() => validateBracketRequest(longLmt({ targetPrice: -5 }))).toThrow(/must be positive/);

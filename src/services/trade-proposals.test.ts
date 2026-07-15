@@ -83,11 +83,16 @@ describe('proposal store lifecycle', () => {
     });
 
     test('executed → entry fill → closed with outcome', async () => {
+        // Delta-based: the store module caches its DB across test files in a
+        // single-process run, so absolute counts are not isolation-safe.
+        const baseOpen = await countOpenExecuted();
+        const baseExecuted = await countExecutedSince(etDayStartMs());
+
         const p = await createProposal(validInput());
         await setProposalStatus(p.id, 'executed', { orderIds: [11, 12, 13], executedAt: Date.now() });
 
-        expect(await countOpenExecuted()).toBe(1);
-        expect(await countExecutedSince(etDayStartMs())).toBe(1);
+        expect(await countOpenExecuted()).toBe(baseOpen + 1);
+        expect(await countExecutedSince(etDayStartMs())).toBe(baseExecuted + 1);
         expect((await listTrackable()).map((t) => t.id)).toContain(p.id);
 
         await markEntryFilled(p.id, 100.05);
@@ -105,9 +110,9 @@ describe('proposal store lifecycle', () => {
         expect(closed?.exitFillPrice).toBe(110.1);
         expect(closed?.realizedPnl).toBe(100.5);
         expect(closed?.commissions).toBe(2.1);
-        expect(await countOpenExecuted()).toBe(0);
+        expect(await countOpenExecuted()).toBe(baseOpen);
         // executed-today counter still counts closed trades (max_daily_trades)
-        expect(await countExecutedSince(etDayStartMs())).toBe(1);
+        expect(await countExecutedSince(etDayStartMs())).toBe(baseExecuted + 1);
         expect(formatProposalLine(closed!)).toContain('+$100.50');
     });
 

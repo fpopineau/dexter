@@ -150,6 +150,11 @@ For each validated setup, output a structured trade plan:
 
 For each **actionable** setup (score ≥ 60 AND risk-validated), register it
 with `trade_proposals` (action `create`, at most 3 per scan):
+- **Pick the entry type by strategy**: momentum continuation on a fast
+  mover → `STP_LMT` (entry = trigger slightly ABOVE current price,
+  entryLimit = trigger +0.3–0.6% — enters WITH strength; a below-market
+  limit on a runner never fills). Mean-reversion / pullback-to-support →
+  `LMT` at the support level. `MKT` only when immediacy beats price.
 - `entry` is REQUIRED even for MKT proposals (pass the current price — it
   anchors the deterministic risk validation).
 - `quantity` from the risk_manager suggestion, `expiresMinutes` 90,

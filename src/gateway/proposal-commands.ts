@@ -13,6 +13,7 @@
  *   orders                  working (unfilled) orders at IBKR
  *   protect SYM STOP [TGT]  attach GTC protective exits to an open position
  *   close SYM               market-close the full position (risk-reducing)
+ *   cancel P-XXXX           cancel an executed-but-unfilled bracket (risk-reducing)
  *   halt status             show the daily-loss kill-switch state
  *   performance [N]         closed-trade P&L summary over the last N days (default 7)
  */
@@ -25,6 +26,7 @@ import {
     getPerformanceSummary,
     listProposals,
 } from '@/services/trade-proposals.js';
+import { cancelProposalBracket } from '@/services/proposal-executor.js';
 import { closePosition, protectPosition } from '@/services/position-actions.js';
 import { createIbkrAccount } from '@/tools/ibkr/account.js';
 import { createIbkrOrders } from '@/tools/ibkr/orders.js';
@@ -36,6 +38,7 @@ const POSITIONS_RE = /^\s*positions?\s*$/i;
 const ORDERS_RE = /^\s*orders?\s*$/i;
 const PROTECT_RE = /^\s*protect\s+([A-Za-z.]{1,6})\s+(\d+(?:\.\d+)?)(?:\s+(\d+(?:\.\d+)?))?\s*$/i;
 const CLOSE_RE = /^\s*close\s+([A-Za-z.]{1,6})\s*$/i;
+const CANCEL_RE = /^\s*cancel\s+(P-[A-Za-z0-9]{4})\s*$/i;
 const HALT_RE = /^\s*halt\s+status\s*$/i;
 const PERF_RE = /^\s*(performance|perf)(?:\s+(\d{1,3})\s*d?)?\s*$/i;
 
@@ -177,6 +180,12 @@ export async function handleProposalCommand(body: string): Promise<string | null
     const close = CLOSE_RE.exec(body);
     if (close) {
         const outcome = await closePosition(close[1]);
+        return outcome.message;
+    }
+
+    const cancel = CANCEL_RE.exec(body);
+    if (cancel) {
+        const outcome = await cancelProposalBracket(cancel[1].toUpperCase());
         return outcome.message;
     }
 

@@ -20,10 +20,12 @@ import { getRiskRules, type RiskRules } from '@/tools/ibkr/risk-rules.js';
 export interface RiskGateProposal {
     symbol: string;
     direction: 'long' | 'short';
-    entryType: 'LMT' | 'MKT';
+    entryType: 'LMT' | 'MKT' | 'STP_LMT';
     /** Entry price. For MKT proposals this is the indicative price used for
-     *  risk math (position value, R/R) — execution still happens at market. */
+     *  risk math (position value, R/R); for STP_LMT it is the TRIGGER. */
     entry: number | null;
+    /** STP_LMT only: the limit cap for the triggered entry. */
+    entryLimit?: number | null;
     stop: number;
     target: number;
     quantity: number;
@@ -80,6 +82,20 @@ export function checkProposalRisk(
         if (!(p.target < entry)) violations.push(`short: target ${p.target} must be below entry ${entry}`);
     }
 
+    // --- STP_LMT: the limit cap must sit beyond the trigger, inside the target ---
+    if (p.entryType === 'STP_LMT') {
+        const cap = p.entryLimit;
+        if (cap == null || !(cap > 0)) {
+            violations.push('STP_LMT entries require entryLimit (the limit cap beyond the trigger)');
+        } else if (p.direction === 'long') {
+            if (!(cap >= entry)) violations.push(`long STP_LMT: entryLimit ${cap} must be at or above the trigger ${entry}`);
+            if (!(p.target > cap)) violations.push(`long STP_LMT: target ${p.target} must be above the limit cap ${cap}`);
+        } else {
+            if (!(cap <= entry)) violations.push(`short STP_LMT: entryLimit ${cap} must be at or below the trigger ${entry}`);
+            if (!(p.target < cap)) violations.push(`short STP_LMT: target ${p.target} must be below the limit cap ${cap}`);
+        }
+    }
+
     // --- Minimum price (penny-stock filter) ---
     if (entry < rules.min_price) {
         violations.push(`entry $${entry} is below the minimum price $${rules.min_price}`);
@@ -117,6 +133,61 @@ export function checkProposalRisk(
     }
 
     return { ok: violations.length === 0, violations, riskReward, positionValue };
+}
+
+// ---------------------------------------------------------------------------
+// Price-run (chase/invalidation) check — used at ACCEPTANCE time with a
+// live quote. Pure so it is unit-testable.
+// ---------------------------------------------------------------------------
+
+/** Fraction of the entry→target distance the price may consume before an
+ *  accept counts as chasing. */
+export const CHASE_FRACTION = 0.25;
+
+export interface PriceRunResult {
+    ok: boolean;
+    reason?: string;
+}
+
+/**
+ * Given a live price, decide whether accepting this proposal still makes
+ * sense: refuse when the price has already consumed more than
+ * CHASE_FRACTION of the edge (chasing), or has traded through the stop
+ * (the setup is invalidated).
+ */
+export function checkPriceRun(
+    p: Pick<RiskGateProposal, 'direction' | 'entry' | 'stop' | 'target'>,
+    lastPrice: number,
+): PriceRunResult {
+    const entry = p.entry;
+    if (entry == null || !(lastPrice > 0)) return { ok: true };
+
+    if (p.direction === 'long') {
+        if (lastPrice <= p.stop) {
+            return { ok: false, reason: `setup invalidated: last ${lastPrice} is at/through the stop ${p.stop}` };
+        }
+        const chaseLine = entry + CHASE_FRACTION * (p.target - entry);
+        if (lastPrice >= chaseLine) {
+            return {
+                ok: false,
+                reason: `price has run: last ${lastPrice} vs entry ${entry} — already past ` +
+                    `${Math.round(CHASE_FRACTION * 100)}% of the way to target ${p.target} (chasing)`,
+            };
+        }
+    } else {
+        if (lastPrice >= p.stop) {
+            return { ok: false, reason: `setup invalidated: last ${lastPrice} is at/through the stop ${p.stop}` };
+        }
+        const chaseLine = entry - CHASE_FRACTION * (entry - p.target);
+        if (lastPrice <= chaseLine) {
+            return {
+                ok: false,
+                reason: `price has run: last ${lastPrice} vs entry ${entry} — already past ` +
+                    `${Math.round(CHASE_FRACTION * 100)}% of the way to target ${p.target} (chasing)`,
+            };
+        }
+    }
+    return { ok: true };
 }
 
 /** Throw with all violations joined unless the proposal passes the gate. */
