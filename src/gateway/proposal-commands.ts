@@ -70,14 +70,34 @@ async function formatOrdersReply(): Promise<string> {
         if (!data.orders?.length) {
             return '📭 No working orders at IBKR.';
         }
-        const lines = [`📬 Working orders (${data.orders.length}):`];
+
+        // Group by symbol: a flat list makes correct bracket structure
+        // (stop + target on the same position) look like duplicate sells.
+        const bySymbol = new Map<string, OpenOrderRow[]>();
         for (const o of data.orders) {
+            const list = bySymbol.get(o.symbol) ?? [];
+            list.push(o);
+            bySymbol.set(o.symbol, list);
+        }
+
+        const fmt = (o: OpenOrderRow) => {
             // IBKR reports unset prices as 0 — a LMT shows lmtPrice, a STP
             // shows auxPrice (the trigger), never a legitimate 0.
             const price = (o.limitPrice || undefined) ?? (o.auxPrice || undefined);
-            lines.push(`• #${o.orderId ?? '?'} ${o.action} ${o.quantity} ${o.symbol} ${o.orderType}${price !== undefined ? ` @ ${price}` : ''} [${o.status ?? '?'}]`);
+            return `  • #${o.orderId ?? '?'} ${o.action} ${o.quantity} ${o.orderType}${price !== undefined ? ` @ ${price}` : ''} [${o.status ?? '?'}]`;
+        };
+
+        const lines = [`📬 Working orders (${data.orders.length}):`];
+        for (const [symbol, orders] of bySymbol) {
+            const sides = new Set(orders.map((o) => o.action));
+            const label = sides.size > 1
+                ? `${symbol} — bracket, entry still working:`
+                : orders.length > 1
+                    ? `${symbol} — exits protecting the position (OCA: one fills, the other cancels):`
+                    : `${symbol}:`;
+            lines.push(label, ...orders.map(fmt));
         }
-        lines.push("These are resting orders — a position appears only when an entry fills ('positions').");
+        lines.push("A position appears only when an entry fills ('positions').");
         return lines.join('\n');
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
