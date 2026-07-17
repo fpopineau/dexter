@@ -217,19 +217,19 @@ Resolution order of weights: explicit argument > in-process override
 
 ## 5. Paper-only auto-execution (off by default)
 
-`AUTO_EXECUTE_PAPER=true` lets trigger-created proposals execute without a
-human reply, under STRICTER conditions than manual acceptance:
+`AUTO_EXECUTE_PAPER=true` lets proposals from every source (briefs, scans,
+triggers) execute without a human reply, under STRICTER conditions than
+manual acceptance:
 
 - **Hard paper assertion**: refuses live ports/accounts **regardless of
   `IBKR_ALLOW_LIVE`**. Auto-execution cannot be enabled for live trading by
   any configuration — going live always requires explicit human acceptance
   per trade.
+- **Confidence floor**: only proposals with score ≥ `AUTO_EXECUTE_MIN_SCORE`
+  (default 80) execute unattended — lower scores stay open for manual accept.
 - Daily cap: `AUTO_EXECUTE_MAX_PER_DAY` (default 5).
 - All standard gates still apply (kill-switch included).
-- Every auto-execution is reported on WhatsApp (`🤖 AUTO-EXECUTE (paper, n/cap)`).
-
-Scope: trigger-created proposals only. Cron-brief proposals always wait for a
-human reply.
+- Every auto-execution is reported on WhatsApp (`🤖 AUTO-EXECUTE (paper, score S, n/cap)`).
 
 ## 6. Configuration reference (env)
 
@@ -241,8 +241,9 @@ human reply.
 | `OPP_TRIGGER_SCORE` | 75 | composite threshold for event triggers |
 | `OPP_TRIGGER_COOLDOWN_MIN` | 30 | per-symbol trigger debounce |
 | `OPP_TRIGGER_MAX_PER_DAY` | 10 | trigger cap per ET day |
-| `AUTO_EXECUTE_PAPER` | false | paper-only auto-execution of trigger proposals |
+| `AUTO_EXECUTE_PAPER` | false | paper-only auto-execution of proposals (all sources) |
 | `AUTO_EXECUTE_MAX_PER_DAY` | 5 | auto-execution cap per ET day |
+| `AUTO_EXECUTE_MIN_SCORE` | 80 | auto-exec confidence floor (score) |
 | `IBKR_ALLOW_LIVE` | false | manual-acceptance live unlock (never affects auto) |
 | `DATA_ARCHIVE` | true | daily post-close bar archival (16:20 ET) |
 | `DATA_ARCHIVE_SYMBOLS` | — | always-archived watchlist (comma-separated) |

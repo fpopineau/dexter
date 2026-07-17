@@ -150,8 +150,9 @@ Everything else has sensible defaults:
 | `UNIVERSE_SWEEP` | false | **opt-in** nightly (18:00 ET) midcap universe build + daily-bar archival — see §15.4 |
 | `UNIVERSE_CAP_MIN` / `_MAX` | 1e9 / 5e9 | universe cap band (USD) |
 | `UNIVERSE_MAX_REQUESTS` / `UNIVERSE_PACE_MS` | 1200 / 3000 | nightly IBKR request budget and pacing |
-| `AUTO_EXECUTE_PAPER` | false | paper-only auto-exec of trigger proposals (§11) |
+| `AUTO_EXECUTE_PAPER` | false | paper-only auto-exec of proposals, all sources (§11) |
 | `AUTO_EXECUTE_MAX_PER_DAY` | 5 | auto-exec daily cap |
+| `AUTO_EXECUTE_MIN_SCORE` | 80 | confidence floor — lower scores stay manual |
 | `DATA_ARCHIVE` | true | daily 16:20 ET bar archival (§15) |
 | `DATA_ARCHIVE_SYMBOLS` | — | always-archived watchlist, e.g. `SPY,QQQ` |
 | `DATA_ARCHIVE_MAX_SYMBOLS` | 30 | archival cap per day |
@@ -341,19 +342,22 @@ recovers succeeds.
 
 ## 11. Paper-only auto-execution
 
-`AUTO_EXECUTE_PAPER=true` lets **trigger-created** proposals execute
-without your reply — useful for accumulating labeled outcomes fast during
-the paper-validation phase.
+`AUTO_EXECUTE_PAPER=true` lets proposals from **every source** (cron
+briefs, scans, triggers) execute without your reply — the way to
+accumulate labeled outcomes fast during the paper-validation phase.
 
 Guarantees, in code, not convention:
 
 - refuses live ports/accounts **regardless of `IBKR_ALLOW_LIVE`** — no
   configuration can make auto-execution trade live;
+- **confidence floor**: only proposals scoring ≥ `AUTO_EXECUTE_MIN_SCORE`
+  (default 80) execute unattended; lower-scored and unscored proposals
+  stay open for a manual `accept`;
 - capped per day (`AUTO_EXECUTE_MAX_PER_DAY`, default 5);
-- every standard gate still applies (kill-switch, risk gate, expiry);
+- every standard gate still applies (kill-switch, risk gate, chase gate,
+  expiry);
 - every auto-execution is announced on WhatsApp
-  (`🤖 AUTO-EXECUTE (paper, n/cap)`);
-- cron-brief proposals are **never** auto-executed — only trigger ones.
+  (`🤖 AUTO-EXECUTE (paper, score S, n/cap)`).
 
 ## 12. Performance tracking
 

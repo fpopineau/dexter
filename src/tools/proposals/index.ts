@@ -14,7 +14,7 @@
 
 import { DynamicStructuredTool } from '@langchain/core/tools';
 import { z } from 'zod';
-import { acceptProposal } from '@/services/proposal-executor.js';
+import { acceptProposal, autoExecuteProposal, isAutoExecuteEnabled } from '@/services/proposal-executor.js';
 import {
     createProposal,
     formatPerformanceReport,
@@ -146,9 +146,22 @@ export function createTradeProposalsTool() {
                             source: 'agent',
                             expiresMinutes: input.expiresMinutes,
                         }, dailyAtr != null ? { dailyAtr } : {});
+
+                        // Paper-only auto-execution (AUTO_EXECUTE_PAPER=true):
+                        // attempted for EVERY proposal source — the executor
+                        // itself gates on score, daily cap, and paper port.
+                        // A refusal simply leaves the proposal open for a
+                        // manual 'accept'.
+                        let autoExecution: { ok: boolean; message: string } | undefined;
+                        if (isAutoExecuteEnabled()) {
+                            autoExecution = await autoExecuteProposal(p.id);
+                        }
                         return formatToolResult({
                             created: p,
-                            userInstruction: `Reply 'accept ${p.id}' to execute on paper, or 'reject ${p.id}'. Expires ${new Date(p.expiresAt).toISOString()}.`,
+                            ...(autoExecution ? { autoExecution } : {}),
+                            userInstruction: autoExecution?.ok
+                                ? `${p.id} was AUTO-EXECUTED on paper (score ${p.score}) — the bracket is working; the outcome will be tracked and alerted. Tell the user this explicitly.`
+                                : `Reply 'accept ${p.id}' to execute on paper, or 'reject ${p.id}'. Expires ${new Date(p.expiresAt).toISOString()}.`,
                         });
                     } catch (err) {
                         // Risk-gate refusal: return the violations so the numbers

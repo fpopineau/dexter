@@ -176,4 +176,44 @@ describe('auto-execution gates (paper-only by construction)', () => {
         expect(outcome.message).toContain('paper-only');
         expect((await getProposal(p.id))?.status).toBe('open');
     });
+
+    test('confidence gate: no score or low score stays open for manual accept', async () => {
+        process.env.AUTO_EXECUTE_PAPER = 'true';
+        process.env.IBKR_PORT = '4002';
+
+        const unscored = await openProposal();
+        const noScore = await autoExecuteProposal(unscored.id);
+        expect(noScore.ok).toBe(false);
+        expect(noScore.message).toContain('score none is below');
+        expect((await getProposal(unscored.id))?.status).toBe('open');
+
+        const low = await createProposal({
+            symbol: 'AAPL', direction: 'long', entryType: 'LMT',
+            entry: 100, stop: 95, target: 110, quantity: 10,
+            score: 62, rationale: 'low-confidence test', source: 'test',
+        });
+        const refused = await autoExecuteProposal(low.id);
+        expect(refused.ok).toBe(false);
+        expect(refused.message).toContain('score 62 is below the confidence threshold 80');
+        expect(refused.message).toContain(`accept ${low.id}`);
+        expect((await getProposal(low.id))?.status).toBe('open');
+    });
+
+    test('confidence threshold is tunable via AUTO_EXECUTE_MIN_SCORE', async () => {
+        process.env.AUTO_EXECUTE_PAPER = 'true';
+        process.env.IBKR_PORT = '4002';
+        process.env.AUTO_EXECUTE_MIN_SCORE = '95';
+        try {
+            const p = await createProposal({
+                symbol: 'AAPL', direction: 'long', entryType: 'LMT',
+                entry: 100, stop: 95, target: 110, quantity: 10,
+                score: 90, rationale: 'threshold test', source: 'test',
+            });
+            const refused = await autoExecuteProposal(p.id);
+            expect(refused.ok).toBe(false);
+            expect(refused.message).toContain('below the confidence threshold 95');
+        } finally {
+            delete process.env.AUTO_EXECUTE_MIN_SCORE;
+        }
+    });
 });

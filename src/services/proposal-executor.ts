@@ -183,6 +183,11 @@ function autoExecMaxPerDay(): number {
     return Number.isFinite(n) && n > 0 ? n : 5;
 }
 
+function autoExecMinScore(): number {
+    const n = Number(process.env.AUTO_EXECUTE_MIN_SCORE);
+    return Number.isFinite(n) && n > 0 ? n : 80;
+}
+
 function etDate(): string {
     const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
     return `${et.getFullYear()}-${String(et.getMonth() + 1).padStart(2, '0')}-${String(et.getDate()).padStart(2, '0')}`;
@@ -208,6 +213,7 @@ export async function autoExecuteProposal(id: string): Promise<ExecutionOutcome>
     if (autoExecCount >= max) {
         return { ok: false, message: `auto-execute daily cap reached (${max}/day)` };
     }
+
     try {
         assertPaperOnly();
     } catch (err) {
@@ -216,11 +222,27 @@ export async function autoExecuteProposal(id: string): Promise<ExecutionOutcome>
         return { ok: false, message: `auto-execute refused — ${msg}` };
     }
 
+    // Confidence gate: only proposals carrying a score at or above
+    // AUTO_EXECUTE_MIN_SCORE execute unattended; everything else stays
+    // open for a manual 'accept'. No score → no auto-execution.
+    const p = await getProposal(id);
+    if (!p) {
+        return { ok: false, message: `auto-execute: proposal ${id.toUpperCase()} not found` };
+    }
+    const minScore = autoExecMinScore();
+    if (p.score == null || p.score < minScore) {
+        return {
+            ok: false,
+            message: `auto-execute: ${p.id} score ${p.score ?? 'none'} is below the confidence threshold ` +
+                `${minScore} (AUTO_EXECUTE_MIN_SCORE) — left open for manual 'accept ${p.id}'`,
+        };
+    }
+
     const outcome = await acceptProposal(id);
     if (outcome.ok) autoExecCount++;
     return {
         ok: outcome.ok,
-        message: `🤖 AUTO-EXECUTE (paper, ${autoExecCount}/${max} today) — ${outcome.message}`,
+        message: `🤖 AUTO-EXECUTE (paper, score ${p.score}, ${autoExecCount}/${max} today) — ${outcome.message}`,
     };
 }
 
