@@ -100,12 +100,29 @@ The signal scorer combines:
 
 ## Step 5: Validate Against Risk Rules
 
+**Set the levels from structure, in this order — never backwards from the
+R/R requirement:**
+
+1. **Stop first, at real structure**: the low of day, the pullback low, the
+   breakout base, or VWAP — the price where the setup is objectively wrong.
+   It must be at least **0.4× the daily ATR** away from entry (the proposal
+   gate enforces this): a tighter stop sits inside ordinary intraday noise
+   and fills on randomness even when the idea is right. Sanity band:
+   0.4–1.5× daily ATR.
+2. **Target at a real objective**: prior high/low, measured move, gap fill.
+   If the honest objective is closer than 2× the stop distance, there is no
+   trade — do NOT stretch the target or tighten the stop to manufacture 2:1.
+3. **Size from the risk budget**: `shares = floor(0.25% of NetLiq / (entry − stop))`.
+   Every trade then loses the same amount when wrong. Never size up to the
+   5% position-value cap on a tight stop — that cap is a ceiling, not a
+   sizing method.
+
 Call `risk_manager` for each trade candidate:
 - **Ticker:** The candidate
 - **Direction:** long/short
 - **Entry price:** Current price from TA data
-- **Stop price:** Based on ATR (entry ± 1.5× ATR)
-- **Target price:** Based on risk/reward ratio (≥ 2:1)
+- **Stop price:** From structure as above (typically entry ± 1–1.5× ATR)
+- **Target price:** The real objective (must give ≥ 2:1 vs the stop)
 
 The risk manager validates:
 - Position size doesn't exceed max allocation

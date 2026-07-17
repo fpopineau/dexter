@@ -148,7 +148,7 @@ const DURATION_FOR_BAR: Record<string, string> = {
 // Data fetching (same pattern as technical-analysis.ts)
 // ---------------------------------------------------------------------------
 
-async function fetchBars(
+export async function fetchBars(
     ticker: string,
     barSize: BarSizeSetting,
     duration: string,

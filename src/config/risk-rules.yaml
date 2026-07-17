@@ -27,3 +27,7 @@ min_avg_volume: 500000 # Minimum average daily volume
 
 # --- ATR-Based Stops ---
 stop_atr_multiplier: 1.5 # Default stop = entry ± 1.5 × ATR
+min_stop_atr_fraction: 0.4 # Refuse stops closer than this × daily ATR(14) — inside intraday noise
+
+# --- Per-Trade Risk Budget ---
+max_risk_per_trade_pct: 0.25 # Max loss if the stop fills (qty × stop distance), as % of net liquidation

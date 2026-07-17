@@ -38,6 +38,9 @@ export interface RiskGateContext {
     openPositions?: number;
     /** Proposals executed since the start of the ET day. Enables max_daily_trades. */
     executedToday?: number;
+    /** Daily ATR(14) for the symbol (USD). Enables the noise-stop check —
+     *  fetched server-side at creation, never trusted from the LLM. */
+    dailyAtr?: number;
 }
 
 export interface RiskGateResult {
@@ -107,6 +110,36 @@ export function checkProposalRisk(
     const riskReward = risk > 0 ? Math.round((reward / risk) * 100) / 100 : null;
     if (riskReward !== null && riskReward < rules.min_risk_reward) {
         violations.push(`risk/reward ${riskReward}:1 is below the minimum ${rules.min_risk_reward}:1`);
+    }
+
+    // --- Stop distance vs daily ATR (noise-stop filter) ---
+    // Every early live loss exited via stop: stops placed at 0.13–0.3× the
+    // daily ATR sit inside ordinary intraday noise and get hit regardless
+    // of whether the idea was right.
+    if (ctx.dailyAtr !== undefined && ctx.dailyAtr > 0 && risk > 0) {
+        const minStop = rules.min_stop_atr_fraction * ctx.dailyAtr;
+        if (risk < minStop) {
+            violations.push(
+                `stop is $${risk.toFixed(2)} from entry — inside intraday noise for a stock with daily ` +
+                `ATR $${ctx.dailyAtr.toFixed(2)} (minimum ${rules.min_stop_atr_fraction}× ATR = $${minStop.toFixed(2)}). ` +
+                `Place the stop at real structure at least that far away (and resize), or skip the trade`,
+            );
+        }
+    }
+
+    // --- Risk budget per trade (needs net liquidation) ---
+    // Normalizes what a stop-out costs: quantity × stop distance may not
+    // exceed max_risk_per_trade_pct of the account.
+    if (ctx.netLiquidation !== undefined && ctx.netLiquidation > 0 && risk > 0) {
+        const riskDollars = Math.round(p.quantity * risk * 100) / 100;
+        const maxRisk = (rules.max_risk_per_trade_pct / 100) * ctx.netLiquidation;
+        if (riskDollars > maxRisk) {
+            const maxShares = Math.floor(maxRisk / risk);
+            violations.push(
+                `a stop-out would cost $${riskDollars.toFixed(0)} (${p.quantity} × $${risk.toFixed(2)} stop distance) — ` +
+                `over the ${rules.max_risk_per_trade_pct}% risk budget ($${maxRisk.toFixed(0)}); max ${maxShares} shares at these levels`,
+            );
+        }
     }
 
     // --- Position size vs account (acceptance-time) ---

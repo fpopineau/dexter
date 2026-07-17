@@ -169,6 +169,8 @@ max_daily_loss_pct: 2        # kill-switch threshold
 max_daily_trades: 20         # hard-enforced at acceptance
 max_open_positions: 10       # hard-enforced at acceptance
 min_risk_reward: 2.0         # hard-enforced at creation
+min_stop_atr_fraction: 0.4   # stop must be ≥ 0.4 × daily ATR from entry (noise filter)
+max_risk_per_trade_pct: 0.25 # max loss-if-stopped per trade, % of NetLiq
 min_price: 5.0               # hard-enforced at creation
 # sector/overnight limits: advisory (risk_manager tool in prompts)
 ```
@@ -286,7 +288,8 @@ P-3F2A LONG 50 NVDA @182.5 stop 178.2 target 191.0 (score 82) [open]
 agent when you ask it to. Creation never trades.
 
 **The risk gate at creation** silently protects you: any proposal with
-R/R < `min_risk_reward`, entry < `min_price`, an incoherent stop/target, or
+R/R < `min_risk_reward`, entry < `min_price`, an incoherent stop/target, a
+stop closer than `min_stop_atr_fraction` × the daily ATR (noise-stop filter), or
 a fractional quantity is refused before it is stored. The agent sees the
 violation list and must fix the numbers.
 

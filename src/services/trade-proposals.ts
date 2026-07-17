@@ -20,7 +20,7 @@ import { logger } from '@/utils';
 import { randomBytes } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { assertProposalRisk } from './proposal-risk-gate.js';
+import { assertProposalRisk, type RiskGateContext } from './proposal-risk-gate.js';
 
 export type ProposalStatus = 'open' | 'executed' | 'closed' | 'rejected' | 'expired' | 'failed';
 
@@ -247,7 +247,10 @@ export interface CreateProposalInput {
     expiresMinutes?: number;
 }
 
-export async function createProposal(input: CreateProposalInput): Promise<TradeProposal> {
+export async function createProposal(
+    input: CreateProposalInput,
+    gateContext: RiskGateContext = {},
+): Promise<TradeProposal> {
     // Deterministic risk gate — a proposal violating risk-rules.yaml is never
     // persisted, regardless of who created it (LLM, cron, TUI, script).
     assertProposalRisk({
@@ -258,7 +261,7 @@ export async function createProposal(input: CreateProposalInput): Promise<TradeP
         stop: input.stop,
         target: input.target,
         quantity: input.quantity,
-    });
+    }, gateContext);
 
     const database = await getDb();
     const now = Date.now();

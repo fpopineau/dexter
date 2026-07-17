@@ -22,6 +22,8 @@ export interface RiskRules {
     min_price: number;
     min_avg_volume: number;
     stop_atr_multiplier: number;
+    max_risk_per_trade_pct: number;
+    min_stop_atr_fraction: number;
 }
 
 export const DEFAULT_RULES: RiskRules = {
@@ -37,6 +39,8 @@ export const DEFAULT_RULES: RiskRules = {
     min_price: 5.0,
     min_avg_volume: 500_000,
     stop_atr_multiplier: 1.5,
+    max_risk_per_trade_pct: 0.25,
+    min_stop_atr_fraction: 0.4,
 };
 
 let cachedRules: RiskRules | null = null;

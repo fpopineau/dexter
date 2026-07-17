@@ -78,10 +78,15 @@ Starts/stops with the gateway when IBKR is configured; opt-out with
 Deterministic enforcement of `risk-rules.yaml` (the `risk_manager` tool is
 advisory; this gate is mandatory):
 - at **creation** (`createProposal`): coherent stop/target, min price,
-  min risk/reward, integer quantity — violating proposals are never persisted;
+  min risk/reward, integer quantity, and the **noise-stop filter** (stop
+  distance must be ≥ `min_stop_atr_fraction` × the daily ATR(14), fetched
+  server-side — a tighter stop sits inside intraday noise and fills on
+  randomness) — violating proposals are never persisted;
 - at **acceptance** (executor): position value vs `max_position_pct` of the
   live NetLiquidation, `max_open_positions` (executed-not-closed count),
-  `max_daily_trades` (executed today, ET).
+  `max_daily_trades` (executed today, ET), and the **per-trade risk budget**
+  (quantity × stop distance ≤ `max_risk_per_trade_pct` of NetLiq — every
+  trade loses the same amount when wrong).
 
 ### Outcome tracker — `src/services/outcome-tracker.ts`
 Closes the feedback loop on executed proposals. Watches the bracket's three

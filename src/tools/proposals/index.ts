@@ -24,6 +24,7 @@ import {
     listProposals,
 } from '@/services/trade-proposals.js';
 import { rejectProposal } from '@/services/proposal-executor.js';
+import { fetchDailyAtr } from '../ibkr/daily-atr.js';
 import { formatToolResult } from '../types.js';
 
 export const TRADE_PROPOSALS_DESCRIPTION = `
@@ -67,9 +68,12 @@ const CreateSchema = z.object({
         .describe('Entry price. LMT: the limit. MKT: current price (indicative, risk validation). STP_LMT: the TRIGGER price (above market for longs).'),
     entryLimit: z.coerce.number().positive().optional()
         .describe('STP_LMT only: the limit cap for the triggered entry (slightly beyond the trigger, e.g. trigger +0.3–0.6%).'),
-    stop: z.coerce.number().positive().describe('Stop-loss price.'),
-    target: z.coerce.number().positive().describe('Take-profit price.'),
-    quantity: z.coerce.number().int().positive().describe('Number of shares.'),
+    stop: z.coerce.number().positive()
+        .describe('Stop-loss price at REAL STRUCTURE (low of day, pullback low, VWAP). The gate refuses stops closer than 0.4× the daily ATR — inside intraday noise, they fill on randomness.'),
+    target: z.coerce.number().positive()
+        .describe('Take-profit at a real objective (prior high, measured move). Do NOT derive it as entry + 2× stop distance to satisfy the R/R gate — if an honest target is not ≥2× the stop distance away, skip the trade.'),
+    quantity: z.coerce.number().int().positive()
+        .describe('Number of shares. Size from the risk budget: shares ≈ (0.25% of account) / (entry − stop). At acceptance the gate refuses if a stop-out would cost more than the budget.'),
     tif: z.enum(['DAY', 'GTC']).default('DAY')
         .describe("Bracket time-in-force. Use 'GTC' for overnight/swing setups so the stop and target SURVIVE the market close; 'DAY' brackets expire at the bell and can leave a filled position unprotected overnight."),
     score: z.coerce.number().min(0).max(150).optional().describe('Signal/composite score backing this proposal.'),
@@ -124,6 +128,9 @@ export function createTradeProposalsTool() {
                     const problem = coherent(input);
                     if (problem) return formatToolResult({ error: problem });
                     try {
+                        // Server-side daily ATR for the noise-stop check —
+                        // never taken from the model. Fail-open (null skips).
+                        const dailyAtr = await fetchDailyAtr(input.symbol);
                         const p = await createProposal({
                             symbol: input.symbol,
                             direction: input.direction,
@@ -138,7 +145,7 @@ export function createTradeProposalsTool() {
                             rationale: input.rationale,
                             source: 'agent',
                             expiresMinutes: input.expiresMinutes,
-                        });
+                        }, dailyAtr != null ? { dailyAtr } : {});
                         return formatToolResult({
                             created: p,
                             userInstruction: `Reply 'accept ${p.id}' to execute on paper, or 'reject ${p.id}'. Expires ${new Date(p.expiresAt).toISOString()}.`,

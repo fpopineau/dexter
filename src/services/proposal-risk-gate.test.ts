@@ -116,6 +116,58 @@ describe('proposal risk gate — account context checks', () => {
     });
 });
 
+describe('noise-stop filter (daily ATR)', () => {
+    test('stop inside 0.4× daily ATR is refused with the required distance', () => {
+        // The live pattern this kills: AMZN entry 256.62, stop 256 — a $0.62
+        // stop on a stock whose daily ATR is ~$5 (0.12× ATR).
+        const r = checkProposalRisk(
+            longProposal({ entry: 256.62, stop: 256, target: 257.87, quantity: 19 }),
+            { dailyAtr: 5 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('intraday noise');
+        expect(r.violations.join(' ')).toContain('$2.00'); // 0.4 × 5
+    });
+
+    test('stop at/beyond the ATR floor passes', () => {
+        // fixture stop distance $5 vs floor 0.4 × $10 = $4
+        const r = checkProposalRisk(longProposal(), { dailyAtr: 10 }, RULES);
+        expect(r.ok).toBe(true);
+    });
+
+    test('no ATR available → check skipped (fail-open)', () => {
+        const r = checkProposalRisk(longProposal({ entry: 256.62, stop: 256, target: 257.87 }), {}, RULES);
+        expect(r.ok).toBe(true);
+    });
+});
+
+describe('per-trade risk budget', () => {
+    test('a stop-out costing more than max_risk_per_trade_pct is refused with a share cap', () => {
+        // The live pattern this kills: RAM 3154 shares × $0.81 stop ≈ $2.5k
+        // risked on one trade while another risked $32.
+        const r = checkProposalRisk(
+            longProposal({ entry: 16.61, stop: 15.8, target: 18.23, quantity: 3154 }),
+            { netLiquidation: 100_000 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        const msg = r.violations.join(' ');
+        expect(msg).toContain('risk budget');
+        expect(msg).toContain(`max ${Math.floor(250 / 0.81)} shares`);
+    });
+
+    test('risk-budget-sized quantity passes both sizing checks', () => {
+        // 308 × $0.81 ≈ $249.5 risk ≤ $250; position $5.1k... exceeds 5%? no: 308 × 16.61 ≈ $5116 > $5000 — use 300
+        const r = checkProposalRisk(
+            longProposal({ entry: 16.61, stop: 15.8, target: 18.23, quantity: 300 }),
+            { netLiquidation: 100_000 },
+            RULES,
+        );
+        expect(r.ok).toBe(true);
+    });
+});
+
 describe('STP_LMT (momentum) entries', () => {
     test('valid long stop-limit entry passes', () => {
         // risk 2.2 (102.2−100.0), reward 4.6 (106.8−102.2) → R/R 2.09 ≥ 2.0
