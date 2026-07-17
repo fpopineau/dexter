@@ -24,6 +24,7 @@ export interface RiskRules {
     stop_atr_multiplier: number;
     max_risk_per_trade_pct: number;
     min_stop_atr_fraction: number;
+    max_extension_atr: number;
 }
 
 export const DEFAULT_RULES: RiskRules = {
@@ -41,6 +42,7 @@ export const DEFAULT_RULES: RiskRules = {
     stop_atr_multiplier: 1.5,
     max_risk_per_trade_pct: 0.25,
     min_stop_atr_fraction: 0.4,
+    max_extension_atr: 3,
 };
 
 let cachedRules: RiskRules | null = null;

@@ -24,7 +24,7 @@ import {
     listProposals,
 } from '@/services/trade-proposals.js';
 import { rejectProposal } from '@/services/proposal-executor.js';
-import { fetchDailyAtr } from '../ibkr/daily-atr.js';
+import { fetchDailyRiskContext } from '../ibkr/daily-atr.js';
 import { formatToolResult } from '../types.js';
 
 export const TRADE_PROPOSALS_DESCRIPTION = `
@@ -128,9 +128,10 @@ export function createTradeProposalsTool() {
                     const problem = coherent(input);
                     if (problem) return formatToolResult({ error: problem });
                     try {
-                        // Server-side daily ATR for the noise-stop check —
-                        // never taken from the model. Fail-open (null skips).
-                        const dailyAtr = await fetchDailyAtr(input.symbol);
+                        // Server-side daily ATR + EMA10 for the noise-stop
+                        // and extension checks — never taken from the model.
+                        // Fail-open (nulls skip the checks).
+                        const { dailyAtr, ema10 } = await fetchDailyRiskContext(input.symbol);
                         const p = await createProposal({
                             symbol: input.symbol,
                             direction: input.direction,
@@ -145,7 +146,10 @@ export function createTradeProposalsTool() {
                             rationale: input.rationale,
                             source: 'agent',
                             expiresMinutes: input.expiresMinutes,
-                        }, dailyAtr != null ? { dailyAtr } : {});
+                        }, {
+                            ...(dailyAtr != null ? { dailyAtr } : {}),
+                            ...(ema10 != null ? { ema10 } : {}),
+                        });
 
                         // Paper-only auto-execution (AUTO_EXECUTE_PAPER=true):
                         // attempted for EVERY proposal source — the executor

@@ -100,6 +100,20 @@ The signal scorer combines:
 
 ## Step 5: Validate Against Risk Rules
 
+**Entry discipline — the two patterns that produced every early live loss:**
+
+- **Don't chase extension.** If price is already far above its 10-day EMA
+  (the gate refuses beyond 3× daily ATR), the move is statistically due to
+  mean-revert — scanners surface these names precisely BECAUSE they are
+  extended. Longs on extended movers need a pullback/consolidation entry,
+  not a top-tick fill. A big-% gainer late in its run is a candidate for
+  no-trade (or a short setup), not a momentum long.
+- **Respect the opening range.** Entries in the first ~15 minutes
+  (09:30–09:45 ET) buy directly into the gap-fade zone — 4 of the first 7
+  live losses filled there and reversed immediately. Prefer waiting for
+  the opening range to form and entering on its break or on the first
+  pullback that holds.
+
 **Set the levels from structure, in this order — never backwards from the
 R/R requirement:**
 

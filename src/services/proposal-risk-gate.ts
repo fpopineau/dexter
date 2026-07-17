@@ -41,6 +41,8 @@ export interface RiskGateContext {
     /** Daily ATR(14) for the symbol (USD). Enables the noise-stop check —
      *  fetched server-side at creation, never trusted from the LLM. */
     dailyAtr?: number;
+    /** EMA(10) of daily closes. With dailyAtr, enables the extension check. */
+    ema10?: number;
 }
 
 export interface RiskGateResult {
@@ -123,6 +125,24 @@ export function checkProposalRisk(
                 `stop is $${risk.toFixed(2)} from entry — inside intraday noise for a stock with daily ` +
                 `ATR $${ctx.dailyAtr.toFixed(2)} (minimum ${rules.min_stop_atr_fraction}× ATR = $${minStop.toFixed(2)}). ` +
                 `Place the stop at real structure at least that far away (and resize), or skip the trade`,
+            );
+        }
+    }
+
+    // --- Extension guard (chasing filter) ---
+    // Every early live loss was an extended mover bought at the top of its
+    // run — and the price never saw the target again. Entering further than
+    // max_extension_atr × ATR beyond the 10-day EMA is chasing a move that
+    // statistically mean-reverts; wait for consolidation or skip.
+    if (ctx.dailyAtr !== undefined && ctx.dailyAtr > 0 && ctx.ema10 !== undefined && ctx.ema10 > 0) {
+        const extension = p.direction === 'long'
+            ? (entry - ctx.ema10) / ctx.dailyAtr
+            : (ctx.ema10 - entry) / ctx.dailyAtr;
+        if (extension > rules.max_extension_atr) {
+            violations.push(
+                `entry $${entry} is ${extension.toFixed(1)}× daily ATR ${p.direction === 'long' ? 'above' : 'below'} ` +
+                `the 10-day EMA ($${ctx.ema10.toFixed(2)}) — chasing an extended move (max ${rules.max_extension_atr}×). ` +
+                `Wait for a pullback/consolidation, or skip`,
             );
         }
     }

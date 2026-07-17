@@ -142,6 +142,45 @@ describe('noise-stop filter (daily ATR)', () => {
     });
 });
 
+describe('extension guard (chasing filter)', () => {
+    test('long entry far above the 10-day EMA is refused', () => {
+        // The live pattern this kills: AEHR bought at 101.87 after doubling —
+        // ~5× ATR above its 10-day mean; price never saw the target again.
+        const r = checkProposalRisk(
+            longProposal({ entry: 101.87, stop: 95, target: 116 }),
+            { dailyAtr: 8, ema10: 60 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('chasing an extended move');
+        expect(r.violations.join(' ')).toContain('5.2× daily ATR above');
+    });
+
+    test('short mirror: entry far below the EMA is refused', () => {
+        const r = checkProposalRisk(
+            longProposal({ direction: 'short', entry: 40, stop: 44, target: 30 }),
+            { dailyAtr: 2, ema10: 50 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('below');
+    });
+
+    test('modest extension passes; missing context skips the check', () => {
+        // 2 ATR above the mean — within the 3× allowance
+        const ok = checkProposalRisk(longProposal(), { dailyAtr: 5, ema10: 90 }, RULES);
+        expect(ok.ok).toBe(true);
+        // ATR present but no EMA → check skipped (fail-open)
+        const skipped = checkProposalRisk(longProposal(), { dailyAtr: 5 }, RULES);
+        expect(skipped.ok).toBe(true);
+    });
+
+    test('a pullback entry BELOW the mean is never "extended" for a long', () => {
+        const r = checkProposalRisk(longProposal(), { dailyAtr: 5, ema10: 120 }, RULES);
+        expect(r.ok).toBe(true); // entry 100 under EMA 120 → negative extension
+    });
+});
+
 describe('per-trade risk budget', () => {
     test('a stop-out costing more than max_risk_per_trade_pct is refused with a share cap', () => {
         // The live pattern this kills: RAM 3154 shares × $0.81 stop ≈ $2.5k

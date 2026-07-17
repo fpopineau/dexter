@@ -81,7 +81,10 @@ advisory; this gate is mandatory):
   min risk/reward, integer quantity, and the **noise-stop filter** (stop
   distance must be ≥ `min_stop_atr_fraction` × the daily ATR(14), fetched
   server-side — a tighter stop sits inside intraday noise and fills on
-  randomness) — violating proposals are never persisted;
+  randomness), and the **extension guard** (entry further than
+  `max_extension_atr` × daily ATR beyond the 10-day EMA is chasing a move
+  that mean-reverts — the first live week lost on exactly this pattern) —
+  violating proposals are never persisted;
 - at **acceptance** (executor): position value vs `max_position_pct` of the
   live NetLiquidation, `max_open_positions` (executed-not-closed count),
   `max_daily_trades` (executed today, ET), and the **per-trade risk budget**
