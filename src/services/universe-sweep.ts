@@ -172,6 +172,15 @@ export async function runUniverseSweepOnce(): Promise<void> {
         `${capsKnown} caps known, ${finalBand.length} names in band, ` +
         `${unknowns.length - probed} still awaiting probes`,
     );
+
+    // Stage 4: swing-pattern scan over the freshly extended daily history.
+    // Local reads only — a failure must never mark the sweep failed.
+    try {
+        const { runPatternScan } = await import('./pattern-scanner.js');
+        await runPatternScan();
+    } catch (err) {
+        logger.error(`[universe-sweep] pattern scan failed: ${err}`);
+    }
 }
 
 function hasUnknowns(store: UniverseStore): boolean {

@@ -115,10 +115,24 @@ Disable with `DATA_ARCHIVE=false`. Historical ranges are backfilled with
 `UNIVERSE_SWEEP=true` adds a nightly job (18:00 ET): US common-stock
 directory (nasdaqtrader) + shares outstanding (SEC EDGAR, no key) →
 market caps → ~400 days of daily bars archived for names in the
-`UNIVERSE_CAP_MIN..MAX` band (default $1–5B). Substrate for the planned
-swing / cup-and-handle pattern scanners. The engine's intraday scans can
-be restricted to the same band via `OPP_MARKET_CAP_MIN/MAX` (unset =
+`UNIVERSE_CAP_MIN..MAX` band (default $1–5B). The engine's intraday scans
+can be restricted to the same band via `OPP_MARKET_CAP_MIN/MAX` (unset =
 unchanged behavior), and the `ibkr_scanner` tool accepts `maxMarketCap`.
+
+### Swing pattern scan — `src/services/pattern-{detectors,scanner}.ts`
+After each sweep, pure detectors run over every symbol with ≥120 archived
+daily bars (local SQLite, no IBKR requests): **pullback-in-uptrend** (rising
+EMA50 trend, orderly 3–12% pullback to the EMA20 on contracting volume),
+**flat-base** (20–35d range ≤10% near highs after a +25% advance), and
+**cup-and-handle** (12–35% rounded cup, rims within 10%, short shallow
+handle in the upper half, volume dry-up). All three trigger on pullbacks
+and pivots — never on vertical extension. The top 25 (with pivot,
+suggested STP_LMT trigger, structure stop, daily ATR, measured evidence)
+persist to `.dexter/data/pattern-scan.json`; the agent reads them via the
+`swing_patterns` tool (`latest`/`refresh`), and the Pre-Market Brief
+verifies news on the top candidates and registers GTC STP_LMT swing
+proposals through the normal gates. Manual run:
+`bun run scripts/pattern-scan.ts`.
 
 ### Scheduled briefs — `src/cron/trading-schedules.ts`
 Seeded at gateway startup (prompt changes in code are re-synced to already

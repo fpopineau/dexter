@@ -477,6 +477,42 @@ export async function archiveBarsRange(options: ArchiveRangeOptions): Promise<Ar
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Read access — consumers of the archived history (pattern scanners)
+// ---------------------------------------------------------------------------
+
+export interface ArchivedDailyBar {
+    time: string;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume: number;
+}
+
+/** Symbols with at least `minBars` archived daily bars. */
+export async function listDailySymbols(minBars: number): Promise<string[]> {
+    const database = await getDb();
+    return database
+        .query<{ symbol: string }>(
+            `SELECT symbol FROM bars WHERE bar_size = '1 day'
+             GROUP BY symbol HAVING COUNT(*) >= ? ORDER BY symbol`,
+        )
+        .all(minBars)
+        .map((r) => r.symbol);
+}
+
+/** Archived daily bars for one symbol, oldest first. */
+export async function getDailyBars(symbol: string): Promise<ArchivedDailyBar[]> {
+    const database = await getDb();
+    return database
+        .query<ArchivedDailyBar>(
+            `SELECT time, open, high, low, close, volume FROM bars
+             WHERE symbol = ? AND bar_size = '1 day' ORDER BY time`,
+        )
+        .all(symbol.toUpperCase());
+}
+
 /**
  * Close the archive database connection.
  */

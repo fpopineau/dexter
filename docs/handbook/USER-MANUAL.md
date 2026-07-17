@@ -538,6 +538,15 @@ pattern scanners (cup-and-handle etc.) will consume:
 Manual run: `bun -e 'import("./src/services/universe-sweep.js").then(m => m.runUniverseSweepOnce())'`.
 The universe lives at `.dexter/data/universe.json`.
 
+**Swing pattern scan** (stages 3–5): after each sweep the pattern detectors
+(pullback-in-uptrend, flat-base, cup-and-handle) run over every symbol with
+enough daily history and persist the top 25 to
+`.dexter/data/pattern-scan.json`. The agent exposes them as the
+`swing_patterns` tool ("any swing setups?" in the TUI/WhatsApp), and the
+08:00 Pre-Market Brief verifies news on the best few and registers GTC
+STP_LMT swing proposals through the normal risk gates. Manual run + printed
+table: `bun run scripts/pattern-scan.ts` (local archive only, no IBKR).
+
 Related: the Opportunity Engine can restrict its intraday scans to the same
 band via `OPP_MARKET_CAP_MIN/MAX`, and the `ibkr_scanner` tool accepts
 `maxMarketCap` — e.g. "scan midcap top gainers" in the TUI.

@@ -17,6 +17,7 @@ import { HEARTBEAT_TOOL_DESCRIPTION, heartbeatTool } from './heartbeat/heartbeat
 import { createIbkrAccount, createIbkrHistorical, createIbkrMarketData, createIbkrOrders, createIbkrScanner, createRiskManager, createSignalScorer, createTechnicalAnalysis, IBKR_ACCOUNT_DESCRIPTION, IBKR_HISTORICAL_DESCRIPTION, IBKR_MARKET_DATA_DESCRIPTION, IBKR_ORDERS_DESCRIPTION, IBKR_SCANNER_DESCRIPTION, RISK_MANAGER_DESCRIPTION, SIGNAL_SCORER_DESCRIPTION, TECHNICAL_ANALYSIS_DESCRIPTION } from './ibkr/index.js';
 import { MEMORY_GET_DESCRIPTION, MEMORY_SEARCH_DESCRIPTION, MEMORY_UPDATE_DESCRIPTION, memoryGetTool, memorySearchTool, memoryUpdateTool } from './memory/index.js';
 import { createOpportunitiesTool, OPPORTUNITIES_DESCRIPTION } from './opportunities/index.js';
+import { createSwingPatternsTool, SWING_PATTERNS_DESCRIPTION } from './patterns/index.js';
 import { ACCEPT_PROPOSAL_DESCRIPTION, createAcceptProposalTool, createTradeProposalsTool, TRADE_PROPOSALS_DESCRIPTION } from './proposals/index.js';
 import { exaSearch, langSearch, perplexitySearch, tavilySearch, WEB_SEARCH_DESCRIPTION, X_SEARCH_DESCRIPTION, xSearchTool } from './search/index.js';
 import { createWebSearchTool, type WebSearchProvider } from './search/web-search.js';
@@ -220,6 +221,13 @@ export function getToolRegistry(model: string): RegisteredTool[] {
         description: OPPORTUNITIES_DESCRIPTION,
         compactDescription: 'Ranked trading opportunities from the continuous market scanner (latest snapshot or fresh cycle). Advisory only.',
         concurrencySafe: false,
+      },
+      {
+        name: 'swing_patterns',
+        tool: createSwingPatternsTool(),
+        description: SWING_PATTERNS_DESCRIPTION,
+        compactDescription: 'Nightly swing-pattern scan (pullback, flat-base, cup-and-handle) over the midcap universe daily history.',
+        concurrencySafe: true,
       },
       {
         name: 'trade_proposals',

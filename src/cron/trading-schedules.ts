@@ -35,7 +35,7 @@ const TRADING_JOBS: TradingJobDef[] = [
         name: 'Pre-Market Brief',
         description: 'Morning market briefing: performance recap, overnight recap, calendar, gap analysis, watchlist levels.',
         cronExpr: '0 8 * * 1-5',
-        message: 'Run pre-market brief. Start with the trading performance recap: call trade_proposals (action performance, days 1) and report the closed trades, win/loss, net P&L, and anything still executing — include the provided report verbatim, then one sentence of interpretation (e.g. stops hit on longs in a weak tape). Then summarize overnight moves, today\'s earnings/economic calendar, pre-market movers, and watchlist key levels.',
+        message: 'Run pre-market brief. Start with the trading performance recap: call trade_proposals (action performance, days 1) and report the closed trades, win/loss, net P&L, and anything still executing — include the provided report verbatim, then one sentence of interpretation (e.g. stops hit on longs in a weak tape). Then summarize overnight moves, today\'s earnings/economic calendar, pre-market movers, and watchlist key levels. Finally check swing_patterns (action latest) — last night\'s pullback/flat-base/cup-and-handle candidates: for the top 2-3, verify news/earnings timing (skip any reporting within the holding window), and where clean, register a GTC swing proposal (entryType STP_LMT, trigger = suggestedEntry, entryLimit ~0.3% above, stop near suggestedStop, target at a real objective giving >= 2:1). These are patient orders that only fill on strength — clearly separate them from intraday ideas in your message.',
         model: undefined, // use default (Claude for deep reasoning)
         maxIterations: 12,
         activeStart: '07:00',
