@@ -15,8 +15,9 @@ import type { Contract, Order, OrderState } from '@stoqey/ib';
 import { EventName, OrderAction, OrderStatus, OrderType, SecType, TimeInForce } from '@stoqey/ib';
 import { z } from 'zod';
 import { formatToolResult } from '../types.js';
-import { assertOrderingAllowed, getIBApi, isNonFatalIbkrError } from './connection.js';
+import { assertAccountsVerified, getIBApi, isNonFatalIbkrError } from './connection.js';
 import { withOrderLock } from './order-lock.js';
+import { assertDailyLossOk } from '@/services/daily-loss-guard.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -136,9 +137,13 @@ export function createIbkrOrders() {
             switch (input.action) {
                 case 'place':
                     // Paper/live safety lock — throws on live port/account
-                    // unless IBKR_ALLOW_LIVE=true. Cancel and list stay
+                    // unless IBKR_ALLOW_LIVE=true, and refuses while account
+                    // codes are still unknown. Cancel and list stay
                     // available in all cases (they only reduce risk).
-                    assertOrderingAllowed();
+                    await assertAccountsVerified();
+                    // Daily-loss kill-switch applies to EVERY risk-increasing
+                    // order path, not only proposals (review finding #2).
+                    await assertDailyLossOk();
                     return withOrderLock(() => placeOrder(api, input));
                 case 'cancel':
                     return cancelOrder(api, input);

@@ -94,6 +94,27 @@ export function getManagedAccounts(): string[] {
     return [...managedAccounts];
 }
 
+/**
+ * Block until the connection's account codes are known, then re-run the
+ * paper/live assertion against them. Closes the fail-open window where an
+ * order is placed after `connected` but before `managedAccounts` arrives —
+ * on a live account behind a non-standard port, the prefix check would
+ * otherwise never have run. Call from order-placement paths (post-connect).
+ */
+export async function assertAccountsVerified(timeoutMs = 5_000): Promise<void> {
+    const allowLive = (process.env.IBKR_ALLOW_LIVE ?? '').trim().toLowerCase() === 'true';
+    const start = Date.now();
+    while (managedAccounts.length === 0 && Date.now() - start < timeoutMs) {
+        await new Promise((r) => setTimeout(r, 100));
+    }
+    if (managedAccounts.length === 0 && !allowLive) {
+        throw new Error(
+            '[IBKR] SAFETY LOCK: account codes not received yet — cannot verify the connection is a paper account; retry in a moment',
+        );
+    }
+    assertOrderingAllowed();
+}
+
 function maskAccount(acct: string): string {
     if (acct.length <= 4) return acct;
     return `${acct.slice(0, 2)}…${acct.slice(-2)}`;

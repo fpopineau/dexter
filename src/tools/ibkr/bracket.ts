@@ -13,7 +13,7 @@
 import type { Contract, Order } from '@stoqey/ib';
 import { OrderAction, OrderType, SecType, TimeInForce } from '@stoqey/ib';
 import { logger } from '@/utils';
-import { getIBApi } from './connection.js';
+import { assertAccountsVerified, getIBApi } from './connection.js';
 import { withOrderLock } from './order-lock.js';
 import { getNextValidOrderId } from './orders.js';
 
@@ -105,6 +105,9 @@ export async function placeBracketOrder(req: BracketRequest): Promise<BracketRes
 
 async function placeBracketOrderLocked(req: BracketRequest): Promise<BracketResult> {
     const api = await getIBApi();
+    // Paper/live verification against the ACTUAL account codes — refuses
+    // while they are still unknown (fail closed, not fail open).
+    await assertAccountsVerified();
     const parentId = await getNextValidOrderId(api);
     const takeProfitId = parentId + 1;
     const stopId = parentId + 2;

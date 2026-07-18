@@ -43,13 +43,23 @@ function tradingDate(): string {
 }
 
 function readHalt(): HaltRecord | null {
+    const p = haltFilePath();
+    if (!existsSync(p)) return null;
     try {
-        const p = haltFilePath();
-        if (!existsSync(p)) return null;
         const rec = JSON.parse(readFileSync(p, 'utf-8')) as HaltRecord;
         return rec?.date ? rec : null;
-    } catch {
-        return null;
+    } catch (err) {
+        // FAIL CLOSED: a halt file that exists but cannot be read may be a
+        // corrupted latch — treating it as "no halt" would silently unlock
+        // trading on the very day the kill-switch fired.
+        logger.error(`[daily-loss-guard] halt file unreadable — failing closed: ${err}`);
+        return {
+            date: tradingDate(),
+            reason: 'halt file exists but is unreadable/corrupt — failing closed; inspect or delete trading-halt.json',
+            dailyPnL: NaN,
+            netLiquidation: NaN,
+            trippedAt: new Date().toISOString(),
+        };
     }
 }
 
