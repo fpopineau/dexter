@@ -81,6 +81,53 @@ export function getWebFetchUserAgent(): string {
   return 'Dexter-User (dexter-ts; +https://github.com/)';
 }
 
+/**
+ * True when the hostname is an IP literal inside a private, loopback,
+ * link-local, or otherwise reserved range — SSRF targets, never legitimate
+ * research fetches. (DNS names resolving to private space are a residual
+ * risk; the agent runs on the operator's own machine, so the primary threat
+ * is prompt-injected fetches of well-known local endpoints.)
+ */
+export function isPrivateOrReservedHost(hostname: string): boolean {
+  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase(); // strip IPv6 brackets
+
+  // IPv6 literals: loopback, unspecified, link-local, unique-local, v4-mapped.
+  if (host.includes(':')) {
+    if (host === '::' || host === '::1') return true;
+    if (/^fe[89ab]/.test(host) || /^f[cd]/.test(host)) return true;
+    if (host.startsWith('::ffff:')) {
+      // v4-mapped — URL parsers emit either ::ffff:1.2.3.4 or ::ffff:0102:0304.
+      const rest = host.slice(7);
+      if (rest.includes('.')) return isPrivateOrReservedHost(rest);
+      const groups = rest.split(':');
+      if (groups.length === 2) {
+        const hi = parseInt(groups[0], 16), lo = parseInt(groups[1], 16);
+        if (Number.isFinite(hi) && Number.isFinite(lo)) {
+          return isPrivateOrReservedHost(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+        }
+      }
+      return true; // malformed mapped form — refuse
+    }
+    return false;
+  }
+
+  // IPv4 literal?
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!m) {
+    // Named hosts: block the conventional local ones.
+    return host === 'localhost' || host.endsWith('.localhost') ||
+      host.endsWith('.local') || host.endsWith('.internal') || host === 'metadata.google.internal';
+  }
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  if (a === 0 || a === 10 || a === 127) return true;                 // this-net, private, loopback
+  if (a === 169 && b === 254) return true;                            // link-local / cloud metadata
+  if (a === 172 && b >= 16 && b <= 31) return true;                   // private
+  if (a === 192 && b === 168) return true;                            // private
+  if (a === 100 && b >= 64 && b <= 127) return true;                  // CGNAT
+  if (a >= 224) return true;                                          // multicast/reserved
+  return false;
+}
+
 export function validateURL(url: string): boolean {
   if (url.length > MAX_URL_LENGTH) {
     return false;
@@ -93,17 +140,25 @@ export function validateURL(url: string): boolean {
     return false;
   }
 
-  // Protocol is not checked here — http is upgraded to https before fetching.
+  // Only web protocols — file:, ftp:, chrome:, etc. are never fetchable.
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return false;
+  }
 
   // Block URLs carrying credentials.
   if (parsed.username || parsed.password) {
     return false;
   }
 
+  // Block private/reserved targets (SSRF: IB Gateway API, local services).
+  if (isPrivateOrReservedHost(parsed.hostname)) {
+    return false;
+  }
+
   // Require a publicly-shaped hostname (at least two labels), filtering out
   // internal/single-label hosts like "localhost".
   const parts = parsed.hostname.split('.');
-  if (parts.length < 2) {
+  if (parts.length < 2 && !parsed.hostname.includes(':')) {
     return false;
   }
 

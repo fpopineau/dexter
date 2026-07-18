@@ -2,6 +2,7 @@ import { DynamicStructuredTool } from '@langchain/core/tools';
 import { chromium, Browser, Page } from 'playwright';
 import { z } from 'zod';
 import { formatToolResult } from '../types.js';
+import { validateURL } from '../fetch/utils.js';
 import { logger } from '@/utils';
 
 let browser: Browser | null = null;
@@ -275,6 +276,9 @@ export const browserTool = new DynamicStructuredTool({
           if (!url) {
             return formatToolResult({ error: 'url is required for navigate action' });
           }
+          if (!validateURL(url)) {
+            return formatToolResult({ error: 'URL refused: only public http(s) destinations are allowed (no local/private/reserved hosts, no credentials, no other schemes).' });
+          }
           const p = await ensureBrowser();
           // Use networkidle for better JS rendering on dynamic sites
           await p.goto(url, { timeout: 30000, waitUntil: 'networkidle' });
@@ -289,6 +293,9 @@ export const browserTool = new DynamicStructuredTool({
         case 'open': {
           if (!url) {
             return formatToolResult({ error: 'url is required for open action' });
+          }
+          if (!validateURL(url)) {
+            return formatToolResult({ error: 'URL refused: only public http(s) destinations are allowed (no local/private/reserved hosts, no credentials, no other schemes).' });
           }
           const currentPage = await ensureBrowser();
           const context = currentPage.context();
