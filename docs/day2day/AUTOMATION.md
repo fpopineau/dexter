@@ -66,7 +66,7 @@ Starts/stops with the gateway when IBKR is configured; opt-out with
 - **`trade_proposals`** — `create` / `list` / `get` / `reject` /
   `performance`. Creating a proposal NEVER trades: it persists a record in
   `.dexter/data/proposals.db` (`P-XXXX` ids, statuses
-  open/executed/closed/rejected/expired/failed, default expiry 2 h).
+  open/executing/executed/closed/rejected/expired/failed, default expiry 2 h).
   Creation passes the **deterministic risk gate** (below); the entry price
   is required even for MKT proposals (indicative, anchors the risk math).
   `performance` returns closed-trade outcomes over the last N days.
@@ -173,24 +173,37 @@ The explicit human message IS the approval — execution still passes every
 safety gate below.
 
 ### Execution path — `src/services/proposal-executor.ts` + `src/tools/ibkr/bracket.ts`
-Single code path to orders: proposal open & unexpired → **paper/live safety
-lock** → **daily-loss kill-switch** → **risk gate with live account
-context** → **chase gate** (live quote vs proposal levels: refuses when the
-price has consumed >25% of the entry→target edge or traded through the
-stop — stale accepts on fast movers stay open for re-evaluation) → bracket
-placement (entry LMT/MKT + take-profit + stop linked by
-`parentId` and an OCA group; the stop carries `transmit=true` so the
-bracket transmits atomically). The executed proposal is handed to the
-outcome tracker.
+Single code path to orders: proposal open & unexpired → **atomic execution
+claim** (`open → executing` via a conditional UPDATE + claim token: exactly
+one concurrent accept wins; the loser is refused instead of placing a
+second bracket) → **paper/live safety lock** → **daily-loss kill-switch** →
+**risk gate with live account context** → **chase gate** (live quote vs
+proposal levels: refuses when the price has consumed >25% of the
+entry→target edge or traded through the stop — stale accepts on fast
+movers stay open for re-evaluation) → bracket placement (entry
+LMT/MKT/STP_LMT + take-profit + stop linked by `parentId` and an OCA
+group; the stop carries `transmit=true` so the bracket transmits
+atomically). Gate refusals release the claim back to `open` (retryable);
+claims stuck >10 min (crash mid-placement) are swept to `failed` with a
+verify-manually note. All order placement — brackets, direct orders,
+protect, close — runs under a **global order lock**
+(`src/tools/ibkr/order-lock.ts`): IBKR's `nextValidId` sequence is not
+concurrency-safe and brackets assume contiguous ids N/N+1/N+2. The
+executed proposal is handed to the outcome tracker.
 
 ## 3. Safety model (layered, independent gates)
 
 1. **Approval gating** — `ibkr_orders` and `accept_proposal` require
    interactive approval; headless agent runs are auto-denied
    (`src/agent/tool-executor.ts`). The LLM cannot execute, ever.
+   A session-level approval ("allow for this session") applies to the
+   ONE tool approved — approving a file edit never pre-approves orders.
 2. **Paper/live safety lock** — order placement refused on live ports
    (4001/7496) and non-`D` accounts unless `IBKR_ALLOW_LIVE=true`
-   (`connection.ts: assertOrderingAllowed`).
+   (`connection.ts: assertOrderingAllowed`). Risk-increasing placements
+   additionally require the connection's account codes to have been
+   RECEIVED (`assertAccountsVerified`) — an empty account list refuses
+   (fail closed) instead of silently passing the prefix check.
 3. **Daily-loss kill-switch** — `src/services/daily-loss-guard.ts`. New orders
    blocked once IBKR daily P&L ≤ −`max_daily_loss_pct` × NetLiquidation
    (risk-rules.yaml, default 2 %). **Latching** (rest of the ET day, stored in
@@ -201,7 +214,11 @@ outcome tracker.
    startup (`netliq-baseline.json`); only when NetLiquidation itself is
    unavailable does the guard refuse. Gate refusals leave the proposal
    OPEN for retry. Inspect with `halt status`; deliberate reset via
-   `clearTradingHalt()`.
+   `clearTradingHalt()`. The kill-switch applies to EVERY risk-increasing
+   order path — proposal acceptance AND direct `ibkr_orders place`
+   (protect/close/cancel stay exempt: they only reduce risk) — and a
+   halt file that exists but cannot be parsed counts as HALTED (fail
+   closed), never as "no halt".
 4. **Risk gate (deterministic)** — `src/services/proposal-risk-gate.ts`
    enforces `risk-rules.yaml` at proposal creation (min R/R, min price,
    coherent stops, quantity sanity) and again at acceptance with the live
@@ -209,6 +226,30 @@ outcome tracker.
    max daily trades). The `risk_manager` tool remains available to the LLM
    for richer advisory checks (sector exposure, overnight limits).
 5. **Auto-execution (optional) is paper-only by construction** — see §5.
+
+### Security review record (2026-07-17)
+
+An external code review was verified finding-by-finding and fixed in
+five commits. What changed, and what was deliberately deferred:
+
+| Finding | Fix | Commit |
+|---|---|---|
+| Double-accept race (TOCTOU between status read and placement) | atomic `open → executing` claim + release-on-refusal + stuck-claim sweep | `efbb3c1` |
+| Order-id collisions (`nextValidId` + contiguous N/N+1/N+2 assumption) | global order lock on every placement path; guessed-id fallback now fails | `efbb3c1` |
+| `allow-session` approved ALL sensitive tools | approval is per-tool | `0487439` |
+| Browser singleton declared concurrency-safe | `concurrencySafe: false` | `0487439` |
+| Shell injection in the privileged rebase workflow (`head_ref` interpolation) | values via `env` only + character allowlist | `3fbea38` |
+| Direct `ibkr_orders place` bypassed the kill-switch | `assertDailyLossOk` on every risk-increasing path | `e4c6b99` |
+| Paper check silently passed on an empty account list | `assertAccountsVerified` — refuse until codes received | `e4c6b99` |
+| Corrupt halt file treated as "no halt" | unreadable halt file counts as HALTED | `e4c6b99` |
+| SSRF: any scheme/host fetchable (incl. `127.0.0.1:4002`); browser unvalidated | http(s)-only + private/reserved/local ranges blocked, browser uses the same validator | `970291e` |
+
+Deferred (revisit before live trading / multi-user):
+- cron results deliver to the most-recent WhatsApp session (single-user
+  assumption — bind jobs to an owner before adding users);
+- DNS-rebinding-resistant fetching (resolve-and-pin);
+- `gateway-debug.log` rotation/PII scrubbing, cron-store write locking,
+  `tsconfig` coverage of `scripts/`, a linter.
 
 ## 4. Calibration (walk-forward grid search)
 

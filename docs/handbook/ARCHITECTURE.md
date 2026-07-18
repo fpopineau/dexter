@@ -159,7 +159,11 @@ scanners surfacing the symbol)`.
         │ "accept"       ▼
         │             rejected (terminal)
         ▼
-   gates 2–4 pass? ──no──► failed (terminal, reason in note)
+   ┌───────────┐  atomic claim — exactly ONE concurrent accept wins;
+   │ executing │  gate refusal releases back to open (retryable);
+   └────┬──────┘  stuck >10 min (crash mid-placement) → failed
+        ▼
+   gates pass? ──no──► back to open (transient) — placement error → failed
         │yes
         ▼
    ┌──────────┐  bracket placed; orderIds + executedAt recorded
@@ -174,8 +178,9 @@ scanners surfacing the symbol)`.
         └─ unrecoverable (tracker down >5 days) ► closed ('unknown')
 ```
 
-Status vocabulary: `open → executed → closed`, with `rejected`, `expired`,
-`failed` as side exits. `closed` rows carry the labeled outcome:
+Status vocabulary: `open → executing → executed → closed`, with `rejected`,
+`expired`, `failed` as side exits (`executing` is the short-lived atomic
+execution claim that makes double-accepts impossible). `closed` rows carry the labeled outcome:
 `entryFillPrice`, `exitFillPrice`, `exitReason`, `realizedPnl` (gross),
 `commissions`, `closedAt`.
 
@@ -192,9 +197,9 @@ standing.
 
 | # | Gate | Where | What it blocks |
 |---|---|---|---|
-| 1 | **Approval gating** | `src/agent/tool-executor.ts` | The LLM calling `ibkr_orders`/`accept_proposal`: interactive confirmation required, headless runs auto-denied. The LLM can never execute. |
-| 2 | **Paper/live lock** | `connection.ts: assertOrderingAllowed` | Any order on live ports (4001/7496) or non-`D` accounts unless `IBKR_ALLOW_LIVE=true` |
-| 3 | **Daily-loss kill-switch** | `daily-loss-guard.ts` | New orders once daily P&L ≤ −`max_daily_loss_pct` × NetLiquidation. **Latching** (rest of the ET day, survives restarts via `trading-halt.json`) and **fail-safe** (P&L unverifiable → refuse). |
+| 1 | **Approval gating** | `src/agent/tool-executor.ts` | The LLM calling `ibkr_orders`/`accept_proposal`: interactive confirmation required, headless runs auto-denied. The LLM can never execute. Session approvals are **per-tool** — approving a file edit never pre-approves an order tool. |
+| 2 | **Paper/live lock** | `connection.ts: assertOrderingAllowed` + `assertAccountsVerified` | Any order on live ports (4001/7496) or non-`D` accounts unless `IBKR_ALLOW_LIVE=true`. Risk-increasing placements refuse while the connection's account codes are still unknown (fail closed). |
+| 3 | **Daily-loss kill-switch** | `daily-loss-guard.ts` | New orders once daily P&L ≤ −`max_daily_loss_pct` × NetLiquidation — on every risk-increasing path incl. direct `ibkr_orders place`. **Latching** (rest of the ET day, survives restarts via `trading-halt.json`; an unreadable halt file counts as halted) and **fail-safe** (P&L unverifiable → refuse). |
 | 4 | **Risk gate** | `proposal-risk-gate.ts` | Rule-violating proposals at creation (never persisted) and at acceptance (position size vs live NetLiquidation, `max_open_positions`, `max_daily_trades`) |
 | 5 | **Paper-only auto-exec** | `proposal-executor.ts: assertPaperOnly` | Auto-execution on live ports/accounts **regardless of `IBKR_ALLOW_LIVE`**. Going live always requires a human accept per trade. |
 
@@ -206,6 +211,14 @@ Structural guarantees on top of the gates:
 - **Single execution path.** Every order-creating flow (WhatsApp accept,
   TUI approval, auto-exec) funnels through `acceptProposal`. There is no
   second code path to `placeBracketOrder` outside the executor.
+- **Exactly-once execution.** Accepting takes an atomic claim
+  (`open → executing`, conditional UPDATE + claim token) — concurrent
+  accepts cannot double-place; interrupted claims are swept to `failed`
+  for manual verification, never silently retried.
+- **Serialized placement.** All order placement runs under a global lock
+  (`order-lock.ts`): IBKR's `nextValidId` sequence is not
+  concurrency-safe and brackets assume contiguous ids. An id IBKR did
+  not grant is never guessed.
 - **Cancels are always allowed.** The kill-switch and gates block only
   risk-*increasing* actions.
 

@@ -298,11 +298,20 @@ a fractional quantity is refused before it is stored. The agent sees the
 violation list and must fix the numbers.
 
 **Accepting:** reply `accept P-3F2A` (or approve the `accept_proposal`
-tool in the TUI). The executor then re-checks everything — expiry, the
-paper/live lock, the kill-switch, and the risk gate again with your live
-account values (position size vs NetLiquidation, open-position count,
-trades-today count). Only then is the bracket placed: entry + take-profit
-+ stop, OCA-linked, transmitted atomically.
+tool in the TUI). The executor first takes an **atomic claim** on the
+proposal (`open → executing`) so two simultaneous accepts — a double-sent
+message, or your accept racing auto-execution — can never place two
+brackets: one wins, the other is told the proposal is already being
+executed. It then re-checks everything — expiry, the paper/live lock
+(including that the connection's account codes have actually been
+received), the kill-switch, the risk gate again with your live account
+values (position size vs NetLiquidation, risk budget, open-position
+count, trades-today count), and the chase gate against a live quote.
+Only then is the bracket placed: entry + take-profit + stop, OCA-linked,
+transmitted atomically. A gate refusal returns the proposal to `open`
+(retry allowed until expiry); a crash mid-placement leaves it
+`executing` and it is swept to `failed` after 10 minutes with a note to
+verify orders at IBKR manually.
 
 **After execution** the outcome tracker takes over — you will get a close
 alert when the trade resolves:
@@ -336,9 +345,16 @@ flaky on paper accounts. A fail-safe refusal (both sources dead) does
 NOT latch: the proposal stays open, and a retry after the Gateway
 recovers succeeds.
 
+The switch covers **every risk-increasing order path**: proposal
+acceptance, auto-execution, and direct `ibkr_orders place`. The
+risk-reducing phone commands (`protect`, `close`, `cancel`) are
+deliberately exempt. A `trading-halt.json` that exists but cannot be
+parsed counts as **halted** (fail closed) — a corrupted latch must never
+unlock trading on the day it fired.
+
 - Inspect: `halt status` on WhatsApp.
-- What still works while halted: rejecting proposals, closing positions
-  manually in TWS, all research.
+- What still works while halted: rejecting proposals, `protect`/`close`/
+  `cancel`, closing positions manually in TWS, all research.
 - Deliberate reset (think twice — the halt fired for a reason): from a
   REPL, `clearTradingHalt()` in `src/services/daily-loss-guard.ts`, or
   delete `.dexter/data/trading-halt.json` and restart.
@@ -606,6 +622,11 @@ P&L math, market-hours. Live-socket behavior is exercised by
 | Proposal `expired` before you replied | expiry is intentional staleness protection — ask for a fresh evaluation |
 | Empty scanner results pre-market | normal before ~08:00 ET or on delayed feeds |
 | Engine does nothing | market closed/holiday (engine idles), or `OPPORTUNITY_ENGINE=false` |
+| `is already being executed by another accept` | the double-accept protection: another accept (or auto-exec) claimed the proposal first — check `orders`, do not retry |
+| `account codes not received yet — cannot verify` | fail-closed paper check right after a (re)connect — wait a few seconds and retry the accept |
+| `nextValidId not received within 5s` | IBKR did not grant an order id — placement refused rather than guessed; retry, and check the Gateway if it persists |
+| Proposal `failed` with "execution interrupted (crash/restart mid-placement)" | the process died between claim and confirmation — verify at IBKR (`orders` / TWS) whether the bracket exists before acting |
+| URL refused: `only public http(s) destinations are allowed` | SSRF protection on web_fetch/browser — local/private addresses are never fetchable, by design |
 | jest: `better_sqlite3.node not found` | `cd node_modules/better-sqlite3 && npx prebuild-install` (bun installs skip node prebuilds) |
 
 ## 19. Going live — checklist
