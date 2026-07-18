@@ -140,9 +140,9 @@ export class AgentToolExecutor {
         return;
       }
       if (decision === 'allow-session') {
-        for (const name of TOOLS_REQUIRING_APPROVAL) {
-          this.sessionApprovedTools.add(name);
-        }
+        // Only the tool the user actually approved — a session approval for
+        // a file edit must never pre-approve order placement.
+        this.sessionApprovedTools.add(toolName);
       }
     }
 

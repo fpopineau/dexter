@@ -96,7 +96,8 @@ export function getToolRegistry(model: string): RegisteredTool[] {
       tool: browserTool,
       description: BROWSER_DESCRIPTION,
       compactDescription: 'JavaScript-rendered pages and interactive navigation. Actions: navigate, snapshot, act, read, close.',
-      concurrencySafe: true,
+      // Singleton page/refs state — parallel calls would act on the wrong tab.
+      concurrencySafe: false,
     },
     {
       name: 'read_file',
