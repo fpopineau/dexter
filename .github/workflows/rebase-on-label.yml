@@ -64,10 +64,19 @@ jobs:
         env:
           REBASE_PUSH_TOKEN: ${{ secrets.REBASE_PUSH_TOKEN }}
           DEFAULT_GITHUB_TOKEN: ${{ github.token }}
+          # Attacker-controlled values (branch names may contain $()) must
+          # reach the shell ONLY via env, never by ${{ }} interpolation
+          # inside `run` — this workflow runs with a write token.
+          HEAD_REPO: ${{ steps.meta.outputs.head_repo }}
+          HEAD_REF: ${{ steps.meta.outputs.head_ref }}
         run: |
           set -euo pipefail
-          HEAD_REPO="${{ steps.meta.outputs.head_repo }}"
-          HEAD_REF="${{ steps.meta.outputs.head_ref }}"
+          case "$HEAD_REPO" in
+            *[!A-Za-z0-9._/-]*|'') echo "Refusing suspicious head repo: $HEAD_REPO" >&2; exit 1;;
+          esac
+          case "$HEAD_REF" in
+            *[!A-Za-z0-9._/-]*|''|-*) echo "Refusing suspicious head ref: $HEAD_REF" >&2; exit 1;;
+          esac
           PUSH_TOKEN="${REBASE_PUSH_TOKEN:-$DEFAULT_GITHUB_TOKEN}"
 
           git fetch origin main
