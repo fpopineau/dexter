@@ -116,6 +116,26 @@ describe('proposal store lifecycle', () => {
         expect(formatProposalLine(closed!)).toContain('+$100.50');
     });
 
+    test('execution claim is atomic: one winner, release restores open', async () => {
+        const { claimProposalForExecution, releaseProposalClaim } = await import('./trade-proposals.js');
+        const p = await createProposal(validInput({ symbol: 'RACE' }));
+
+        // Fire concurrent claims — exactly one may win.
+        const results = await Promise.all(
+            Array.from({ length: 5 }, () => claimProposalForExecution(p.id)),
+        );
+        expect(results.filter(Boolean).length).toBe(1);
+        expect((await getProposal(p.id))?.status).toBe('executing');
+
+        // A claimed proposal cannot be claimed again…
+        expect(await claimProposalForExecution(p.id)).toBe(false);
+        // …until released (gate refusal path), after which it is retryable.
+        await releaseProposalClaim(p.id);
+        expect((await getProposal(p.id))?.status).toBe('open');
+        expect(await claimProposalForExecution(p.id)).toBe(true);
+        await releaseProposalClaim(p.id); // cleanup for cross-file counts
+    });
+
     test('closeProposal only transitions executed proposals', async () => {
         const p = await createProposal(validInput());
         await closeProposal(p.id, { exitReason: 'manual' });

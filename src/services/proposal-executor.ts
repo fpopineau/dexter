@@ -22,6 +22,7 @@ import { assertDailyLossOk } from './daily-loss-guard.js';
 import { trackExecutedProposal } from './outcome-tracker.js';
 import { assertProposalRisk, checkPriceRun } from './proposal-risk-gate.js';
 import {
+    claimProposalForExecution,
     countExecutedSince,
     countOpenExecuted,
     etDayStartMs,
@@ -29,6 +30,7 @@ import {
     formatProposalLine,
     getProposal,
     listTrackable,
+    releaseProposalClaim,
     setProposalStatus,
 } from './trade-proposals.js';
 
@@ -58,6 +60,13 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
     }
     if (p.status !== 'open') {
         return { ok: false, message: `Proposal ${p.id} is ${p.status}, not open. ${formatProposalLine(p)}` };
+    }
+
+    // Atomic claim (open → executing): exactly one concurrent accept wins.
+    // Without this, two accepts racing through the async gates below could
+    // both observe 'open' and place two brackets.
+    if (!(await claimProposalForExecution(p.id))) {
+        return { ok: false, message: `⛔ ${p.id} is already being executed by another accept — not placing a second bracket.` };
     }
 
     // Safety gates — order matters: cheap static lock first, then live P&L.
@@ -104,6 +113,7 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.warn(`[proposal-executor] ${p.id} refused by gates (proposal stays open): ${msg}`);
+        await releaseProposalClaim(p.id); // refusal → back to open, retryable
         return {
             ok: false,
             message:

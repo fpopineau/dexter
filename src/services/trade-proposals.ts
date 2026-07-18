@@ -22,7 +22,7 @@ import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { assertProposalRisk, type RiskGateContext } from './proposal-risk-gate.js';
 
-export type ProposalStatus = 'open' | 'executed' | 'closed' | 'rejected' | 'expired' | 'failed';
+export type ProposalStatus = 'open' | 'executing' | 'executed' | 'closed' | 'rejected' | 'expired' | 'failed';
 
 /** How an executed trade ended. */
 export type ExitReason = 'target' | 'stop' | 'cancelled' | 'manual' | 'unknown';
@@ -151,6 +151,7 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     ['closed_at', 'INTEGER'],
     ['tif', 'TEXT'],
     ['entry_limit', 'REAL'],
+    ['claim_token', 'TEXT'],
 ];
 
 function migrate(database: SqliteDatabase): void {
@@ -521,7 +522,47 @@ export async function expireStale(): Promise<number> {
         database.query<void>(`UPDATE proposals SET status = 'expired', updated_at = ? WHERE id = ?`).run(now, r.id);
     }
     if (stale.length) logger.info(`[proposals] expired ${stale.length} stale proposal(s)`);
+
+    // Claims that never resolved (crash/restart mid-placement) must not
+    // stay 'executing' forever — fail them honestly for manual review.
+    const stuck = database.query<Row>(
+        `SELECT id FROM proposals WHERE status = 'executing' AND updated_at < ?`,
+    ).all(now - 10 * 60_000);
+    for (const r of stuck) {
+        database.query<void>(
+            `UPDATE proposals SET status = 'failed', updated_at = ?, note = ? WHERE id = ? AND status = 'executing'`,
+        ).run(now, 'execution interrupted (crash/restart mid-placement) — verify orders at IBKR manually', r.id);
+        logger.error(`[proposals] ${r.id}: stuck in 'executing' >10min — marked failed for manual review`);
+    }
     return stale.length;
+}
+
+/**
+ * Atomically claim an open proposal for execution (open → executing).
+ * SQLite serializes the conditional UPDATE, so exactly ONE concurrent
+ * caller sees its own token after the write — everyone else gets false.
+ * Release with releaseProposalClaim (gate refusals) or finalize with
+ * setProposalStatus('executed'|'failed').
+ */
+export async function claimProposalForExecution(id: string): Promise<boolean> {
+    const database = await getDb();
+    const key = id.trim().toUpperCase();
+    const token = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    database.query<void>(
+        `UPDATE proposals SET status = 'executing', claim_token = ?, updated_at = ? WHERE id = ? AND status = 'open'`,
+    ).run(token, Date.now(), key);
+    const row = database.query<{ claim_token: string | null }>(
+        `SELECT claim_token FROM proposals WHERE id = ?`,
+    ).all(key)[0];
+    return row?.claim_token === token;
+}
+
+/** Return a claimed proposal to 'open' (gate refusal — retry allowed). */
+export async function releaseProposalClaim(id: string): Promise<void> {
+    const database = await getDb();
+    database.query<void>(
+        `UPDATE proposals SET status = 'open', claim_token = NULL, updated_at = ? WHERE id = ? AND status = 'executing'`,
+    ).run(Date.now(), id.trim().toUpperCase());
 }
 
 /** One-line human summary (used in WhatsApp messages). */

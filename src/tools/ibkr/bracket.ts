@@ -14,6 +14,7 @@ import type { Contract, Order } from '@stoqey/ib';
 import { OrderAction, OrderType, SecType, TimeInForce } from '@stoqey/ib';
 import { logger } from '@/utils';
 import { getIBApi } from './connection.js';
+import { withOrderLock } from './order-lock.js';
 import { getNextValidOrderId } from './orders.js';
 
 export interface BracketRequest {
@@ -97,7 +98,12 @@ export function validateBracketRequest(req: BracketRequest): void {
  */
 export async function placeBracketOrder(req: BracketRequest): Promise<BracketResult> {
     validateBracketRequest(req);
+    // The whole id-grant → three placeOrder calls sequence must be atomic
+    // vs any other placement (ids N, N+1, N+2 are assumed contiguous).
+    return withOrderLock(() => placeBracketOrderLocked(req));
+}
 
+async function placeBracketOrderLocked(req: BracketRequest): Promise<BracketResult> {
     const api = await getIBApi();
     const parentId = await getNextValidOrderId(api);
     const takeProfitId = parentId + 1;

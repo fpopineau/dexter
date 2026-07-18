@@ -15,7 +15,8 @@ import type { Contract, Order, OrderState } from '@stoqey/ib';
 import { EventName, OrderAction, OrderStatus, OrderType, SecType, TimeInForce } from '@stoqey/ib';
 import { z } from 'zod';
 import { formatToolResult } from '../types.js';
-import { allocReqId, assertOrderingAllowed, getIBApi, isNonFatalIbkrError } from './connection.js';
+import { assertOrderingAllowed, getIBApi, isNonFatalIbkrError } from './connection.js';
+import { withOrderLock } from './order-lock.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -138,7 +139,7 @@ export function createIbkrOrders() {
                     // unless IBKR_ALLOW_LIVE=true. Cancel and list stay
                     // available in all cases (they only reduce risk).
                     assertOrderingAllowed();
-                    return placeOrder(api, input);
+                    return withOrderLock(() => placeOrder(api, input));
                 case 'cancel':
                     return cancelOrder(api, input);
                 case 'list':
@@ -451,9 +452,9 @@ export function getNextValidOrderId(api: import('@stoqey/ib').IBApi): Promise<nu
     return new Promise<number>((resolve, reject) => {
         const timeout = setTimeout(() => {
             cleanup();
-            // Fallback: use allocReqId() which won't collide with IBKR's IDs
-            // in practice, but is less safe for order placement
-            resolve(allocReqId() + 100_000);
+            // No guessed fallback: an id IBKR did not grant can collide with
+            // the connection's real sequence. Fail the placement instead.
+            reject(new Error('[IBKR] nextValidId not received within 5s — refusing to place an order with a guessed id; retry'));
         }, 5_000);
 
         const onNextValidId = (orderId: number) => {

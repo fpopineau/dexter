@@ -16,6 +16,7 @@
  */
 
 import { allocReqId, assertOrderingAllowed, getIBApi, isNonFatalIbkrError } from '@/tools/ibkr/connection.js';
+import { withOrderLock } from '@/tools/ibkr/order-lock.js';
 import { getNextValidOrderId } from '@/tools/ibkr/orders.js';
 import { logger } from '@/utils';
 import type { Contract, Order } from '@stoqey/ib';
@@ -172,43 +173,44 @@ export async function protectPosition(
             ? ` ${existing.length} existing DAY exit(s) expire at the session rollover; the GTC pair takes over.`
             : '';
 
-        const stopId = await getNextValidOrderId(api);
-        const ocaGroup = `dexter-protect-${symbol}-${stopId}`;
+        // Locked: the OCA pair assumes contiguous ids stopId/stopId+1.
+        const targetMsg = await withOrderLock(async () => {
+            const stopId = await getNextValidOrderId(api);
+            const ocaGroup = `dexter-protect-${symbol}-${stopId}`;
 
-        const stopOrder: Order = {
-            orderId: stopId,
-            action: exitAction,
-            totalQuantity: qty,
-            orderType: OrderType.STP,
-            auxPrice: stopPrice,
-            tif: TimeInForce.GTC, // protection must survive the close
-            ...(targetPrice !== undefined ? { ocaGroup, ocaType: 1 } : {}),
-            // NOTE: transmit-chaining only works for parent/child brackets.
-            // A standalone OCA pair must transmit BOTH legs explicitly, or
-            // the first leg sits untransmitted and the position has no stop.
-            transmit: true,
-        };
-        api.placeOrder(stopId, stockContract(symbol), stopOrder);
-
-        let targetMsg = '';
-        if (targetPrice !== undefined) {
-            const targetId = stopId + 1;
-            const targetOrder: Order = {
-                orderId: targetId,
+            const stopOrder: Order = {
+                orderId: stopId,
                 action: exitAction,
                 totalQuantity: qty,
-                orderType: OrderType.LMT,
-                lmtPrice: targetPrice,
-                tif: TimeInForce.GTC,
-                ocaGroup,
-                ocaType: 1,
+                orderType: OrderType.STP,
+                auxPrice: stopPrice,
+                tif: TimeInForce.GTC, // protection must survive the close
+                ...(targetPrice !== undefined ? { ocaGroup, ocaType: 1 } : {}),
+                // NOTE: transmit-chaining only works for parent/child brackets.
+                // A standalone OCA pair must transmit BOTH legs explicitly, or
+                // the first leg sits untransmitted and the position has no stop.
                 transmit: true,
             };
-            api.placeOrder(targetId, stockContract(symbol), targetOrder);
-            targetMsg = `, target ${targetPrice} (orders ${stopId}/${targetId}, OCA ${ocaGroup})`;
-        } else {
-            targetMsg = ` (order ${stopId})`;
-        }
+            api.placeOrder(stopId, stockContract(symbol), stopOrder);
+
+            if (targetPrice !== undefined) {
+                const targetId = stopId + 1;
+                const targetOrder: Order = {
+                    orderId: targetId,
+                    action: exitAction,
+                    totalQuantity: qty,
+                    orderType: OrderType.LMT,
+                    lmtPrice: targetPrice,
+                    tif: TimeInForce.GTC,
+                    ocaGroup,
+                    ocaType: 1,
+                    transmit: true,
+                };
+                api.placeOrder(targetId, stockContract(symbol), targetOrder);
+                return `, target ${targetPrice} (orders ${stopId}/${targetId}, OCA ${ocaGroup})`;
+            }
+            return ` (order ${stopId})`;
+        });
 
         logger.info(`[position-actions] protected ${symbol}: ${exitAction} ${qty} stop ${stopPrice}${targetPrice !== undefined ? ` / target ${targetPrice}` : ''}`);
         return {
@@ -239,17 +241,19 @@ export async function closePosition(symbolRaw: string): Promise<PositionActionOu
 
         const isLong = pos.quantity > 0;
         const qty = Math.abs(pos.quantity);
-        const orderId = await getNextValidOrderId(api);
-
-        const order: Order = {
-            orderId,
-            action: isLong ? OrderAction.SELL : OrderAction.BUY,
-            totalQuantity: qty,
-            orderType: OrderType.MKT,
-            tif: TimeInForce.DAY,
-            transmit: true,
-        };
-        api.placeOrder(orderId, stockContract(symbol), order);
+        const { orderId, order } = await withOrderLock(async () => {
+            const orderId = await getNextValidOrderId(api);
+            const order: Order = {
+                orderId,
+                action: isLong ? OrderAction.SELL : OrderAction.BUY,
+                totalQuantity: qty,
+                orderType: OrderType.MKT,
+                tif: TimeInForce.DAY,
+                transmit: true,
+            };
+            api.placeOrder(orderId, stockContract(symbol), order);
+            return { orderId, order };
+        });
 
         logger.info(`[position-actions] closing ${symbol}: ${order.action} ${qty} MKT (order ${orderId})`);
         return {
