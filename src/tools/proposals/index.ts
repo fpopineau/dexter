@@ -26,6 +26,7 @@ import {
 import { rejectProposal } from '@/services/proposal-executor.js';
 import { fetchDailyRiskContext } from '../ibkr/daily-atr.js';
 import { formatToolResult } from '../types.js';
+import { logger } from '@/utils';
 
 export const TRADE_PROPOSALS_DESCRIPTION = `
 Manage trade proposals — persisted, human-actionable trade recommendations.
@@ -170,7 +171,11 @@ export function createTradeProposalsTool() {
                     } catch (err) {
                         // Risk-gate refusal: return the violations so the numbers
                         // can be corrected — do not weaken them to force a trade.
-                        return formatToolResult({ error: err instanceof Error ? err.message : String(err) });
+                        // Logged too: refused creates leave no DB row, so without
+                        // this line they are invisible in post-hoc diagnosis.
+                        const msg = err instanceof Error ? err.message : String(err);
+                        logger.warn(`[trade-proposals] create refused: ${input.symbol} ${input.direction} ${input.entryType} @${input.entry} stop ${input.stop} target ${input.target} q${input.quantity} — ${msg}`);
+                        return formatToolResult({ error: msg });
                     }
                 }
                 case 'list': {

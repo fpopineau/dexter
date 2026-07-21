@@ -259,6 +259,7 @@ export async function createProposal(
         direction: input.direction,
         entryType: input.entryType,
         entry: input.entry ?? null,
+        entryLimit: input.entryLimit ?? null,
         stop: input.stop,
         target: input.target,
         quantity: input.quantity,

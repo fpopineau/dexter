@@ -67,6 +67,25 @@ describe('proposal store lifecycle', () => {
         expect((await getProposal(p.id))?.tif).toBe('GTC');
     });
 
+    test('STP_LMT with entryLimit passes the gate end-to-end (regression)', async () => {
+        // Regression: createProposal did not forward entryLimit to the risk
+        // gate, so EVERY momentum STP_LMT create was refused with
+        // "requires entryLimit" even when the caller supplied it.
+        const p = await createProposal(validInput({
+            symbol: 'QCRH', entryType: 'STP_LMT',
+            entry: 100.35, entryLimit: 100.65, stop: 93.18, target: 116,
+            quantity: 26, tif: 'GTC',
+        }));
+        const stored = await getProposal(p.id);
+        expect(stored?.entryType).toBe('STP_LMT');
+        expect(stored?.entryLimit).toBe(100.65);
+        // …and it is still refused when the cap is genuinely missing.
+        await expect(createProposal(validInput({
+            symbol: 'QCRH', entryType: 'STP_LMT',
+            entry: 100.35, stop: 93.18, target: 116, quantity: 26,
+        }))).rejects.toThrow(/entryLimit/);
+    });
+
     test('creation is refused by the risk gate on bad numbers', async () => {
         // R/R 0.8:1 < 2.0 minimum
         await expect(createProposal(validInput({ target: 104 }))).rejects.toThrow(/risk-gate/);
