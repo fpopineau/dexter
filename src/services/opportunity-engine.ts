@@ -26,6 +26,7 @@ import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { addSymbol, removeSymbol } from './ibkr-stream.js';
 import { runScan, type ScanCode, type ScanResult } from './scanner-loop.js';
+import { ScanHealthMonitor, type HealthTransition } from './scan-health.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -426,6 +427,21 @@ export async function runCycleOnce(forcePhase?: EnginePhase): Promise<Opportunit
             `[opportunity-engine] cycle done (${snapshot.phase}): ${snapshot.scanned} scanned, ` +
             `${snapshot.scored} scored, top: ${opportunities.slice(0, 3).map((o) => `${o.symbol}:${o.compositeRank}`).join(' ') || 'none'}`,
         );
+
+        // Scanner-health watchdog: persistent zero-scan cycles during market
+        // hours mean the Gateway API is degraded — surface it, don't log it
+        // into the void.
+        const health = healthMonitor.observe(snapshot.scanned, snapshot.marketOpen);
+        if (health) {
+            logger[health.kind === 'degraded' ? 'error' : 'info'](
+                `[opportunity-engine] scanner ${health.kind}: ${health.emptyCycles} empty cycle(s) since ${new Date(health.sinceMs).toISOString()}`,
+            );
+            for (const cb of [...healthCallbacks]) {
+                try { await cb(health); } catch (err) {
+                    logger.error(`[opportunity-engine] health callback failed: ${err}`);
+                }
+            }
+        }
         return snapshot;
     } finally {
         cycleInFlight = false;
@@ -457,6 +473,20 @@ async function syncStreamSubscriptions(snapshot: OpportunitySnapshot): Promise<v
 // ---------------------------------------------------------------------------
 
 export type TriggerCallback = (opp: Opportunity, snapshot: OpportunitySnapshot) => void | Promise<void>;
+
+// --- Scanner-health events (see scan-health.ts) ---
+export type HealthCallback = (t: HealthTransition) => void | Promise<void>;
+const healthCallbacks = new Set<HealthCallback>();
+const healthMonitor = new ScanHealthMonitor(
+    Number.isFinite(Number(process.env.OPP_HEALTH_EMPTY_CYCLES)) && Number(process.env.OPP_HEALTH_EMPTY_CYCLES) > 0
+        ? Number(process.env.OPP_HEALTH_EMPTY_CYCLES) : 3,
+);
+
+/** Register a callback for scanner degraded/recovered transitions. */
+export function onEngineHealth(cb: HealthCallback): () => void {
+    healthCallbacks.add(cb);
+    return () => healthCallbacks.delete(cb);
+}
 
 const triggerCallbacks = new Set<TriggerCallback>();
 const lastTriggerAt = new Map<string, number>();

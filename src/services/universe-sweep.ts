@@ -115,6 +115,30 @@ export async function runUniverseSweepOnce(): Promise<void> {
     // 3+4. IBKR daily bars within the request budget.
     let spent = 0;
 
+    // Watchlist first (UNIVERSE_EXTRA_SYMBOLS): names the operator wants in
+    // the pattern scan REGARDLESS of the cap band — mega caps like MU/INTC
+    // are outside the $1–5B universe but their swing setups matter too.
+    const extras = (process.env.UNIVERSE_EXTRA_SYMBOLS ?? '')
+        .split(',').map((s) => s.trim().toUpperCase()).filter(Boolean);
+    if (extras.length) {
+        logger.info(`[universe-sweep] watchlist: ${extras.length} extra symbol(s) — ${extras.join(', ')}`);
+        for (const symbol of extras) {
+            if (spent >= ibkrBudget) break;
+            const result = await archiveBarsRange({
+                symbols: [symbol],
+                from: isoDaysAgo(400),
+                to: isoDaysAgo(1),
+                barSize: '1 day',
+                chunkDays: 365,
+                useRTH: true,
+                paceMs,
+                resume: true,
+                withDailyAdjusted: false,
+            });
+            spent += result.chunksFetched + result.chunksFailed;
+        }
+    }
+
     // In-band names first: deepen/refresh their daily history (the data
     // pattern scanners will read). Resume makes this incremental.
     const inBand = getUniverse(store, { minCapUsd: capMin, maxCapUsd: capMax });

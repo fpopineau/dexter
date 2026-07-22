@@ -92,11 +92,13 @@ How to run dexter around this:
    **Sunday evening (Paris time)**, before Monday's pre-market. Miss it
    and Monday runs blind — no scans, no briefs with data, and the
    kill-switch fail-safe refusing orders (see below).
-4. **Failure is safe but silent-ish**: a dead Gateway cannot cause harm —
+4. **Failure is safe and now LOUD**: a dead Gateway cannot cause harm —
    the daily-loss guard fails closed ("P&L could not be verified"), so
-   nothing trades. Detection: send `halt status` on WhatsApp in the
-   morning — a connection problem shows up in the reply; the JSONL log
-   shows `[IBKR] Scheduling reconnect attempt N` climbing.
+   nothing trades. Detection is push, not pull: after 3 consecutive
+   zero-symbol scan cycles during market hours (`OPP_HEALTH_EMPTY_CYCLES`)
+   a ⚠️ scanner-health alert lands on WhatsApp, and a ✅ follows when
+   scans recover. `halt status` and the JSONL log
+   (`[IBKR] Scheduling reconnect attempt N`) remain for diagnosis.
 5. **Machine hygiene**: disable sleep/hibernation on this box and set
    Windows Update active hours so forced reboots don't land in the
    trading day or the restart window.
@@ -146,6 +148,8 @@ Everything else has sensible defaults:
 | `OPP_TRIGGER_SCORE` | 75 | composite rank for event triggers |
 | `OPP_TRIGGER_COOLDOWN_MIN` | 30 | per-symbol trigger debounce |
 | `OPP_TRIGGER_MAX_PER_DAY` | 10 | trigger cap per ET day |
+| `OPP_HEALTH_EMPTY_CYCLES` | 3 | zero-scan cycles before the scanner-health WhatsApp alert |
+| `UNIVERSE_EXTRA_SYMBOLS` | — | mega-cap watchlist for the nightly archive + swing pattern scan |
 | `OPP_MARKET_CAP_MIN` / `_MAX` | unset | restrict engine scans to a cap band (USD), e.g. 1e9–5e9 for midcaps; unset = unchanged behavior |
 | `UNIVERSE_SWEEP` | false | **opt-in** nightly (18:00 ET) midcap universe build + daily-bar archival — see §15.4 |
 | `UNIVERSE_CAP_MIN` / `_MAX` | 1e9 / 5e9 | universe cap band (USD) |

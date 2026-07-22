@@ -32,6 +32,7 @@ import { registerOutcomeAlerts } from './outcome-alerts.js';
 import { handleProposalCommand } from './proposal-commands.js';
 import { resolveRoute } from './routing/resolve-route.js';
 import { resolveSessionStorePath, upsertSessionMeta } from './sessions/store.js';
+import { registerScanHealthAlerts } from './health-alerts.js';
 import { registerTriggerAlerts } from './trigger-alerts.js';
 import { cleanMarkdownForWhatsApp } from './utils.js';
 
@@ -279,6 +280,7 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     void captureNetLiqBaseline();
     if (isOpportunityEngineEnabled()) {
       registerTriggerAlerts();
+      registerScanHealthAlerts();
       startOpportunityEngine();
     }
     if (isArchiveSchedulerEnabled()) {

@@ -299,6 +299,8 @@ manual acceptance:
 | `OPP_TRIGGER_SCORE` | 75 | composite threshold for event triggers |
 | `OPP_TRIGGER_COOLDOWN_MIN` | 30 | per-symbol trigger debounce |
 | `OPP_TRIGGER_MAX_PER_DAY` | 10 | trigger cap per ET day |
+| `OPP_HEALTH_EMPTY_CYCLES` | 3 | consecutive zero-scan cycles (market open) before a degraded-scanner WhatsApp alert |
+| `UNIVERSE_EXTRA_SYMBOLS` | — | watchlist archived nightly + swing-pattern-scanned regardless of the cap band |
 | `AUTO_EXECUTE_PAPER` | false | paper-only auto-execution of proposals (all sources) |
 | `AUTO_EXECUTE_MAX_PER_DAY` | 5 | auto-execution cap per ET day |
 | `AUTO_EXECUTE_MIN_SCORE` | 80 | auto-exec confidence floor (score) |
