@@ -330,6 +330,14 @@ Exit reasons: `target`, `stop`, `cancelled` (entry never filled),
 `manual` (position closed outside the bracket — P&L unknown, check
 `ibkr_account`), `unknown` (outcome unrecoverable).
 
+**Auto-protect:** when a `manual` close happens because both bracket
+exits died with the entry filled (the DAY-bracket-expired-at-the-bell
+trap), the tracker automatically re-attaches a GTC stop/target OCA pair
+at the proposal's levels and tells you on WhatsApp (`🛡️ AUTO-PROTECT`).
+If the position is genuinely flat it does nothing; if protection cannot
+be attached you get a ⚠️ with the exact `protect` command to send.
+Risk-reducing only; opt out with `AUTO_PROTECT=false`.
+
 **Expiry:** default 120 min (90 for intraday brief proposals, 45 for
 overnight ones). Expired proposals cannot be accepted — ask for a fresh
 evaluation instead of chasing a stale price.

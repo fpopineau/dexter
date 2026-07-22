@@ -94,6 +94,11 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 netLiquidation: lossStatus.netLiquidation,
                 openPositions: await countOpenExecuted(),
                 executedToday: await countExecutedSince(etDayStartMs()),
+                // Committed notional on this symbol from OTHER working/filled
+                // proposals — the aggregate cap stops same-name stacking.
+                existingSymbolExposure: (await listTrackable())
+                    .filter((t) => t.symbol === p.symbol && t.id !== p.id)
+                    .reduce((sum, t) => sum + t.quantity * (t.entry ?? 0), 0),
             },
         );
 

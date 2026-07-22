@@ -93,6 +93,35 @@ describe('proposal risk gate — account context checks', () => {
         expect(r.ok).toBe(true);
     });
 
+    test('per-symbol aggregate exposure is capped across proposals', () => {
+        // The live pattern this kills: BANC 1520 filled + BANC 250 resting —
+        // each passed alone; the stack must not.
+        // New position $4,000 + $2,000 existing > 5% of $100k ($5,000).
+        const r = checkProposalRisk(
+            longProposal({ quantity: 40 }),
+            { netLiquidation: 100_000, existingSymbolExposure: 2_000 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('already committed to AAPL');
+        expect(r.violations.join(' ')).toContain('single-symbol cap');
+
+        // Same proposal with room left passes…
+        const ok = checkProposalRisk(
+            longProposal({ quantity: 25 }),
+            { netLiquidation: 100_000, existingSymbolExposure: 2_000 },
+            RULES,
+        );
+        expect(ok.ok).toBe(true);
+        // …and zero existing exposure never triggers the aggregate check.
+        const solo = checkProposalRisk(
+            longProposal({ quantity: 50 }),
+            { netLiquidation: 100_000, existingSymbolExposure: 0 },
+            RULES,
+        );
+        expect(solo.ok).toBe(true);
+    });
+
     test('max_open_positions reached is refused', () => {
         const r = checkProposalRisk(longProposal(), { openPositions: 10 }, RULES);
         expect(r.ok).toBe(false);

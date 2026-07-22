@@ -87,9 +87,12 @@ advisory; this gate is mandatory):
   violating proposals are never persisted;
 - at **acceptance** (executor): position value vs `max_position_pct` of the
   live NetLiquidation, `max_open_positions` (executed-not-closed count),
-  `max_daily_trades` (executed today, ET), and the **per-trade risk budget**
+  `max_daily_trades` (executed today, ET), the **per-trade risk budget**
   (quantity × stop distance ≤ `max_risk_per_trade_pct` of NetLiq — every
-  trade loses the same amount when wrong).
+  trade loses the same amount when wrong), and the **per-symbol aggregate
+  cap** (notional committed across ALL working/filled proposals on one
+  symbol ≤ `max_position_pct` — two individually-passing proposals cannot
+  stack into an oversized single-name bet).
 
 ### Outcome tracker — `src/services/outcome-tracker.ts`
 Closes the feedback loop on executed proposals. Watches the bracket's three
@@ -304,6 +307,7 @@ manual acceptance:
 | `AUTO_EXECUTE_PAPER` | false | paper-only auto-execution of proposals (all sources) |
 | `AUTO_EXECUTE_MAX_PER_DAY` | 5 | auto-execution cap per ET day |
 | `AUTO_EXECUTE_MIN_SCORE` | 80 | auto-exec confidence floor (score) |
+| `AUTO_PROTECT` | true | GTC exits auto-reattached when DAY exits die on an open position |
 | `IBKR_ALLOW_LIVE` | false | manual-acceptance live unlock (never affects auto) |
 | `DATA_ARCHIVE` | true | daily post-close bar archival (16:20 ET) |
 | `DATA_ARCHIVE_SYMBOLS` | — | always-archived watchlist (comma-separated) |

@@ -7,7 +7,7 @@
  * no LLM involved.
  */
 
-import { onTradeClosed } from '@/services/outcome-tracker.js';
+import { onAutoProtect, onTradeClosed } from '@/services/outcome-tracker.js';
 import { formatProposalLine, type TradeProposal } from '@/services/trade-proposals.js';
 import { logger } from '@/utils';
 import { assertOutboundAllowed, sendMessageWhatsApp } from './channels/whatsapp/index.js';
@@ -71,6 +71,24 @@ export function registerOutcomeAlerts(): void {
             accountId: session.lastAccountId,
         });
         logger.info(`[outcome-alerts] ${proposal.id} close alert delivered`);
+    });
+
+    // Auto-protect outcomes (GTC exits re-attached after a DAY bracket died
+    // on an open position, or a warning when that failed).
+    onAutoProtect(async (message) => {
+        const session = findTargetSession();
+        if (!session?.lastTo || !session?.lastAccountId) {
+            logger.warn('[outcome-alerts] no WhatsApp delivery target, skipping auto-protect alert');
+            return;
+        }
+        try {
+            assertOutboundAllowed({ to: session.lastTo, accountId: session.lastAccountId });
+        } catch {
+            logger.warn('[outcome-alerts] outbound blocked, skipping auto-protect alert');
+            return;
+        }
+        await sendMessageWhatsApp({ to: session.lastTo, body: message, accountId: session.lastAccountId });
+        logger.info('[outcome-alerts] auto-protect alert delivered');
     });
 
     logger.info('[outcome-alerts] registered');

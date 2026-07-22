@@ -7,6 +7,10 @@ import { join } from 'node:path';
 const dir = mkdtempSync(join(tmpdir(), 'dexter-proposals-tool-'));
 const prevDataDir = process.env.DEXTER_DATA_DIR;
 process.env.DEXTER_DATA_DIR = dir;
+// Pin auto-execution OFF: test runners load the project .env, where the
+// operator keeps AUTO_EXECUTE_PAPER=true — a created proposal would flow
+// into the real accept path and hang looking for IBKR.
+process.env.AUTO_EXECUTE_PAPER = 'false';
 
 import { createTradeProposalsTool } from './index.js';
 

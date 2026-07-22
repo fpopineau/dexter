@@ -182,6 +182,55 @@ async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string):
             }
         }
     }
+
+    // AUTO-PROTECT: a 'manual' close with a filled entry means the exits
+    // died while the position may still be open (the DAY-bracket trap —
+    // it left TWO positions naked overnight on 2026-07-22). Re-attach GTC
+    // protection at the proposal's levels. Risk-REDUCING by construction:
+    // protectPosition itself no-ops when the position is flat and refuses
+    // when GTC exits already exist. Opt out with AUTO_PROTECT=false.
+    if (
+        reason === 'manual' && trade.entryAvgPrice != null && proposal &&
+        process.env.NODE_ENV !== 'test' &&
+        (process.env.AUTO_PROTECT ?? '').trim().toLowerCase() !== 'false'
+    ) {
+        try {
+            const { protectPosition } = await import('./position-actions.js');
+            const outcome = await protectPosition(proposal.symbol, proposal.stop, proposal.target);
+            if (outcome.ok) {
+                logger.info(`[outcome-tracker] auto-protected ${proposal.symbol} after dead exits: ${outcome.message}`);
+                await notifyAutoProtect(`🛡️ AUTO-PROTECT ${proposal.symbol}: the ${trade.proposalId} bracket exits died with the entry filled. ${outcome.message}`);
+            } else {
+                logger.info(`[outcome-tracker] auto-protect ${proposal.symbol} not applied: ${outcome.message}`);
+                // "No open position" is the normal case (position really was
+                // closed manually) — only surface actionable refusals.
+                if (!outcome.message.includes('No open position')) {
+                    await notifyAutoProtect(`⚠️ ${proposal.symbol} may be UNPROTECTED (${trade.proposalId} exits died) and auto-protect could not attach exits: ${outcome.message}`);
+                }
+            }
+        } catch (err) {
+            logger.error(`[outcome-tracker] auto-protect ${proposal.symbol} failed: ${err}`);
+            await notifyAutoProtect(`⚠️ ${proposal.symbol} may be UNPROTECTED (${trade.proposalId} exits died) — auto-protect errored: ${err instanceof Error ? err.message : err}. Use 'protect ${proposal.symbol} ${proposal.stop} ${proposal.target}'.`);
+        }
+    }
+}
+
+// --- Auto-protect notifications (bridged to WhatsApp by the gateway) ---
+type AutoProtectCallback = (message: string) => void | Promise<void>;
+const autoProtectCallbacks = new Set<AutoProtectCallback>();
+
+/** Register a callback for auto-protect outcomes (idempotent per cb). */
+export function onAutoProtect(cb: AutoProtectCallback): () => void {
+    autoProtectCallbacks.add(cb);
+    return () => autoProtectCallbacks.delete(cb);
+}
+
+async function notifyAutoProtect(message: string): Promise<void> {
+    for (const cb of [...autoProtectCallbacks]) {
+        try { await cb(message); } catch (err) {
+            logger.error(`[outcome-tracker] auto-protect callback failed: ${err}`);
+        }
+    }
 }
 
 function scheduleFinalize(trade: TrackedTrade, reason: ExitReason, note?: string): void {

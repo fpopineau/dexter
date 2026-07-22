@@ -43,6 +43,9 @@ export interface RiskGateContext {
     dailyAtr?: number;
     /** EMA(10) of daily closes. With dailyAtr, enables the extension check. */
     ema10?: number;
+    /** Notional (USD) already committed to THIS symbol by other working or
+     *  filled proposals. Enables the per-symbol aggregate exposure check. */
+    existingSymbolExposure?: number;
 }
 
 export interface RiskGateResult {
@@ -171,6 +174,19 @@ export function checkProposalRisk(
             violations.push(
                 `position $${positionValue.toFixed(0)} (${p.quantity} × $${entry}) exceeds ` +
                 `${rules.max_position_pct}% of net liquidation ($${maxValue.toFixed(0)}) — max ${maxShares} shares`,
+            );
+        }
+
+        // Aggregate PER SYMBOL: two individually-passing proposals on the
+        // same name must not stack past the cap (filled + resting entries
+        // both count — a resting average-down fills exactly when the
+        // symbol is falling).
+        const existing = ctx.existingSymbolExposure ?? 0;
+        if (existing > 0 && positionValue + existing > maxValue) {
+            violations.push(
+                `$${existing.toFixed(0)} is already committed to ${p.symbol} by working/filled proposals — ` +
+                `adding $${positionValue.toFixed(0)} totals $${(positionValue + existing).toFixed(0)}, over the ` +
+                `${rules.max_position_pct}% single-symbol cap ($${maxValue.toFixed(0)})`,
             );
         }
     }
