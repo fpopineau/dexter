@@ -195,7 +195,11 @@ async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string):
         (process.env.AUTO_PROTECT ?? '').trim().toLowerCase() !== 'false'
     ) {
         try {
-            const { protectPosition } = await import('./position-actions.js');
+            const { protectPosition, wasRecentlyClosed } = await import('./position-actions.js');
+            if (wasRecentlyClosed(proposal.symbol)) {
+                logger.info(`[outcome-tracker] auto-protect ${proposal.symbol} skipped — position was deliberately closed just now`);
+                return;
+            }
             const outcome = await protectPosition(proposal.symbol, proposal.stop, proposal.target);
             if (outcome.ok) {
                 logger.info(`[outcome-tracker] auto-protected ${proposal.symbol} after dead exits: ${outcome.message}`);

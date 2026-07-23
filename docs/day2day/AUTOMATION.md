@@ -167,7 +167,7 @@ Inbound DMs are pre-routed **before** the agent (deterministic, no LLM):
 | `positions` | current holdings + daily P&L from IBKR |
 | `orders` | working (unfilled) orders at IBKR |
 | `protect SYM STOP [TGT]` | attach GTC protective exits to an open position |
-| `close SYM` | market-close the full position (risk-reducing) |
+| `close SYM [SYM…]` | market-close position(s), cancelling their exits (risk-reducing) |
 | `cancel P-XXXX` / `cancel SYM` | cancel an executed-but-unfilled bracket (symbol resolves to its proposal; ambiguity → cancel by id) |
 | `halt status` | kill-switch state and daily P&L headroom |
 | `performance` (or `perf`, `performance 30`) | closed-trade P&L summary (default 7 days) |

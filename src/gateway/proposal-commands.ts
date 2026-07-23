@@ -12,7 +12,7 @@
  *   positions               current account holdings + daily P&L
  *   orders                  working (unfilled) orders at IBKR
  *   protect SYM STOP [TGT]  attach GTC protective exits to an open position
- *   close SYM               market-close the full position (risk-reducing)
+ *   close SYM [SYM…]        market-close full position(s), cancelling their exits (risk-reducing)
  *   cancel P-XXXX|SYM       cancel an executed-but-unfilled bracket (risk-reducing)
  *   halt status             show the daily-loss kill-switch state
  *   performance [N]         closed-trade P&L summary over the last N days (default 7)
@@ -38,7 +38,24 @@ const LIST_RE = /^\s*proposals?\s*$/i;
 const POSITIONS_RE = /^\s*positions?\s*$/i;
 const ORDERS_RE = /^\s*orders?\s*$/i;
 const PROTECT_RE = /^\s*protect\s+([A-Za-z.]{1,6})\s+(\d+(?:\.\d+)?)(?:\s+(\d+(?:\.\d+)?))?\s*$/i;
-const CLOSE_RE = /^\s*close\s+([A-Za-z.]{1,6})\s*$/i;
+const CLOSE_RE = /^\s*close\s+([A-Za-z.,\s]+?)\s*$/i;
+
+/**
+ * Parse the argument of a 'close' command into ticker symbols. Accepts
+ * separators ',' / whitespace / 'and' ("close MU, NVDA and SMCI"). Returns
+ * null when any token does not look like a ticker ("close the positions")
+ * so the message falls through to the agent instead of guessing.
+ */
+export function parseCloseSymbols(arg: string): string[] | null {
+    const tokens = arg.split(/[\s,]+/).filter(Boolean).filter((t) => !/^and$/i.test(t));
+    if (tokens.length === 0 || tokens.length > 8) return null;
+    const symbols: string[] = [];
+    for (const t of tokens) {
+        if (!/^[A-Za-z.]{1,6}$/.test(t)) return null;
+        symbols.push(t.toUpperCase());
+    }
+    return [...new Set(symbols)];
+}
 const CANCEL_RE = /^\s*cancel\s+(P-[A-Za-z0-9]{4}|[A-Za-z.]{1,6})\s*$/i;
 const HALT_RE = /^\s*halt\s+status\s*$/i;
 const PERF_RE = /^\s*(performance|perf)(?:\s+(\d{1,3})\s*d?)?\s*$/i;
@@ -214,8 +231,16 @@ export async function handleProposalCommand(body: string): Promise<string | null
 
     const close = CLOSE_RE.exec(body);
     if (close) {
-        const outcome = await closePosition(close[1]);
-        return outcome.message;
+        const symbols = parseCloseSymbols(close[1]);
+        if (symbols) {
+            const messages: string[] = [];
+            for (const s of symbols) {
+                messages.push((await closePosition(s)).message);
+            }
+            return messages.join('\n');
+        }
+        // Not a clean symbol list ("close the positions") → let the agent
+        // interpret it.
     }
 
     const cancel = CANCEL_RE.exec(body);

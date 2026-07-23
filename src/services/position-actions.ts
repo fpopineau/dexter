@@ -226,6 +226,18 @@ export async function protectPosition(
     }
 }
 
+// Symbols deliberately closed just now: auto-protect must NOT re-attach
+// exits to a position that is mid-liquidation (the close MKT order and the
+// exit cancellations race through the tracker).
+const recentlyClosed = new Map<string, number>();
+const RECENTLY_CLOSED_MS = 10 * 60_000;
+
+/** True when the operator closed this symbol within the last 10 minutes. */
+export function wasRecentlyClosed(symbol: string): boolean {
+    const at = recentlyClosed.get(symbol.trim().toUpperCase());
+    return at !== undefined && Date.now() - at < RECENTLY_CLOSED_MS;
+}
+
 /** Market-close the full position in a symbol (risk-reducing). */
 export async function closePosition(symbolRaw: string): Promise<PositionActionOutcome> {
     const symbol = symbolRaw.trim().toUpperCase();
@@ -238,6 +250,7 @@ export async function closePosition(symbolRaw: string): Promise<PositionActionOu
         if (!pos) {
             return { ok: false, message: `No open position in ${symbol} — nothing to close.` };
         }
+        recentlyClosed.set(symbol, Date.now());
 
         const isLong = pos.quantity > 0;
         const qty = Math.abs(pos.quantity);
@@ -255,13 +268,31 @@ export async function closePosition(symbolRaw: string): Promise<PositionActionOu
             return { orderId, order };
         });
 
-        logger.info(`[position-actions] closing ${symbol}: ${order.action} ${qty} MKT (order ${orderId})`);
+        // Cancel this symbol's tracked bracket/exit orders: a live GTC exit
+        // on a CLOSED position is a naked short (or unintended long) waiting
+        // for the target/stop price to print.
+        let cancelledExits = 0;
+        try {
+            const { listTrackable } = await import('./trade-proposals.js');
+            for (const t of await listTrackable()) {
+                if (t.symbol !== symbol || !t.orderIds?.length) continue;
+                for (const oid of t.orderIds) {
+                    try { api.cancelOrder(oid); cancelledExits++; } catch { /* already gone */ }
+                }
+            }
+        } catch (err) {
+            logger.warn(`[position-actions] exit cleanup for ${symbol} failed: ${err}`);
+        }
+
+        logger.info(`[position-actions] closing ${symbol}: ${order.action} ${qty} MKT (order ${orderId}), ${cancelledExits} tracked exit order(s) cancelled`);
         return {
             ok: true,
             message:
                 `🔚 Closing ${symbol}: ${order.action} ${qty} at market (order ${orderId}). ` +
                 `Outside market hours the order waits for the open. ` +
-                `Note: any resting exits for ${symbol} should be reviewed ('orders').`,
+                (cancelledExits > 0
+                    ? `${cancelledExits} resting bracket/exit order(s) for ${symbol} cancelled with it.`
+                    : `Note: any resting exits for ${symbol} should be reviewed ('orders').`),
         };
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
