@@ -23,8 +23,11 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   header .halt-on { color:var(--red); font-weight:700; }
   header .halt-off { color:var(--green); }
   .wrap { display:flex; height:calc(100vh - 43px); }
-  aside { width:340px; overflow-y:auto; border-right:1px solid var(--line); padding:10px 12px; }
+  aside { width:var(--aside-w,340px); min-width:220px; overflow-y:auto; overflow-x:hidden; padding:10px 12px; flex-shrink:0; }
+  #splitter { width:5px; cursor:col-resize; background:var(--line); flex-shrink:0; }
+  #splitter:hover, #splitter.drag { background:var(--blue); }
   main { flex:1; display:flex; flex-direction:column; min-width:0; }
+  body.resizing { user-select:none; cursor:col-resize; }
   #chart { flex:1; }
   .bar { display:flex; gap:8px; padding:8px 12px; align-items:center; border-bottom:1px solid var(--line); }
   .bar .sym { font-size:16px; font-weight:700; }
@@ -61,6 +64,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     <h3>Profit trail</h3><table id="trail"></table>
     <h3>Swing candidates (last scan)</h3><table id="patterns"></table>
   </aside>
+  <div id="splitter" title="drag to resize"></div>
   <main>
     <div class="bar">
       <span class="sym" id="cursym">—</span>
@@ -85,14 +89,39 @@ function pnlSpan(v){ if(v==null) return '<span class="dim">—</span>';
   var c = v>=0?'g':'b', s = v>=0?'+':''; return '<span class="'+c+'">'+s+fmt(v)+'</span>'; }
 
 function initChart(){
-  var opts = { layout:{ background:{color:'#0d1117'}, textColor:'#8b949e' },
+  var opts = { autoSize:true,
+    layout:{ background:{color:'#0d1117'}, textColor:'#8b949e' },
     grid:{ vertLines:{color:'#161b22'}, horzLines:{color:'#161b22'} },
     timeScale:{ timeVisible:true, secondsVisible:false },
     rightPriceScale:{ borderColor:'#21262d' }, crosshair:{ mode:0 } };
   state.chart = LightweightCharts.createChart(el('chart'), opts);
   state.series = state.chart.addCandlestickSeries({
     upColor:'#3fb950', downColor:'#f85149', wickUpColor:'#3fb950', wickDownColor:'#f85149', borderVisible:false });
-  new ResizeObserver(function(){ state.chart.applyOptions({}); }).observe(el('chart'));
+}
+
+function initSplitter(){
+  var saved = localStorage.getItem('dexter-aside-w');
+  if(saved) document.documentElement.style.setProperty('--aside-w', saved + 'px');
+  var sp = el('splitter');
+  sp.addEventListener('mousedown', function(ev){
+    ev.preventDefault();
+    sp.classList.add('drag');
+    document.body.classList.add('resizing');
+    function move(e){
+      var w = Math.min(Math.max(e.clientX, 220), Math.round(window.innerWidth * 0.6));
+      document.documentElement.style.setProperty('--aside-w', w + 'px');
+    }
+    function up(e){
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', up);
+      sp.classList.remove('drag');
+      document.body.classList.remove('resizing');
+      var w = Math.min(Math.max(e.clientX, 220), Math.round(window.innerWidth * 0.6));
+      localStorage.setItem('dexter-aside-w', String(w));
+    }
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+  });
 }
 
 function clearLines(){ state.lines.forEach(function(l){ state.series.removePriceLine(l); }); state.lines = []; }
@@ -231,7 +260,7 @@ el('tf1d').addEventListener('click', function(){ state.tf='1d'; setTf(); });
 function setTf(){ el('tf1m').classList.toggle('on', state.tf==='1min');
   el('tf1d').classList.toggle('on', state.tf==='1d'); loadBars(); }
 
-initChart(); setTf(); refresh();
+initChart(); initSplitter(); setTf(); refresh();
 setInterval(refresh, 30000);
 setInterval(loadBars, 60000);
 </script>
