@@ -65,6 +65,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
         <span style="color:#f85149">stop</span> ·
         <span style="color:#3fb950">target</span> ·
         <span style="color:#d29922">trail peak</span></span>
+      <span id="chartmsg" class="legend" style="margin-left:auto;color:#d29922"></span>
     </div>
     <div id="chart"></div>
   </main>
@@ -115,15 +116,18 @@ function selectSymbol(sym){
 
 function loadBars(){
   if(!state.symbol) return;
+  el('chartmsg').textContent = 'loading…';
   fetch('/api/bars?symbol='+encodeURIComponent(state.symbol)+'&size='+(state.tf==='1d'?'1d':'1min'))
     .then(function(r){ return r.json(); })
     .then(function(d){
-      if(!d.bars) return;
+      if(d.error){ state.series.setData([]); el('chartmsg').textContent = 'no data: '+d.error; return; }
+      if(!d.bars || !d.bars.length){ state.series.setData([]); el('chartmsg').textContent = 'no bars available for '+state.symbol+' ('+state.tf+')'; return; }
+      el('chartmsg').textContent = d.stale ? '⚠ '+(d.note||'archived data') : '';
       state.series.setData(d.bars);
       state.chart.timeScale().fitContent();
       overlayFor(state.symbol);
     })
-    .catch(function(){});
+    .catch(function(e){ el('chartmsg').textContent = 'bars request failed: '+e; });
 }
 
 function renderOverview(o){

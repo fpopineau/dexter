@@ -15,7 +15,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { BarSizeSetting } from '@stoqey/ib';
-import { getDailyBars } from './data-archive.js';
+import { getDailyBars, getIntradayBars } from './data-archive.js';
 import { getDailyLossStatus } from './daily-loss-guard.js';
 import { getLatestPatternScan } from './pattern-scanner.js';
 import { fetchPositions } from './position-actions.js';
@@ -87,14 +87,28 @@ async function buildBars(symbol: string, size: string): Promise<string> {
             bars: bars.map((b) => ({ time: dailyBarTime(b.time), open: b.open, high: b.high, low: b.low, close: b.close })),
         });
     }
-    // Intraday: live fetch over the existing session (2 days of 1-min bars).
-    const bars = await fetchBars(symbol, BarSizeSetting.MINUTES_ONE, '2 D', true);
-    return JSON.stringify({
-        symbol, size,
-        bars: bars
-            .filter((b) => b.time && b.open != null)
-            .map((b) => ({ time: intradayBarTime(b.time!), open: b.open, high: b.high, low: b.low, close: b.close })),
-    });
+    // Intraday: live fetch over the existing session (2 days of 1-min bars),
+    // falling back to the archive when live market data is unavailable
+    // (competing session, disconnected Gateway) — stale beats blank.
+    try {
+        const bars = await fetchBars(symbol, BarSizeSetting.MINUTES_ONE, '2 D', true);
+        if (bars.length === 0) throw new Error('live fetch returned no bars');
+        return JSON.stringify({
+            symbol, size,
+            bars: bars
+                .filter((b) => b.time && b.open != null)
+                .map((b) => ({ time: intradayBarTime(b.time!), open: b.open, high: b.high, low: b.low, close: b.close })),
+        });
+    } catch (err) {
+        const archived = await getIntradayBars(symbol, '1 min');
+        if (archived.length === 0) throw err; // surface the real reason
+        return JSON.stringify({
+            symbol, size,
+            stale: true,
+            note: `live market data unavailable (${err instanceof Error ? err.message : err}) — showing archived bars`,
+            bars: archived.map((b) => ({ time: intradayBarTime(b.time), open: b.open, high: b.high, low: b.low, close: b.close })),
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------

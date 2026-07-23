@@ -513,6 +513,17 @@ export async function getDailyBars(symbol: string): Promise<ArchivedDailyBar[]> 
         .all(symbol.toUpperCase());
 }
 
+/** Archived intraday bars ('1 min' / '5 mins') for one symbol, oldest first. */
+export async function getIntradayBars(symbol: string, barSize: '1 min' | '5 mins'): Promise<ArchivedDailyBar[]> {
+    const database = await getDb();
+    return database
+        .query<ArchivedDailyBar>(
+            `SELECT time, open, high, low, close, volume FROM bars
+             WHERE symbol = ? AND bar_size = ? ORDER BY time`,
+        )
+        .all(symbol.toUpperCase(), barSize);
+}
+
 /**
  * Close the archive database connection.
  */
