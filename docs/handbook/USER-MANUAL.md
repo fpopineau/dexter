@@ -338,6 +338,17 @@ If the position is genuinely flat it does nothing; if protection cannot
 be attached you get a ⚠️ with the exact `protect` command to send.
 Risk-reducing only; opt out with `AUTO_PROTECT=false`.
 
+**Profit trail:** winners protect themselves. During regular hours every
+position is watched against its peak price; once unrealized gain reaches
+`profit_trail_arm_pct` (default 5%) the trail arms, and a pullback of
+`profit_trail_pullback_pct` (default 1%) from the peak closes the
+position at market — cancelling its bracket exits with it — and reports
+on WhatsApp (`📉➡️💰 PROFIT TRAIL`). Peaks persist across restarts.
+Direction-aware (shorts arm on drops, close on bounces). Thresholds live
+in `risk-rules.yaml`; disable with `PROFIT_TRAIL=false`. Note the
+trade-off: a 1% trail is tight — it locks gains early and will sometimes
+exit a runner that would have gone further.
+
 **Expiry:** default 120 min (90 for intraday brief proposals, 45 for
 overnight ones). Expired proposals cannot be accepted — ask for a fresh
 evaluation instead of chasing a stale price.

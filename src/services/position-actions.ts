@@ -27,7 +27,7 @@ export interface PositionActionOutcome {
     message: string;
 }
 
-interface LivePosition {
+export interface LivePosition {
     account: string;
     symbol: string;
     /** Signed: positive = long, negative = short. */
@@ -36,7 +36,7 @@ interface LivePosition {
 }
 
 /** Fetch current positions (one-shot). */
-async function fetchPositions(api: import('@stoqey/ib').IBApi): Promise<LivePosition[]> {
+export async function fetchPositions(api: import('@stoqey/ib').IBApi): Promise<LivePosition[]> {
     const positions: LivePosition[] = [];
     return new Promise<LivePosition[]>((resolve, reject) => {
         const timeout = setTimeout(() => {

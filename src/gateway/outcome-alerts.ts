@@ -8,6 +8,7 @@
  */
 
 import { onAutoProtect, onTradeClosed } from '@/services/outcome-tracker.js';
+import { onProfitTrailAlert } from '@/services/profit-trail.js';
 import { formatProposalLine, type TradeProposal } from '@/services/trade-proposals.js';
 import { logger } from '@/utils';
 import { assertOutboundAllowed, sendMessageWhatsApp } from './channels/whatsapp/index.js';
@@ -89,6 +90,23 @@ export function registerOutcomeAlerts(): void {
         }
         await sendMessageWhatsApp({ to: session.lastTo, body: message, accountId: session.lastAccountId });
         logger.info('[outcome-alerts] auto-protect alert delivered');
+    });
+
+    // Profit-trail closes (winner peaked, pulled back, auto-closed).
+    onProfitTrailAlert(async (message) => {
+        const session = findTargetSession();
+        if (!session?.lastTo || !session?.lastAccountId) {
+            logger.warn('[outcome-alerts] no WhatsApp delivery target, skipping profit-trail alert');
+            return;
+        }
+        try {
+            assertOutboundAllowed({ to: session.lastTo, accountId: session.lastAccountId });
+        } catch {
+            logger.warn('[outcome-alerts] outbound blocked, skipping profit-trail alert');
+            return;
+        }
+        await sendMessageWhatsApp({ to: session.lastTo, body: message, accountId: session.lastAccountId });
+        logger.info('[outcome-alerts] profit-trail alert delivered');
     });
 
     logger.info('[outcome-alerts] registered');

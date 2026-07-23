@@ -25,6 +25,8 @@ export interface RiskRules {
     max_risk_per_trade_pct: number;
     min_stop_atr_fraction: number;
     max_extension_atr: number;
+    profit_trail_arm_pct: number;
+    profit_trail_pullback_pct: number;
 }
 
 export const DEFAULT_RULES: RiskRules = {
@@ -43,6 +45,8 @@ export const DEFAULT_RULES: RiskRules = {
     max_risk_per_trade_pct: 0.25,
     min_stop_atr_fraction: 0.4,
     max_extension_atr: 3,
+    profit_trail_arm_pct: 5,
+    profit_trail_pullback_pct: 1,
 };
 
 let cachedRules: RiskRules | null = null;

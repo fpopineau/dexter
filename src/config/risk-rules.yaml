@@ -32,3 +32,7 @@ max_extension_atr: 3 # Refuse entries further than this × daily ATR beyond the 
 
 # --- Per-Trade Risk Budget ---
 max_risk_per_trade_pct: 0.25 # Max loss if the stop fills (qty × stop distance), as % of net liquidation
+
+# --- Profit Trail (automatic winner protection) ---
+profit_trail_arm_pct: 5 # Arm the trail once unrealized gain reaches this %
+profit_trail_pullback_pct: 1 # Close when price gives back this % from the peak
