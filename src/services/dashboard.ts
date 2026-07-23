@@ -263,7 +263,20 @@ export function startDashboard(): void {
             try { res.destroy(); } catch { /* already gone */ }
         });
     });
-    server.on('error', (err) => logger.error(`[dashboard] server error: ${err}`));
+    server.on('error', (err: NodeJS.ErrnoException) => {
+        if (err.code === 'EADDRINUSE') {
+            // Restart overlap: the previous gateway instance still holds the
+            // port for a few seconds. Keep retrying instead of giving up —
+            // observed live: a second instance started before the first
+            // exited and permanently lost its dashboard.
+            logger.warn(`[dashboard] port ${port} busy (previous instance still up?) — retrying in 15s`);
+            try { server?.close(); } catch { /* not listening */ }
+            server = null;
+            setTimeout(() => startDashboard(), 15_000);
+            return;
+        }
+        logger.error(`[dashboard] server error: ${err}`);
+    });
     server.listen(port, host, () => {
         logger.info(`[dashboard] serving http://${host}:${port}/`);
     });
