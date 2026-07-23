@@ -309,6 +309,7 @@ manual acceptance:
 | `AUTO_EXECUTE_MIN_SCORE` | 80 | auto-exec confidence floor (score) |
 | `AUTO_PROTECT` | true | GTC exits auto-reattached when DAY exits die on an open position |
 | `PROFIT_TRAIL` | true | auto-close winners: arm at +`profit_trail_arm_pct`% (5), close on `profit_trail_pullback_pct`% (1) pullback from peak |
+| `DASHBOARD` / `_PORT` / `_HOST` | true / 8484 / 127.0.0.1 | local charts+book dashboard served by the gateway (no second IBKR session) |
 | `IBKR_ALLOW_LIVE` | false | manual-acceptance live unlock (never affects auto) |
 | `DATA_ARCHIVE` | true | daily post-close bar archival (16:20 ET) |
 | `DATA_ARCHIVE_SYMBOLS` | — | always-archived watchlist (comma-separated) |

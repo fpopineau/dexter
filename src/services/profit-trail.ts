@@ -191,11 +191,18 @@ async function runCycle(state: Map<string, TrailEntry>): Promise<void> {
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let cycleRunning = false;
+let liveState: Map<string, TrailEntry> | null = null;
+
+/** Current trail entries (live when the watcher runs, persisted otherwise). */
+export function getProfitTrailEntries(): TrailEntry[] {
+    return [...(liveState ?? loadState()).values()];
+}
 
 /** Start the watcher (idempotent; no-op when PROFIT_TRAIL=false). */
 export function startProfitTrail(): void {
     if (timer || !isProfitTrailEnabled()) return;
     const state = loadState();
+    liveState = state;
     const rules = getRiskRules();
     timer = setInterval(() => {
         if (cycleRunning) return;

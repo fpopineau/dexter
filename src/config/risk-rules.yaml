@@ -35,4 +35,4 @@ max_risk_per_trade_pct: 0.25 # Max loss if the stop fills (qty × stop distance)
 
 # --- Profit Trail (automatic winner protection) ---
 profit_trail_arm_pct: 5 # Arm the trail once unrealized gain reaches this %
-profit_trail_pullback_pct: 1 # Close when price gives back this % from the peak
+profit_trail_pullback_pct: 1.5 # Close when price gives back this % from the peak

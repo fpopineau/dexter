@@ -32,6 +32,7 @@ import { registerOutcomeAlerts } from './outcome-alerts.js';
 import { handleProposalCommand } from './proposal-commands.js';
 import { resolveRoute } from './routing/resolve-route.js';
 import { resolveSessionStorePath, upsertSessionMeta } from './sessions/store.js';
+import { startDashboard } from '@/services/dashboard.js';
 import { startProfitTrail } from '@/services/profit-trail.js';
 import { registerScanHealthAlerts } from './health-alerts.js';
 import { registerTriggerAlerts } from './trigger-alerts.js';
@@ -279,6 +280,9 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     // Profit trail: auto-close winners that pull back from their peak
     // (alerts bridged to WhatsApp inside registerOutcomeAlerts).
     startProfitTrail();
+    // Local dashboard (http://127.0.0.1:8484) — charts + the live book from
+    // dexter's own data; no second IBKR session involved.
+    startDashboard();
     // Session NetLiq baseline: the kill-switch's P&L fallback references
     // pre-trading equity. Best-effort; retried on the first gate check.
     void captureNetLiqBaseline();

@@ -590,6 +590,27 @@ Related: the Opportunity Engine can restrict its intraday scans to the same
 band via `OPP_MARKET_CAP_MIN/MAX`, and the `ibkr_scanner` tool accepts
 `maxMarketCap` — e.g. "scan midcap top gainers" in the TUI.
 
+## 15bis. The local dashboard
+
+`http://127.0.0.1:8484/` (with the gateway running) — charts and the live
+book, served by dexter itself from its own data. **This is the supported
+way to watch the paper account visually**: any external viewer that logs
+in with the paper credentials (TradingView's broker integration, a second
+Gateway, IBKR Desktop) competes for the username's single brokerage
+session and disconnects the Gateway mid-day. Client Portal web is the
+only external exception.
+
+What it shows: positions, working orders, open/executed proposals with
+scores, profit-trail peaks (armed/watching), halt state and daily P&L,
+and the latest swing-scan candidates. Click any symbol for its chart
+(1-min live via the existing session, or daily from the archive) with
+the entry / stop / target / trail-peak levels drawn on it. Auto-refreshes
+every 30 s.
+
+Knobs: `DASHBOARD=false` to disable, `DASHBOARD_PORT` (8484),
+`DASHBOARD_HOST` (127.0.0.1 — it has no auth; do not bind it wider on an
+untrusted network).
+
 ## 16. Monitoring and logs
 
 Daily JSONL logs in `.dexter/logs/dexter-<date>.jsonl`
