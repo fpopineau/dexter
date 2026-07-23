@@ -126,8 +126,11 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
             return;
         }
         if (url.pathname === '/api/overview') {
+            // Build BEFORE writeHead: a throw after headers are sent turns
+            // into ERR_HTTP_HEADERS_SENT in the catch and kills the process.
+            const body = await buildOverview();
             res.writeHead(200, { 'content-type': 'application/json' });
-            res.end(await buildOverview());
+            res.end(body);
             return;
         }
         if (url.pathname === '/api/bars') {
@@ -138,16 +141,23 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
                 res.end(JSON.stringify({ error: 'bad symbol' }));
                 return;
             }
+            const body = await buildBars(symbol, size);
             res.writeHead(200, { 'content-type': 'application/json' });
-            res.end(await buildBars(symbol, size));
+            res.end(body);
             return;
         }
         res.writeHead(404, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ error: 'not found' }));
     } catch (err) {
         logger.warn(`[dashboard] ${url.pathname} failed: ${err}`);
-        res.writeHead(500, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+        // The error path must be throw-proof — it runs inside the only
+        // safety net this request has.
+        try {
+            if (!res.headersSent) {
+                res.writeHead(500, { 'content-type': 'application/json' });
+            }
+            res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+        } catch { /* socket gone — nothing left to say */ }
     }
 }
 
@@ -165,7 +175,14 @@ export function startDashboard(): void {
     if (host !== '127.0.0.1' && host !== 'localhost') {
         logger.warn(`[dashboard] binding ${host} — the dashboard has NO auth; only do this on a trusted network`);
     }
-    server = createServer((req, res) => { void handle(req, res); });
+    // A dashboard request must never be able to take the gateway down:
+    // catch anything that escapes the handler's own try/catch.
+    server = createServer((req, res) => {
+        handle(req, res).catch((err) => {
+            logger.error(`[dashboard] unhandled: ${err}`);
+            try { res.destroy(); } catch { /* already gone */ }
+        });
+    });
     server.on('error', (err) => logger.error(`[dashboard] server error: ${err}`));
     server.listen(port, host, () => {
         logger.info(`[dashboard] serving http://${host}:${port}/`);
