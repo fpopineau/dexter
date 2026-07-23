@@ -47,9 +47,17 @@ export async function fetchDailyRiskContext(symbol: string): Promise<DailyRiskCo
             new Promise<never>((_, reject) =>
                 setTimeout(() => reject(new Error('timeout after 8s')), 8_000)),
         ]);
-        const highs = bars.map((b) => b.high ?? NaN);
-        const lows = bars.map((b) => b.low ?? NaN);
-        const closes = bars.map((b) => b.close ?? NaN);
+        // COMPLETED bars only: on a gap day the in-progress bar's huge range
+        // inflates ATR, which deflates measured extension — the gap grants
+        // itself permission to be chased (observed live: MEDP +17% measured
+        // 2.8× ATR with today's bar, 4.2× without). The reference regime is
+        // yesterday's, not the event's.
+        const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+        const todayEt = `${et.getFullYear()}${String(et.getMonth() + 1).padStart(2, '0')}${String(et.getDate()).padStart(2, '0')}`;
+        const completed = bars.filter((b) => (b.time ?? '').slice(0, 8) !== todayEt);
+        const highs = completed.map((b) => b.high ?? NaN);
+        const lows = completed.map((b) => b.low ?? NaN);
+        const closes = completed.map((b) => b.close ?? NaN);
         value = {
             dailyAtr: lastValid(atr(highs, lows, closes, 14).atr),
             ema10: lastValid(ema(closes, 10)),

@@ -144,9 +144,22 @@ describe('cancel by symbol', () => {
         expect(onFilled.message).toContain('unprotected');
         await closeProposal(filled.id, { exitReason: 'manual' });
 
-        // two working brackets on one symbol → must cancel by id
-        const a = await make('CBSA');
-        const b = await make('CBSA');
+        // two working brackets on one symbol → must cancel by id.
+        // (Create BOTH while open — the duplicate-setup guard now refuses
+        // creating against an already-executed same-entry proposal, so this
+        // state can only arise from near-simultaneous creations.)
+        const a = await createProposal({
+            symbol: 'CBSA', direction: 'long', entryType: 'LMT',
+            entry: 100, stop: 95, target: 110, quantity: 10,
+            rationale: 'ambiguity test A', source: 'test',
+        });
+        const b = await createProposal({
+            symbol: 'CBSA', direction: 'long', entryType: 'LMT',
+            entry: 100, stop: 95, target: 110, quantity: 10,
+            rationale: 'ambiguity test B', source: 'test',
+        });
+        await setProposalStatus(a.id, 'executed', { orderIds: [61, 62, 63], executedAt: Date.now() });
+        await setProposalStatus(b.id, 'executed', { orderIds: [64, 65, 66], executedAt: Date.now() });
         const ambiguous = await cancelProposalForSymbol('CBSA');
         expect(ambiguous.ok).toBe(false);
         expect(ambiguous.message).toContain(a.id);

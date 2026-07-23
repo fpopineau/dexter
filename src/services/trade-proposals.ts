@@ -248,10 +248,32 @@ export interface CreateProposalInput {
     expiresMinutes?: number;
 }
 
+/** Entries within this fraction of an existing working bracket's entry on
+ *  the same symbol are duplicates (the daily brief re-proposing yesterday's
+ *  swing setup), not new trades. */
+export const DUPLICATE_ENTRY_TOLERANCE = 0.02;
+
 export async function createProposal(
     input: CreateProposalInput,
     gateContext: RiskGateContext = {},
 ): Promise<TradeProposal> {
+    // Duplicate-setup guard: an executed proposal on the same symbol with a
+    // near-identical entry means this exact setup already has a working
+    // bracket — creating another stacks orders, it does not add a trade.
+    if (input.entry != null && input.entry > 0) {
+        const dupe = (await listTrackable()).find((t) =>
+            t.symbol === input.symbol.trim().toUpperCase() &&
+            t.entry != null &&
+            Math.abs(t.entry - input.entry!) / input.entry! < DUPLICATE_ENTRY_TOLERANCE);
+        if (dupe) {
+            throw new Error(
+                `[risk-gate] REFUSED ${input.symbol.toUpperCase()}: duplicate setup — ${dupe.id} already has a ` +
+                `working bracket at ${dupe.entry} (within ${DUPLICATE_ENTRY_TOLERANCE * 100}% of ${input.entry}). ` +
+                `Cancel ${dupe.id} first, or skip`,
+            );
+        }
+    }
+
     // Deterministic risk gate — a proposal violating risk-rules.yaml is never
     // persisted, regardless of who created it (LLM, cron, TUI, script).
     assertProposalRisk({
@@ -383,6 +405,19 @@ export async function listTrackable(): Promise<TradeProposal[]> {
     const rows = database.query<Row>(
         `SELECT * FROM proposals WHERE status = 'executed' ORDER BY executed_at ASC`,
     ).all();
+    return rows.map(fromRow);
+}
+
+/** Executed proposals whose ENTRY never filled, older than maxAgeMs —
+ *  zombie brackets occupying position slots (swept by the stale-entry
+ *  sweeper, which cancels their orders). */
+export async function listStaleUnfilled(maxAgeMs: number): Promise<TradeProposal[]> {
+    const database = await getDb();
+    const rows = database.query<Row>(
+        `SELECT * FROM proposals
+         WHERE status = 'executed' AND entry_fill_price IS NULL AND executed_at < ?
+         ORDER BY executed_at ASC`,
+    ).all(Date.now() - maxAgeMs);
     return rows.map(fromRow);
 }
 

@@ -155,6 +155,38 @@ describe('proposal store lifecycle', () => {
         await releaseProposalClaim(p.id); // cleanup for cross-file counts
     });
 
+    test('duplicate-setup guard: refuses a near-identical entry against a working bracket', async () => {
+        const a = await createProposal(validInput({ symbol: 'DUPE', entry: 100, stop: 95, target: 110 }));
+        await setProposalStatus(a.id, 'executed', { orderIds: [71, 72, 73], executedAt: Date.now() });
+
+        // Same symbol, entry within 2% → refused (the daily re-propose pattern).
+        await expect(createProposal(validInput({ symbol: 'DUPE', entry: 101, stop: 96, target: 111 })))
+            .rejects.toThrow(/duplicate setup/);
+        // A genuinely different level (>2%) is a new trade.
+        const fresh = await createProposal(validInput({ symbol: 'DUPE', entry: 106, stop: 100.7, target: 116.7 }));
+        expect(fresh.status).toBe('open');
+
+        await closeProposal(a.id, { exitReason: 'cancelled' }); // free the slot for other tests
+    });
+
+    test('listStaleUnfilled finds old unfilled entries, not filled or fresh ones', async () => {
+        const { listStaleUnfilled } = await import('./trade-proposals.js');
+        const old = await createProposal(validInput({ symbol: 'STAL' }));
+        await setProposalStatus(old.id, 'executed', { orderIds: [81, 82, 83], executedAt: Date.now() - 4 * 24 * 3600_000 });
+        const fresh = await createProposal(validInput({ symbol: 'STAF' }));
+        await setProposalStatus(fresh.id, 'executed', { orderIds: [84, 85, 86], executedAt: Date.now() });
+        const filled = await createProposal(validInput({ symbol: 'STAG' }));
+        await setProposalStatus(filled.id, 'executed', { orderIds: [87, 88, 89], executedAt: Date.now() - 4 * 24 * 3600_000 });
+        await markEntryFilled(filled.id, 100.01);
+
+        const stale = (await listStaleUnfilled(3 * 24 * 3600_000)).map((p) => p.id);
+        expect(stale).toContain(old.id);
+        expect(stale).not.toContain(fresh.id);
+        expect(stale).not.toContain(filled.id);
+
+        for (const id of [old.id, fresh.id, filled.id]) await closeProposal(id, { exitReason: 'cancelled' });
+    });
+
     test('closeProposal only transitions executed proposals', async () => {
         const p = await createProposal(validInput());
         await closeProposal(p.id, { exitReason: 'manual' });

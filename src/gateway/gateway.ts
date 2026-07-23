@@ -34,6 +34,7 @@ import { resolveRoute } from './routing/resolve-route.js';
 import { resolveSessionStorePath, upsertSessionMeta } from './sessions/store.js';
 import { startDashboard } from '@/services/dashboard.js';
 import { startProfitTrail } from '@/services/profit-trail.js';
+import { startStaleEntrySweeper } from '@/services/stale-entry-sweeper.js';
 import { registerScanHealthAlerts } from './health-alerts.js';
 import { registerTriggerAlerts } from './trigger-alerts.js';
 import { cleanMarkdownForWhatsApp } from './utils.js';
@@ -280,6 +281,8 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     // Profit trail: auto-close winners that pull back from their peak
     // (alerts bridged to WhatsApp inside registerOutcomeAlerts).
     startProfitTrail();
+    // Reclaim position slots from brackets whose entry never filled.
+    startStaleEntrySweeper();
     // Local dashboard (http://127.0.0.1:8484) — charts + the live book from
     // dexter's own data; no second IBKR session involved.
     startDashboard();
