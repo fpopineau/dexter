@@ -1,7 +1,15 @@
 import { afterAll, describe, expect, test } from 'bun:test';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 process.env.DASHBOARD_PORT = '8497';
 process.env.DASHBOARD = 'true';
+// CRITICAL: isolate the proposals DB BEFORE any import touches the store.
+// This file sorts first alphabetically — without this line it binds the
+// store to the PRODUCTION DB for the whole single-process test run (which
+// is exactly what happened: 27 test fixtures leaked into the live book).
+process.env.DEXTER_DATA_DIR = mkdtempSync(join(tmpdir(), 'dexter-dashboard-'));
 
 import { startDashboard, stopDashboard } from './dashboard.js';
 

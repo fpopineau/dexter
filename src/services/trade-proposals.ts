@@ -91,6 +91,12 @@ let db: SqliteDatabase | null = null;
 
 async function getDb(): Promise<SqliteDatabase> {
     if (db) return db;
+    // Hard guard: a test run must NEVER bind the production proposals DB.
+    // The store caches its handle process-wide, so one test file importing
+    // without isolation poisons the entire run — refuse loudly instead.
+    if (process.env.NODE_ENV === 'test' && !process.env.DEXTER_DATA_DIR) {
+        throw new Error('[proposals] refusing to open the production DB under NODE_ENV=test — set DEXTER_DATA_DIR to a temp dir first');
+    }
     const dbDir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
     const dbPath = join(dbDir, 'proposals.db');
     await mkdir(dirname(dbPath), { recursive: true });
