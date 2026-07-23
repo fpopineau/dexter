@@ -607,6 +607,13 @@ and the latest swing-scan candidates. Click any symbol for its chart
 the entry / stop / target / trail-peak levels drawn on it. Auto-refreshes
 every 30 s.
 
+**Actions:** the sidebar carries the same deterministic commands as
+WhatsApp — accept/reject open proposals, cancel working brackets,
+close/protect positions — each behind a confirmation, each through the
+full gate stack (paper lock, kill-switch, risk gates, chase gate).
+Mutations are CSRF-protected by a per-startup token baked into the page;
+after a gateway restart, reload the page if actions return 403.
+
 Knobs: `DASHBOARD=false` to disable, `DASHBOARD_PORT` (8484),
 `DASHBOARD_HOST` (127.0.0.1 — it has no auth; do not bind it wider on an
 untrusted network).

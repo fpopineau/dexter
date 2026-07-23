@@ -14,7 +14,10 @@
  */
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { randomBytes } from 'node:crypto';
 import { BarSizeSetting } from '@stoqey/ib';
+import { acceptProposal, cancelProposalBracket, rejectProposal } from './proposal-executor.js';
+import { closePosition, protectPosition } from './position-actions.js';
 import { getDailyBars, getIntradayBars } from './data-archive.js';
 import { getDailyLossStatus } from './daily-loss-guard.js';
 import { getLatestPatternScan } from './pattern-scanner.js';
@@ -116,13 +119,90 @@ async function buildBars(symbol: string, size: string): Promise<string> {
 // ---------------------------------------------------------------------------
 
 const SYMBOL_RE = /^[A-Za-z.]{1,6}$/;
+const PROPOSAL_ID_RE = /^P-[A-Za-z0-9]{4}$/i;
+
+/**
+ * CSRF protection for trade actions: any website the operator visits can
+ * POST to 127.0.0.1, so mutations require this per-startup token, which is
+ * embedded in the served page — same-origin JS can read it, a foreign
+ * origin cannot (and the custom header forces a CORS preflight we never
+ * answer). A restart rotates it; stale tabs get 403 and say "reload".
+ */
+const ACTION_TOKEN = randomBytes(16).toString('hex');
+
+function readBody(req: IncomingMessage, limit = 10_000): Promise<string> {
+    return new Promise((resolve, reject) => {
+        let body = '';
+        req.on('data', (chunk: Buffer) => {
+            body += chunk.toString('utf-8');
+            if (body.length > limit) reject(new Error('body too large'));
+        });
+        req.on('end', () => resolve(body));
+        req.on('error', reject);
+    });
+}
+
+interface ActionPayload {
+    action?: string;
+    id?: string;
+    symbol?: string;
+    stop?: number;
+    target?: number;
+}
+
+/** Route a dashboard action through the SAME deterministic paths as the
+ *  WhatsApp command router — every gate applies identically. */
+async function runAction(p: ActionPayload): Promise<{ ok: boolean; message: string }> {
+    switch (p.action) {
+        case 'accept':
+        case 'reject':
+        case 'cancel': {
+            if (!p.id || !PROPOSAL_ID_RE.test(p.id)) return { ok: false, message: 'bad proposal id' };
+            const id = p.id.toUpperCase();
+            if (p.action === 'accept') return acceptProposal(id);
+            if (p.action === 'reject') return rejectProposal(id);
+            return cancelProposalBracket(id);
+        }
+        case 'close': {
+            if (!p.symbol || !SYMBOL_RE.test(p.symbol)) return { ok: false, message: 'bad symbol' };
+            return closePosition(p.symbol);
+        }
+        case 'protect': {
+            if (!p.symbol || !SYMBOL_RE.test(p.symbol)) return { ok: false, message: 'bad symbol' };
+            const stop = Number(p.stop);
+            if (!(stop > 0)) return { ok: false, message: 'protect requires a positive stop price' };
+            const target = p.target !== undefined && p.target !== null ? Number(p.target) : undefined;
+            if (target !== undefined && !(target > 0)) return { ok: false, message: 'bad target price' };
+            return protectPosition(p.symbol, stop, target);
+        }
+        default:
+            return { ok: false, message: `unknown action '${p.action}'` };
+    }
+}
 
 async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
     try {
         if (url.pathname === '/') {
             res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-            res.end(DASHBOARD_HTML);
+            res.end(DASHBOARD_HTML.replace('__DEXTER_TOKEN__', ACTION_TOKEN));
+            return;
+        }
+        if (url.pathname === '/api/action' && req.method === 'POST') {
+            const origin = req.headers.origin;
+            const originOk = origin === undefined ||
+                origin.startsWith('http://127.0.0.1') || origin.startsWith('http://localhost');
+            if (!originOk || req.headers['x-dexter-token'] !== ACTION_TOKEN) {
+                res.writeHead(403, { 'content-type': 'application/json' });
+                res.end(JSON.stringify({ ok: false, message: 'forbidden — reload the dashboard page' }));
+                return;
+            }
+            const payload = JSON.parse(await readBody(req)) as ActionPayload;
+            logger.info(`[dashboard] action ${payload.action} ${payload.id ?? payload.symbol ?? ''}`);
+            const outcome = await runAction(payload);
+            overviewCache = null; // the book just changed — next poll must see it
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(outcome));
             return;
         }
         if (url.pathname === '/api/overview') {
