@@ -44,6 +44,14 @@ function getApiKey(): string {
   return process.env.FINANCIAL_DATASETS_API_KEY || '';
 }
 
+// Circuit breaker: once the provider says unauthorized (401) or out of
+// credits (402), every further call this session will fail identically —
+// short-circuit instead of burning agent iterations and HTTP round-trips.
+// Re-probes after an hour in case the account was topped up.
+const BREAKER_RETRY_MS = 60 * 60_000;
+let breakerTrippedAt = 0;
+let breakerReason = '';
+
 /**
  * Shared request execution: handles API key, error handling, logging, and response parsing.
  */
@@ -56,6 +64,12 @@ async function executeRequest(
 
   if (!apiKey) {
     logger.warn(`[Financial Datasets API] call without key: ${label}`);
+  }
+
+  if (breakerTrippedAt && Date.now() - breakerTrippedAt < BREAKER_RETRY_MS) {
+    throw new Error(
+      `[Financial Datasets API] unavailable (${breakerReason}) — do not retry this tool; use web_search instead`,
+    );
   }
 
   let response: Response;
@@ -75,6 +89,14 @@ async function executeRequest(
 
   if (!response.ok) {
     const detail = `${response.status} ${response.statusText}`;
+    if (response.status === 401 || response.status === 402) {
+      breakerTrippedAt = Date.now();
+      breakerReason = response.status === 401 ? 'no valid API key' : 'no credits on the account';
+      logger.warn(`[Financial Datasets API] ${detail} on ${label} — circuit open for 1h, calls will short-circuit`);
+      throw new Error(
+        `[Financial Datasets API] unavailable (${breakerReason}) — do not retry this tool; use web_search instead`,
+      );
+    }
     logger.error(`[Financial Datasets API] error: ${label} — ${detail}`);
     throw new Error(`[Financial Datasets API] request failed: ${detail}`);
   }

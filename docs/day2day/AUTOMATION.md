@@ -70,6 +70,12 @@ Starts/stops with the gateway when IBKR is configured; opt-out with
   Creation passes the **deterministic risk gate** (below); the entry price
   is required even for MKT proposals (indicative, anchors the risk math).
   `performance` returns closed-trade outcomes over the last N days.
+- **`earnings_calendar`** — keyless (Nasdaq public data): who reports on a
+  date, and whether given symbols report within N days. The Pre-Market
+  Brief names the day's big reporters and checks positions/watchlist; the
+  Pre-Close Review refuses to hold through a report by ACCIDENT (every
+  position checked, withinDays 2). Unavailable days are reported as
+  "could not verify", never as "no earnings".
 - **`accept_proposal`** — executes an open proposal. Listed in
   `TOOLS_REQUIRING_APPROVAL`: interactive confirmation in the TUI,
   **auto-denied in headless runs** (cron, gateway, triggers).

@@ -12,6 +12,17 @@ feeds, how to configure it, and what is still missing.
 
 ---
 
+## Earnings calendar — Nasdaq public endpoint (FREE, wired)
+
+Daily per-date fetch of US reporters (symbol, pre-market/after-hours
+timing, consensus EPS), cached 6h in earnings-calendar.json with a 7-day
+lookahead. Feeds the earnings_calendar tool, the Pre-Market Brief
+(today/tomorrow reporters vs positions and watchlist) and the Pre-Close
+Review overnight-risk check. Replaces the Financial Datasets news/earnings
+dependency (that API is now prepaid-credits only; a circuit breaker
+short-circuits its calls for 1h after a 401/402 so briefs never burn
+iterations on a dead provider).
+
 ## 1. Live sources (wired)
 
 ### 1.1 Interactive Brokers (IBKR) — the market backbone
