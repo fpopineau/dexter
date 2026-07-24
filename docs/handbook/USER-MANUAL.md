@@ -157,6 +157,10 @@ Everything else has sensible defaults:
 | `AUTO_EXECUTE_PAPER` | false | paper-only auto-exec of proposals, all sources (§11) |
 | `AUTO_EXECUTE_MAX_PER_DAY` | 5 | auto-exec daily cap |
 | `AUTO_EXECUTE_MIN_SCORE` | 80 | confidence floor — lower scores stay manual |
+| `PROFIT_TRAIL` | true | auto-close winners: arm at +`profit_trail_arm_pct`%, close on `profit_trail_pullback_pct`% pullback from peak (§9) |
+| `STALE_ENTRY_MAX_DAYS` | 3 | cancel executed-but-unfilled entries after N days (0 = off) |
+| `AUTO_PROTECT` | true | re-attach GTC exits when DAY exits die on an open position (§9) |
+| `DASHBOARD` / `_PORT` / `_HOST` | true / 8484 / 127.0.0.1 | local dashboard (§15bis) |
 | `DATA_ARCHIVE` | true | daily 16:20 ET bar archival (§15) |
 | `DATA_ARCHIVE_SYMBOLS` | — | always-archived watchlist, e.g. `SPY,QQQ` |
 | `DATA_ARCHIVE_MAX_SYMBOLS` | 30 | archival cap per day |
@@ -246,17 +250,21 @@ All times ET; weekends and NYSE holidays are skipped automatically.
 
 | Time | What happens | What you see |
 |---|---|---|
-| 08:00 | **Pre-Market Brief** | WhatsApp: yesterday's performance recap, overnight moves, calendar, gaps |
-| 08:00–09:30 | engine pre-open scans (5 min) | (logs only) |
+| 08:00 | **Pre-Market Brief** | WhatsApp: performance recap, **today's & tomorrow's earnings reporters vs your book**, overnight moves, gaps, swing-pattern candidates (GTC STP_LMT proposals) |
+| 08:00–09:30 | engine pre-open scans (5 min) | (logs only; ⚠️ scanner-health alert if scans return empty) |
 | 09:30–10:30 | engine open-drive scans (2 min) | possible trigger alerts |
 | 09:35 | **Market Open Scan** | ranked brief, ≤3 proposals (90 min expiry) — reply `accept P-XXXX` to act |
 | 10:30–15:00 | engine midday scans (10 min) | occasional triggers |
 | 12:00 | **Midday Check** | positions + mean-reversion look |
 | 15:00–16:00 | engine pre-close scans (5 min) | |
-| 15:30 | **Pre-Close Review** | hold/trim/close advice, ≤2 overnight proposals (45 min expiry) |
+| 15:30 | **Pre-Close Review** | hold/trim/close advice, **every position checked for earnings ≤2 days**, expiring DAY exits flagged, ≤2 overnight proposals (45 min expiry) |
 | any time | a candidate enters top-3 with rank ≥ 75 | trigger alert with a proposal, if the evaluation finds a catalyst |
-| on fills | outcome tracker | 🎯/🛑 close alerts with realized P&L |
+| RTH, every 60 s | **profit trail** watches each position's peak | 📉➡️💰 auto-close alert when a ≥+5% winner pulls back 1.5% from its peak |
+| hourly | **stale-entry sweeper** | 🚫 close alerts for brackets whose entry never filled in 3 days (slots freed) |
+| on fills | outcome tracker | 🎯/🛑 close alerts with realized P&L; 🛡️ auto-protect if DAY exits died on an open position |
 | 16:20 | archive scheduler | (logs only) day's bars archived |
+| 18:00 | universe sweep + swing-pattern scan | (logs only) watchlist + midcap history refreshed, pattern-scan.json rebuilt |
+| all day | **dashboard** at `http://127.0.0.1:8484/` | live book, charts with entry/stop/target/peak lines, accept/reject/cancel/close/protect buttons |
 
 Schedules are editable: the jobs live in the cron store and can be tuned
 (time, active hours) without code changes; prompts are re-synced from code.
@@ -297,9 +305,13 @@ agent when you ask it to. Creation never trades.
 R/R < `min_risk_reward`, entry < `min_price`, an incoherent stop/target, a
 stop closer than `min_stop_atr_fraction` × the daily ATR (noise-stop filter),
 an entry more than `max_extension_atr` × ATR beyond the 10-day EMA (extension
-guard — no chasing), or
-a fractional quantity is refused before it is stored. The agent sees the
-violation list and must fix the numbers.
+guard — no chasing), an entry within 2% of an existing working bracket on
+the same symbol (duplicate-setup guard — the daily brief re-proposing
+yesterday's trigger), or a fractional quantity is refused before it is
+stored. The agent sees the violation list and must fix the numbers. The
+ATR and EMA references are computed from **completed daily bars only** —
+on a gap day the in-progress bar would inflate ATR and let the gap grant
+itself permission to be chased.
 
 **Accepting:** reply `accept P-3F2A` (or approve the `accept_proposal`
 tool in the TUI). The executor first takes an **atomic claim** on the
@@ -678,6 +690,11 @@ P&L math, market-hours. Live-socket behavior is exercised by
 | `nextValidId not received within 5s` | IBKR did not grant an order id — placement refused rather than guessed; retry, and check the Gateway if it persists |
 | Proposal `failed` with "execution interrupted (crash/restart mid-placement)" | the process died between claim and confirmation — verify at IBKR (`orders` / TWS) whether the bracket exists before acting |
 | URL refused: `only public http(s) destinations are allowed` | SSRF protection on web_fetch/browser — local/private addresses are never fetchable, by design |
+| `[risk-gate] REFUSED … duplicate setup — P-XXXX already has a working bracket` | the same symbol already has a bracket within 2% of that entry — cancel it first or let it work |
+| `📉➡️💰 PROFIT TRAIL` close you didn't ask for | the winner-protection rule (§9): +5% peak then 1.5% pullback → banked automatically |
+| Proposal closed `cancelled` by the hourly sweep | its entry never filled for `STALE_ENTRY_MAX_DAYS` — the zombie bracket was reclaimed |
+| `Financial Datasets API unavailable (no credits…)` | expected: that provider is prepaid-only and unfunded; the circuit breaker silences it for 1h and the agent uses web_search/earnings_calendar |
+| Dashboard action returns `forbidden — reload the dashboard page` | the CSRF token rotated with a gateway restart — reload the tab |
 | jest: `better_sqlite3.node not found` | `cd node_modules/better-sqlite3 && npx prebuild-install` (bun installs skip node prebuilds) |
 
 ## 19. Going live — checklist

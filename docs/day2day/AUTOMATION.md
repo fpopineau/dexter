@@ -87,10 +87,14 @@ advisory; this gate is mandatory):
   min risk/reward, integer quantity, and the **noise-stop filter** (stop
   distance must be ≥ `min_stop_atr_fraction` × the daily ATR(14), fetched
   server-side — a tighter stop sits inside intraday noise and fills on
-  randomness), and the **extension guard** (entry further than
+  randomness), the **extension guard** (entry further than
   `max_extension_atr` × daily ATR beyond the 10-day EMA is chasing a move
-  that mean-reverts — the first live week lost on exactly this pattern) —
-  violating proposals are never persisted;
+  that mean-reverts — the first live week lost on exactly this pattern),
+  and the **duplicate-setup guard** (entry within 2% of an existing
+  working bracket on the same symbol) — violating proposals are never
+  persisted. ATR/EMA references use **completed daily bars only**, so a
+  gap day's giant in-progress bar cannot inflate ATR and license its own
+  chase;
 - at **acceptance** (executor): position value vs `max_position_pct` of the
   live NetLiquidation, `max_open_positions` (executed-not-closed count),
   `max_daily_trades` (executed today, ET), the **per-trade risk budget**
@@ -142,6 +146,41 @@ persist to `.dexter/data/pattern-scan.json`; the agent reads them via the
 verifies news on the top candidates and registers GTC STP_LMT swing
 proposals through the normal gates. Manual run:
 `bun run scripts/pattern-scan.ts`.
+
+### Position guardians (deterministic, no LLM)
+Three services watch every position the executor creates:
+- **Profit trail** — `src/services/profit-trail.ts`: RTH 60 s poll; once a
+  position's unrealized gain reaches `profit_trail_arm_pct` (risk-rules,
+  5%) it ARMS and tracks the peak; a `profit_trail_pullback_pct` (1.5%)
+  giveback closes at market via `closePosition` (exits cancelled,
+  auto-protect suppressed). Peaks persist across restarts; armed stays
+  armed; shorts mirrored. `PROFIT_TRAIL=false` to disable.
+- **Auto-protect** — in the outcome tracker: a `manual` close with a
+  filled entry (DAY exits died at the bell) re-attaches a GTC stop/target
+  OCA pair at the proposal's levels and alerts (`🛡️`); no-ops when flat;
+  refuses when GTC exits already exist. `AUTO_PROTECT=false` to disable.
+- **Stale-entry sweeper** — `src/services/stale-entry-sweeper.ts`: hourly,
+  cancels the orders of executed proposals whose ENTRY never filled after
+  `STALE_ENTRY_MAX_DAYS` (3) — the tracker closes them as `cancelled`,
+  freeing `max_open_positions` slots from zombie brackets.
+
+### Earnings calendar — `src/services/earnings-calendar.ts`
+Keyless Nasdaq public data, 6 h cache, 7-day lookahead, pure parser.
+Consumed by the `earnings_calendar` tool, the Pre-Market Brief (today's and
+tomorrow's reporters vs the book) and the Pre-Close Review (every position
+checked `withinDays 2`). An unfetchable day is "could not verify", never
+"no earnings". The legacy Financial Datasets client sits behind a circuit
+breaker: the first 401/402 short-circuits further calls for an hour.
+
+### Local dashboard — `src/services/dashboard{,-page}.ts`
+`http://127.0.0.1:8484/` served by the gateway from its own data (no
+second IBKR session — external viewers steal the Gateway's brokerage
+session). Book sidebar (positions, working orders, proposals, trail
+peaks, swing candidates), candlestick chart with entry/stop/target/peak
+lines (live 1-min over the existing session, archive fallback), and
+action buttons routed through the SAME executor paths as WhatsApp,
+CSRF-protected by a per-startup token. Resizable splitter; EADDRINUSE
+bind retries survive restart overlap.
 
 ### Scheduled briefs — `src/cron/trading-schedules.ts`
 Seeded at gateway startup (prompt changes in code are re-synced to already
