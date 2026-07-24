@@ -216,6 +216,9 @@ export const CHASE_FRACTION = 0.25;
 export interface PriceRunResult {
     ok: boolean;
     reason?: string;
+    /** Why it failed: the setup died (through the stop) vs the price ran
+     *  away (chasing) — callers tailor their advice on this. */
+    kind?: 'invalidated' | 'chasing';
 }
 
 /**
@@ -233,24 +236,26 @@ export function checkPriceRun(
 
     if (p.direction === 'long') {
         if (lastPrice <= p.stop) {
-            return { ok: false, reason: `setup invalidated: last ${lastPrice} is at/through the stop ${p.stop}` };
+            return { ok: false, kind: 'invalidated', reason: `setup invalidated: last ${lastPrice} is at/through the stop ${p.stop}` };
         }
         const chaseLine = entry + CHASE_FRACTION * (p.target - entry);
         if (lastPrice >= chaseLine) {
             return {
                 ok: false,
+                kind: 'chasing',
                 reason: `price has run: last ${lastPrice} vs entry ${entry} — already past ` +
                     `${Math.round(CHASE_FRACTION * 100)}% of the way to target ${p.target} (chasing)`,
             };
         }
     } else {
         if (lastPrice >= p.stop) {
-            return { ok: false, reason: `setup invalidated: last ${lastPrice} is at/through the stop ${p.stop}` };
+            return { ok: false, kind: 'invalidated', reason: `setup invalidated: last ${lastPrice} is at/through the stop ${p.stop}` };
         }
         const chaseLine = entry - CHASE_FRACTION * (entry - p.target);
         if (lastPrice <= chaseLine) {
             return {
                 ok: false,
+                kind: 'chasing',
                 reason: `price has run: last ${lastPrice} vs entry ${entry} — already past ` +
                     `${Math.round(CHASE_FRACTION * 100)}% of the way to target ${p.target} (chasing)`,
             };

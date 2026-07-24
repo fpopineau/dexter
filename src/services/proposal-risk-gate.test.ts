@@ -210,6 +210,18 @@ describe('extension guard (chasing filter)', () => {
     });
 });
 
+describe('checkPriceRun refusal kinds', () => {
+    test('distinguishes chasing from invalidation (advice differs downstream)', () => {
+        const p = { direction: 'long' as const, entry: 100, stop: 95, target: 110 };
+        expect(checkPriceRun(p, 104).kind).toBe('chasing');       // past the 102.5 chase line
+        expect(checkPriceRun(p, 94).kind).toBe('invalidated');    // through the stop
+        expect(checkPriceRun(p, 101).kind).toBeUndefined();       // ok
+        const s = { direction: 'short' as const, entry: 100, stop: 105, target: 90 };
+        expect(checkPriceRun(s, 96).kind).toBe('chasing');
+        expect(checkPriceRun(s, 106).kind).toBe('invalidated');
+    });
+});
+
 describe('per-trade risk budget', () => {
     test('a stop-out costing more than max_risk_per_trade_pct is refused with a share cap', () => {
         // The live pattern this kills: RAM 3154 shares × $0.81 stop ≈ $2.5k

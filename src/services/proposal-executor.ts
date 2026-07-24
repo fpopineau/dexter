@@ -110,7 +110,17 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         if (last !== null) {
             const run = checkPriceRun(p, last);
             if (!run.ok) {
-                throw new Error(`[chase-gate] ${run.reason}. Ask for re-evaluated levels instead of accepting stale ones.`);
+                // Steer the retry: a deep pullback limit under a runner
+                // either never fills (SAP) or fills when momentum breaks
+                // (AEHR) — the right re-proposal is a continuation trigger.
+                // On invalidation (through the stop) the setup is dead:
+                // never advise re-entering.
+                const hint = run.kind === 'chasing' && p.entryType === 'LMT'
+                    ? 'On a runner, a deep pullback limit either never fills or fills when momentum breaks — re-propose as STP_LMT continuation (trigger just above the market, fresh stop/target) or skip.'
+                    : run.kind === 'chasing'
+                        ? 'Ask for re-evaluated levels instead of accepting stale ones.'
+                        : 'The setup is dead at these levels — do not re-enter; re-evaluate from scratch if the thesis still stands.';
+                throw new Error(`[chase-gate] ${run.reason}. ${hint}`);
             }
         } else {
             logger.warn(`[proposal-executor] ${p.id}: live quote unavailable — chase check skipped`);
