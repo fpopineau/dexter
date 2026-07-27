@@ -81,7 +81,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
 </div>
 <script>
 window.DEXTER_TOKEN = '__DEXTER_TOKEN__';
-var state = { overview:null, symbol:null, tf:'1min', chart:null, series:null, lines:[] };
+var state = { overview:null, symbol:null, tf:'1min', chart:null, series:null, lines:[], linePrices:[] };
 
 function el(id){ return document.getElementById(id); }
 function fmt(n,d){ return n==null||isNaN(n) ? '—' : Number(n).toFixed(d==null?2:d); }
@@ -96,7 +96,17 @@ function initChart(){
     rightPriceScale:{ borderColor:'#21262d' }, crosshair:{ mode:0 } };
   state.chart = LightweightCharts.createChart(el('chart'), opts);
   state.series = state.chart.addCandlestickSeries({
-    upColor:'#3fb950', downColor:'#f85149', wickUpColor:'#3fb950', wickDownColor:'#f85149', borderVisible:false });
+    upColor:'#3fb950', downColor:'#f85149', wickUpColor:'#3fb950', wickDownColor:'#f85149', borderVisible:false,
+    // Stretch the price scale to keep overlay levels (stop/target/peak)
+    // in view — otherwise a target above the day's range is invisible
+    // and the stop below reads like "a target under the entry".
+    autoscaleInfoProvider: function(original){
+      var r = original();
+      if(!r || !r.priceRange || !state.linePrices.length) return r;
+      var lo = Math.min.apply(null, [r.priceRange.minValue].concat(state.linePrices));
+      var hi = Math.max.apply(null, [r.priceRange.maxValue].concat(state.linePrices));
+      return { priceRange: { minValue: lo, maxValue: hi }, margins: r.margins };
+    } });
 }
 
 function initSplitter(){
@@ -124,9 +134,10 @@ function initSplitter(){
   });
 }
 
-function clearLines(){ state.lines.forEach(function(l){ state.series.removePriceLine(l); }); state.lines = []; }
+function clearLines(){ state.lines.forEach(function(l){ state.series.removePriceLine(l); }); state.lines = []; state.linePrices = []; }
 function addLine(price, color, title, dashed){
   if(price==null || isNaN(price)) return;
+  state.linePrices.push(Number(price));
   state.lines.push(state.series.createPriceLine({ price:Number(price), color:color, lineWidth:1,
     lineStyle: dashed?LightweightCharts.LineStyle.Dashed:LightweightCharts.LineStyle.Solid, title:title }));
 }
