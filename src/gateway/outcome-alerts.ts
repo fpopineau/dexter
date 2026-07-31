@@ -8,6 +8,7 @@
  */
 
 import { onAutoProtect, onTradeClosed } from '@/services/outcome-tracker.js';
+import { onEodTriage } from '@/services/eod-triage.js';
 import { onProfitTrailAlert } from '@/services/profit-trail.js';
 import { formatProposalLine, type TradeProposal } from '@/services/trade-proposals.js';
 import { logger } from '@/utils';
@@ -90,6 +91,23 @@ export function registerOutcomeAlerts(): void {
         }
         await sendMessageWhatsApp({ to: session.lastTo, body: message, accountId: session.lastAccountId });
         logger.info('[outcome-alerts] auto-protect alert delivered');
+    });
+
+    // EOD triage reports (close losing-and-fading / keep the rest).
+    onEodTriage(async (message) => {
+        const session = findTargetSession();
+        if (!session?.lastTo || !session?.lastAccountId) {
+            logger.warn('[outcome-alerts] no WhatsApp delivery target, skipping EOD-triage report');
+            return;
+        }
+        try {
+            assertOutboundAllowed({ to: session.lastTo, accountId: session.lastAccountId });
+        } catch {
+            logger.warn('[outcome-alerts] outbound blocked, skipping EOD-triage report');
+            return;
+        }
+        await sendMessageWhatsApp({ to: session.lastTo, body: message, accountId: session.lastAccountId });
+        logger.info('[outcome-alerts] EOD-triage report delivered');
     });
 
     // Profit-trail closes (winner peaked, pulled back, auto-closed).

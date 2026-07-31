@@ -33,6 +33,7 @@ import { handleProposalCommand } from './proposal-commands.js';
 import { resolveRoute } from './routing/resolve-route.js';
 import { resolveSessionStorePath, upsertSessionMeta } from './sessions/store.js';
 import { startDashboard } from '@/services/dashboard.js';
+import { startEodTriage } from '@/services/eod-triage.js';
 import { startProfitTrail } from '@/services/profit-trail.js';
 import { startStaleEntrySweeper } from '@/services/stale-entry-sweeper.js';
 import { registerScanHealthAlerts } from './health-alerts.js';
@@ -283,6 +284,9 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     startProfitTrail();
     // Reclaim position slots from brackets whose entry never filled.
     startStaleEntrySweeper();
+    // 15:52 ET: close losing-and-fading DAY positions; keep the rest for
+    // the protected-overnight conversion at the bell.
+    startEodTriage();
     // Local dashboard (http://127.0.0.1:8484) — charts + the live book from
     // dexter's own data; no second IBKR session involved.
     startDashboard();

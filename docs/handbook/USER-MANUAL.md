@@ -160,6 +160,7 @@ Everything else has sensible defaults:
 | `PROFIT_TRAIL` | true | auto-close winners: arm at +`profit_trail_arm_pct`%, close on `profit_trail_pullback_pct`% pullback from peak (§9) |
 | `STALE_ENTRY_MAX_DAYS` | 3 | cancel executed-but-unfilled entries after N days (0 = off) |
 | `AUTO_PROTECT` | true | re-attach GTC exits when DAY exits die on an open position (§9) |
+| `EOD_TRIAGE` | true | 15:52 ET: close losing-and-fading DAY positions; keep the rest overnight |
 | `DASHBOARD` / `_PORT` / `_HOST` | true / 8484 / 127.0.0.1 | local dashboard (§15bis) |
 | `DATA_ARCHIVE` | true | daily 16:20 ET bar archival (§15) |
 | `DATA_ARCHIVE_SYMBOLS` | — | always-archived watchlist, e.g. `SPY,QQQ` |
@@ -260,6 +261,7 @@ All times ET; weekends and NYSE holidays are skipped automatically.
 | 15:30 | **Pre-Close Review** | hold/trim/close advice, **every position checked for earnings ≤2 days**, expiring DAY exits flagged, ≤2 overnight proposals (45 min expiry) |
 | any time | a candidate enters top-3 with rank ≥ 75 | trigger alert with a proposal, if the evaluation finds a catalyst |
 | RTH, every 60 s | **profit trail** watches each position's peak | 📉➡️💰 auto-close alert when a ≥+5% winner pulls back 1.5% from its peak |
+| 15:52 | **EOD triage** of unresolved DAY positions | 🌇 report: losing-and-fading closed before the bell; the rest keep their overnight chance |
 | hourly | **stale-entry sweeper** | 🚫 close alerts for brackets whose entry never filled in 3 days (slots freed) |
 | on fills | outcome tracker | 🎯/🛑 close alerts with realized P&L; 🛡️ auto-protect if DAY exits died on an open position |
 | 16:20 | archive scheduler | (logs only) day's bars archived |
