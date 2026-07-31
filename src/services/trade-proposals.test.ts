@@ -24,6 +24,7 @@ import {
     listProposals,
     listTrackable,
     markEntryFilled,
+    recordLateExitFill,
     setProposalStatus,
     type CreateProposalInput,
 } from './trade-proposals.js';
@@ -285,5 +286,36 @@ describe('listProposals', () => {
         for (const p of open) expect(p.status).toBe('open');
         const closed = await listProposals('closed');
         expect(closed.length).toBeGreaterThanOrEqual(3);
+    });
+});
+
+describe('recordLateExitFill (P&L attribution after the fact)', () => {
+    test('patches a closed manual row, and only that', async () => {
+        // The 'close outside RTH' shape: proposal finalized as manual/unknown,
+        // the MKT close fills at the next open.
+        const p = await createProposal(validInput({ symbol: 'LATE' }));
+        await setProposalStatus(p.id, 'executed', { orderIds: [31, 32, 33], executedAt: Date.now() });
+        await markEntryFilled(p.id, 100);
+        await closeProposal(p.id, { exitReason: 'manual', note: 'both bracket exits terminated without filling' });
+        expect((await getProposal(p.id))?.realizedPnl).toBeNull();
+
+        await recordLateExitFill(p.id, { exitFillPrice: 104, realizedPnl: 40, note: 'position closed at market by EOD triage @ 104' });
+        const patched = await getProposal(p.id);
+        expect(patched?.realizedPnl).toBe(40);
+        expect(patched?.exitFillPrice).toBe(104);
+        expect(patched?.note).toContain('both bracket exits terminated');
+        expect(patched?.note).toContain('EOD triage @ 104');
+
+        // A second late fill must NOT overwrite the recorded P&L.
+        await recordLateExitFill(p.id, { exitFillPrice: 90, realizedPnl: -100, note: 'bogus duplicate' });
+        expect((await getProposal(p.id))?.realizedPnl).toBe(40);
+    });
+
+    test('rows with a real P&L (e.g. stop exits) are never touched', async () => {
+        const s = await createProposal(validInput({ symbol: 'STOPD' }));
+        await setProposalStatus(s.id, 'executed', { orderIds: [34, 35, 36], executedAt: Date.now() });
+        await closeProposal(s.id, { exitReason: 'stop', realizedPnl: -50 });
+        await recordLateExitFill(s.id, { exitFillPrice: 1, realizedPnl: 999 });
+        expect((await getProposal(s.id))?.realizedPnl).toBe(-50);
     });
 });

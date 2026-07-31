@@ -238,8 +238,10 @@ export function wasRecentlyClosed(symbol: string): boolean {
     return at !== undefined && Date.now() - at < RECENTLY_CLOSED_MS;
 }
 
-/** Market-close the full position in a symbol (risk-reducing). */
-export async function closePosition(symbolRaw: string): Promise<PositionActionOutcome> {
+/** Market-close the full position in a symbol (risk-reducing). `source`
+ *  labels who decided (operator command, profit-trail, EOD triage) — it
+ *  flows into the outcome tracker so the close gets a real P&L. */
+export async function closePosition(symbolRaw: string, source = 'close command'): Promise<PositionActionOutcome> {
     const symbol = symbolRaw.trim().toUpperCase();
     try {
         assertOrderingAllowed();
@@ -267,6 +269,18 @@ export async function closePosition(symbolRaw: string): Promise<PositionActionOu
             api.placeOrder(orderId, stockContract(symbol), order);
             return { orderId, order };
         });
+
+        // Register the close with the outcome tracker BEFORE cancelling the
+        // bracket exits: its fill is the exit price that turns the tracked
+        // proposals' 'manual / P&L unknown' into a real realized P&L.
+        // (Dynamic import mirrors the tracker's own import of this module —
+        // no static cycle.)
+        try {
+            const { trackManualExit } = await import('./outcome-tracker.js');
+            trackManualExit(symbol, orderId, qty, source);
+        } catch (err) {
+            logger.warn(`[position-actions] could not register ${symbol} close with the outcome tracker: ${err}`);
+        }
 
         // Cancel this symbol's tracked bracket/exit orders: a live GTC exit
         // on a CLOSED position is a naked short (or unintended long) waiting

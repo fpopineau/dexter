@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { computeRealizedPnl, isIbNumber } from './outcome-tracker.js';
+import { computeRealizedPnl, isIbNumber, selectManualExitTargets } from './outcome-tracker.js';
 
 describe('computeRealizedPnl', () => {
     test('long win: (exit − entry) × qty', () => {
@@ -42,5 +42,29 @@ describe('isIbNumber (IBKR unset-sentinel filtering)', () => {
         expect(isIbNumber(null)).toBe(false);
         expect(isIbNumber(Number.NaN)).toBe(false);
         expect(isIbNumber(Number.POSITIVE_INFINITY)).toBe(false);
+    });
+});
+
+describe('selectManualExitTargets (guardian-close P&L attribution)', () => {
+    const t = (symbol: string, closed: boolean, entryRecorded: boolean, id: string) =>
+        ({ symbol, closed, entryRecorded, id });
+
+    test('picks entry-filled, still-open trades on the symbol only', () => {
+        const trades = [
+            t('NVDA', false, true, 'a'),   // yes
+            t('NVDA', false, false, 'b'),  // entry never filled — nothing to close
+            t('NVDA', true, true, 'c'),    // already finalized
+            t('MU', false, true, 'd'),     // other symbol
+        ];
+        expect(selectManualExitTargets(trades, 'NVDA').map((x) => x.id)).toEqual(['a']);
+    });
+
+    test('a stacked position (two filled proposals) attributes to both', () => {
+        const trades = [t('MU', false, true, 'a'), t('MU', false, true, 'b')];
+        expect(selectManualExitTargets(trades, ' mu ').length).toBe(2);
+    });
+
+    test('no candidates → empty (the close is untracked, P&L stays honest-unknown)', () => {
+        expect(selectManualExitTargets([t('MU', false, true, 'a')], 'NVDA')).toEqual([]);
     });
 });

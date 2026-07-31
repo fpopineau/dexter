@@ -406,6 +406,36 @@ export async function closeProposal(id: string, input: CloseProposalInput): Prom
     logger.info(`[proposals] closed ${id.toUpperCase()} (${input.exitReason}, pnl ${input.realizedPnl ?? '?'})`);
 }
 
+/**
+ * Late P&L attribution: a deliberate close order (closePosition /
+ * profit-trail / EOD triage) filled AFTER its proposal was already closed
+ * as 'manual / P&L unknown' — e.g. the close was placed outside RTH and
+ * filled at the next open. Fills the blanks on the closed row; never
+ * overwrites a P&L that is already recorded.
+ */
+export async function recordLateExitFill(
+    id: string,
+    input: { exitFillPrice: number; realizedPnl: number; note?: string },
+): Promise<void> {
+    const database = await getDb();
+    database.query<void>(
+        `UPDATE proposals SET
+                exit_fill_price = COALESCE(exit_fill_price, ?),
+                realized_pnl = ?,
+                note = CASE WHEN note IS NULL THEN ? ELSE note || ' — ' || ? END,
+                updated_at = ?
+         WHERE id = ? AND status = 'closed' AND exit_reason = 'manual' AND realized_pnl IS NULL`,
+    ).run(
+        input.exitFillPrice,
+        input.realizedPnl,
+        input.note ?? 'late exit fill',
+        input.note ?? 'late exit fill',
+        Date.now(),
+        id.trim().toUpperCase(),
+    );
+    logger.info(`[proposals] late exit fill recorded for ${id.toUpperCase()} (pnl ${input.realizedPnl})`);
+}
+
 /** Executed proposals that have not been closed — what the tracker watches. */
 export async function listTrackable(): Promise<TradeProposal[]> {
     const database = await getDb();

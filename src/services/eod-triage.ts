@@ -138,7 +138,7 @@ export async function runEodTriageOnce(): Promise<void> {
 
         logger.info(`[eod-triage] ${t.id} ${t.symbol}: ${decision.action} — ${decision.reason}`);
         if (decision.action === 'close') {
-            const outcome = await closePosition(t.symbol);
+            const outcome = await closePosition(t.symbol, 'EOD triage');
             lines.push(`• ${t.symbol} (${t.id}): ${decision.reason}. ${outcome.ok ? 'Closed.' : outcome.message}`);
         } else {
             lines.push(`• ${t.symbol} (${t.id}): ${decision.reason}.`);

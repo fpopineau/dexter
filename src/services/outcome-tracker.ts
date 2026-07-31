@@ -26,8 +26,11 @@
  *   - stop order fills          → 'stop'
  *   - entry cancelled unfilled  → 'cancelled' (P&L 0 by construction)
  *   - both exits terminal with the entry filled and no exit fill
- *     → 'manual' (position was closed or left unprotected outside the
- *       bracket; P&L unknown — recorded as null, never guessed).
+ *     → 'manual'. Deliberate closes (closePosition — the phone command,
+ *       profit-trail, EOD triage) register their MKT order via
+ *       trackManualExit, and its fill supplies the exit price and a real
+ *       realized P&L; only truly untracked exits stay 'P&L unknown'
+ *       (recorded as null, never guessed).
  */
 
 import { allocReqId, getIBApi, isNonFatalIbkrError, onReconnect } from '@/tools/ibkr/connection.js';
@@ -39,6 +42,7 @@ import {
     getProposal,
     listTrackable,
     markEntryFilled,
+    recordLateExitFill,
     type ExitReason,
     type TradeProposal,
 } from './trade-proposals.js';
@@ -95,6 +99,10 @@ interface TrackedTrade {
     commissions: number;
     /** Terminal (cancelled/inactive) state per exit order id. */
     terminalExits: Set<number>;
+    /** Order id of a deliberate market-close working for this symbol
+     *  (closePosition / profit-trail / EOD triage) — finalize waits for
+     *  its fill so the close gets a real P&L instead of 'unknown'. */
+    pendingManualExit?: number;
     finalizeTimer: ReturnType<typeof setTimeout> | null;
     closed: boolean;
 }
@@ -160,6 +168,10 @@ async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string):
     const dayExpiry =
         process.env.NODE_ENV !== 'test' &&
         reason === 'manual' && trade.entryAvgPrice != null &&
+        // A known exit fill means a DELIBERATE close (profit-trail / EOD
+        // triage / operator) that happened to land near the bell — expiry
+        // never fills anything.
+        trade.exitAvgPrice == null &&
         proposalEarly?.tif === 'DAY' && afterBell;
     if (dayExpiry) {
         note = 'DAY bracket exits expired at the session close with the position still open — GTC re-protection attempted (see auto-protect)';
@@ -273,13 +285,97 @@ async function notifyAutoProtect(message: string): Promise<void> {
     }
 }
 
-function scheduleFinalize(trade: TrackedTrade, reason: ExitReason, note?: string): void {
+function scheduleFinalize(trade: TrackedTrade, reason: ExitReason, note?: string, delayMs = FINALIZE_DELAY_MS): void {
     if (trade.closed || trade.finalizeTimer) return;
     trade.finalizeTimer = setTimeout(() => {
         trade.finalizeTimer = null;
         void finalize(trade, reason, note);
-    }, FINALIZE_DELAY_MS);
+    }, delayMs);
 }
+
+// ---------------------------------------------------------------------------
+// Manual-exit attribution
+// ---------------------------------------------------------------------------
+// Guardian exits (profit-trail, EOD triage, the phone 'close' command) close
+// positions with their own MKT order, outside the tracked bracket — which is
+// why 15 of the first 49 closed proposals said 'P&L unknown'. The closer
+// registers its order here; its fill becomes the exit price for every
+// affected proposal, and the finalize pass waits for it.
+
+interface ManualExit {
+    symbol: string;
+    quantity: number;
+    source: string;
+    trades: TrackedTrade[];
+}
+
+const manualExitOrders = new Map<number, ManualExit>();
+
+/** Pure: the tracked trades a manual close of `symbol` attributes to —
+ *  entry filled (there is a position to close) and not yet finalized. */
+export function selectManualExitTargets<T extends { symbol: string; closed: boolean; entryRecorded: boolean }>(
+    trades: T[],
+    symbol: string,
+): T[] {
+    const sym = symbol.trim().toUpperCase();
+    return trades.filter((t) => t.symbol === sym && !t.closed && t.entryRecorded);
+}
+
+/**
+ * Register a deliberate market-close order (called by closePosition right
+ * after placement, BEFORE it cancels the bracket exits). All entry-filled
+ * tracked trades on the symbol share the close's fill price — economically
+ * exact even when two proposals stacked the position.
+ */
+export function trackManualExit(symbol: string, orderId: number, quantity: number, source: string): void {
+    const trades = selectManualExitTargets([...byProposalId.values()], symbol);
+    if (trades.length === 0) {
+        logger.info(`[outcome-tracker] manual exit ${symbol} order ${orderId} (${source}): no tracked trades to attribute`);
+        return;
+    }
+    manualExitOrders.set(orderId, { symbol: symbol.trim().toUpperCase(), quantity, source, trades });
+    for (const t of trades) t.pendingManualExit = orderId;
+    logger.info(
+        `[outcome-tracker] manual exit ${symbol} order ${orderId} (${source}) → will attribute P&L to ${trades.map((t) => t.proposalId).join(', ')}`,
+    );
+}
+
+/** A registered manual-exit order filled at `avgFillPrice`. */
+function handleManualExitFill(orderId: number, avgFillPrice: number): void {
+    const manual = manualExitOrders.get(orderId);
+    if (!manual) return;
+    manualExitOrders.delete(orderId);
+
+    for (const trade of manual.trades) {
+        const note = `position closed at market by ${manual.source} @ ${avgFillPrice}`;
+        if (trade.closed) {
+            // Finalized before the fill arrived (close placed outside RTH,
+            // filled at the next open) — patch the blanks retroactively.
+            if (trade.entryAvgPrice != null) {
+                const pnl = computeRealizedPnl(trade.direction, trade.quantity, trade.entryAvgPrice, avgFillPrice);
+                void recordLateExitFill(trade.proposalId, { exitFillPrice: avgFillPrice, realizedPnl: pnl, note }).catch(
+                    (err) => logger.error(`[outcome-tracker] late exit fill ${trade.proposalId}: ${err}`),
+                );
+            }
+            continue;
+        }
+        trade.exitAvgPrice = avgFillPrice;
+        trade.exitReason = 'manual';
+        trade.pendingManualExit = undefined;
+        // Replace a generic exits-died finalize already pending: the fill
+        // carries the informative note and the P&L.
+        if (trade.finalizeTimer) {
+            clearTimeout(trade.finalizeTimer);
+            trade.finalizeTimer = null;
+        }
+        scheduleFinalize(trade, 'manual', note);
+    }
+}
+
+/** How long finalize waits for a registered close order's fill before
+ *  giving up (a MKT close placed outside RTH waits for the open — the
+ *  late-fill patch covers that case). */
+const MANUAL_EXIT_GRACE_MS = 30_000;
 
 const TERMINAL_STATUSES = new Set(['Cancelled', 'ApiCancelled', 'Inactive']);
 
@@ -290,6 +386,18 @@ function handleOrderStatus(
     remaining: number,
     avgFillPrice: number,
 ): void {
+    // Deliberate market-closes are tracked separately from brackets.
+    if (manualExitOrders.has(orderId)) {
+        if (status === 'Filled' && remaining === 0 && isIbNumber(avgFillPrice)) {
+            handleManualExitFill(orderId, avgFillPrice);
+        } else if (TERMINAL_STATUSES.has(status)) {
+            const manual = manualExitOrders.get(orderId);
+            manualExitOrders.delete(orderId);
+            for (const t of manual?.trades ?? []) t.pendingManualExit = undefined;
+        }
+        return;
+    }
+
     const entry = byOrderId.get(orderId);
     if (!entry || entry.trade.closed) return;
     const { trade, role } = entry;
@@ -326,10 +434,13 @@ function handleOrderStatus(
             if (bothExitsDead && trade.exitReason === null && trade.entryRecorded) {
                 // Entry filled, both exits gone without filling: closed manually
                 // or the DAY bracket expired. P&L is unknown — never guessed.
+                // When a registered close order is working, give its fill time
+                // to arrive first: it carries the real exit price.
                 scheduleFinalize(
                     trade,
                     'manual',
                     'both bracket exits terminated without filling — position closed or left unprotected outside the bracket',
+                    trade.pendingManualExit !== undefined ? MANUAL_EXIT_GRACE_MS : FINALIZE_DELAY_MS,
                 );
             }
         }
@@ -339,6 +450,19 @@ function handleOrderStatus(
 function handleExecDetails(_reqId: number, _contract: Contract, execution: Execution): void {
     const orderId = execution.orderId;
     if (orderId === undefined) return;
+
+    // Manual-exit fallback (covers a missed orderStatus event): the close
+    // order's own quantity decides completeness, not any one trade's.
+    const manual = manualExitOrders.get(orderId);
+    if (manual) {
+        const avg = isIbNumber(execution.avgPrice) ? execution.avgPrice : undefined;
+        const cum = isIbNumber(execution.cumQty) ? execution.cumQty : undefined;
+        if (avg !== undefined && cum !== undefined && cum >= manual.quantity) {
+            handleManualExitFill(orderId, avg);
+        }
+        return;
+    }
+
     const entry = byOrderId.get(orderId);
     if (!entry || entry.trade.closed) return;
     const { trade, role } = entry;

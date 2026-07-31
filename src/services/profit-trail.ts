@@ -175,7 +175,7 @@ async function runCycle(state: Map<string, TrailEntry>): Promise<void> {
             `[profit-trail] ${pos.symbol}: peak gain ${decision.gainAtBestPct}% (best ${entry.best}), ` +
             `pullback ${decision.pullbackPct}% at ${price} — closing`,
         );
-        const outcome = await closePosition(pos.symbol);
+        const outcome = await closePosition(pos.symbol, 'profit-trail');
         state.delete(pos.symbol);
         const message =
             `📉➡️💰 PROFIT TRAIL ${pos.symbol}: peaked +${decision.gainAtBestPct}% (best ${entry.best}, ` +
