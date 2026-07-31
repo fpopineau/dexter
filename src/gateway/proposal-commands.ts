@@ -15,13 +15,17 @@
  *   close SYM [SYM…]        market-close full position(s), cancelling their exits (risk-reducing)
  *   cancel P-XXXX|SYM       cancel an executed-but-unfilled bracket (risk-reducing)
  *   halt status             show the daily-loss kill-switch state
- *   performance [N]         closed-trade P&L summary over the last N days (default 7)
+ *   performance [N]         closed-trade P&L summary over the last N days (default 7),
+ *                           measured from the baseline when one is set
+ *   performance all [N]     same, ignoring the baseline (full history)
+ *   performance reset       stamp a new baseline NOW (non-destructive)
  */
 
 import { getDailyLossStatus } from '@/services/daily-loss-guard.js';
 import { acceptProposal, rejectProposal } from '@/services/proposal-executor.js';
 import {
     formatPerformanceReport,
+    setPerformanceBaseline,
     formatProposalLine,
     getPerformanceSummary,
     listProposals,
@@ -58,7 +62,8 @@ export function parseCloseSymbols(arg: string): string[] | null {
 }
 const CANCEL_RE = /^\s*cancel\s+(P-[A-Za-z0-9]{4}|[A-Za-z.]{1,6})\s*$/i;
 const HALT_RE = /^\s*halt\s+status\s*$/i;
-const PERF_RE = /^\s*(performance|perf)(?:\s+(\d{1,3})\s*d?)?\s*$/i;
+const PERF_RE = /^\s*(performance|perf)(?:\s+(all))?(?:\s+(\d{1,3})\s*d?)?\s*$/i;
+const PERF_RESET_RE = /^\s*(performance|perf)\s+reset\s*$/i;
 
 interface PositionRow {
     account: string;
@@ -252,11 +257,20 @@ export async function handleProposalCommand(body: string): Promise<string | null
         return outcome.message;
     }
 
+    // Non-destructive: stamps a baseline so reports judge the current
+    // gate stack on its own record; all labeled history stays in the DB.
+    if (PERF_RESET_RE.test(body)) {
+        const b = setPerformanceBaseline('manual reset');
+        return `📊 Performance baseline reset to ${new Date(b.epochMs).toISOString().slice(0, 16).replace('T', ' ')} UTC.\n` +
+            `Reports now start here; nothing was deleted — 'performance all' shows the full history.`;
+    }
+
     const perf = PERF_RE.exec(body);
     if (perf) {
-        const days = perf[2] ? Math.max(1, Number(perf[2])) : 7;
-        const summary = await getPerformanceSummary(Date.now() - days * 24 * 3600_000);
-        return formatPerformanceReport(summary, `last ${days}d`);
+        const all = !!perf[2];
+        const days = perf[3] ? Math.max(1, Number(perf[3])) : (all ? 365 : 7);
+        const summary = await getPerformanceSummary(Date.now() - days * 24 * 3600_000, { includeAllHistory: all });
+        return formatPerformanceReport(summary, all ? `all, last ${days}d` : `last ${days}d`);
     }
 
     if (HALT_RE.test(body)) {

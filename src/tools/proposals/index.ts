@@ -43,7 +43,8 @@ Manage trade proposals — persisted, human-actionable trade recommendations.
 **get** — fetch one proposal by id.
 **reject** — mark an open proposal rejected (risk-reducing, always allowed).
 **performance** — closed-trade outcomes over the last N days (default 7): wins/losses,
-  win rate, gross/net P&L, best/worst, exit reasons. Use it for daily recaps.
+  win rate, gross/net P&L, best/worst, exit reasons. Use it for daily recaps. Measured
+  from the performance baseline when one is set; pass allHistory=true for everything.
 
 Execution is human-only: the accept_proposal tool requires interactive approval, and
 WhatsApp users execute by replying 'accept <ID>'. Prices must be coherent: for long,
@@ -103,6 +104,8 @@ const PerformanceSchema = z.object({
     action: z.literal('performance'),
     days: z.coerce.number().int().positive().max(365).default(7)
         .describe('Look-back window in days for closed-trade outcomes. Defaults to 7.'),
+    allHistory: z.boolean().default(false)
+        .describe('Include trades from before the performance baseline (a non-destructive reset stamp). Default false.'),
 });
 
 const ProposalsSchema = z.discriminatedUnion('action', [CreateSchema, ListSchema, GetSchema, RejectSchema, PerformanceSchema]);
@@ -197,7 +200,10 @@ export function createTradeProposalsTool() {
                     return formatToolResult(outcome);
                 }
                 case 'performance': {
-                    const summary = await getPerformanceSummary(Date.now() - input.days * 24 * 3600_000);
+                    const summary = await getPerformanceSummary(
+                        Date.now() - input.days * 24 * 3600_000,
+                        { includeAllHistory: input.allHistory },
+                    );
                     return formatToolResult({
                         days: input.days,
                         summary,

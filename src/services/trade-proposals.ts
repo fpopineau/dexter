@@ -18,6 +18,7 @@
 
 import { logger } from '@/utils';
 import { randomBytes } from 'node:crypto';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { assertProposalRisk, type RiskGateContext } from './proposal-risk-gate.js';
@@ -464,11 +465,49 @@ export async function listProposalSymbolsSince(sinceMs: number): Promise<string[
 }
 
 // ---------------------------------------------------------------------------
+// Performance baseline (non-destructive "reset")
+// ---------------------------------------------------------------------------
+// 'performance reset' stamps a baseline: reports measure from it by default
+// so a re-tuned gate stack gets judged on its own record, while the full
+// labeled history stays in the DB — it is the calibration/training data.
+// 'performance all' bypasses the baseline.
+
+export interface PerformanceBaseline {
+    epochMs: number;
+    note?: string;
+}
+
+function baselinePath(): string {
+    const dataDir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
+    return join(dataDir, 'performance-epoch.json');
+}
+
+/** The active baseline, or null when none was ever set. */
+export function getPerformanceBaseline(): PerformanceBaseline | null {
+    try {
+        const parsed = JSON.parse(readFileSync(baselinePath(), 'utf-8')) as PerformanceBaseline;
+        return Number.isFinite(parsed.epochMs) && parsed.epochMs > 0 ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+/** Stamp a new baseline at now. Overwrites any previous one. */
+export function setPerformanceBaseline(note?: string): PerformanceBaseline {
+    const baseline: PerformanceBaseline = { epochMs: Date.now(), ...(note ? { note } : {}) };
+    writeFileSync(baselinePath(), JSON.stringify(baseline, null, 2));
+    logger.info(`[proposals] performance baseline reset to ${new Date(baseline.epochMs).toISOString()}${note ? ` (${note})` : ''}`);
+    return baseline;
+}
+
+// ---------------------------------------------------------------------------
 // Performance reporting
 // ---------------------------------------------------------------------------
 
 export interface PerformanceSummary {
     sinceMs: number;
+    /** Baseline that floored the window (null = none set or ignored). */
+    baseline: PerformanceBaseline | null;
     closed: number;
     wins: number;
     losses: number;
@@ -486,12 +525,18 @@ export interface PerformanceSummary {
     openProposals: number;
 }
 
-/** Aggregate closed-trade outcomes since the given epoch ms. */
-export async function getPerformanceSummary(sinceMs: number): Promise<PerformanceSummary> {
+/** Aggregate closed-trade outcomes since the given epoch ms. The window is
+ *  floored to the performance baseline unless `includeAllHistory` is set. */
+export async function getPerformanceSummary(
+    sinceMs: number,
+    opts: { includeAllHistory?: boolean } = {},
+): Promise<PerformanceSummary> {
+    const baseline = opts.includeAllHistory ? null : getPerformanceBaseline();
+    const effectiveSince = baseline ? Math.max(sinceMs, baseline.epochMs) : sinceMs;
     const database = await getDb();
     const rows = database.query<Row>(
         `SELECT * FROM proposals WHERE status = 'closed' AND closed_at >= ? ORDER BY closed_at ASC`,
-    ).all(sinceMs).map(fromRow);
+    ).all(effectiveSince).map(fromRow);
 
     let wins = 0, losses = 0, flat = 0, unlabeled = 0;
     let grossPnl = 0, commissions = 0;
@@ -516,7 +561,8 @@ export async function getPerformanceSummary(sinceMs: number): Promise<Performanc
 
     const decided = wins + losses;
     return {
-        sinceMs,
+        sinceMs: effectiveSince,
+        baseline: baseline && baseline.epochMs > sinceMs ? baseline : null,
         closed: rows.length,
         wins,
         losses,
@@ -537,7 +583,8 @@ export async function getPerformanceSummary(sinceMs: number): Promise<Performanc
 /** Human-readable performance report (WhatsApp / brief friendly). */
 export function formatPerformanceReport(s: PerformanceSummary, label: string): string {
     if (s.closed === 0 && s.openExecuted === 0) {
-        return `📊 Performance (${label}): no closed trades, nothing executing.`;
+        const since = s.baseline ? ` since the ${new Date(s.baseline.epochMs).toISOString().slice(0, 10)} baseline` : '';
+        return `📊 Performance (${label}): no closed trades${since}, nothing executing.`;
     }
     const sign = (n: number) => (n >= 0 ? `+$${n.toFixed(2)}` : `-$${Math.abs(n).toFixed(2)}`);
     const lines = [
@@ -552,6 +599,10 @@ export function formatPerformanceReport(s: PerformanceSummary, label: string): s
     if (reasons) lines.push(`Exits: ${reasons}`);
     if (s.openExecuted > 0) lines.push(`Still executing: ${s.openExecuted}`);
     if (s.openProposals > 0) lines.push(`Open proposals: ${s.openProposals}`);
+    if (s.baseline) {
+        const d = new Date(s.baseline.epochMs).toISOString().slice(0, 10);
+        lines.push(`Baseline: ${d}${s.baseline.note ? ` (${s.baseline.note})` : ''} — earlier history kept, see 'performance all'`);
+    }
     return lines.join('\n');
 }
 

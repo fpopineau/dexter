@@ -17,8 +17,10 @@ import {
     expireStale,
     formatPerformanceReport,
     formatProposalLine,
+    getPerformanceBaseline,
     getPerformanceSummary,
     getProposal,
+    setPerformanceBaseline,
     listProposals,
     listTrackable,
     markEntryFilled,
@@ -235,6 +237,45 @@ describe('performance summary', () => {
         const s = await getPerformanceSummary(Date.now() + 60_000);
         expect(s.closed).toBe(0);
         expect(s.winRatePct).toBeNull();
+    });
+});
+
+describe('performance baseline (non-destructive reset)', () => {
+    test('a reset hides earlier closes from default reports but keeps them in the DB', async () => {
+        const since = Date.now() - 60_000; // covers everything this file closed
+
+        const before = await createProposal(validInput({ symbol: 'OLDL' }));
+        await setProposalStatus(before.id, 'executed', { orderIds: [21, 22, 23], executedAt: Date.now() });
+        await closeProposal(before.id, { exitReason: 'stop', realizedPnl: -500, commissions: 1 });
+
+        await new Promise((r) => setTimeout(r, 5));
+        const baseline = setPerformanceBaseline('gate-stack overhaul');
+        expect(getPerformanceBaseline()?.epochMs).toBe(baseline.epochMs);
+        await new Promise((r) => setTimeout(r, 5));
+
+        const after = await createProposal(validInput({ symbol: 'NEWW' }));
+        await setProposalStatus(after.id, 'executed', { orderIds: [24, 25, 26], executedAt: Date.now() });
+        await closeProposal(after.id, { exitReason: 'target', realizedPnl: 200, commissions: 1 });
+
+        // Default: floored to the baseline — only the new trade counts.
+        const fresh = await getPerformanceSummary(since);
+        expect(fresh.baseline?.epochMs).toBe(baseline.epochMs);
+        expect(fresh.closed).toBe(1);
+        expect(fresh.netPnl).toBe(199);
+        expect(formatPerformanceReport(fresh, '7d')).toContain('Baseline');
+
+        // Full history on demand: the old loss is still there, undeleted.
+        const all = await getPerformanceSummary(since, { includeAllHistory: true });
+        expect(all.baseline).toBeNull();
+        expect(all.closed).toBeGreaterThanOrEqual(2);
+        const closed = await listProposals('closed');
+        expect(closed.some((p) => p.symbol === 'OLDL')).toBe(true);
+    });
+
+    test('a window starting after the baseline is not widened by it', async () => {
+        const s = await getPerformanceSummary(Date.now() + 60_000);
+        expect(s.baseline).toBeNull(); // baseline is a floor, not a ceiling
+        expect(s.closed).toBe(0);
     });
 });
 
