@@ -25,6 +25,7 @@ import { getMarketSession, MarketSession } from '@/utils/market-hours.js';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { addSymbol, removeSymbol } from './ibkr-stream.js';
+import { detectBreadth, type BreadthEvent } from './breadth-detector.js';
 import { runScan, type ScanCode, type ScanResult } from './scanner-loop.js';
 import { ScanHealthMonitor, type HealthTransition } from './scan-health.js';
 
@@ -333,6 +334,9 @@ function sleep(ms: number): Promise<void> {
 let latestSnapshot: OpportunitySnapshot | null = null;
 let streamedSymbols = new Set<string>();
 let cycleInFlight = false;
+/** Symbols surfaced by the most recent cycle's scanners, with which scan
+ *  codes surfaced them — the breadth detector's input. */
+let lastSurfaced: Array<{ symbol: string; sources: string[] }> = [];
 
 /**
  * Run one full scan→score→rank cycle and persist the snapshot.
@@ -372,6 +376,8 @@ export async function runCycleOnce(forcePhase?: EnginePhase): Promise<Opportunit
                 logger.warn(`[opportunity-engine] scan ${code} failed: ${err}`);
             }
         }));
+
+        lastSurfaced = [...found.entries()].map(([symbol, meta]) => ({ symbol, sources: [...meta.sources] }));
 
         // 2. Pick candidates: multi-scan symbols first, then by scanner rank
         const candidates = [...found.entries()]
@@ -493,6 +499,82 @@ const lastTriggerAt = new Map<string, number>();
 let triggersToday = 0;
 let triggersDate = '';
 
+// --- Breadth events (sector-wide melt-ups; see breadth-detector.ts) ---
+// Separate pipeline from single-name triggers: its own small daily cap and
+// per-vehicle cooldown, and it never consumes the single-name slots. A
+// detected breadth day also RELIEVES the single-name cap — on Jul 30 the
+// 10/day cap exhausted by midday and AMD/INTC/DELL/TSM/ARM were never
+// evaluated at all.
+
+export type BreadthCallback = (event: BreadthEvent, snapshot: OpportunitySnapshot) => void | Promise<void>;
+const breadthCallbacks = new Set<BreadthCallback>();
+const lastBreadthVehicleAt = new Map<string, number>();
+let breadthVehicleTriggersToday = 0;
+let breadthDate = '';
+/** ET date on which breadth was last detected — grants the single-name
+ *  trigger-cap bonus for the rest of that day. */
+let breadthActiveDate = '';
+
+function breadthMaxPerDay(): number {
+    const n = Number(process.env.OPP_BREADTH_MAX_PER_DAY);
+    return Number.isFinite(n) && n > 0 ? n : 2;
+}
+
+function breadthCooldownMs(): number {
+    const n = Number(process.env.OPP_BREADTH_COOLDOWN_MIN);
+    return (Number.isFinite(n) && n > 0 ? n : 120) * 60_000;
+}
+
+function breadthCapBonus(): number {
+    const n = Number(process.env.OPP_BREADTH_CAP_BONUS);
+    return Number.isFinite(n) && n >= 0 ? n : 5;
+}
+
+/** Register a callback fired on a breadth event (sector-vehicle evaluation). */
+export function onBreadthTrigger(cb: BreadthCallback): () => void {
+    breadthCallbacks.add(cb);
+    return () => breadthCallbacks.delete(cb);
+}
+
+async function evaluateBreadth(snapshot: OpportunitySnapshot): Promise<void> {
+    if (!snapshot.marketOpen) return;
+
+    const today = etDateString();
+    if (today !== breadthDate) {
+        breadthDate = today;
+        breadthVehicleTriggersToday = 0;
+        lastBreadthVehicleAt.clear();
+    }
+
+    const event = detectBreadth(lastSurfaced);
+    if (!event) return;
+
+    if (breadthActiveDate !== today) {
+        breadthActiveDate = today;
+        logger.info(
+            `[opportunity-engine] BREADTH day: ${event.movers.length} watchlist movers in gainer scans ` +
+            `(${event.movers.join(' ')}) — single-name trigger cap +${breadthCapBonus()}, vehicle ${event.vehicle}`,
+        );
+    }
+
+    if (breadthCallbacks.size === 0) return;
+    if (breadthVehicleTriggersToday >= breadthMaxPerDay()) return;
+    const last = lastBreadthVehicleAt.get(event.vehicle) ?? 0;
+    const now = Date.now();
+    if (now - last < breadthCooldownMs()) return;
+
+    lastBreadthVehicleAt.set(event.vehicle, now);
+    breadthVehicleTriggersToday++;
+    logger.info(`[opportunity-engine] BREADTH TRIGGER ${event.vehicle} (movers: ${event.movers.join(' ')})`);
+    for (const cb of [...breadthCallbacks]) {
+        try {
+            await cb(event, snapshot);
+        } catch (err) {
+            logger.error(`[opportunity-engine] breadth callback failed: ${err}`);
+        }
+    }
+}
+
 /** Register a callback fired when a candidate crosses the trigger threshold. */
 export function onOpportunityTrigger(cb: TriggerCallback): () => void {
     triggerCallbacks.add(cb);
@@ -518,10 +600,15 @@ async function evaluateTriggers(snapshot: OpportunitySnapshot): Promise<void> {
     const cooldown = triggerCooldownMs();
     const now = Date.now();
 
+    // Breadth days get extra single-name slots: a correlated 9-name move
+    // exhausts the ordinary cap while half the movers are still unseen.
+    const capBonus = breadthActiveDate === today ? breadthCapBonus() : 0;
+    const maxTriggers = triggerMaxPerDay() + capBonus;
+
     for (const opp of snapshot.opportunities.slice(0, 3)) {
         if (opp.compositeRank < threshold) continue;
-        if (triggersToday >= triggerMaxPerDay()) {
-            logger.info('[opportunity-engine] trigger cap reached for today');
+        if (triggersToday >= maxTriggers) {
+            logger.info(`[opportunity-engine] trigger cap reached for today (${maxTriggers}${capBonus ? ` incl. breadth bonus +${capBonus}` : ''})`);
             return;
         }
         const last = lastTriggerAt.get(opp.symbol) ?? 0;
@@ -558,6 +645,9 @@ function scheduleNext(): void {
         if (current.phase !== 'idle') {
             try {
                 const snapshot = await runCycleOnce();
+                // Breadth first: a detected regime day relieves the
+                // single-name cap for the trigger pass of the SAME cycle.
+                await evaluateBreadth(snapshot);
                 await evaluateTriggers(snapshot);
             } catch (err) {
                 logger.error(`[opportunity-engine] cycle failed: ${err}`);
@@ -575,7 +665,10 @@ export function startOpportunityEngine(): void {
     logger.info(`[opportunity-engine] started (phase: ${plan.phase}, next cycle in ~${Math.round(plan.cadenceMs / 60000)} min)`);
     if (plan.phase !== 'idle') {
         void runCycleOnce()
-            .then((snapshot) => evaluateTriggers(snapshot))
+            .then(async (snapshot) => {
+                await evaluateBreadth(snapshot);
+                await evaluateTriggers(snapshot);
+            })
             .catch((err) => logger.error(`[opportunity-engine] initial cycle failed: ${err}`));
     }
     scheduleNext();
