@@ -69,6 +69,53 @@ export function etDatePlus(days: number, now: Date = new Date()): string {
     return `${et.getFullYear()}-${String(et.getMonth() + 1).padStart(2, '0')}-${String(et.getDate()).padStart(2, '0')}`;
 }
 
+/** Previous weekday's ET date (Mon → Fri). Holidays are not modeled: a
+ *  holiday-Monday look-back lands on an empty calendar day, which simply
+ *  yields "no earnings" — a safe miss, never a false positive. */
+export function previousTradingDate(now: Date = new Date()): string {
+    const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    do {
+        et.setDate(et.getDate() - 1);
+    } while (et.getDay() === 0 || et.getDay() === 6);
+    return `${et.getFullYear()}-${String(et.getMonth() + 1).padStart(2, '0')}-${String(et.getDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Pure core of reportedRecently: did the symbol report within the last
+ * session, judged from today's and the previous trading day's calendars?
+ * A gap TODAY comes from yesterday's after-hours print or today's
+ * pre-market print; 'unknown' timing counts on both sides (Nasdaq omits
+ * the slot often enough that excluding it would gut the exception).
+ * Null = the needed data was unavailable — callers must stay strict.
+ */
+export function decideReportedRecently(input: {
+    symbol: string;
+    todayEntries: EarningsEntry[] | null;
+    prevEntries: EarningsEntry[] | null;
+}): boolean | null {
+    const sym = input.symbol.trim().toUpperCase();
+    const inToday = input.todayEntries?.some(
+        (e) => e.symbol === sym && (e.time === 'pre-market' || e.time === 'unknown'),
+    );
+    const inPrev = input.prevEntries?.some(
+        (e) => e.symbol === sym && (e.time === 'after-hours' || e.time === 'unknown'),
+    );
+    if (inToday || inPrev) return true;
+    if (input.todayEntries === null || input.prevEntries === null) return null;
+    return false;
+}
+
+/** Did `symbol` report earnings within the last trading session? Consumed
+ *  by the extension guard's earnings-gap exception. Null = could not
+ *  verify (the guard then stays strict). */
+export async function reportedRecently(symbol: string, now: Date = new Date()): Promise<boolean | null> {
+    const [todayEntries, prevEntries] = await Promise.all([
+        getEarningsForDate(etDatePlus(0, now)),
+        getEarningsForDate(previousTradingDate(now)),
+    ]);
+    return decideReportedRecently({ symbol, todayEntries, prevEntries });
+}
+
 // ---------------------------------------------------------------------------
 // Fetch + cache
 // ---------------------------------------------------------------------------
@@ -87,10 +134,12 @@ function loadCache(): CalendarCache {
 
 function saveCache(cache: CalendarCache): void {
     try {
-        // Drop stale past days so the file does not grow forever.
-        const today = etDatePlus(0);
+        // Drop stale past days so the file does not grow forever — but keep
+        // the previous trading day: the extension guard's earnings-gap
+        // exception looks one session back.
+        const keepFrom = previousTradingDate();
         for (const day of Object.keys(cache.days)) {
-            if (day < today) delete cache.days[day];
+            if (day < keepFrom) delete cache.days[day];
         }
         writeFileSync(cachePath(), JSON.stringify(cache, null, 2));
     } catch (err) {

@@ -132,7 +132,7 @@ export function createTradeProposalsTool() {
                         // Server-side daily ATR + EMA10 for the noise-stop
                         // and extension checks — never taken from the model.
                         // Fail-open (nulls skip the checks).
-                        const { dailyAtr, ema10 } = await fetchDailyRiskContext(input.symbol);
+                        const { dailyAtr, ema10, recentEarnings } = await fetchDailyRiskContext(input.symbol);
                         const p = await createProposal({
                             symbol: input.symbol,
                             direction: input.direction,
@@ -150,6 +150,9 @@ export function createTradeProposalsTool() {
                         }, {
                             ...(dailyAtr != null ? { dailyAtr } : {}),
                             ...(ema10 != null ? { ema10 } : {}),
+                            // Only a VERIFIED report waives the extension
+                            // guard; null (couldn't verify) stays strict.
+                            ...(recentEarnings === true ? { recentEarnings: true } : {}),
                         });
 
                         // Paper-only auto-execution (AUTO_EXECUTE_PAPER=true):

@@ -16,6 +16,7 @@
  */
 
 import { getRiskRules, type RiskRules } from '@/tools/ibkr/risk-rules.js';
+import { logger } from '@/utils';
 
 export interface RiskGateProposal {
     symbol: string;
@@ -46,11 +47,21 @@ export interface RiskGateContext {
     /** Notional (USD) already committed to THIS symbol by other working or
      *  filled proposals. Enables the per-symbol aggregate exposure check. */
     existingSymbolExposure?: number;
+    /** The symbol reported earnings within the last trading session
+     *  (earnings-calendar, fetched server-side). Waives the extension
+     *  guard: a post-earnings re-rating is a new price regime, not a
+     *  stretched move — measuring it against last week's EMA refuses
+     *  exactly the days institutions are repricing (Jul 30 MSFT +15%,
+     *  refused 3× at 3.2–4.6× ATR). */
+    recentEarnings?: boolean;
 }
 
 export interface RiskGateResult {
     ok: boolean;
     violations: string[];
+    /** Checks that were waived or downgraded, with the reason — surfaced
+     *  in logs so exceptions stay visible in post-hoc diagnosis. */
+    notes: string[];
     /** Informational values computed along the way. */
     riskReward: number | null;
     positionValue: number | null;
@@ -66,6 +77,7 @@ export function checkProposalRisk(
     rules: RiskRules = getRiskRules(),
 ): RiskGateResult {
     const violations: string[] = [];
+    const notes: string[] = [];
 
     // --- Quantity sanity ---
     if (!Number.isInteger(p.quantity) || p.quantity <= 0) {
@@ -78,7 +90,7 @@ export function checkProposalRisk(
         violations.push(
             'entry price is required — for MKT proposals pass the current price as an indicative entry for risk validation',
         );
-        return { ok: false, violations, riskReward: null, positionValue: null };
+        return { ok: false, violations, notes, riskReward: null, positionValue: null };
     }
 
     // --- Price coherence: stop and target on the correct sides ---
@@ -113,7 +125,8 @@ export function checkProposalRisk(
     const risk = Math.abs(entry - p.stop);
     const reward = Math.abs(p.target - entry);
     const riskReward = risk > 0 ? Math.round((reward / risk) * 100) / 100 : null;
-    if (riskReward !== null && riskReward < rules.min_risk_reward) {
+    const rrFailed = riskReward !== null && riskReward < rules.min_risk_reward;
+    if (rrFailed) {
         violations.push(`risk/reward ${riskReward}:1 is below the minimum ${rules.min_risk_reward}:1`);
     }
 
@@ -121,15 +134,36 @@ export function checkProposalRisk(
     // Every early live loss exited via stop: stops placed at 0.13–0.3× the
     // daily ATR sit inside ordinary intraday noise and get hit regardless
     // of whether the idea was right.
+    let noiseStopFailed = false;
     if (ctx.dailyAtr !== undefined && ctx.dailyAtr > 0 && risk > 0) {
         const minStop = rules.min_stop_atr_fraction * ctx.dailyAtr;
         if (risk < minStop) {
+            noiseStopFailed = true;
             violations.push(
                 `stop is $${risk.toFixed(2)} from entry — inside intraday noise for a stock with daily ` +
                 `ATR $${ctx.dailyAtr.toFixed(2)} (minimum ${rules.min_stop_atr_fraction}× ATR = $${minStop.toFixed(2)}). ` +
                 `Place the stop at real structure at least that far away (and resize), or skip the trade`,
             );
         }
+    }
+
+    // --- Prescriptive geometry on stop/R:R refusals ---
+    // Live failure (Jul 30, MU +18%): each refusal message described only its
+    // own constraint, so the model fixed the stop and broke R/R, then fixed
+    // R/R and broke the stop — three incompatible retries, then surrender,
+    // while the jointly-valid trade existed (and its target was hit). Hand
+    // over the solved system: the tightest geometry satisfying BOTH rules.
+    if ((noiseStopFailed || rrFailed) && ctx.dailyAtr !== undefined && ctx.dailyAtr > 0) {
+        const minStop = rules.min_stop_atr_fraction * ctx.dailyAtr;
+        const sign = p.direction === 'long' ? 1 : -1;
+        const stopBound = entry - sign * minStop;
+        const targetBound = entry + sign * rules.min_risk_reward * minStop;
+        violations.push(
+            `VIABLE GEOMETRY for ${p.direction} ${p.symbol} at $${entry}: stop at/beyond ` +
+            `$${stopBound.toFixed(2)} AND target at/beyond $${targetBound.toFixed(2)} — both together ` +
+            `(a wider stop needs a proportionally farther target for ${rules.min_risk_reward}:1). ` +
+            `If that target is not honestly reachable, SKIP the symbol instead of shrinking the stop`,
+        );
     }
 
     // --- Extension guard (chasing filter) ---
@@ -142,11 +176,22 @@ export function checkProposalRisk(
             ? (entry - ctx.ema10) / ctx.dailyAtr
             : (ctx.ema10 - entry) / ctx.dailyAtr;
         if (extension > rules.max_extension_atr) {
-            violations.push(
-                `entry $${entry} is ${extension.toFixed(1)}× daily ATR ${p.direction === 'long' ? 'above' : 'below'} ` +
-                `the 10-day EMA ($${ctx.ema10.toFixed(2)}) — chasing an extended move (max ${rules.max_extension_atr}×). ` +
-                `Wait for a pullback/consolidation, or skip`,
-            );
+            // Earnings-gap exception: a symbol that just reported is being
+            // repriced, not chased — the pre-gap EMA is the wrong yardstick.
+            // Every OTHER gate still applies (noise stop on pre-gap ATR,
+            // R/R, risk budget, chase gate at acceptance).
+            if (ctx.recentEarnings === true) {
+                notes.push(
+                    `extension check waived for ${p.symbol}: ${extension.toFixed(1)}× ATR beyond EMA10, but the ` +
+                    `symbol reported earnings within the last session (earnings-gap exception)`,
+                );
+            } else {
+                violations.push(
+                    `entry $${entry} is ${extension.toFixed(1)}× daily ATR ${p.direction === 'long' ? 'above' : 'below'} ` +
+                    `the 10-day EMA ($${ctx.ema10.toFixed(2)}) — chasing an extended move (max ${rules.max_extension_atr}×). ` +
+                    `Wait for a pullback/consolidation, or skip`,
+                );
+            }
         }
     }
 
@@ -201,7 +246,7 @@ export function checkProposalRisk(
         violations.push(`${ctx.executedToday} trades already executed today — max ${rules.max_daily_trades}`);
     }
 
-    return { ok: violations.length === 0, violations, riskReward, positionValue };
+    return { ok: violations.length === 0, violations, notes, riskReward, positionValue };
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +316,9 @@ export function assertProposalRisk(
     rules: RiskRules = getRiskRules(),
 ): void {
     const result = checkProposalRisk(p, ctx, rules);
+    for (const note of result.notes) {
+        logger.info(`[risk-gate] ${note}`);
+    }
     if (!result.ok) {
         throw new Error(`[risk-gate] REFUSED ${p.symbol}: ${result.violations.join('; ')}`);
     }

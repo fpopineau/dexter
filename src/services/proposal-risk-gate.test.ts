@@ -320,3 +320,106 @@ describe('assertProposalRisk', () => {
         expect(() => assertProposalRisk(longProposal(), {}, RULES)).not.toThrow();
     });
 });
+
+describe('prescriptive refusal geometry (Jul 30 MU failure)', () => {
+    // MU-shaped case: ATR 85.85 → min stop 34.34, and 2:1 on that stop
+    // demands a target 68.68 away. Each refusal must hand over BOTH bounds.
+    test('noise-stop refusal includes the jointly-valid stop AND target bounds', () => {
+        const r = checkProposalRisk(
+            longProposal({ entry: 790, stop: 784, target: 825, quantity: 1 }),
+            { dailyAtr: 85.85 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        const all = r.violations.join(' ');
+        expect(all).toContain('VIABLE GEOMETRY');
+        expect(all).toContain('$755.66'); // 790 − 0.4×85.85
+        expect(all).toContain('$858.68'); // 790 + 2×0.4×85.85
+        expect(all).toContain('SKIP');
+    });
+
+    test('R/R-only refusal also gets the solved geometry when ATR is known', () => {
+        // Stop is wide enough (37 > 34.34) but target gives 1.0:1.
+        const r = checkProposalRisk(
+            longProposal({ entry: 788, stop: 751, target: 825, quantity: 1 }),
+            { dailyAtr: 85.85 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('VIABLE GEOMETRY');
+    });
+
+    test('short direction mirrors the bounds', () => {
+        const r = checkProposalRisk(
+            longProposal({ direction: 'short', entry: 100, stop: 101, target: 95, quantity: 1 }),
+            { dailyAtr: 10 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        const all = r.violations.join(' ');
+        // short: stop bound = entry + minStop = 104, target bound = entry − 2×minStop = 92
+        expect(all).toContain('$104.00');
+        expect(all).toContain('$92.00');
+    });
+
+    test('no prescriptive line without ATR (nothing to solve with)', () => {
+        const r = checkProposalRisk(longProposal({ target: 104 }), {}, RULES);
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).not.toContain('VIABLE GEOMETRY');
+    });
+
+    test('a passing proposal has no prescriptive line', () => {
+        const r = checkProposalRisk(
+            longProposal({ entry: 790, stop: 750, target: 880, quantity: 1 }),
+            { dailyAtr: 85.85 },
+            RULES,
+        );
+        expect(r.ok).toBe(true);
+        expect(r.violations).toEqual([]);
+    });
+});
+
+describe('earnings-gap exception (Jul 30 MSFT failure)', () => {
+    // MSFT-shaped case: entry 434, EMA10 390, ATR 12 → 3.7× extension.
+    const extended = { entry: 434, stop: 428, target: 450, quantity: 1 };
+
+    test('extended entry is refused without the earnings flag', () => {
+        const r = checkProposalRisk(
+            longProposal(extended),
+            { dailyAtr: 12, ema10: 390 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('chasing an extended move');
+    });
+
+    test('recent earnings waives the extension check with a visible note', () => {
+        const r = checkProposalRisk(
+            longProposal(extended),
+            { dailyAtr: 12, ema10: 390, recentEarnings: true },
+            RULES,
+        );
+        expect(r.ok).toBe(true);
+        expect(r.violations).toEqual([]);
+        expect(r.notes.join(' ')).toContain('earnings-gap exception');
+    });
+
+    test('the waiver does NOT weaken the other gates (noise stop still bites)', () => {
+        const r = checkProposalRisk(
+            longProposal({ entry: 434, stop: 433, target: 450, quantity: 1 }),
+            { dailyAtr: 12, ema10: 390, recentEarnings: true },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('intraday noise');
+    });
+
+    test('recentEarnings false or absent keeps the guard strict', () => {
+        const r = checkProposalRisk(
+            longProposal(extended),
+            { dailyAtr: 12, ema10: 390, recentEarnings: false },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+    });
+});

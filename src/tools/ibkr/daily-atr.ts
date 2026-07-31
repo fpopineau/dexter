@@ -10,6 +10,7 @@
 import { BarSizeSetting } from '@stoqey/ib';
 import { atr, ema } from './ta-indicators.js';
 import { fetchBars } from './signal-scorer.js';
+import { reportedRecently } from '@/services/earnings-calendar.js';
 import { logger } from '@/utils';
 
 export interface DailyRiskContext {
@@ -17,12 +18,15 @@ export interface DailyRiskContext {
     dailyAtr: number | null;
     /** EMA(10) of daily closes — the short-term mean for the extension check. */
     ema10: number | null;
+    /** Reported earnings within the last session (earnings-gap exception
+     *  for the extension guard). Null = could not verify → guard stays strict. */
+    recentEarnings: boolean | null;
 }
 
 const TTL_MS = 10 * 60_000;
 const cache = new Map<string, { value: DailyRiskContext; at: number }>();
 
-const NONE: DailyRiskContext = { dailyAtr: null, ema10: null };
+const NONE: DailyRiskContext = { dailyAtr: null, ema10: null, recentEarnings: null };
 
 function lastValid(series: number[]): number | null {
     for (let i = series.length - 1; i >= 0; i--) {
@@ -40,7 +44,8 @@ export async function fetchDailyRiskContext(symbol: string): Promise<DailyRiskCo
     const hit = cache.get(sym);
     if (hit && Date.now() - hit.at < TTL_MS) return hit.value;
 
-    let value: DailyRiskContext = NONE;
+    // Fresh object, never the shared NONE — recentEarnings is patched below.
+    let value: DailyRiskContext = { ...NONE };
     try {
         const bars = await Promise.race([
             fetchBars(sym, BarSizeSetting.DAYS_ONE, '2 M', true),
@@ -61,9 +66,22 @@ export async function fetchDailyRiskContext(symbol: string): Promise<DailyRiskCo
         value = {
             dailyAtr: lastValid(atr(highs, lows, closes, 14).atr),
             ema10: lastValid(ema(closes, 10)),
+            recentEarnings: null,
         };
     } catch (err) {
         logger.warn(`[daily-risk-context] ${sym}: ${err instanceof Error ? err.message : String(err)} — ATR/extension checks skipped`);
+    }
+
+    // Earnings look-back for the extension guard's earnings-gap exception.
+    // Own timeout, own failure mode: unavailable → null → the guard stays
+    // strict. Usually a cache hit (6h per-day calendar cache).
+    try {
+        value.recentEarnings = await Promise.race([
+            reportedRecently(sym),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), 6_000)),
+        ]);
+    } catch {
+        value.recentEarnings = null;
     }
     cache.set(sym, { value, at: Date.now() });
     return value;
