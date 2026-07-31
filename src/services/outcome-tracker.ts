@@ -142,9 +142,27 @@ async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string):
     trade.closed = true;
 
     // Surface the broker's rejection reason — 'cancelled' without a why
-    // forces log archaeology (e.g. IBKR 201 permission rejections).
-    if (trade.lastOrderError) {
+    // forces log archaeology (e.g. IBKR 201 permission rejections). But an
+    // EMPTY reason ("Ordre annulé - Raison :" with nothing after) is IBKR's
+    // routine end-of-day expiry cancel — appending it only confuses.
+    if (trade.lastOrderError && !/Raison\s*:?\s*$/i.test(trade.lastOrderError)) {
         note = note ? `${note} — ${trade.lastOrderError}` : trade.lastOrderError;
+    }
+
+    // DAY-bracket expiry at the bell: entry filled, tif DAY, and we are at/
+    // after the close — the exits died of old age, nobody acted. This is a
+    // distinct, well-understood case that deserves ONE clear message (the
+    // 🌙 re-protection notice) instead of a confusing '✋ manual / P&L
+    // unknown' + '🛡️' pair. Gated off in tests (wall-clock dependent).
+    const proposalEarly = await getProposal(trade.proposalId).catch(() => null);
+    const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const afterBell = etNow.getHours() > 15 || (etNow.getHours() === 15 && etNow.getMinutes() >= 55);
+    const dayExpiry =
+        process.env.NODE_ENV !== 'test' &&
+        reason === 'manual' && trade.entryAvgPrice != null &&
+        proposalEarly?.tif === 'DAY' && afterBell;
+    if (dayExpiry) {
+        note = 'DAY bracket exits expired at the session close with the position still open — GTC re-protection attempted (see auto-protect)';
     }
 
     const realizedPnl =
@@ -173,15 +191,6 @@ async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string):
     );
 
     const proposal = await getProposal(trade.proposalId).catch(() => null);
-    if (proposal) {
-        for (const cb of [...closedCallbacks]) {
-            try {
-                await cb(proposal);
-            } catch (err) {
-                logger.error(`[outcome-tracker] onTradeClosed callback failed: ${err}`);
-            }
-        }
-    }
 
     // AUTO-PROTECT: a 'manual' close with a filled entry means the exits
     // died while the position may still be open (the DAY-bracket trap —
@@ -189,6 +198,11 @@ async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string):
     // protection at the proposal's levels. Risk-REDUCING by construction:
     // protectPosition itself no-ops when the position is flat and refuses
     // when GTC exits already exist. Opt out with AUTO_PROTECT=false.
+    //
+    // For the well-understood DAY-expiry-at-the-bell case, protection runs
+    // FIRST and (when it succeeds) a single 🌙 message replaces the
+    // confusing '✋ manual' + '🛡️' pair.
+    let suppressCloseAlert = false;
     if (
         reason === 'manual' && trade.entryAvgPrice != null && proposal &&
         process.env.NODE_ENV !== 'test' &&
@@ -198,23 +212,45 @@ async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string):
             const { protectPosition, wasRecentlyClosed } = await import('./position-actions.js');
             if (wasRecentlyClosed(proposal.symbol)) {
                 logger.info(`[outcome-tracker] auto-protect ${proposal.symbol} skipped — position was deliberately closed just now`);
-                return;
-            }
-            const outcome = await protectPosition(proposal.symbol, proposal.stop, proposal.target);
-            if (outcome.ok) {
-                logger.info(`[outcome-tracker] auto-protected ${proposal.symbol} after dead exits: ${outcome.message}`);
-                await notifyAutoProtect(`🛡️ AUTO-PROTECT ${proposal.symbol}: the ${trade.proposalId} bracket exits died with the entry filled. ${outcome.message}`);
             } else {
-                logger.info(`[outcome-tracker] auto-protect ${proposal.symbol} not applied: ${outcome.message}`);
-                // "No open position" is the normal case (position really was
-                // closed manually) — only surface actionable refusals.
-                if (!outcome.message.includes('No open position')) {
-                    await notifyAutoProtect(`⚠️ ${proposal.symbol} may be UNPROTECTED (${trade.proposalId} exits died) and auto-protect could not attach exits: ${outcome.message}`);
+                const outcome = await protectPosition(proposal.symbol, proposal.stop, proposal.target);
+                if (outcome.ok && dayExpiry) {
+                    logger.info(`[outcome-tracker] ${trade.proposalId} DAY expiry → re-protected: ${outcome.message}`);
+                    await notifyAutoProtect(
+                        `🌙 ${trade.proposalId} ${proposal.symbol}: the DAY bracket expired at the close with the position ` +
+                        `still open (${proposal.direction.toUpperCase()} ${proposal.quantity} @ ${trade.entryAvgPrice}) — nothing was closed. ` +
+                        `${outcome.message} ` +
+                        `NOTE: this is now an OVERNIGHT hold that was sized by INTRADAY rules — it never passed the ` +
+                        `overnight vetting (tighter caps, earnings check) the Pre-Close Review applies to deliberate ` +
+                        `holds. Tomorrow's brief reviews it; P&L will realize on the new GTC exits. ` +
+                        `Reply 'close ${proposal.symbol}' if you'd rather not hold it.`,
+                    );
+                    suppressCloseAlert = true;
+                } else if (outcome.ok) {
+                    logger.info(`[outcome-tracker] auto-protected ${proposal.symbol} after dead exits: ${outcome.message}`);
+                    await notifyAutoProtect(`🛡️ AUTO-PROTECT ${proposal.symbol}: the ${trade.proposalId} bracket exits died with the entry filled. ${outcome.message}`);
+                } else {
+                    logger.info(`[outcome-tracker] auto-protect ${proposal.symbol} not applied: ${outcome.message}`);
+                    // "No open position" is the normal case (position really was
+                    // closed outside the bracket) — only surface actionable refusals.
+                    if (!outcome.message.includes('No open position')) {
+                        await notifyAutoProtect(`⚠️ ${proposal.symbol} may be UNPROTECTED (${trade.proposalId} exits died) and auto-protect could not attach exits: ${outcome.message}`);
+                    }
                 }
             }
         } catch (err) {
             logger.error(`[outcome-tracker] auto-protect ${proposal.symbol} failed: ${err}`);
             await notifyAutoProtect(`⚠️ ${proposal.symbol} may be UNPROTECTED (${trade.proposalId} exits died) — auto-protect errored: ${err instanceof Error ? err.message : err}. Use 'protect ${proposal.symbol} ${proposal.stop} ${proposal.target}'.`);
+        }
+    }
+
+    if (proposal && !suppressCloseAlert) {
+        for (const cb of [...closedCallbacks]) {
+            try {
+                await cb(proposal);
+            } catch (err) {
+                logger.error(`[outcome-tracker] onTradeClosed callback failed: ${err}`);
+            }
         }
     }
 }
