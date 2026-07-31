@@ -362,6 +362,29 @@ describe('prescriptive refusal geometry (Jul 30 MU failure)', () => {
         expect(all).toContain('$92.00');
     });
 
+    test('following the prescription verbatim always passes (SOXL 0.4¢ regression)', () => {
+        // SOXL live case: ATR 29.36 → min stop 11.744. Naive rounding
+        // prescribed 119.26 (too tight by 0.4¢); away-from-entry rounding
+        // must prescribe 119.25 / 154.50 — and that exact geometry passes.
+        const refused = checkProposalRisk(
+            longProposal({ symbol: 'SOXL', entry: 131, stop: 128, target: 140, quantity: 1 }),
+            { dailyAtr: 29.36 },
+            RULES,
+        );
+        expect(refused.ok).toBe(false);
+        const all = refused.violations.join(' ');
+        expect(all).toContain('$119.25');
+        expect(all).toContain('$154.50');
+
+        const obeyed = checkProposalRisk(
+            longProposal({ symbol: 'SOXL', entry: 131, stop: 119.25, target: 154.5, quantity: 1 }),
+            { dailyAtr: 29.36 },
+            RULES,
+        );
+        expect(obeyed.ok).toBe(true);
+        expect(obeyed.violations).toEqual([]);
+    });
+
     test('no prescriptive line without ATR (nothing to solve with)', () => {
         const r = checkProposalRisk(longProposal({ target: 104 }), {}, RULES);
         expect(r.ok).toBe(false);

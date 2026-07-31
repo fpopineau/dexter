@@ -155,9 +155,18 @@ export function checkProposalRisk(
     // over the solved system: the tightest geometry satisfying BOTH rules.
     if ((noiseStopFailed || rrFailed) && ctx.dailyAtr !== undefined && ctx.dailyAtr > 0) {
         const minStop = rules.min_stop_atr_fraction * ctx.dailyAtr;
-        const sign = p.direction === 'long' ? 1 : -1;
-        const stopBound = entry - sign * minStop;
-        const targetBound = entry + sign * rules.min_risk_reward * minStop;
+        // Bounds rounded AWAY from entry, and the target derived from the
+        // ROUNDED stop distance — following the prescription verbatim must
+        // pass. (Observed live: SOXL min stop $11.744 prescribed as
+        // "$119.26", the model obeyed exactly and was refused by 0.4¢ —
+        // an unsatisfiable-looking gate teaches surrender.)
+        const stopBound = p.direction === 'long'
+            ? Math.floor((entry - minStop) * 100) / 100
+            : Math.ceil((entry + minStop) * 100) / 100;
+        const stopDist = Math.abs(entry - stopBound);
+        const targetBound = p.direction === 'long'
+            ? Math.ceil((entry + rules.min_risk_reward * stopDist) * 100) / 100
+            : Math.floor((entry - rules.min_risk_reward * stopDist) * 100) / 100;
         violations.push(
             `VIABLE GEOMETRY for ${p.direction} ${p.symbol} at $${entry}: stop at/beyond ` +
             `$${stopBound.toFixed(2)} AND target at/beyond $${targetBound.toFixed(2)} — both together ` +
