@@ -89,9 +89,15 @@ async function executeRequest(
 
   if (!response.ok) {
     const detail = `${response.status} ${response.statusText}`;
-    if (response.status === 401 || response.status === 402) {
+    // 403 joined the club live (2026-07-31): the key is valid but the plan
+    // does not cover these endpoints — identical for every call, so it
+    // short-circuits the same way.
+    if (response.status === 401 || response.status === 402 || response.status === 403) {
       breakerTrippedAt = Date.now();
-      breakerReason = response.status === 401 ? 'no valid API key' : 'no credits on the account';
+      breakerReason =
+        response.status === 401 ? 'no valid API key'
+        : response.status === 402 ? 'no credits on the account'
+        : 'the plan does not cover this endpoint';
       logger.warn(`[Financial Datasets API] ${detail} on ${label} — circuit open for 1h, calls will short-circuit`);
       throw new Error(
         `[Financial Datasets API] unavailable (${breakerReason}) — do not retry this tool; use web_search instead`,

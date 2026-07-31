@@ -49,8 +49,9 @@ function buildPrompt(opp: Opportunity): string {
         '2. Validate entry/stop/target and position size with risk_manager (stop from ATR).',
         '3. Decision:',
         `   - NOT actionable → respond with exactly: ${HEARTBEAT_OK_TOKEN}`,
-        '   - Actionable → register it with trade_proposals (action create, source rationale included),',
-        "     then reply briefly: the setup, the proposal line, and \"Reply 'accept <ID>' to execute (paper)\".",
+        '   - Actionable → register it with trade_proposals (action create, source rationale included).',
+        '     trade_proposals is the ONLY tool that registers proposals — opportunities is read-only.',
+        "     Then reply briefly: the setup, the proposal line, and \"Reply 'accept <ID>' to execute (paper)\".",
         'Never place orders yourself. Keep the alert under 10 lines.',
     ].join('\n');
 }
@@ -69,8 +70,9 @@ function buildBreadthPrompt(event: BreadthEvent): string {
         '   Prefer a pullback entry (VWAP / prior high) over hitting the offer at the high of day.',
         '3. Decision:',
         `   - NOT actionable → respond with exactly: ${HEARTBEAT_OK_TOKEN}`,
-        '   - Actionable → register it with trade_proposals (action create, breadth rationale included),',
-        "     then reply briefly: the setup, the proposal line, and \"Reply 'accept <ID>' to execute (paper)\".",
+        '   - Actionable → register it with trade_proposals (action create, breadth rationale included).',
+        '     trade_proposals is the ONLY tool that registers proposals — opportunities is read-only.',
+        "     Then reply briefly: the setup, the proposal line, and \"Reply 'accept <ID>' to execute (paper)\".",
         'Never place orders yourself. Keep the alert under 10 lines.',
     ].join('\n');
 }

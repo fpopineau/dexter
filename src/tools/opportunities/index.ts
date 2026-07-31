@@ -35,10 +35,13 @@ as stale context, not live signals. This tool is advisory and never places order
 `.trim();
 
 const OpportunitiesSchema = z.object({
+    // Deliberately a free string: an unknown action (observed live: 'create',
+    // trying to register a proposal here) must return a STEERING message,
+    // not an opaque schema error the model reads as "tool is broken".
     action: z
-        .enum(['latest', 'refresh'])
+        .string()
         .default('latest')
-        .describe("'latest' returns the cached snapshot; 'refresh' runs a new scan cycle (~30-60s)."),
+        .describe("'latest' returns the cached snapshot; 'refresh' runs a new scan cycle (~30-60s). No other actions exist — proposals are registered with the trade_proposals tool."),
     limit: z
         .coerce.number()
         .int()
@@ -82,7 +85,16 @@ export function createOpportunitiesTool() {
             'Ranked trading opportunities from the continuous market scanner. Action latest (cached) or refresh (new scan cycle, ~30-60s). Advisory only.',
         schema: OpportunitiesSchema,
         func: async (input) => {
-            if (input.action === 'refresh') {
+            const action = input.action.trim().toLowerCase();
+            if (action !== 'latest' && action !== 'refresh') {
+                return formatToolResult({
+                    error:
+                        `opportunities is READ-ONLY (actions: 'latest', 'refresh') — '${input.action}' does not exist here. ` +
+                        `To register a trade recommendation, call the trade_proposals tool with action 'create' ` +
+                        `(symbol, direction, entryType, entry, stop, target, quantity, rationale).`,
+                });
+            }
+            if (action === 'refresh') {
                 const snapshot = await runCycleOnce();
                 return formatToolResult(trim(snapshot, input.limit));
             }
