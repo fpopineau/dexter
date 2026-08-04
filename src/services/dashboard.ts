@@ -23,7 +23,7 @@ import { getDailyLossStatus } from './daily-loss-guard.js';
 import { getLatestPatternScan } from './pattern-scanner.js';
 import { fetchPositions } from './position-actions.js';
 import { getProfitTrailEntries } from './profit-trail.js';
-import { listProposals } from './trade-proposals.js';
+import { getPerformanceSummary, listProposals } from './trade-proposals.js';
 import { getIBApi } from '@/tools/ibkr/connection.js';
 import { createIbkrOrders } from '@/tools/ibkr/orders.js';
 import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
@@ -62,11 +62,14 @@ const OVERVIEW_TTL_MS = 15_000;
 async function buildOverview(): Promise<string> {
     if (overviewCache && Date.now() - overviewCache.at < OVERVIEW_TTL_MS) return overviewCache.body;
 
-    const [positions, ordersRaw, proposals, lossStatus] = await Promise.all([
+    const [positions, ordersRaw, proposals, lossStatus, perf] = await Promise.all([
         getIBApi().then((api) => fetchPositions(api)).catch(() => []),
         createIbkrOrders().invoke({ action: 'list' }).then((r) => JSON.parse(String(r))).catch(() => null),
         listProposals(undefined, 40).catch(() => []),
         getDailyLossStatus().catch(() => null),
+        // 90d window — automatically floored to the performance baseline, so
+        // the panel shows the CURRENT stack's record, not the pre-reset era.
+        getPerformanceSummary(Date.now() - 90 * 24 * 3600_000).catch(() => null),
     ]);
 
     const body = JSON.stringify({
@@ -77,6 +80,7 @@ async function buildOverview(): Promise<string> {
         trail: getProfitTrailEntries(),
         loss: lossStatus,
         patterns: getLatestPatternScan()?.candidates?.slice(0, 10) ?? [],
+        perf,
     });
     overviewCache = { at: Date.now(), body };
     return body;

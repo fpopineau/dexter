@@ -58,6 +58,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
 <div class="wrap">
   <aside>
     <div id="actionmsg"></div>
+    <h3>Performance</h3><table id="perf"></table>
     <h3>Positions</h3><table id="positions"></table>
     <h3>Working orders</h3><table id="orders"></table>
     <h3>Proposals</h3><table id="proposals"></table>
@@ -204,6 +205,24 @@ function renderOverview(o){
     el('dpnl').innerHTML = o.loss.dailyPnL!=null ? 'Day '+pnlSpan(o.loss.dailyPnL) : '';
     el('halt').innerHTML = o.loss.halted ? '<span class="halt-on">⛔ HALTED</span>' : '<span class="halt-off">● trading allowed</span>';
   }
+  if(o.perf){
+    var s = o.perf;
+    var base = s.baseline ? 'since '+new Date(s.baseline.epochMs).toISOString().slice(0,10) : 'last 90d';
+    var reasons = Object.keys(s.byExitReason||{}).map(function(k){ return k+' '+s.byExitReason[k]; }).join(' · ');
+    var rec = s.wins+'W / '+s.losses+'L'+(s.winRatePct!=null?' ('+fmt(s.winRatePct,0)+'%)':'')+(s.unlabeled?' <span class="dim">+'+s.unlabeled+' unlabeled</span>':'');
+    var rows = '';
+    rows += '<tr><td class="dim">Record <span class="chip">'+base+'</span></td><td class="r">'+rec+'</td></tr>';
+    rows += '<tr><td class="dim">Net P&L</td><td class="r">'+pnlSpan(s.netPnl)+'</td></tr>';
+    rows += '<tr><td class="dim">Gross / fees</td><td class="r">'+pnlSpan(s.grossPnl)+' <span class="dim">/ $'+fmt(s.commissions)+'</span></td></tr>';
+    if(s.best) rows += '<tr><td class="dim">Best</td><td class="r"><b>'+s.best.symbol+'</b> '+pnlSpan(s.best.pnl)+'</td></tr>';
+    if(s.worst && (!s.best || s.worst.id!==s.best.id)) rows += '<tr><td class="dim">Worst</td><td class="r"><b>'+s.worst.symbol+'</b> '+pnlSpan(s.worst.pnl)+'</td></tr>';
+    if(reasons) rows += '<tr><td class="dim">Exits</td><td class="r dim">'+reasons+'</td></tr>';
+    rows += '<tr><td class="dim">Book</td><td class="r">'+s.openExecuted+' executing <span class="dim">·</span> '+s.openProposals+' open</td></tr>';
+    el('perf').innerHTML = rows;
+  } else {
+    el('perf').innerHTML = '<tr><td class="dim">unavailable</td></tr>';
+  }
+
   var pos = (o.positions||[]).map(function(p){
     return '<tr class="row" data-sym="'+p.symbol+'"><td><b>'+p.symbol+'</b></td>'+
       '<td class="r">'+(p.quantity>0?'+':'')+p.quantity+'</td>'+
