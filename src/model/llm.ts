@@ -70,6 +70,11 @@ const MODEL_FACTORIES: Record<string, ModelFactory> = {
       model: name,
       ...opts,
       apiKey: getApiKey('ANTHROPIC_API_KEY'),
+      // LangChain's per-model default table lags new releases: unknown ids
+      // (claude-sonnet-5, claude-opus-5) fall back to 4096 max_tokens, and
+      // the Claude 5 family thinks by default WITHIN that cap — truncation
+      // risk. Set an explicit ceiling instead.
+      maxTokens: 16384,
     }),
   google: (name, opts) =>
     new ChatGoogleGenerativeAI({

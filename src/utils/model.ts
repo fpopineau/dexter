@@ -17,6 +17,8 @@ const PROVIDER_MODELS: Record<string, Model[]> = {
     { id: 'gpt-5.4', displayName: 'GPT 5.4' },
   ],
   anthropic: [
+    { id: 'claude-sonnet-5', displayName: 'Sonnet 5' },
+    { id: 'claude-opus-5', displayName: 'Opus 5' },
     { id: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6' },
     { id: 'claude-opus-4-8', displayName: 'Opus 4.8' },
     { id: 'claude-fable-5', displayName: 'Fable 5' },
