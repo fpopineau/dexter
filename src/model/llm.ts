@@ -63,10 +63,76 @@ function getApiKey(envVar: string): string {
   return apiKey;
 }
 
+/**
+ * Anthropic rejects oneOf/anyOf/allOf at the ROOT of a tool's input_schema
+ * ("input_schema does not support oneOf ... at the top level", 400).
+ * LangChain's zod conversion emits exactly that for tools whose root schema
+ * is a (discriminated) union — earnings, account, proposals, orders — which
+ * OpenAI-compatible backends (vLLM) accept, so this only surfaced on the
+ * first Sonnet 5 session. Flatten the root union: merge branch properties
+ * (discriminator consts become one enum), require only what EVERY branch
+ * requires. Per-action validation still happens at execution time via the
+ * tool's original zod schema; nested unions inside properties are fine.
+ */
+function flattenRootUnionSchema(schema: Record<string, unknown>): Record<string, unknown> {
+  if (schema.type !== undefined) return schema;
+  const branches = (schema.oneOf ?? schema.anyOf) as Array<Record<string, unknown>> | undefined;
+  if (!Array.isArray(branches) || branches.length === 0) return schema;
+  if (!branches.every((b) => b && b.type === 'object')) return schema;
+
+  const properties: Record<string, Record<string, unknown>> = {};
+  let required: string[] | null = null;
+  for (const branch of branches) {
+    for (const [key, value] of Object.entries((branch.properties as Record<string, unknown>) ?? {})) {
+      const prop = value as Record<string, unknown>;
+      if (!(key in properties)) {
+        properties[key] = { ...prop };
+        continue;
+      }
+      // Same-named property across branches: merge const/enum (the
+      // discriminator case); otherwise first definition wins.
+      const existing = properties[key];
+      const values = [existing.const, existing.enum, prop.const, prop.enum]
+        .flat()
+        .filter((v) => v !== undefined);
+      if (values.length > 0) {
+        delete existing.const;
+        existing.enum = [...new Set(values)];
+      }
+    }
+    const branchRequired = (branch.required as string[]) ?? [];
+    required = required === null
+      ? [...branchRequired]
+      : required.filter((key) => branchRequired.includes(key));
+  }
+
+  return {
+    type: 'object',
+    properties,
+    ...(required && required.length > 0 ? { required } : {}),
+    ...(schema.description !== undefined ? { description: schema.description } : {}),
+  };
+}
+
+export class SchemaSafeChatAnthropic extends ChatAnthropic {
+  override formatStructuredToolToAnthropic(
+    tools: Parameters<ChatAnthropic['formatStructuredToolToAnthropic']>[0],
+  ): ReturnType<ChatAnthropic['formatStructuredToolToAnthropic']> {
+    const formatted = super.formatStructuredToolToAnthropic(tools);
+    for (const tool of formatted ?? []) {
+      const holder = tool as { input_schema?: Record<string, unknown> };
+      if (holder.input_schema) {
+        holder.input_schema = flattenRootUnionSchema(holder.input_schema) as typeof holder.input_schema;
+      }
+    }
+    return formatted;
+  }
+}
+
 // Factories keyed by provider id — prefix routing is handled by resolveProvider()
 const MODEL_FACTORIES: Record<string, ModelFactory> = {
   anthropic: (name, opts) =>
-    new ChatAnthropic({
+    new SchemaSafeChatAnthropic({
       model: name,
       ...opts,
       apiKey: getApiKey('ANTHROPIC_API_KEY'),
