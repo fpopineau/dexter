@@ -136,9 +136,13 @@ function initSplitter(){
 
 function clearLines(){ state.lines.forEach(function(l){ state.series.removePriceLine(l); }); state.lines = []; state.linePrices = []; }
 function addLine(price, color, title, dashed){
-  if(price==null || isNaN(price)) return;
-  state.linePrices.push(Number(price));
-  state.lines.push(state.series.createPriceLine({ price:Number(price), color:color, lineWidth:1,
+  if(price==null || isNaN(price) || !(Number(price)>0)) return;
+  var p = Number(price);
+  // Skip near-duplicates: bracket orders mirror their proposal's levels —
+  // one line per price, first writer (the proposal) wins the label.
+  for(var i=0;i<state.linePrices.length;i++){ if(Math.abs(state.linePrices[i]-p) < 0.01) return; }
+  state.linePrices.push(p);
+  state.lines.push(state.series.createPriceLine({ price:p, color:color, lineWidth:1,
     lineStyle: dashed?LightweightCharts.LineStyle.Dashed:LightweightCharts.LineStyle.Solid, title:title }));
 }
 
@@ -150,6 +154,22 @@ function overlayFor(symbol){
     if(p.symbol!==symbol) return;
     if(p.status==='executed'||p.status==='executing'){ addLine(p.stop,'#f85149','stop '+p.id); addLine(p.target,'#3fb950','tgt '+p.id); }
     if(p.status==='open'){ addLine(p.entry,'#8b949e',p.id+' entry', true); }
+  });
+  // Working orders too: auto-protect exits (a position whose proposal is
+  // already closed, like an orphaned overnight) have no proposal to draw
+  // from — without this the chart shows a protected position with no
+  // bracket lines. Dedupe in addLine stops double-drawing when a
+  // proposal's bracket orders mirror the same levels.
+  var posside = 0;
+  (o.positions||[]).forEach(function(pp){ if(pp.symbol===symbol){ posside = pp.quantity>0?1:-1; } });
+  (o.orders||[]).forEach(function(ord){
+    if(ord.symbol!==symbol) return;
+    var t = String(ord.orderType||'');
+    var price = t.indexOf('STP')===0 ? ord.auxPrice : ord.limitPrice;
+    var isExit = (posside===1 && ord.action==='SELL') || (posside===-1 && ord.action==='BUY');
+    if(isExit && t==='STP'){ addLine(price,'#f85149','stop #'+ord.orderId); }
+    else if(isExit && t==='LMT'){ addLine(price,'#3fb950','tgt #'+ord.orderId); }
+    else { addLine(price,'#8b949e',ord.action.toLowerCase()+' #'+ord.orderId, true); }
   });
   (o.trail||[]).forEach(function(t){ if(t.symbol===symbol) addLine(t.best, '#d29922', (t.armed?'peak (armed)':'peak'), true); });
 }
