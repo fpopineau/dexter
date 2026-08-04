@@ -16,6 +16,7 @@
 
 import { logger } from '@/utils';
 import { EventName, IBApi } from '@stoqey/ib';
+import { setAccountProfile } from './risk-rules.js';
 
 let ibApi: IBApi | null = null;
 let connected = false;
@@ -229,6 +230,10 @@ function doConnect(): Promise<IBApi> {
             const masked = managedAccounts.map(maskAccount).join(', ');
             const paper = managedAccounts.every((a) => a.toUpperCase().startsWith('D'));
             logger.info(`[IBKR] Managed accounts: ${masked} (${paper ? 'paper' : 'LIVE or mixed'})`);
+            // Risk-rules profile follows the account: a live account gets the
+            // small-account overrides (risk-rules.live.yaml); paper keeps the
+            // base rules. Default is 'paper' — fail-safe tiny percentages.
+            setAccountProfile(paper ? 'paper' : 'live');
         });
 
         api.on(EventName.disconnected, () => {

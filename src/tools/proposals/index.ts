@@ -32,8 +32,9 @@ export const TRADE_PROPOSALS_DESCRIPTION = `
 Manage trade proposals — persisted, human-actionable trade recommendations.
 
 **create** — register a recommendation (symbol, direction, entryType LMT/MKT, entry,
-  stop, target, quantity, score, rationale, expiresMinutes default 120). Creating a
-  proposal does NOT trade. The entry price is REQUIRED even for MKT proposals (pass the
+  stop, target, score, rationale, expiresMinutes default 120). OMIT quantity: the
+  position sizer computes shares from the account's risk budget, the confidence score
+  and the stop distance (works on any account size). Creating a proposal does NOT trade. The entry price is REQUIRED even for MKT proposals (pass the
   current price — it anchors deterministic risk validation; execution is still at market).
   Every proposal passes a mandatory risk gate (min risk/reward, min price, coherent
   stop/target) — a rejected create returns the violations; fix the numbers, don't fight it.
@@ -74,8 +75,8 @@ const CreateSchema = z.object({
         .describe('Stop-loss price at REAL STRUCTURE (low of day, pullback low, VWAP). The gate refuses stops closer than 0.4× the daily ATR — inside intraday noise, they fill on randomness.'),
     target: z.coerce.number().positive()
         .describe('Take-profit at a real objective (prior high, measured move). Do NOT derive it as entry + 2× stop distance to satisfy the R/R gate — if an honest target is not ≥2× the stop distance away, skip the trade.'),
-    quantity: z.coerce.number().int().positive()
-        .describe('Number of shares. Size from the risk budget: shares ≈ (0.25% of account) / (entry − stop). At acceptance the gate refuses if a stop-out would cost more than the budget.'),
+    quantity: z.coerce.number().int().positive().optional()
+        .describe('Number of shares. OMIT to auto-size (recommended): the position sizer computes shares from the account risk budget, the confidence score, and the stop distance — this is the only way sizing stays correct across account sizes. Pass explicitly only when the user demanded a specific quantity.'),
     tif: z.enum(['DAY', 'GTC']).default('DAY')
         .describe("Bracket time-in-force. Use 'GTC' for overnight/swing setups so the stop and target SURVIVE the market close; 'DAY' brackets expire at the bell and can leave a filled position unprotected overnight."),
     score: z.coerce.number().min(0).max(150).optional().describe('Signal/composite score backing this proposal.'),
@@ -136,6 +137,30 @@ export function createTradeProposalsTool() {
                         // and extension checks — never taken from the model.
                         // Fail-open (nulls skip the checks).
                         const { dailyAtr, ema10, recentEarnings } = await fetchDailyRiskContext(input.symbol);
+
+                        // Auto-sizing: quantity omitted → the deterministic
+                        // sizer computes shares from live NetLiq, the score
+                        // and the stop distance. Sizing failures return the
+                        // reason — the model adjusts or skips, never guesses.
+                        let quantity = input.quantity;
+                        if (quantity == null) {
+                            const { getDailyLossStatus } = await import('@/services/daily-loss-guard.js');
+                            const { computeQuantity } = await import('@/services/position-sizer.js');
+                            const netLiq = (await getDailyLossStatus().catch(() => null))?.netLiquidation;
+                            if (netLiq == null || !(netLiq > 0)) {
+                                return formatToolResult({ error: 'auto-sizing needs the live account net liquidation and it is unavailable — retry shortly or pass an explicit quantity' });
+                            }
+                            const sized = computeQuantity({
+                                entry: input.entry, stop: input.stop, score: input.score, netLiquidation: netLiq,
+                            });
+                            if (sized.quantity == null) {
+                                logger.warn(`[trade-proposals] auto-size refused: ${input.symbol} ${input.direction} @${input.entry} stop ${input.stop} score ${input.score ?? '—'} — ${sized.reason}`);
+                                return formatToolResult({ error: `position sizer refused: ${sized.reason}` });
+                            }
+                            quantity = sized.quantity;
+                            logger.info(`[trade-proposals] auto-sized ${input.symbol}: ${quantity} shares (budget $${sized.riskBudget.toFixed(0)}, confidence ×${sized.multiplier})`);
+                        }
+
                         const p = await createProposal({
                             symbol: input.symbol,
                             direction: input.direction,
@@ -144,7 +169,7 @@ export function createTradeProposalsTool() {
                             entryLimit: input.entryLimit,
                             stop: input.stop,
                             target: input.target,
-                            quantity: input.quantity,
+                            quantity,
                             tif: input.tif,
                             score: input.score,
                             rationale: input.rationale,

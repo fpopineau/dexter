@@ -1,0 +1,33 @@
+# Risk rules — LIVE ACCOUNT OVERRIDES (small account, ~€3-5K)
+#
+# Loaded ON TOP of risk-rules.yaml when the IBKR connection verifies a
+# non-paper account. Keys absent here inherit the base file.
+#
+# Rationale: the base percentages are tuned for the $1M paper account and
+# produce unusable absolute numbers on a small account (5% position = ~€185,
+# 0.25% risk = ~€9 — inside commission noise). These values trade fewer,
+# larger positions with a real but bounded per-trade risk.
+#
+# >>> REVIEW THESE BEFORE GOING LIVE — they are risk-appetite decisions. <<<
+
+# --- Position Sizing ---
+max_position_pct: 20 # ~€740 per position on €3.7K — one liquid mega-cap share or a few mid-caps
+max_open_positions: 3 # concentration beats dust at this size
+
+# --- Daily Limits ---
+max_daily_trades: 4 # commissions are a real tax at this size
+
+# --- Overnight ---
+max_overnight_position_pct: 15
+
+# --- Per-Trade Risk Budget ---
+max_risk_per_trade_pct: 1.0 # ~€37 max loss per stop-out at full confidence
+
+# --- Confidence-weighted sizing (position-sizer) ---
+sizing_full_score: 80 # score >= 80 -> full risk budget
+sizing_half_score: 60 # 60-79 -> sizing_half_mult x budget
+sizing_half_mult: 0.6
+sizing_low_mult: 0.35 # below 60, or unscored
+
+# --- Small-account floor ---
+min_risk_budget_usd: 15 # refuse trades whose weighted budget is below this — commissions/spread would eat the edge

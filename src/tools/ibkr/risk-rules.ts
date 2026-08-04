@@ -4,6 +4,14 @@
  * Extracted from risk-manager.ts so that deterministic services (the
  * proposal risk gate, the daily-loss guard) can read the rules without
  * pulling in the LangChain tool machinery.
+ *
+ * PROFILES: percentages tuned for the $1M paper account produce unusable
+ * absolute numbers on a small real account (5% position = ~€185; 0.25%
+ * risk = ~€9 — inside commission noise). When the connection verifies a
+ * LIVE account, risk-rules.live.yaml overrides take effect on top of the
+ * base file. The default profile is 'paper' — fail-safe: if profile
+ * detection never runs, live trading sees the tiny paper percentages and
+ * the sizer refuses everything rather than oversizing.
  */
 
 import { readFileSync } from 'fs';
@@ -27,6 +35,18 @@ export interface RiskRules {
     max_extension_atr: number;
     profit_trail_arm_pct: number;
     profit_trail_pullback_pct: number;
+    /** Confidence-weighted sizing: score at/above which a proposal gets the
+     *  FULL per-trade risk budget. */
+    sizing_full_score: number;
+    /** Score at/above which a proposal gets sizing_half_mult × budget. */
+    sizing_half_score: number;
+    sizing_half_mult: number;
+    /** Multiplier for low-score and unscored proposals. */
+    sizing_low_mult: number;
+    /** Refuse trades whose confidence-weighted risk budget falls below this
+     *  (USD). Guards small accounts against trades where commissions and
+     *  spread eat the entire edge. 0 disables. */
+    min_risk_budget_usd: number;
 }
 
 export const DEFAULT_RULES: RiskRules = {
@@ -47,41 +67,74 @@ export const DEFAULT_RULES: RiskRules = {
     max_extension_atr: 3,
     profit_trail_arm_pct: 5,
     profit_trail_pullback_pct: 1,
+    sizing_full_score: 80,
+    sizing_half_score: 60,
+    sizing_half_mult: 0.6,
+    sizing_low_mult: 0.35,
+    min_risk_budget_usd: 0,
 };
 
-let cachedRules: RiskRules | null = null;
+export type AccountProfile = 'paper' | 'live';
 
-function loadRules(): RiskRules {
-    if (cachedRules) return cachedRules;
-    try {
-        // Simple YAML parser — the file has only flat key: value pairs
-        const raw = readFileSync(
-            resolve(import.meta.dirname ?? '.', '../../config/risk-rules.yaml'),
-            'utf-8',
-        );
-        const parsed: Record<string, unknown> = {};
-        for (const line of raw.split('\n')) {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed.startsWith('#')) continue;
-            const [key, ...rest] = trimmed.split(':');
-            const valueStr = rest.join(':').split('#')[0].trim(); // strip inline comments
-            if (!key || valueStr === '') continue;
-            const k = key.trim();
-            if (valueStr === 'true') parsed[k] = true;
-            else if (valueStr === 'false') parsed[k] = false;
-            else {
-                const num = Number(valueStr);
-                parsed[k] = isNaN(num) ? valueStr : num;
-            }
+let activeProfile: AccountProfile = 'paper';
+const cachedByProfile = new Map<AccountProfile, RiskRules>();
+
+function parseFlatYaml(path: string): Record<string, unknown> {
+    // Simple YAML parser — the files have only flat key: value pairs
+    const raw = readFileSync(path, 'utf-8');
+    const parsed: Record<string, unknown> = {};
+    for (const line of raw.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const [key, ...rest] = trimmed.split(':');
+        const valueStr = rest.join(':').split('#')[0].trim(); // strip inline comments
+        if (!key || valueStr === '') continue;
+        const k = key.trim();
+        if (valueStr === 'true') parsed[k] = true;
+        else if (valueStr === 'false') parsed[k] = false;
+        else {
+            const num = Number(valueStr);
+            parsed[k] = isNaN(num) ? valueStr : num;
         }
-        cachedRules = { ...DEFAULT_RULES, ...parsed } as RiskRules;
-    } catch {
-        cachedRules = DEFAULT_RULES;
     }
-    return cachedRules;
+    return parsed;
 }
 
-/** Public accessor for the risk rules. */
+function loadRules(profile: AccountProfile): RiskRules {
+    const hit = cachedByProfile.get(profile);
+    if (hit) return hit;
+    let rules: RiskRules;
+    try {
+        const dir = resolve(import.meta.dirname ?? '.', '../../config');
+        const base = parseFlatYaml(resolve(dir, 'risk-rules.yaml'));
+        let overrides: Record<string, unknown> = {};
+        if (profile === 'live') {
+            try {
+                overrides = parseFlatYaml(resolve(dir, 'risk-rules.live.yaml'));
+            } catch { /* no live override file → live runs on base rules */ }
+        }
+        rules = { ...DEFAULT_RULES, ...base, ...overrides } as RiskRules;
+    } catch {
+        rules = DEFAULT_RULES;
+    }
+    cachedByProfile.set(profile, rules);
+    return rules;
+}
+
+/**
+ * Select the active rules profile. Called by the IBKR connection when the
+ * managed accounts are verified: all-paper accounts ('D…') → 'paper',
+ * anything else → 'live'. Idempotent.
+ */
+export function setAccountProfile(profile: AccountProfile): void {
+    activeProfile = profile;
+}
+
+export function getAccountProfile(): AccountProfile {
+    return activeProfile;
+}
+
+/** Public accessor for the risk rules (active profile). */
 export function getRiskRules(): RiskRules {
-    return loadRules();
+    return loadRules(activeProfile);
 }
