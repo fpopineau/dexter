@@ -15,7 +15,8 @@
  */
 
 import { readFileSync } from 'fs';
-import { resolve } from 'path';
+import { dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
 
 export interface RiskRules {
     max_position_pct: number;
@@ -105,7 +106,11 @@ function loadRules(profile: AccountProfile): RiskRules {
     if (hit) return hit;
     let rules: RiskRules;
     try {
-        const dir = resolve(import.meta.dirname ?? '.', '../../config');
+        // import.meta.dirname is undefined under jest's ESM VM — derive from
+        // import.meta.url, which both bun and jest support. Getting this
+        // wrong is silent: everything falls back to DEFAULT_RULES and the
+        // live overrides never load.
+        const dir = resolve(dirname(fileURLToPath(import.meta.url)), '../../config');
         const base = parseFlatYaml(resolve(dir, 'risk-rules.yaml'));
         let overrides: Record<string, unknown> = {};
         if (profile === 'live') {
