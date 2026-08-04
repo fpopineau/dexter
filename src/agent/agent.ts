@@ -410,7 +410,14 @@ export class Agent {
           tool_call_id: event.toolCallId,
           name: event.tool,
         }));
-        denied = true;
+        // Only an INTERACTIVE user denial ends the turn — the user is
+        // present and saw it. An AUTO-denial (headless cron/WhatsApp run)
+        // must flow back to the model so it can follow the steering text
+        // above and still produce an answer: ending the turn here returns
+        // an empty answer, which the gateway suppresses — observed live
+        // 2026-08-04 as 'suppressed (empty)' briefs and vanished replies
+        // whenever Sonnet 5 reached for an approval-gated tool.
+        if (!event.auto) denied = true;
       }
     }
 
