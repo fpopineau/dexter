@@ -1,3 +1,4 @@
-// Scratch file used to live-verify the Anthropic tool-schema flattening fix
-// (bind the four union-rooted tools + one real API call). Safe to delete.
+// Scratch file (gitignored) — last used to live-verify fractional bracket
+// placement on paper: IBKR rejected with error 10243 ("fractional orders
+// cannot be placed via API"), a server-side policy. See risk-rules.yaml.
 export {};

@@ -5,7 +5,7 @@
 # --- Position Sizing ---
 max_position_pct: 5 # Max % of account value per position
 max_open_positions: 10 # Max number of simultaneous positions
-fractional_shares: false # Decimal quantities (IBKR 0.0001 resolution). The live profile enables it; requires the IBKR Fractional Shares permission
+fractional_shares: false # KEEP FALSE: IBKR hard-blocks fractional EQUITY orders via the TWS API (error 10243, verified live 2026-08-05) — the account permission and desktop UI allow fractions, the API does not. Code kept ready for the day IBKR lifts it.
 
 # --- Daily Limits ---
 max_daily_loss_pct: 2 # Stop trading after this % drawdown in a day

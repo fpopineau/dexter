@@ -85,7 +85,12 @@ describe('bracket request validation', () => {
 });
 
 describe('fractional bracket quantities (profile-driven)', () => {
-    test('decimal quantity valid on the live profile, refused on paper', async () => {
+    test('decimal quantities refused on BOTH profiles while the IBKR API block stands', async () => {
+        // IBKR rejects fractional EQUITY orders via the TWS API outright
+        // (error 10243, verified live 2026-08-05), so fractional_shares is
+        // false in both yaml profiles. The mechanism itself is proven in
+        // position-sizer tests (isValidQuantity with fractional=true) and
+        // stays ready should IBKR lift the block.
         const { setAccountProfile } = await import('./risk-rules.js');
         const req = {
             parentOrderId: 1, takeProfitOrderId: 2, stopOrderId: 3, ocaGroup: 'g',
@@ -93,8 +98,8 @@ describe('fractional bracket quantities (profile-driven)', () => {
             entryType: 'LMT' as const, entryPrice: 500, stopPrice: 490, targetPrice: 520,
         };
         try {
-            setAccountProfile('live'); // risk-rules.live.yaml → fractional_shares: true
-            expect(() => validateBracketRequest(req)).not.toThrow();
+            setAccountProfile('live');
+            expect(() => validateBracketRequest(req)).toThrow(/fraction/);
             setAccountProfile('paper');
             expect(() => validateBracketRequest(req)).toThrow(/fraction/);
             expect(() => validateBracketRequest({ ...req, quantity: 2 })).not.toThrow();

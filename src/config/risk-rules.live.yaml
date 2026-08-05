@@ -33,9 +33,10 @@ sizing_low_mult: 0.35 # below 60, or unscored
 min_risk_budget_usd: 15 # refuse trades whose weighted budget is below this — commissions/spread would eat the edge
 
 # --- Fractional shares ---
-# One share of most mega-caps exceeds the 20% position cap (~€740) — the
-# sizer computes decimal quantities instead (IBKR 0.0001 resolution).
-# REQUIRES the Fractional Shares trading permission on the IBKR account
-# (Account Settings → Trading Permissions); the broker rejects fractional
-# orders without it, and some symbols are not fractional-eligible.
-fractional_shares: true
+# KEEP FALSE: IBKR hard-blocks fractional EQUITY orders via the TWS API
+# (error 10243 "use the desktop version", verified live on paper
+# 2026-08-05 — a server-side policy, not a permission or setting). The
+# sizer therefore trades whole shares: symbols above the position cap
+# per share (~€740 at 20% of €3.7K) are refused as unaffordable. The
+# fractional code path stays ready should IBKR ever lift the block.
+fractional_shares: false
