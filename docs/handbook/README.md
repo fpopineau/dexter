@@ -16,6 +16,16 @@ Companion documents (design history, kept for context):
 - [../day2day/AUTOMATION.md](../day2day/AUTOMATION.md) — the condensed
   system reference for the automation pipeline.
 
+Research memos (external work analyzed for reuse):
+
+- [../day2day/RESEARCH-signal-or-noise.md](../day2day/RESEARCH-signal-or-noise.md)
+  (added 2026-08-05) — analysis of Fatouros & Metaxas,
+  ["Signal or Noise in Multi-Agent LLM-based Stock Recommendations?"](https://arxiv.org/abs/2604.17327)
+  (arXiv:2604.17327; PDF in Zotero), and six reuse options for day2day —
+  headline: a counterfactual same-size null over the engine's candidate
+  pool (R1, needs a `snapshotId` on proposals) to test whether the LLM
+  judgment layer beats the deterministic scanner net of costs.
+
 ## One-paragraph overview
 
 Dexter's agent loop, tool registry, skills, memory and WhatsApp gateway are
