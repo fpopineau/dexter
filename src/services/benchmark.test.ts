@@ -124,6 +124,12 @@ describe('formatMoverLine', () => {
         expect(line).toContain('captured 24%');
     });
 
+    test('catalyst tags render, absence stays clean', () => {
+        expect(formatMoverLine('SNDK', metrics, base, 'earnings')).toContain('📅 earnings');
+        expect(formatMoverLine('SNDK', metrics, base, 'earnings-pending')).toContain('📅 reports soon');
+        expect(formatMoverLine('PLTR', metrics, base, null)).not.toContain('📅');
+    });
+
     test('refused names the gates', () => {
         const line = formatMoverLine('SNDK', metrics, { ...base, seen: true, triggered: true, refusedBy: ['unaffordable', 'unaffordable'] });
         expect(line).toContain('refused: unaffordable');

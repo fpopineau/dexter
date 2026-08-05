@@ -32,6 +32,7 @@ import { join } from 'node:path';
 import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
 import { logger } from '@/utils';
 import { isMarketHoliday } from '@/utils/market-hours.js';
+import { findUpcomingEarnings, reportedRecently } from './earnings-calendar.js';
 import { getSymbolRankStatsSince, onBreadthTrigger, onOpportunityTrigger } from './opportunity-engine.js';
 import { runScan } from './scanner-loop.js';
 import {
@@ -130,8 +131,14 @@ export interface FunnelStage {
     capturePct: number | null;
 }
 
+/** Earnings-relation of a mover: reported within the last session, or
+ *  reporting within a day. Splits the ledger into two populations that
+ *  must be judged separately — the gap of an earnings mover is forgone
+ *  BY POLICY, not missed. */
+export type Catalyst = 'earnings' | 'earnings-pending' | null;
+
 /** One line of the digest per mover. */
-export function formatMoverLine(symbol: string, m: DayMetrics, f: FunnelStage): string {
+export function formatMoverLine(symbol: string, m: DayMetrics, f: FunnelStage, catalyst: Catalyst = null): string {
     const move = `${m.dayPct >= 0 ? '+' : ''}${m.dayPct.toFixed(1)}% (gap ${m.gapPct >= 0 ? '+' : ''}${m.gapPct.toFixed(1)}, intraday ${m.intradayPct >= 0 ? '+' : ''}${m.intradayPct.toFixed(1)})`;
     let stage: string;
     if (f.executed) {
@@ -141,7 +148,8 @@ export function formatMoverLine(symbol: string, m: DayMetrics, f: FunnelStage): 
     else if (f.triggered) stage = 'triggered, no proposal';
     else if (f.seen) stage = `seen (max rank ${f.maxRank}), never triggered`;
     else stage = 'NEVER SEEN by the scanners';
-    return `• ${symbol} ${move} — ${stage}`;
+    const tag = catalyst === 'earnings' ? ' · 📅 earnings' : catalyst === 'earnings-pending' ? ' · 📅 reports soon' : '';
+    return `• ${symbol} ${move}${tag} — ${stage}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,11 +243,24 @@ export async function runBenchmarkOnce(): Promise<void> {
         .filter((p) => p.createdAt >= dayStart);
     const refusalsToday = await listRefusalsSince(dayStart).catch(() => [] as RefusalRecord[]);
 
+    // Catalyst tagging: reported within the last session, or reports within
+    // a day (calendar is cached per-day; failures degrade to untagged).
+    const pendingEarnings = await findUpcomingEarnings([...movers.keys()], 1)
+        .then((r) => new Set(r.hits.map((h) => h.symbol)))
+        .catch(() => new Set<string>());
+    const catalystFor = async (symbol: string): Promise<Catalyst> => {
+        try {
+            if (await reportedRecently(symbol)) return 'earnings';
+        } catch { /* untagged */ }
+        return pendingEarnings.has(symbol) ? 'earnings-pending' : null;
+    };
+
     const moverLines: string[] = [];
     const ledgerMovers: Array<Record<string, unknown>> = [];
     for (const [symbol, moveDir] of movers) {
         const metrics = await dayMetricsFor(symbol);
         if (!metrics) continue;
+        const catalyst = await catalystFor(symbol);
         const props = proposalsToday.filter((p) => p.symbol === symbol);
         const executed = props.filter((p) => p.status === 'executed' || p.status === 'closed');
         const closedWithPnl = executed.filter((p) => p.realizedPnl != null);
@@ -264,8 +285,8 @@ export async function runBenchmarkOnce(): Promise<void> {
             realizedPnl,
             capturePct,
         };
-        moverLines.push(formatMoverLine(symbol, metrics, funnel));
-        ledgerMovers.push({ symbol, moveDir, ...metrics, ...funnel });
+        moverLines.push(formatMoverLine(symbol, metrics, funnel, catalyst));
+        ledgerMovers.push({ symbol, moveDir, catalyst, ...metrics, ...funnel });
     }
 
     // 3. Counterfactual replay of today's unevaluated refusals.
