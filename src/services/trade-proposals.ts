@@ -142,8 +142,140 @@ async function getDb(): Promise<SqliteDatabase> {
             note        TEXT
         );
     `);
+    // Refusal ledger (benchmark phase 2): every gate/sizer refusal at
+    // creation time, with the proposed levels — so the nightly benchmark
+    // can replay each refusal against the day's bars and score the gates.
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS refusals (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at  INTEGER NOT NULL,
+            symbol      TEXT NOT NULL,
+            direction   TEXT NOT NULL,
+            entry_type  TEXT NOT NULL,
+            entry       REAL,
+            entry_limit REAL,
+            stop        REAL,
+            target      REAL,
+            quantity    REAL,
+            score       REAL,
+            reason      TEXT NOT NULL,
+            gate        TEXT NOT NULL,
+            outcome     TEXT,
+            outcome_note TEXT
+        );
+    `);
     migrate(db);
     return db;
+}
+
+// ---------------------------------------------------------------------------
+// Refusal ledger (benchmark phase 2)
+// ---------------------------------------------------------------------------
+
+export interface RefusalRecord {
+    id: number;
+    createdAt: number;
+    symbol: string;
+    direction: 'long' | 'short';
+    entryType: string;
+    entry: number | null;
+    entryLimit: number | null;
+    stop: number | null;
+    target: number | null;
+    quantity: number | null;
+    score: number | null;
+    reason: string;
+    /** Which gate refused — keyword-classified from the reason. */
+    gate: string;
+    /** Counterfactual outcome, filled by the nightly benchmark replay:
+     *  'target' | 'stop' | 'unfilled' | 'open' | 'unknown'. */
+    outcome: string | null;
+    outcomeNote: string | null;
+}
+
+/** Keyword classification of a refusal reason into the gate that fired. */
+export function classifyRefusalGate(reason: string): string {
+    const r = reason.toLowerCase();
+    if (r.includes('duplicate setup')) return 'duplicate';
+    if (r.includes('intraday noise')) return 'noise-stop';
+    if (r.includes('chasing an extended move')) return 'extension';
+    if (r.includes('risk/reward')) return 'risk-reward';
+    if (r.includes('risk budget') && r.includes('stop-out')) return 'risk-budget';
+    if (r.includes('cannot afford') || r.includes('position cap')) return 'unaffordable';
+    if (r.includes('budget') && r.includes('floor')) return 'sizer-floor';
+    if (r.includes('minimum price')) return 'min-price';
+    if (r.includes('positions already open')) return 'max-positions';
+    if (r.includes('executed today')) return 'max-daily-trades';
+    if (r.includes('sizer refused') || r.includes('stop distance')) return 'sizer';
+    return 'other';
+}
+
+export async function recordRefusal(input: {
+    symbol: string;
+    direction: 'long' | 'short';
+    entryType: string;
+    entry?: number | null;
+    entryLimit?: number | null;
+    stop?: number | null;
+    target?: number | null;
+    quantity?: number | null;
+    score?: number | null;
+    reason: string;
+}): Promise<void> {
+    const database = await getDb();
+    database.query<void>(
+        `INSERT INTO refusals (created_at, symbol, direction, entry_type, entry, entry_limit, stop, target, quantity, score, reason, gate)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+        Date.now(), input.symbol.trim().toUpperCase(), input.direction, input.entryType,
+        input.entry ?? null, input.entryLimit ?? null, input.stop ?? null, input.target ?? null,
+        input.quantity ?? null, input.score ?? null, input.reason.slice(0, 600), classifyRefusalGate(input.reason),
+    );
+}
+
+interface RefusalRow {
+    id: number; created_at: number; symbol: string; direction: string; entry_type: string;
+    entry: number | null; entry_limit: number | null; stop: number | null; target: number | null;
+    quantity: number | null; score: number | null; reason: string; gate: string;
+    outcome: string | null; outcome_note: string | null;
+}
+
+export async function listRefusalsSince(sinceMs: number): Promise<RefusalRecord[]> {
+    const database = await getDb();
+    return database.query<RefusalRow>(
+        `SELECT * FROM refusals WHERE created_at >= ? ORDER BY created_at ASC`,
+    ).all(sinceMs).map((r) => ({
+        id: r.id, createdAt: r.created_at, symbol: r.symbol,
+        direction: r.direction as 'long' | 'short', entryType: r.entry_type,
+        entry: r.entry, entryLimit: r.entry_limit, stop: r.stop, target: r.target,
+        quantity: r.quantity, score: r.score, reason: r.reason, gate: r.gate,
+        outcome: r.outcome, outcomeNote: r.outcome_note,
+    }));
+}
+
+export async function setRefusalOutcome(id: number, outcome: string, note?: string): Promise<void> {
+    const database = await getDb();
+    database.query<void>(
+        `UPDATE refusals SET outcome = ?, outcome_note = ? WHERE id = ?`,
+    ).run(outcome, note ?? null, id);
+}
+
+/** Cumulative per-gate counterfactual scoreboard (evaluated refusals only). */
+export async function getGateScoreboard(): Promise<Array<{ gate: string; total: number; wouldStop: number; wouldTarget: number; unfilled: number }>> {
+    const database = await getDb();
+    const rows = database.query<{ gate: string; outcome: string | null; n: number }>(
+        `SELECT gate, outcome, COUNT(*) as n FROM refusals GROUP BY gate, outcome`,
+    ).all();
+    const byGate = new Map<string, { gate: string; total: number; wouldStop: number; wouldTarget: number; unfilled: number }>();
+    for (const r of rows) {
+        const g = byGate.get(r.gate) ?? { gate: r.gate, total: 0, wouldStop: 0, wouldTarget: 0, unfilled: 0 };
+        g.total += r.n;
+        if (r.outcome === 'stop') g.wouldStop += r.n;
+        else if (r.outcome === 'target') g.wouldTarget += r.n;
+        else if (r.outcome === 'unfilled') g.unfilled += r.n;
+        byGate.set(r.gate, g);
+    }
+    return [...byGate.values()].sort((a, b) => b.total - a.total);
 }
 
 /** Outcome columns added after the initial release; ALTER is idempotent-by-catch. */

@@ -155,6 +155,12 @@ export function createTradeProposalsTool() {
                             });
                             if (sized.quantity == null) {
                                 logger.warn(`[trade-proposals] auto-size refused: ${input.symbol} ${input.direction} @${input.entry} stop ${input.stop} score ${input.score ?? '—'} — ${sized.reason}`);
+                                const { recordRefusal } = await import('@/services/trade-proposals.js');
+                                await recordRefusal({
+                                    symbol: input.symbol, direction: input.direction, entryType: input.entryType,
+                                    entry: input.entry, entryLimit: input.entryLimit, stop: input.stop, target: input.target,
+                                    score: input.score, reason: `sizer refused: ${sized.reason}`,
+                                }).catch(() => { /* ledger is best-effort */ });
                                 return formatToolResult({ error: `position sizer refused: ${sized.reason}` });
                             }
                             quantity = sized.quantity;
@@ -206,6 +212,12 @@ export function createTradeProposalsTool() {
                         // this line they are invisible in post-hoc diagnosis.
                         const msg = err instanceof Error ? err.message : String(err);
                         logger.warn(`[trade-proposals] create refused: ${input.symbol} ${input.direction} ${input.entryType} @${input.entry} stop ${input.stop} target ${input.target} q${input.quantity} — ${msg}`);
+                        const { recordRefusal } = await import('@/services/trade-proposals.js');
+                        await recordRefusal({
+                            symbol: input.symbol, direction: input.direction, entryType: input.entryType,
+                            entry: input.entry, entryLimit: input.entryLimit, stop: input.stop, target: input.target,
+                            quantity: input.quantity, score: input.score, reason: msg,
+                        }).catch(() => { /* ledger is best-effort */ });
                         return formatToolResult({ error: msg });
                     }
                 }

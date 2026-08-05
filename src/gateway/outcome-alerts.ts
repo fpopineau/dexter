@@ -8,6 +8,7 @@
  */
 
 import { onAutoProtect, onTradeClosed } from '@/services/outcome-tracker.js';
+import { onBenchmarkReport } from '@/services/benchmark.js';
 import { onEodTriage } from '@/services/eod-triage.js';
 import { onProfitTrailAlert } from '@/services/profit-trail.js';
 import { formatProposalLine, type TradeProposal } from '@/services/trade-proposals.js';
@@ -108,6 +109,23 @@ export function registerOutcomeAlerts(): void {
         }
         await sendMessageWhatsApp({ to: session.lastTo, body: message, accountId: session.lastAccountId });
         logger.info('[outcome-alerts] EOD-triage report delivered');
+    });
+
+    // Nightly benchmark capture report (top movers vs the pipeline funnel).
+    onBenchmarkReport(async (message) => {
+        const session = findTargetSession();
+        if (!session?.lastTo || !session?.lastAccountId) {
+            logger.warn('[outcome-alerts] no WhatsApp delivery target, skipping benchmark report');
+            return;
+        }
+        try {
+            assertOutboundAllowed({ to: session.lastTo, accountId: session.lastAccountId });
+        } catch {
+            logger.warn('[outcome-alerts] outbound blocked, skipping benchmark report');
+            return;
+        }
+        await sendMessageWhatsApp({ to: session.lastTo, body: message, accountId: session.lastAccountId });
+        logger.info('[outcome-alerts] benchmark report delivered');
     });
 
     // Profit-trail closes (winner peaked, pulled back, auto-closed).

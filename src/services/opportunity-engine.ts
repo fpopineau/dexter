@@ -731,6 +731,36 @@ export async function getSnapshotSymbolsSince(sinceMs: number): Promise<string[]
     return [...symbols];
 }
 
+/**
+ * Per-symbol ranking stats from persisted snapshots since `sinceMs` — the
+ * benchmark's "did the engine SEE it, and how highly?" join. Returns max
+ * compositeRank and first-seen timestamp per symbol.
+ */
+export async function getSymbolRankStatsSince(
+    sinceMs: number,
+): Promise<Map<string, { maxRank: number; firstSeenMs: number }>> {
+    const stats = new Map<string, { maxRank: number; firstSeenMs: number }>();
+    const database = await getDb();
+    if (!database) return stats;
+    const rows = database.query<{ json: string }>(
+        `SELECT json FROM opportunity_snapshots WHERE ts >= ?`,
+    ).all(sinceMs);
+    for (const row of rows) {
+        try {
+            const snap = JSON.parse(row.json) as OpportunitySnapshot;
+            for (const o of snap.opportunities) {
+                const cur = stats.get(o.symbol);
+                if (!cur) stats.set(o.symbol, { maxRank: o.compositeRank, firstSeenMs: snap.timestamp });
+                else {
+                    cur.maxRank = Math.max(cur.maxRank, o.compositeRank);
+                    cur.firstSeenMs = Math.min(cur.firstSeenMs, snap.timestamp);
+                }
+            }
+        } catch { /* skip malformed row */ }
+    }
+    return stats;
+}
+
 /** Engine status for diagnostics. */
 export function engineStatus(): { running: boolean; phase: EnginePhase; lastCycleAt: number | null } {
     return {

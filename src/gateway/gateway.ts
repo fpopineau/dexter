@@ -32,6 +32,7 @@ import { registerOutcomeAlerts } from './outcome-alerts.js';
 import { handleProposalCommand } from './proposal-commands.js';
 import { resolveRoute } from './routing/resolve-route.js';
 import { resolveSessionStorePath, upsertSessionMeta } from './sessions/store.js';
+import { startBenchmark } from '@/services/benchmark.js';
 import { startDashboard } from '@/services/dashboard.js';
 import { startEodTriage } from '@/services/eod-triage.js';
 import { startProfitTrail } from '@/services/profit-trail.js';
@@ -287,6 +288,7 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     // 15:52 ET: close losing-and-fading DAY positions; keep the rest for
     // the protected-overnight conversion at the bell.
     startEodTriage();
+    startBenchmark();
     // Local dashboard (http://127.0.0.1:8484) — charts + the live book from
     // dexter's own data; no second IBKR session involved.
     startDashboard();
