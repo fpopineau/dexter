@@ -60,6 +60,15 @@ export function breadthMinWatched(): number {
     return Number.isFinite(n) && n > 0 ? n : 4;
 }
 
+/** Trigger-threshold relief for WATCHLIST names while a breadth day is
+ *  active: SNAP ranked top-3 at composite 68 on 2026-08-04 (+14% day) and
+ *  the flat 75 threshold never let it trigger. Watchlist membership plus
+ *  breadth context justifies a lower bar; quiet days are unaffected. */
+export function breadthThresholdRelief(): number {
+    const n = Number(process.env.OPP_BREADTH_THRESHOLD_RELIEF);
+    return Number.isFinite(n) && n >= 0 ? n : 10;
+}
+
 /** The watchlist breadth is measured against: UNIVERSE_EXTRA_SYMBOLS plus
  *  the built-in mega-cap/semis core. */
 export function breadthWatchlist(): Set<string> {

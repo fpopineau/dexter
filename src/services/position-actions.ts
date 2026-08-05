@@ -81,14 +81,14 @@ function stockContract(symbol: string): Contract {
     return { symbol, secType: SecType.STK, exchange: 'SMART', currency: 'USD' };
 }
 
-interface OpenOrderSummary {
+export interface OpenOrderSummary {
     orderId: number;
     orderType: string;
     tif: string;
 }
 
 /** Working orders for a symbol on the given side (all API clients). */
-async function fetchOpenOrdersFor(
+export async function fetchOpenOrdersFor(
     api: import('@stoqey/ib').IBApi,
     symbol: string,
     side: OrderAction,

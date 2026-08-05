@@ -48,6 +48,11 @@ export interface RiskRules {
      *  (USD). Guards small accounts against trades where commissions and
      *  spread eat the entire edge. 0 disables. */
     min_risk_budget_usd: number;
+    /** Runner mode: when the profit trail ARMS (gain ≥ arm_pct), cancel the
+     *  bracket's fixed target leg and let the trail manage the exit — hard
+     *  targets cap exactly the winners that run (PLTR 2026-08-04: target
+     *  banked +5.6% of a +29% move). The stop always stays. */
+    profit_trail_replaces_target: boolean;
 }
 
 export const DEFAULT_RULES: RiskRules = {
@@ -73,6 +78,7 @@ export const DEFAULT_RULES: RiskRules = {
     sizing_half_mult: 0.6,
     sizing_low_mult: 0.35,
     min_risk_budget_usd: 0,
+    profit_trail_replaces_target: true,
 };
 
 export type AccountProfile = 'paper' | 'live';

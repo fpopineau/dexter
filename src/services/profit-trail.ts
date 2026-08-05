@@ -21,7 +21,8 @@ import { createIbkrMarketData } from '@/tools/ibkr/market-data.js';
 import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
 import { logger } from '@/utils';
 import { getMarketSession, MarketSession } from '@/utils/market-hours.js';
-import { closePosition, fetchPositions, wasRecentlyClosed } from './position-actions.js';
+import { closePosition, fetchOpenOrdersFor, fetchPositions, wasRecentlyClosed } from './position-actions.js';
+import { OrderAction } from '@stoqey/ib';
 
 const POLL_MS = 60_000;
 const QUOTE_PACE_MS = 400;
@@ -133,6 +134,33 @@ async function fetchLast(symbol: string): Promise<number | null> {
     }
 }
 
+/**
+ * Runner mode: on arming, cancel the position's fixed TARGET leg so the
+ * trail manages the exit — a hard target caps exactly the winners that run
+ * (PLTR 2026-08-04: +5.6% banked of a +29% move). The stop leg stays; OCA
+ * siblings survive a manual cancel of one leg. Finds the target among the
+ * live exit orders (covers both tracked brackets and auto-protect pairs on
+ * orphaned positions).
+ */
+async function releaseTargetLeg(
+    api: Awaited<ReturnType<typeof getIBApi>>,
+    entry: TrailEntry,
+): Promise<string | null> {
+    const exitAction = entry.direction === 'long' ? OrderAction.SELL : OrderAction.BUY;
+    const exits = await fetchOpenOrdersFor(api, entry.symbol, exitAction);
+    const targets = exits.filter((o) => o.orderType === 'LMT');
+    if (targets.length === 0) return null;
+    for (const t of targets) {
+        try {
+            api.cancelOrder(t.orderId);
+            logger.info(`[profit-trail] ${entry.symbol}: runner mode — target order #${t.orderId} cancelled, trail manages the exit`);
+        } catch (err) {
+            logger.warn(`[profit-trail] ${entry.symbol}: could not cancel target #${t.orderId}: ${err}`);
+        }
+    }
+    return targets.map((t) => `#${t.orderId}`).join(', ');
+}
+
 async function runCycle(state: Map<string, TrailEntry>): Promise<void> {
     if (getMarketSession().session !== MarketSession.REGULAR) return;
 
@@ -168,7 +196,29 @@ async function runCycle(state: Map<string, TrailEntry>): Promise<void> {
         await new Promise((r) => setTimeout(r, QUOTE_PACE_MS));
         if (price === null) continue;
 
+        const wasArmed = entry.armed;
         const decision = observeTrail(entry, price, rules.profit_trail_arm_pct, rules.profit_trail_pullback_pct);
+
+        // Arming transition → runner mode (unless the same tick already
+        // decided to close, in which case closePosition cancels everything).
+        if (!wasArmed && entry.armed && !decision && rules.profit_trail_replaces_target) {
+            try {
+                const released = await releaseTargetLeg(api, entry);
+                if (released) {
+                    const msg =
+                        `🏃 RUNNER ${pos.symbol}: trail armed at +${rules.profit_trail_arm_pct}% (best ${entry.best}) — ` +
+                        `target order ${released} released; the exit is now the ${rules.profit_trail_pullback_pct}% trail. The stop stays.`;
+                    for (const cb of [...alertCallbacks]) {
+                        try { await cb(msg); } catch (err) {
+                            logger.error(`[profit-trail] alert callback failed: ${err}`);
+                        }
+                    }
+                }
+            } catch (err) {
+                logger.warn(`[profit-trail] ${pos.symbol}: runner-mode release failed (target stays): ${err}`);
+            }
+        }
+
         if (!decision) continue;
 
         logger.info(

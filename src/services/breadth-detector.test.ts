@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { breadthWatchlist, detectBreadth } from './breadth-detector.js';
+import { breadthThresholdRelief, breadthWatchlist, detectBreadth } from './breadth-detector.js';
 
 const WATCH = new Set(['MU', 'MSFT', 'AMD', 'INTC', 'DELL', 'TSM', 'ARM', 'ASML', 'SMCI', 'WMT', 'BAC']);
 
@@ -9,7 +9,7 @@ function surfaced(symbol: string, ...sources: string[]) {
 
 // detectBreadth reads vehicle envs — pin them so a user .env (bun auto-loads
 // it into tests) can never steer assertions.
-const ENV_KEYS = ['OPP_BREADTH_VEHICLE_SEMI', 'OPP_BREADTH_VEHICLE_BROAD', 'OPP_BREADTH_MIN_WATCHED', 'UNIVERSE_EXTRA_SYMBOLS'];
+const ENV_KEYS = ['OPP_BREADTH_VEHICLE_SEMI', 'OPP_BREADTH_VEHICLE_BROAD', 'OPP_BREADTH_MIN_WATCHED', 'OPP_BREADTH_THRESHOLD_RELIEF', 'UNIVERSE_EXTRA_SYMBOLS'];
 const saved: Record<string, string | undefined> = {};
 beforeEach(() => {
     for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
@@ -93,6 +93,19 @@ describe('detectBreadth (Jul 30 melt-up shape)', () => {
             surfaced('TSM', 'TOP_PERC_GAIN'),
         ], WATCH, 4);
         expect(event!.vehicle).toBe('SMH');
+    });
+});
+
+describe('breadthThresholdRelief (SNAP-at-68 regression)', () => {
+    test('defaults to 10 — a 75 bar becomes 65 for watchlist movers on breadth days', () => {
+        expect(breadthThresholdRelief()).toBe(10);
+    });
+
+    test('env override, including 0 to disable', () => {
+        process.env.OPP_BREADTH_THRESHOLD_RELIEF = '5';
+        expect(breadthThresholdRelief()).toBe(5);
+        process.env.OPP_BREADTH_THRESHOLD_RELIEF = '0';
+        expect(breadthThresholdRelief()).toBe(0);
     });
 });
 

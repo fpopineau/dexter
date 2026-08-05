@@ -25,7 +25,7 @@ import { getMarketSession, MarketSession } from '@/utils/market-hours.js';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { addSymbol, removeSymbol } from './ibkr-stream.js';
-import { detectBreadth, type BreadthEvent } from './breadth-detector.js';
+import { breadthThresholdRelief, breadthWatchlist, detectBreadth, type BreadthEvent } from './breadth-detector.js';
 import { runScan, type ScanCode, type ScanResult } from './scanner-loop.js';
 import { ScanHealthMonitor, type HealthTransition } from './scan-health.js';
 
@@ -602,11 +602,17 @@ async function evaluateTriggers(snapshot: OpportunitySnapshot): Promise<void> {
 
     // Breadth days get extra single-name slots: a correlated 9-name move
     // exhausts the ordinary cap while half the movers are still unseen.
-    const capBonus = breadthActiveDate === today ? breadthCapBonus() : 0;
+    const breadthDay = breadthActiveDate === today;
+    const capBonus = breadthDay ? breadthCapBonus() : 0;
     const maxTriggers = triggerMaxPerDay() + capBonus;
+    // …and threshold relief for watchlist names: correlated movers score
+    // lower individually (SNAP at 68 vs the 75 bar on a +14% day).
+    const watch = breadthDay ? breadthWatchlist() : null;
+    const relief = breadthDay ? breadthThresholdRelief() : 0;
 
     for (const opp of snapshot.opportunities.slice(0, 3)) {
-        if (opp.compositeRank < threshold) continue;
+        const oppThreshold = watch?.has(opp.symbol.toUpperCase()) ? threshold - relief : threshold;
+        if (opp.compositeRank < oppThreshold) continue;
         if (triggersToday >= maxTriggers) {
             logger.info(`[opportunity-engine] trigger cap reached for today (${maxTriggers}${capBonus ? ` incl. breadth bonus +${capBonus}` : ''})`);
             return;
@@ -616,7 +622,10 @@ async function evaluateTriggers(snapshot: OpportunitySnapshot): Promise<void> {
 
         lastTriggerAt.set(opp.symbol, now);
         triggersToday++;
-        logger.info(`[opportunity-engine] TRIGGER ${opp.symbol} (${opp.direction}, rank ${opp.compositeRank})`);
+        logger.info(
+            `[opportunity-engine] TRIGGER ${opp.symbol} (${opp.direction}, rank ${opp.compositeRank}` +
+            `${opp.compositeRank < threshold ? `, breadth relief −${relief}` : ''})`,
+        );
         for (const cb of [...triggerCallbacks]) {
             try {
                 await cb(opp, snapshot);
