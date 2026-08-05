@@ -47,6 +47,29 @@ export interface SizeResult {
     reason?: string;
 }
 
+/** IBKR fractional resolution: 4 decimal places, minimum 0.0001 share. */
+export const FRACTIONAL_STEP = 0.0001;
+
+/**
+ * Is `qty` a placeable share quantity under the active rules?
+ * Whole-share mode: positive integers. Fractional mode: positive decimals
+ * at IBKR's 0.0001 resolution (finer silently fails at the broker).
+ * Shared by the risk gate and the bracket placer so the two can never
+ * disagree about what is orderable.
+ */
+export function isValidQuantity(qty: number, fractional: boolean): boolean {
+    if (!Number.isFinite(qty) || !(qty > 0)) return false;
+    if (!fractional) return Number.isInteger(qty);
+    const scaled = qty / FRACTIONAL_STEP;
+    return qty >= FRACTIONAL_STEP && Math.abs(scaled - Math.round(scaled)) < 1e-6;
+}
+
+/** Round a computed quantity DOWN to what is placeable under the rules. */
+export function floorToPlaceable(qty: number, fractional: boolean): number {
+    if (!fractional) return Math.floor(qty);
+    return Math.floor(qty / FRACTIONAL_STEP + 1e-9) * FRACTIONAL_STEP;
+}
+
 /** Confidence multiplier from the score bands in the risk rules. */
 export function confidenceMultiplier(score: number | null | undefined, rules: RiskRules = getRiskRules()): number {
     if (score == null || !Number.isFinite(score)) return rules.sizing_low_mult;
@@ -79,22 +102,26 @@ export function computeQuantity(input: SizeInput, rules: RiskRules = getRiskRule
         };
     }
 
-    const byRisk = Math.floor(riskBudget / stopDistance);
+    const fractional = rules.fractional_shares;
     const maxPositionValue = (rules.max_position_pct / 100) * input.netLiquidation;
-    const byCap = Math.floor(maxPositionValue / input.entry);
+    const byRisk = floorToPlaceable(riskBudget / stopDistance, fractional);
+    const byCap = floorToPlaceable(maxPositionValue / input.entry, fractional);
     const quantity = Math.min(byRisk, byCap);
+    const minQty = fractional ? FRACTIONAL_STEP : 1;
 
-    if (quantity < 1) {
+    if (quantity < minQty) {
         const maxAffordableEntry = Math.floor(maxPositionValue * 100) / 100;
+        const unit = fractional ? `${FRACTIONAL_STEP} share` : 'one share';
         return {
             quantity: null, multiplier, riskBudget,
-            reason: byCap < 1
-                ? `one share at $${input.entry} exceeds the ${rules.max_position_pct}% position cap ` +
+            reason: byCap < minQty
+                ? `${unit} at $${input.entry} exceeds the ${rules.max_position_pct}% position cap ` +
                   `($${maxAffordableEntry.toFixed(0)}) — the account cannot afford this symbol; pick one under that price`
-                : `the $${riskBudget.toFixed(0)} risk budget does not cover one share's stop distance ` +
+                : `the $${riskBudget.toFixed(0)} risk budget does not cover ${unit}'s stop distance ` +
                   `($${stopDistance.toFixed(2)}) — tighten to real structure closer in, or skip`,
         };
     }
 
-    return { quantity, multiplier, riskBudget };
+    // toFixed(4) clears float dust from the resolution math (e.g. 1.4799999…).
+    return { quantity: fractional ? Number(quantity.toFixed(4)) : quantity, multiplier, riskBudget };
 }

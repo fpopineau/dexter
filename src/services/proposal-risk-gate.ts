@@ -16,6 +16,7 @@
  */
 
 import { getRiskRules, type RiskRules } from '@/tools/ibkr/risk-rules.js';
+import { isValidQuantity } from '@/services/position-sizer.js';
 import { logger } from '@/utils';
 
 export interface RiskGateProposal {
@@ -79,9 +80,14 @@ export function checkProposalRisk(
     const violations: string[] = [];
     const notes: string[] = [];
 
-    // --- Quantity sanity ---
-    if (!Number.isInteger(p.quantity) || p.quantity <= 0) {
-        violations.push(`quantity must be a positive integer (got ${p.quantity})`);
+    // --- Quantity sanity (whole shares, or IBKR 0.0001 fractions when the
+    // active profile enables fractional_shares) ---
+    if (!isValidQuantity(p.quantity, rules.fractional_shares)) {
+        violations.push(
+            rules.fractional_shares
+                ? `quantity must be positive at IBKR's 0.0001-share resolution (got ${p.quantity})`
+                : `quantity must be a positive integer (got ${p.quantity})`,
+        );
     }
 
     // --- Entry price is required (indicative for MKT) ---

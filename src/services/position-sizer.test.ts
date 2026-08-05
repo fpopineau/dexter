@@ -94,3 +94,48 @@ describe('computeQuantity — short proposals', () => {
         expect(r.quantity).toBe(14);
     });
 });
+
+describe('fractional shares (small live account)', () => {
+    const FRAC: RiskRules = { ...DEFAULT_RULES, max_position_pct: 20, max_risk_per_trade_pct: 1.0, min_risk_budget_usd: 15, fractional_shares: true };
+
+    test('isValidQuantity: integers-only off, 0.0001 resolution on', async () => {
+        const { isValidQuantity } = await import('./position-sizer.js');
+        expect(isValidQuantity(3, false)).toBe(true);
+        expect(isValidQuantity(1.5, false)).toBe(false);
+        expect(isValidQuantity(1.5, true)).toBe(true);
+        expect(isValidQuantity(0.0001, true)).toBe(true);
+        expect(isValidQuantity(0.00005, true)).toBe(false);   // below IBKR resolution
+        expect(isValidQuantity(1.23456, true)).toBe(false);   // 5 decimals
+        expect(isValidQuantity(0, true)).toBe(false);
+        expect(isValidQuantity(-1, true)).toBe(false);
+    });
+
+    test('floorToPlaceable rounds down to the placeable step', async () => {
+        const { floorToPlaceable } = await import('./position-sizer.js');
+        expect(floorToPlaceable(1.99999, false)).toBe(1);
+        expect(floorToPlaceable(1.48123456, true)).toBeCloseTo(1.4812, 10);
+    });
+
+    test('a $500 mega-cap becomes tradable: cap-bound decimal quantity', () => {
+        // cap = 3700 × 20% = 740 → 740/500 = 1.48 shares; budget 37 / stop 10 = 3.7 → cap binds.
+        const r = computeQuantity({ entry: 500, stop: 490, score: 85, netLiquidation: 3700 }, FRAC);
+        expect(r.quantity).toBeCloseTo(1.48, 10);
+    });
+
+    test('risk budget binds fractionally too', () => {
+        // budget 37 / stop 25 = 1.48 by risk; cap 740/300 = 2.4666 → risk binds at 1.48.
+        const r = computeQuantity({ entry: 300, stop: 275, score: 85, netLiquidation: 3700 }, FRAC);
+        expect(r.quantity).toBeCloseTo(1.48, 10);
+    });
+
+    test('confidence floor still refuses sub-viable trades in fractional mode', () => {
+        const r = computeQuantity({ entry: 500, stop: 490, score: null, netLiquidation: 3700 }, FRAC);
+        expect(r.quantity).toBeNull();
+        expect(r.reason).toContain('floor');
+    });
+
+    test('whole-share mode is unchanged (paper regression)', () => {
+        const r = computeQuantity({ entry: 303, stop: 299.5, score: 85, netLiquidation: 1_000_000 }, { ...DEFAULT_RULES });
+        expect(r.quantity).toBe(165);
+    });
+});

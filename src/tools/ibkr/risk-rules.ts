@@ -53,6 +53,13 @@ export interface RiskRules {
      *  targets cap exactly the winners that run (PLTR 2026-08-04: target
      *  banked +5.6% of a +29% move). The stop always stays. */
     profit_trail_replaces_target: boolean;
+    /** Allow decimal share quantities (IBKR fractional trading, 0.0001
+     *  resolution). Requires the Fractional Shares permission on the IBKR
+     *  account — without it the broker rejects the orders. Essential on a
+     *  small account where one share of most mega-caps exceeds the
+     *  position cap. Brackets stay atomic: the sizer computes an explicit
+     *  decimal quantity and all three legs carry it. */
+    fractional_shares: boolean;
 }
 
 export const DEFAULT_RULES: RiskRules = {
@@ -79,6 +86,7 @@ export const DEFAULT_RULES: RiskRules = {
     sizing_low_mult: 0.35,
     min_risk_budget_usd: 0,
     profit_trail_replaces_target: true,
+    fractional_shares: false,
 };
 
 export type AccountProfile = 'paper' | 'live';

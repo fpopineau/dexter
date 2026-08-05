@@ -31,9 +31,9 @@ describe('bracket request validation', () => {
         ).not.toThrow();
     });
 
-    test('zero or fractional quantity is refused', () => {
-        expect(() => validateBracketRequest(longLmt({ quantity: 0 }))).toThrow(/positive integer/);
-        expect(() => validateBracketRequest(longLmt({ quantity: 1.5 }))).toThrow(/positive integer/);
+    test('zero or fractional quantity is refused on the whole-share (paper) profile', () => {
+        expect(() => validateBracketRequest(longLmt({ quantity: 0 }))).toThrow(/whole number/);
+        expect(() => validateBracketRequest(longLmt({ quantity: 1.5 }))).toThrow(/fraction/);
     });
 
     test('LMT without entryPrice is refused', () => {
@@ -81,5 +81,25 @@ describe('bracket request validation', () => {
     test('non-positive stop or target is refused', () => {
         expect(() => validateBracketRequest(longLmt({ stopPrice: 0 }))).toThrow(/must be positive/);
         expect(() => validateBracketRequest(longLmt({ targetPrice: -5 }))).toThrow(/must be positive/);
+    });
+});
+
+describe('fractional bracket quantities (profile-driven)', () => {
+    test('decimal quantity valid on the live profile, refused on paper', async () => {
+        const { setAccountProfile } = await import('./risk-rules.js');
+        const req = {
+            parentOrderId: 1, takeProfitOrderId: 2, stopOrderId: 3, ocaGroup: 'g',
+            symbol: 'MSFT', direction: 'long' as const, quantity: 1.48,
+            entryType: 'LMT' as const, entryPrice: 500, stopPrice: 490, targetPrice: 520,
+        };
+        try {
+            setAccountProfile('live'); // risk-rules.live.yaml → fractional_shares: true
+            expect(() => validateBracketRequest(req)).not.toThrow();
+            setAccountProfile('paper');
+            expect(() => validateBracketRequest(req)).toThrow(/fraction/);
+            expect(() => validateBracketRequest({ ...req, quantity: 2 })).not.toThrow();
+        } finally {
+            setAccountProfile('paper');
+        }
     });
 });

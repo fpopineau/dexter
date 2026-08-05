@@ -73,7 +73,7 @@ const PlaceOrderSchema = z.object({
     action: z.literal('place'),
     ticker: z.string().describe("US equity ticker symbol, e.g. 'AAPL'."),
     side: z.enum(['BUY', 'SELL']).describe('Order side: BUY or SELL.'),
-    quantity: z.coerce.number().int().positive().describe('Number of shares. Must be a positive integer.'),
+    quantity: z.coerce.number().positive().describe('Number of shares. Whole shares unless the account profile enables fractional trading (then IBKR 0.0001-share resolution).'),
     orderType: z
         .enum(SUPPORTED_ORDER_TYPES)
         .describe('Order type: MKT, LMT, STP, STP_LMT, TRAIL, TRAIL_LIMIT, MOC, LOC, MIDPRICE.'),

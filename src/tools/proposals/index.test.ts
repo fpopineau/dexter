@@ -46,9 +46,12 @@ describe('trade_proposals tool — argument coercion', () => {
         expect(parsed.data.created?.quantity).toBe(48);
     });
 
-    test('coercion still rejects fractional share counts', async () => {
+    test('fractional share counts are refused by the GATE on the whole-share profile', async () => {
+        // The schema now admits decimals (the live profile allows them);
+        // the paper profile's gate still refuses — same invariant, enforced
+        // one layer down where the rules profile is known.
         const tool = createTradeProposalsTool();
-        await expect(tool.invoke({
+        const raw = await tool.invoke({
             action: 'create',
             symbol: 'ZETA',
             direction: 'long',
@@ -57,8 +60,10 @@ describe('trade_proposals tool — argument coercion', () => {
             stop: '19.20',
             target: '24.00',
             quantity: '48.5',
-            rationale: 'fractional quantity must be refused',
-        } as never)).rejects.toThrow();
+            rationale: 'fractional quantity must be refused on paper',
+        } as never);
+        const parsed = JSON.parse(String(raw));
+        expect(parsed.data.error).toContain('positive integer');
     });
 
     test('performance accepts a stringified day count', async () => {

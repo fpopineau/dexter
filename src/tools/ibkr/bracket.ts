@@ -16,6 +16,8 @@ import { logger } from '@/utils';
 import { assertAccountsVerified, getIBApi } from './connection.js';
 import { withOrderLock } from './order-lock.js';
 import { getNextValidOrderId } from './orders.js';
+import { getRiskRules } from './risk-rules.js';
+import { isValidQuantity } from '@/services/position-sizer.js';
 
 export interface BracketRequest {
     symbol: string;
@@ -52,8 +54,11 @@ export interface BracketResult {
 
 /** Structural validation of a bracket request (exported for tests). */
 export function validateBracketRequest(req: BracketRequest): void {
-    if (!Number.isInteger(req.quantity) || req.quantity <= 0) {
-        throw new Error('[bracket] quantity must be a positive integer');
+    // Whole shares, or IBKR 0.0001-share fractions when the active rules
+    // profile enables fractional trading. All three legs carry the same
+    // explicit quantity, so the bracket stays atomic either way.
+    if (!isValidQuantity(req.quantity, getRiskRules().fractional_shares)) {
+        throw new Error('[bracket] quantity must be a positive whole number of shares, or a 0.0001-resolution fraction when fractional_shares is enabled');
     }
     if (req.entryType === 'LMT' && !(req.entryPrice && req.entryPrice > 0)) {
         throw new Error('[bracket] entryPrice is required for LMT entries');

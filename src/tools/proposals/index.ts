@@ -75,8 +75,8 @@ const CreateSchema = z.object({
         .describe('Stop-loss price at REAL STRUCTURE (low of day, pullback low, VWAP). The gate refuses stops closer than 0.4× the daily ATR — inside intraday noise, they fill on randomness.'),
     target: z.coerce.number().positive()
         .describe('Take-profit at a real objective (prior high, measured move). Do NOT derive it as entry + 2× stop distance to satisfy the R/R gate — if an honest target is not ≥2× the stop distance away, skip the trade.'),
-    quantity: z.coerce.number().int().positive().optional()
-        .describe('Number of shares. OMIT to auto-size (recommended): the position sizer computes shares from the account risk budget, the confidence score, and the stop distance — this is the only way sizing stays correct across account sizes. Pass explicitly only when the user demanded a specific quantity.'),
+    quantity: z.coerce.number().positive().optional()
+        .describe('Number of shares (decimals allowed when the account profile enables fractional trading). OMIT to auto-size (recommended): the position sizer computes shares from the account risk budget, the confidence score, and the stop distance — this is the only way sizing stays correct across account sizes. Pass explicitly only when the user demanded a specific quantity.'),
     tif: z.enum(['DAY', 'GTC']).default('DAY')
         .describe("Bracket time-in-force. Use 'GTC' for overnight/swing setups so the stop and target SURVIVE the market close; 'DAY' brackets expire at the bell and can leave a filled position unprotected overnight."),
     score: z.coerce.number().min(0).max(150).optional().describe('Signal/composite score backing this proposal.'),

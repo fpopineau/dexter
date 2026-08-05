@@ -446,3 +446,35 @@ describe('earnings-gap exception (Jul 30 MSFT failure)', () => {
         expect(r.ok).toBe(false);
     });
 });
+
+describe('fractional quantities at the gate', () => {
+    const FRAC_RULES = { ...DEFAULT_RULES, fractional_shares: true };
+
+    test('decimal quantity refused under whole-share rules (paper default)', () => {
+        const r = checkProposalRisk(longProposal({ quantity: 1.48 }), {}, RULES);
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('positive integer');
+    });
+
+    test('0.0001-resolution decimals pass when fractional_shares is on', () => {
+        const r = checkProposalRisk(longProposal({ quantity: 1.48 }), {}, FRAC_RULES);
+        expect(r.ok).toBe(true);
+        expect(r.positionValue).toBeCloseTo(148, 5);
+    });
+
+    test('sub-resolution dust is refused even in fractional mode', () => {
+        const r = checkProposalRisk(longProposal({ quantity: 1.234567 }), {}, FRAC_RULES);
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('0.0001');
+    });
+
+    test('risk budget and position caps compute correctly on fractional quantities', () => {
+        // 1.48 × $100 = $148 position; stop distance 5 → $7.40 at risk.
+        const r = checkProposalRisk(
+            longProposal({ quantity: 1.48 }),
+            { netLiquidation: 3700 },
+            { ...FRAC_RULES, max_position_pct: 20, max_risk_per_trade_pct: 1.0 },
+        );
+        expect(r.ok).toBe(true);
+    });
+});
