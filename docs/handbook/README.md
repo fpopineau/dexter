@@ -25,6 +25,18 @@ Research memos (external work analyzed for reuse):
   headline: a counterfactual same-size null over the engine's candidate
   pool (R1, needs a `snapshotId` on proposals) to test whether the LLM
   judgment layer beats the deterministic scanner net of costs.
+- [../day2day/RESEARCH-screening.md](../day2day/RESEARCH-screening.md)
+  (added 2026-08-05) — day/overnight stock-screening methods and whether a
+  home-built screener can beat the IBKR scanner. Verdict: yes, on breadth,
+  composability and historizability; latency-tiered hybrid (IBKR RT top-N +
+  $29–$99/mo full-market snapshots) with evidence-backed criteria
+  (overnight/intraday decomposition, attention-reversal, short-flow).
+- [../day2day/RESEARCH-news-gdelt-polymarket.md](../day2day/RESEARCH-news-gdelt-polymarket.md)
+  (added 2026-08-05) — usability of GDELT news and Polymarket/Kalshi
+  probabilities as signals. Verdict: GDELT stock-level stays in backtest
+  behind the entity-mapper + a pre-registered IC gate; prediction markets
+  enter as episodic event-window context (briefs, overnight gap risk), not
+  as a scoring factor; two zero-cost data accruals to start now.
 
 ## One-paragraph overview
 
