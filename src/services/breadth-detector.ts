@@ -14,7 +14,9 @@
  * (semis-dominated → SOXL, otherwise QQQ) and let the engine relieve the
  * single-name trigger cap.
  *
- * Long-only by construction: the gainer scan codes imply upside breadth.
+ * Direction-aware: gainer scans imply upside breadth (long the vehicle),
+ * loser scans imply a correlated selloff (short the vehicle); the dominant
+ * side wins, ties go long.
  *
  * Environment:
  *   OPP_BREADTH_MIN_WATCHED    watchlist movers to declare breadth (default 4)
@@ -28,6 +30,10 @@
 /** Scan codes that imply "up big today" — presence in these is a directional
  *  fact; MOST_ACTIVE / HOT_BY_VOLUME / TOP_TRADE_RATE are direction-blind. */
 const GAINER_SCANS = new Set(['TOP_PERC_GAIN', 'TOP_OPEN_PERC_GAIN', 'HIGH_OPEN_GAP']);
+
+/** Mirror for "down big today" — a correlated selloff is a breadth event
+ *  too, expressed by SHORTING the sector vehicle. */
+const LOSER_SCANS = new Set(['TOP_PERC_LOSE', 'TOP_OPEN_PERC_LOSE']);
 
 /** Semiconductor complex — routes a semis-dominated breadth day to the
  *  semis vehicle instead of the broad one. Static by design: this is a
@@ -47,11 +53,14 @@ const CORE_WATCHLIST = new Set([
 ]);
 
 export interface BreadthEvent {
-    /** Watchlist symbols surfaced by gainer scanners this cycle. */
+    /** Trade direction for the vehicle: 'long' on a correlated melt-up,
+     *  'short' on a correlated selloff. */
+    direction: 'long' | 'short';
+    /** Watchlist symbols surfaced by directional scanners this cycle. */
     movers: string[];
     /** The semiconductor subset of `movers`. */
     semis: string[];
-    /** The sector vehicle to evaluate (SOXL / QQQ by default). */
+    /** The sector vehicle to evaluate (SMH/SOXL / QQQ per env). */
     vehicle: string;
 }
 
@@ -89,10 +98,19 @@ export function detectBreadth(
     watchlist: Set<string> = breadthWatchlist(),
     minMovers: number = breadthMinWatched(),
 ): BreadthEvent | null {
-    const movers = surfaced
-        .filter((s) => watchlist.has(s.symbol.toUpperCase()))
+    const watched = surfaced.filter((s) => watchlist.has(s.symbol.toUpperCase()));
+    const up = watched
         .filter((s) => s.sources.some((code) => GAINER_SCANS.has(code)))
         .map((s) => s.symbol.toUpperCase());
+    const down = watched
+        .filter((s) => s.sources.some((code) => LOSER_SCANS.has(code)))
+        .map((s) => s.symbol.toUpperCase());
+
+    // Dominant side wins; ties go long (upside breadth has the better
+    // follow-through record, and shorting into a mixed tape is the worst
+    // of both). Neither side at threshold → ordinary tape.
+    const direction: 'long' | 'short' = down.length > up.length ? 'short' : 'long';
+    const movers = direction === 'long' ? up : down;
     if (movers.length < minMovers) return null;
 
     const semis = movers.filter((m) => SEMI_SYMBOLS.has(m));
@@ -101,5 +119,5 @@ export function detectBreadth(
         ? (process.env.OPP_BREADTH_VEHICLE_SEMI ?? '').trim().toUpperCase() || 'SOXL'
         : (process.env.OPP_BREADTH_VEHICLE_BROAD ?? '').trim().toUpperCase() || 'QQQ';
 
-    return { movers, semis, vehicle };
+    return { direction, movers, semis, vehicle };
 }

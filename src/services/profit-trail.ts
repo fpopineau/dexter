@@ -134,6 +134,20 @@ async function fetchLast(symbol: string): Promise<number | null> {
     }
 }
 
+/** Pure: which side a position's EXIT orders sit on — a long exits by
+ *  SELLING (target = SELL LMT above, stop = SELL STP below); a short exits
+ *  by BUYING (target = BUY LMT below, stop = BUY STP above). */
+export function exitActionFor(direction: 'long' | 'short'): OrderAction {
+    return direction === 'long' ? OrderAction.SELL : OrderAction.BUY;
+}
+
+/** Pure: the target legs among a position's exit-side orders. The target
+ *  is always the LMT leg regardless of direction; the STP leg is the stop
+ *  and must never be selected. */
+export function selectTargetLegs<T extends { orderType: string }>(exitOrders: T[]): T[] {
+    return exitOrders.filter((o) => o.orderType === 'LMT');
+}
+
 /**
  * Runner mode: on arming, cancel the position's fixed TARGET leg so the
  * trail manages the exit — a hard target caps exactly the winners that run
@@ -146,9 +160,8 @@ async function releaseTargetLeg(
     api: Awaited<ReturnType<typeof getIBApi>>,
     entry: TrailEntry,
 ): Promise<string | null> {
-    const exitAction = entry.direction === 'long' ? OrderAction.SELL : OrderAction.BUY;
-    const exits = await fetchOpenOrdersFor(api, entry.symbol, exitAction);
-    const targets = exits.filter((o) => o.orderType === 'LMT');
+    const exits = await fetchOpenOrdersFor(api, entry.symbol, exitActionFor(entry.direction));
+    const targets = selectTargetLegs(exits);
     if (targets.length === 0) return null;
     for (const t of targets) {
         try {

@@ -552,20 +552,24 @@ async function evaluateBreadth(snapshot: OpportunitySnapshot): Promise<void> {
     if (breadthActiveDate !== today) {
         breadthActiveDate = today;
         logger.info(
-            `[opportunity-engine] BREADTH day: ${event.movers.length} watchlist movers in gainer scans ` +
-            `(${event.movers.join(' ')}) — single-name trigger cap +${breadthCapBonus()}, vehicle ${event.vehicle}`,
+            `[opportunity-engine] BREADTH day (${event.direction}): ${event.movers.length} watchlist movers in ` +
+            `${event.direction === 'long' ? 'gainer' : 'loser'} scans (${event.movers.join(' ')}) — ` +
+            `single-name trigger cap +${breadthCapBonus()}, vehicle ${event.vehicle}`,
         );
     }
 
     if (breadthCallbacks.size === 0) return;
     if (breadthVehicleTriggersToday >= breadthMaxPerDay()) return;
-    const last = lastBreadthVehicleAt.get(event.vehicle) ?? 0;
+    // Cooldown per vehicle+direction: a violent reversal day may fairly
+    // evaluate the same vehicle short after the morning's long.
+    const cooldownKey = `${event.vehicle}:${event.direction}`;
+    const last = lastBreadthVehicleAt.get(cooldownKey) ?? 0;
     const now = Date.now();
     if (now - last < breadthCooldownMs()) return;
 
-    lastBreadthVehicleAt.set(event.vehicle, now);
+    lastBreadthVehicleAt.set(cooldownKey, now);
     breadthVehicleTriggersToday++;
-    logger.info(`[opportunity-engine] BREADTH TRIGGER ${event.vehicle} (movers: ${event.movers.join(' ')})`);
+    logger.info(`[opportunity-engine] BREADTH TRIGGER ${event.vehicle} ${event.direction.toUpperCase()} (movers: ${event.movers.join(' ')})`);
     for (const cb of [...breadthCallbacks]) {
         try {
             await cb(event, snapshot);

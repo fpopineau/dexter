@@ -57,3 +57,30 @@ describe('profit trail state machine', () => {
         expect(observeTrail(e, NaN, 5, 1)).toBeNull();
     });
 });
+
+describe('runner mode direction mapping (shorts covered)', () => {
+    test('exit side: long exits SELL, short exits BUY', async () => {
+        const { exitActionFor } = await import('./profit-trail.js');
+        const { OrderAction } = await import('@stoqey/ib');
+        expect(exitActionFor('long')).toBe(OrderAction.SELL);
+        expect(exitActionFor('short')).toBe(OrderAction.BUY);
+    });
+
+    test('target selection picks the LMT leg and never the stop, both directions', async () => {
+        const { selectTargetLegs } = await import('./profit-trail.js');
+        // Long bracket exits: SELL LMT (target) + SELL STP (stop)
+        const longExits = [
+            { orderId: 1, orderType: 'LMT', tif: 'GTC' },
+            { orderId: 2, orderType: 'STP', tif: 'GTC' },
+        ];
+        expect(selectTargetLegs(longExits).map((o) => o.orderId)).toEqual([1]);
+        // Short bracket exits: BUY LMT (target below) + BUY STP (stop above)
+        const shortExits = [
+            { orderId: 3, orderType: 'STP', tif: 'GTC' },
+            { orderId: 4, orderType: 'LMT', tif: 'GTC' },
+        ];
+        expect(selectTargetLegs(shortExits).map((o) => o.orderId)).toEqual([4]);
+        // STP LMT stops (momentum-style) are never targets
+        expect(selectTargetLegs([{ orderId: 5, orderType: 'STP LMT', tif: 'GTC' }])).toEqual([]);
+    });
+});

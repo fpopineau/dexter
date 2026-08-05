@@ -84,6 +84,56 @@ describe('detectBreadth (Jul 30 melt-up shape)', () => {
         expect(event).toBeNull();
     });
 
+    test('long events carry direction long', () => {
+        const event = detectBreadth([
+            surfaced('MU', 'TOP_PERC_GAIN'), surfaced('AMD', 'TOP_PERC_GAIN'),
+            surfaced('INTC', 'TOP_PERC_GAIN'), surfaced('TSM', 'TOP_PERC_GAIN'),
+        ], WATCH, 4);
+        expect(event!.direction).toBe('long');
+    });
+
+    test('a correlated SELLOFF is a breadth event too — direction short', () => {
+        const event = detectBreadth([
+            surfaced('MU', 'TOP_PERC_LOSE'),
+            surfaced('AMD', 'TOP_PERC_LOSE'),
+            surfaced('TSM', 'TOP_OPEN_PERC_LOSE'),
+            surfaced('ARM', 'TOP_PERC_LOSE'),
+            surfaced('MSFT', 'TOP_PERC_LOSE'),
+        ], WATCH, 4);
+        expect(event).not.toBeNull();
+        expect(event!.direction).toBe('short');
+        expect(event!.movers.length).toBe(5);
+        // semis majority → semis vehicle, to be SHORTED
+        expect(event!.vehicle).toBe('SOXL');
+    });
+
+    test('mixed tape: dominant side wins, ties go long', () => {
+        // 4 up vs 5 down → short side wins
+        const down = detectBreadth([
+            surfaced('MU', 'TOP_PERC_GAIN'), surfaced('AMD', 'TOP_PERC_GAIN'),
+            surfaced('INTC', 'TOP_PERC_GAIN'), surfaced('TSM', 'TOP_PERC_GAIN'),
+            surfaced('ARM', 'TOP_PERC_LOSE'), surfaced('MSFT', 'TOP_PERC_LOSE'),
+            surfaced('DELL', 'TOP_PERC_LOSE'), surfaced('SMCI', 'TOP_PERC_LOSE'),
+            surfaced('ASML', 'TOP_PERC_LOSE'),
+        ], WATCH, 4);
+        expect(down!.direction).toBe('short');
+        // 4 vs 4 tie → long
+        const tie = detectBreadth([
+            surfaced('MU', 'TOP_PERC_GAIN'), surfaced('AMD', 'TOP_PERC_GAIN'),
+            surfaced('INTC', 'TOP_PERC_GAIN'), surfaced('TSM', 'TOP_PERC_GAIN'),
+            surfaced('ARM', 'TOP_PERC_LOSE'), surfaced('MSFT', 'TOP_PERC_LOSE'),
+            surfaced('DELL', 'TOP_PERC_LOSE'), surfaced('SMCI', 'TOP_PERC_LOSE'),
+        ], WATCH, 4);
+        expect(tie!.direction).toBe('long');
+    });
+
+    test('a selloff below the threshold stays null (no panic shorting)', () => {
+        const event = detectBreadth([
+            surfaced('MU', 'TOP_PERC_LOSE'), surfaced('AMD', 'TOP_PERC_LOSE'),
+        ], WATCH, 4);
+        expect(event).toBeNull();
+    });
+
     test('vehicle env overrides are honored', () => {
         process.env.OPP_BREADTH_VEHICLE_SEMI = 'smh';
         const event = detectBreadth([

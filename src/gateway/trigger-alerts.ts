@@ -58,17 +58,21 @@ function buildPrompt(opp: Opportunity): string {
 }
 
 function buildBreadthPrompt(event: BreadthEvent): string {
+    const up = event.direction === 'long';
     return [
-        `[BREADTH TRIGGER] Sector-wide move: ${event.movers.length} watchlist names are ripping together ` +
+        `[BREADTH TRIGGER] Sector-wide move: ${event.movers.length} watchlist names are ` +
+        `${up ? 'ripping' : 'selling off'} together ` +
         `(${event.movers.join(', ')}${event.semis.length ? `; semis: ${event.semis.join(', ')}` : ''}).`,
         '',
         `On a correlated move the single-name pipeline bottlenecks (extension guard, trigger cap) — ` +
         `the whole move is expressed in ONE liquid vehicle instead: ${event.vehicle}.`,
         '',
-        `Evaluate ${event.vehicle} NOW for a LONG intraday entry:`,
+        `Evaluate ${event.vehicle} NOW for a ${up ? 'LONG' : 'SHORT'} intraday entry:`,
         '1. Confirm the breadth story with a news check (web_search) — what is driving the group?',
         `2. Validate entry/stop/target and position size with risk_manager (stop from ${event.vehicle}'s own ATR).`,
-        '   Prefer a pullback entry (VWAP / prior high) over hitting the offer at the high of day.',
+        up
+            ? '   Prefer a pullback entry (VWAP / prior high) over hitting the offer at the high of day.'
+            : '   Prefer a bounce entry (VWAP retest / broken support from below) over hitting bids at the low of day.',
         '3. Decision:',
         `   - NOT actionable → respond with exactly: ${HEARTBEAT_OK_TOKEN}`,
         '   - Actionable → register it with trade_proposals (action create, breadth rationale included;',
@@ -157,7 +161,7 @@ export function registerTriggerAlerts(): void {
     // the single-name trigger cap (Jul 30: nine correlated movers, cap
     // exhausted by midday, AMD/INTC/DELL/TSM/ARM never evaluated).
     onBreadthTrigger(async (event) => {
-        await evaluateAndDeliver(`breadth:${event.vehicle}`, event.vehicle, buildBreadthPrompt(event));
+        await evaluateAndDeliver(`breadth:${event.vehicle}:${event.direction}`, event.vehicle, buildBreadthPrompt(event));
     });
 
     logger.info('[trigger-alerts] registered');

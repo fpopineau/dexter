@@ -85,3 +85,12 @@ describe('computeQuantity — degenerate inputs', () => {
         expect(computeQuantity({ entry: 50, stop: 48, score: 90, netLiquidation: 0 }, LIVE).quantity).toBeNull();
     });
 });
+
+describe('computeQuantity — short proposals', () => {
+    test('sizes shorts identically (stop above entry)', () => {
+        const LIVE_RULES = { ...DEFAULT_RULES, max_position_pct: 20, max_risk_per_trade_pct: 1.0, min_risk_budget_usd: 15 };
+        // short at 50, stop 52 → distance 2, budget 37 → 18 by risk; cap 14.
+        const r = computeQuantity({ entry: 50, stop: 52, score: 85, netLiquidation: 3700 }, LIVE_RULES);
+        expect(r.quantity).toBe(14);
+    });
+});
