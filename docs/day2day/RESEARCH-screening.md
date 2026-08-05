@@ -82,6 +82,40 @@ Ranked by strength of evidence and fit to day/overnight:
 | Finviz Elite / Trade-Ideas / TradingView | $40–$120+/mo | UI products | RT-ish | no proper APIs / expensive; not automation-grade — [K] general knowledge, not re-verified |
 | EODHD / FMP | $20–$60/mo | ✓ EOD | EOD | fine for nightly universe stats, not live scanning |
 
+### 3.1 Wider vendor comparison (added 2026-08-05, prices spot-checked)
+
+Cheapest-first, for the *screener* use case specifically:
+
+| Solution | $/mo | Full-market | Latency | Verdict |
+|---|---|---|---|---|
+| **Polygon Starter** | 29 | ✓ snapshot, 1 call | 15-min delayed | best value: covers every phase except open-drive; same subscription serves the §6.2 historical backfill — double duty |
+| Tiingo Power | 30 | ✓ (109k symbols, 10k req/h, 100k req/day) | RT **IEX-only** | trap for screening: IEX ≈ small % of consolidated volume → RVOL/gap distortion (same flaw as Alpaca's free tier); good as EOD/history backup ([pricing](https://www.tiingo.com/about/pricing)) |
+| Finviz Elite | ~40 | ✓ via screener CSV export | delayed | fixed criteria set, semi-automatable export; not composable |
+| **Alpaca Algo Trader Plus** | 99 | ✓ (full SIP, unlimited ws) | **RT** | cheapest *full-SIP real-time* option |
+| Polygon Advanced | 199 | ✓ | RT | over budget |
+| Trade-Ideas etc. | 120+ | ✓ | RT | UI products, expensive, weak APIs |
+
+**TradingView — assessed and rejected as a data layer.** Plans ([2026](https://quantroutine.com/tools/tradingview-free-vs-pro/)):
+Essential $12.95 / Plus $29.95 / Premium $59.95 / Ultimate $199.95 (annual
+billing). No official data-out API at any tier; the screener is a UI, not a
+queryable service. Automation paths and why they don't fit:
+- **Alert webhooks** (Premium: 400 non-expiring alerts, Ultimate: 1,000):
+  per-symbol/per-condition triggers that could feed the gateway, but not a
+  full-market composable scan, not historizable, capped far below the
+  universe. Possible niche use later as a redundant catalyst trigger, nothing
+  more.
+- **Unofficial scanner endpoint** (`tradingview-screener` python lib): free
+  but ToS-gray, fragile, no SLA, and limited to TradingView's predefined
+  fields — cannot express our custom features (overnight/intraday
+  decomposition, per-minute RVOL baselines).
+Legitimate role: human prototyping/eyeballing of criteria only.
+
+Bottom line: **Alpaca is not the cheapest overall — it is the cheapest
+full-SIP real-time.** The cheapest fit for the screener is Polygon Starter
+($29, delayed) since the engine's non-open-drive cadences are 5–10 min
+anyway; upgrade to Alpaca $99 only if the shadow run proves real-time
+full-market breadth pays for itself during open-drive.
+
 Decision shape: **latency-tiered hybrid.**
 - Open-drive (09:30–10:30) is the only phase where real-time breadth matters →
   either accept IBKR's narrow-but-RT view there, or pay Alpaca $99.
