@@ -643,6 +643,67 @@ function scoreTrend(ind: AllIndicators, ohlcv: OHLCV, direction: 'long' | 'short
 // Composite score
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Bar freshness — deterministic staleness detection
+// ---------------------------------------------------------------------------
+// Live incident (2026-08-05): after IB Gateway's noon auto-restart the
+// historical farm woke lazily and served bars ending at YESTERDAY'S close
+// during pre-market; the live snapshot disagreed with the indicators. The
+// model happened to notice — this makes the check deterministic so no
+// consumer has to.
+
+export interface BarFreshness {
+    /** Raw IBKR time of the newest bar, e.g. '20260805 07:40:00'. */
+    lastBarTime: string | null;
+    /** Minutes since the newest bar (ET frame); null for daily bars or
+     *  unparseable times. */
+    lastBarAgeMin: number | null;
+    /** True when new bars SHOULD exist (US extended session, Mon–Fri
+     *  04:00–20:00 ET) and the newest bar is older than the threshold. */
+    stale: boolean;
+    /** Present only when stale — written for the consuming model. */
+    staleNote?: string;
+}
+
+const STALE_AFTER_MIN = 15;
+
+/** Assess how fresh the newest bar is. Pure; `now` injectable for tests.
+ *  Bar times are interpreted in America/New_York (US equities). */
+export function assessBarFreshness(lastBarTime: string | undefined, now: Date = new Date()): BarFreshness {
+    const raw = (lastBarTime ?? '').trim();
+    const m = /^(\d{4})(\d{2})(\d{2})(?:\s+(\d{2}):(\d{2}):(\d{2}))?/.exec(raw);
+    if (!m) return { lastBarTime: raw || null, lastBarAgeMin: null, stale: false };
+    if (m[4] === undefined) {
+        // Daily bar — freshness is a different question (previous session
+        // close is legitimate); leave to the daily-context consumers.
+        return { lastBarTime: raw, lastBarAgeMin: null, stale: false };
+    }
+
+    // Compare bar and clock in the same fictional UTC frame built from ET
+    // components — correct across DST without offset arithmetic.
+    const barMs = Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+    const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const nowMs = Date.UTC(et.getFullYear(), et.getMonth(), et.getDate(), et.getHours(), et.getMinutes(), et.getSeconds());
+    const ageMin = Math.round((nowMs - barMs) / 60_000);
+
+    const day = et.getDay();
+    const hour = et.getHours();
+    const expectFresh = day >= 1 && day <= 5 && hour >= 4 && hour < 20;
+    const stale = expectFresh && ageMin > STALE_AFTER_MIN;
+
+    return {
+        lastBarTime: raw,
+        lastBarAgeMin: ageMin,
+        stale,
+        ...(stale ? {
+            staleNote:
+                `STALE DATA: newest bar is ${ageMin} min old (${raw} ET) while the market session is active — ` +
+                `the historical feed is lagging (typical right after an IB Gateway restart). Do NOT size a trade ` +
+                `from these indicators; retry in a minute and cross-check against a live quote`,
+        } : {}),
+    };
+}
+
 export interface SignalResult {
     ticker: string;
     direction: 'long' | 'short';
@@ -663,6 +724,8 @@ export interface SignalResult {
         atr: number | null;
         rvol: number | null;
     };
+    /** Deterministic staleness assessment of the newest bar. */
+    freshness: BarFreshness;
 }
 
 export function computeSignalScore(
@@ -703,6 +766,7 @@ export function computeSignalScore(
             volume: { score: vol.score, weight: w.volume, weighted: Math.round(vol.score * w.volume), components: vol.components },
             trend: { score: trend.score, weight: w.trend, weighted: Math.round(trend.score * w.trend), components: trend.components },
         },
+        freshness: assessBarFreshness(n > 0 ? ohlcv.time[n - 1] : undefined),
         snapshot: {
             price: n > 0 ? ohlcv.close[n - 1] : null,
             rsi: (() => { const v = lastValid(indicators.rsi.rsi); return isNaN(v) ? null : Math.round(v * 100) / 100; })(),

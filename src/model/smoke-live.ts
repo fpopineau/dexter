@@ -1,4 +1,6 @@
-// Scratch file (gitignored) — last used to live-verify fractional bracket
-// placement on paper: IBKR rejected with error 10243 ("fractional orders
-// cannot be placed via API"), a server-side policy. See risk-rules.yaml.
+// Scratch file (gitignored). Past live probes on the paper account:
+// - fractional-size bracket → IBKR error 10243 (API hard block)
+// - cashQty stock order → IBKR error 10244 (cash quantity not usable)
+// Decision 2026-08-05: dexter trades whole shares; fractional code stays
+// dormant (fractional_shares: false in both risk-rules profiles).
 export {};
