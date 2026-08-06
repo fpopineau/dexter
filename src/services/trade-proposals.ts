@@ -634,13 +634,25 @@ export async function listStaleUnfilled(maxAgeMs: number): Promise<TradeProposal
     return rows.map(fromRow);
 }
 
-/** Executed-and-not-closed count — the system's notion of open exposure. */
+/** Open exposure count: executed positions PLUS acceptances mid-flight
+ *  ('executing') — two concurrent accepts must see each other, or both
+ *  slip under max_open_positions (audit 2026-08-06, finding 5). */
 export async function countOpenExecuted(): Promise<number> {
     const database = await getDb();
     const rows = database.query<{ n: number }>(
-        `SELECT COUNT(*) AS n FROM proposals WHERE status = 'executed'`,
+        `SELECT COUNT(*) AS n FROM proposals WHERE status IN ('executing', 'executed')`,
     ).all();
     return rows[0]?.n ?? 0;
+}
+
+/** Proposals holding or about to hold exposure — feeds the per-symbol
+ *  aggregate cap (same 'executing' rationale as countOpenExecuted). */
+export async function listExposure(): Promise<TradeProposal[]> {
+    const database = await getDb();
+    const rows = database.query<Row>(
+        `SELECT * FROM proposals WHERE status IN ('executing', 'executed')`,
+    ).all();
+    return rows.map(fromRow);
 }
 
 /** Start of the current America/New_York day in epoch ms. */
@@ -656,7 +668,7 @@ export async function countExecutedSince(sinceMs: number): Promise<number> {
     const database = await getDb();
     const rows = database.query<{ n: number }>(
         `SELECT COUNT(*) AS n FROM proposals
-         WHERE status IN ('executed', 'closed') AND executed_at >= ?`,
+         WHERE status IN ('executing', 'executed', 'closed') AND executed_at >= ?`,
     ).all(sinceMs);
     return rows[0]?.n ?? 0;
 }
@@ -763,15 +775,20 @@ export async function getPerformanceSummary(
             continue;
         }
         cls.netPnl = Math.round((cls.netPnl + p.realizedPnl - (p.commissions ?? 0)) * 100) / 100;
-        if (p.realizedPnl > 0) cls.wins++;
-        else if (p.realizedPnl < 0) cls.losses++;
+        // Win/loss on NET P&L (gross minus commissions): a trade whose
+        // gross edge is smaller than its round-trip fees is a loss, and
+        // that marginal population is exactly what calibration reads
+        // (audit 2026-08-06, finding A).
+        const net = Math.round((p.realizedPnl - (p.commissions ?? 0)) * 100) / 100;
+        if (net > 0) cls.wins++;
+        else if (net < 0) cls.losses++;
         grossPnl += p.realizedPnl;
         commissions += p.commissions ?? 0;
-        if (p.realizedPnl > 0) wins++;
-        else if (p.realizedPnl < 0) losses++;
+        if (net > 0) wins++;
+        else if (net < 0) losses++;
         else flat++;
-        if (!best || p.realizedPnl > best.pnl) best = { id: p.id, symbol: p.symbol, pnl: p.realizedPnl };
-        if (!worst || p.realizedPnl < worst.pnl) worst = { id: p.id, symbol: p.symbol, pnl: p.realizedPnl };
+        if (!best || net > best.pnl) best = { id: p.id, symbol: p.symbol, pnl: net };
+        if (!worst || net < worst.pnl) worst = { id: p.id, symbol: p.symbol, pnl: net };
     }
 
     const decided = wins + losses;

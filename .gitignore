@@ -60,4 +60,5 @@ logs/
 coverage.json
 
 # Scratchpad files
-scratchpads/*src/model/smoke-live.ts
+scratchpads/*
+src/model/smoke-live.ts

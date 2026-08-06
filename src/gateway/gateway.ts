@@ -32,12 +32,12 @@ import { registerOutcomeAlerts } from './outcome-alerts.js';
 import { handleProposalCommand } from './proposal-commands.js';
 import { resolveRoute } from './routing/resolve-route.js';
 import { resolveSessionStorePath, upsertSessionMeta } from './sessions/store.js';
-import { startBenchmark } from '@/services/benchmark.js';
-import { startDashboard } from '@/services/dashboard.js';
-import { startEodTriage } from '@/services/eod-triage.js';
-import { startProfitTrail } from '@/services/profit-trail.js';
+import { startBenchmark, stopBenchmark } from '@/services/benchmark.js';
+import { startDashboard, stopDashboard } from '@/services/dashboard.js';
+import { startEodTriage, stopEodTriage } from '@/services/eod-triage.js';
+import { startProfitTrail, stopProfitTrail } from '@/services/profit-trail.js';
 import { catchUpPatternScan } from '@/services/pattern-scanner.js';
-import { startStaleEntrySweeper } from '@/services/stale-entry-sweeper.js';
+import { startStaleEntrySweeper, stopStaleEntrySweeper } from '@/services/stale-entry-sweeper.js';
 import { registerScanHealthAlerts } from './health-alerts.js';
 import { registerTriggerAlerts } from './trigger-alerts.js';
 import { cleanMarkdownForWhatsApp } from './utils.js';
@@ -321,6 +321,13 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
       stopArchiveScheduler();
       stopOpportunityEngine();
       stopOutcomeTracker();
+      // Audit finding C: these five kept running after "shutdown" —
+      // profit-trail and EOD triage can place market orders post-stop.
+      stopProfitTrail();
+      stopStaleEntrySweeper();
+      stopEodTriage();
+      stopBenchmark();
+      stopDashboard();
       await manager.stopAll();
     },
     snapshot: () => manager.getSnapshot(),

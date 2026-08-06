@@ -16,10 +16,19 @@ export class ApprovalPromptComponent extends Container {
 
   constructor(tool: string, args: Record<string, unknown>) {
     super();
-    this.selector = createApprovalSelector((decision) => this.onSelect?.(decision));
+    const tradeTool = tool === 'ibkr_orders' || tool === 'accept_proposal';
+    this.selector = createApprovalSelector(
+        (decision) => this.onSelect?.(decision),
+        { allowSession: !tradeTool },
+    );
     const width = Math.max(20, process.stdout.columns ?? 80);
     const border = theme.warning('─'.repeat(width));
-    const path = (args.path as string) || '<unknown>';
+    // The operator must see WHAT they approve: the path for file edits,
+    // the full argument payload for everything else — an order approval
+    // reading "<unknown>" is a blind signature (audit finding 2).
+    const path = typeof args.path === 'string' && args.path
+        ? (args.path as string)
+        : JSON.stringify(args).slice(0, 300);
 
     this.addChild(new Text(border, 0, 0));
     this.addChild(new Text(theme.warning(theme.bold('Permission required')), 0, 0));

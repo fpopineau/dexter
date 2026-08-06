@@ -1,6 +1,7 @@
-// Scratch file (gitignored). Past live probes on the paper account:
-// - fractional-size bracket → IBKR error 10243 (API hard block)
-// - cashQty stock order → IBKR error 10244 (cash quantity not usable)
-// Decision 2026-08-05: dexter trades whole shares; fractional code stays
-// dormant (fractional_shares: false in both risk-rules profiles).
+// Scratch file (gitignored). Probe results 2026-08-05, IBKR news API on
+// the paper account: reqNewsProviders lists 8 providers (Briefing.com,
+// Dow Jones family) but reqHistoricalNews returns ZERO headlines with no
+// error, with and without explicit time ranges — API news entitlement is
+// separate from the UI feeds and evidently absent here. Re-probe on the
+// LIVE account before building news enrichment.
 export {};

@@ -28,6 +28,7 @@ import {
     countOpenExecuted,
     etDayStartMs,
     expireStale,
+    listExposure,
     formatProposalLine,
     getProposal,
     listTrackable,
@@ -103,7 +104,7 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 ...(p.worstCaseGapPct != null ? { worstCaseGapPct: p.worstCaseGapPct } : {}),
                 // Committed notional on this symbol from OTHER working/filled
                 // proposals — the aggregate cap stops same-name stacking.
-                existingSymbolExposure: (await listTrackable())
+                existingSymbolExposure: (await listExposure())
                     .filter((t) => t.symbol === p.symbol && t.id !== p.id)
                     .reduce((sum, t) => sum + t.quantity * (t.entry ?? 0), 0),
             },
@@ -204,7 +205,13 @@ function assertPaperOnly(): void {
     if (isLivePort()) {
         throw new Error('auto-execute is paper-only: refusing on a live port (4001/7496), regardless of IBKR_ALLOW_LIVE');
     }
-    const liveAccounts = getManagedAccounts().filter((a) => !a.toUpperCase().startsWith('D'));
+    // An EMPTY account list is not proof of paper — it is proof of
+    // nothing. Fail closed until IBKR says who we are (audit finding 4).
+    const accounts = getManagedAccounts();
+    if (accounts.length === 0) {
+        throw new Error('auto-execute is paper-only: account identity not verified yet (no managed accounts received) — refusing');
+    }
+    const liveAccounts = accounts.filter((a) => !a.toUpperCase().startsWith('D'));
     if (liveAccounts.length > 0) {
         throw new Error('auto-execute is paper-only: connected account does not look like a paper account');
     }
@@ -246,17 +253,14 @@ export async function autoExecuteProposal(id: string): Promise<ExecutionOutcome>
         return { ok: false, message: `auto-execute daily cap reached (${max}/day)` };
     }
 
-    try {
-        assertPaperOnly();
-    } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error(`[proposal-executor] auto-execute refused: ${msg}`);
-        return { ok: false, message: `auto-execute refused — ${msg}` };
+    // Static live-port refusal first — it must dominate every other message.
+    if (isLivePort()) {
+        return { ok: false, message: 'auto-execute refused — auto-execute is paper-only: refusing on a live port (4001/7496), regardless of IBKR_ALLOW_LIVE' };
     }
 
-    // Confidence gate: only proposals carrying a score at or above
-    // AUTO_EXECUTE_MIN_SCORE execute unattended; everything else stays
-    // open for a manual 'accept'. No score → no auto-execution.
+    // Confidence gate next: a pure filter that places nothing — refusals
+    // here must not depend on connection state. The paper-identity assertion
+    // runs just before anything could actually execute.
     const p = await getProposal(id);
     if (!p) {
         return { ok: false, message: `auto-execute: proposal ${id.toUpperCase()} not found` };
@@ -268,6 +272,14 @@ export async function autoExecuteProposal(id: string): Promise<ExecutionOutcome>
             message: `auto-execute: ${p.id} score ${p.score ?? 'none'} is below the confidence threshold ` +
                 `${minScore} (AUTO_EXECUTE_MIN_SCORE) — left open for manual 'accept ${p.id}'`,
         };
+    }
+
+    try {
+        assertPaperOnly();
+    } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[proposal-executor] auto-execute refused: ${msg}`);
+        return { ok: false, message: `auto-execute refused — ${msg}` };
     }
 
     const outcome = await acceptProposal(id);

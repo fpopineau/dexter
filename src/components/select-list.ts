@@ -94,12 +94,22 @@ export function createModelSelector(
   return list;
 }
 
-export function createApprovalSelector(onSelect: (decision: ApprovalDecision) => void) {
-  const items: SelectItem[] = [
-    { value: 'allow-once', label: '1. Yes' },
-    { value: 'allow-session', label: '2. Yes, allow all edits this session' },
-    { value: 'deny', label: '3. No' },
-  ];
+export function createApprovalSelector(
+  onSelect: (decision: ApprovalDecision) => void,
+  opts: { allowSession?: boolean } = {},
+) {
+  // Trade tools never offer the session-wide option: every order is
+  // approved individually or not at all (audit 2026-08-06, finding 2).
+  const items: SelectItem[] = opts.allowSession === false
+    ? [
+        { value: 'allow-once', label: '1. Yes, this order only' },
+        { value: 'deny', label: '2. No' },
+      ]
+    : [
+        { value: 'allow-once', label: '1. Yes' },
+        { value: 'allow-session', label: '2. Yes, allow all edits this session' },
+        { value: 'deny', label: '3. No' },
+      ];
   const list = new VimSelectList(items, 5, selectListTheme);
   list.onSelect = (item) => onSelect(item.value as ApprovalDecision);
   list.onCancel = () => onSelect('deny');

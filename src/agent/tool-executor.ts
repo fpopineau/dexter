@@ -25,6 +25,10 @@ type ToolExecutionEvent =
   | ToolLimitEvent;
 
 const TOOLS_REQUIRING_APPROVAL = ['write_file', 'edit_file', 'ibkr_orders', 'accept_proposal'] as const;
+/** Trade tools are approved per invocation, never session-wide — a cached
+ *  approval on accept_proposal would be a blank cheque for every later
+ *  proposal that session (audit 2026-08-06, finding 2). */
+const SESSION_APPROVAL_EXCLUDED = new Set<string>(['ibkr_orders', 'accept_proposal']);
 const DEFAULT_MAX_CONCURRENCY = 10;
 
 interface ToolCallBatch {
@@ -130,7 +134,8 @@ export class AgentToolExecutor {
     const toolQuery = this.extractQueryFromArgs(toolArgs);
 
     // Approval flow for sensitive tools
-    if (this.requiresApproval(toolName) && !this.sessionApprovedTools.has(toolName)) {
+    const sessionApproved = this.sessionApprovedTools.has(toolName) && !SESSION_APPROVAL_EXCLUDED.has(toolName);
+    if (this.requiresApproval(toolName) && !sessionApproved) {
       // No approval channel (headless: gateway/cron/trigger runs) → auto-deny.
       const headless = this.requestToolApproval === undefined;
       const decision = (await this.requestToolApproval?.({ tool: toolName, args: toolArgs })) ?? 'deny';
@@ -139,7 +144,7 @@ export class AgentToolExecutor {
         yield { type: 'tool_denied', tool: toolName, args: toolArgs, toolCallId, auto: headless };
         return;
       }
-      if (decision === 'allow-session') {
+      if (decision === 'allow-session' && !SESSION_APPROVAL_EXCLUDED.has(toolName)) {
         // Only the tool the user actually approved — a session approval for
         // a file edit must never pre-approve order placement.
         this.sessionApprovedTools.add(toolName);

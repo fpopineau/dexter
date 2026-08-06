@@ -188,7 +188,7 @@ with `trade_proposals` (action `create`, at most 3 per scan):
   `LMT` at the support level. `MKT` only when immediacy beats price.
 - `entry` is REQUIRED even for MKT proposals (pass the current price — it
   anchors the deterministic risk validation).
-- `quantity` from the risk_manager suggestion, `expiresMinutes` 90,
+- OMIT `quantity` — the deterministic position sizer computes it from the account, the score, and the stop distance (risk_manager's suggestion uses a placeholder account value and must never size a real proposal), `expiresMinutes` 90,
   `rationale` one line (setup + catalyst + risk note), include the signal
   `score`.
 - Creation NEVER trades. Include each returned proposal ID in your answer

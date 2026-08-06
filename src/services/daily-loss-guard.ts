@@ -196,6 +196,13 @@ function fetchDailyPnl(api: import('@stoqey/ib').IBApi, account: string): Promis
             clearTimeout(timeout);
             try { api.cancelPnL(reqId); } catch { /* ignore */ }
             cleanup();
+            // NaN / IBKR sentinel (1.797e308) would sail through the
+            // `dailyPnL <= -limit` comparison as false and silently defeat
+            // the kill-switch (audit 2026-08-06, risk item 8). Fail closed.
+            if (!Number.isFinite(dailyPnL) || Math.abs(dailyPnL) > 1e12) {
+                reject(new Error(`[daily-loss-guard] broker returned unusable daily P&L (${dailyPnL})`));
+                return;
+            }
             resolve(dailyPnL);
         };
         const onError = (err: Error, code: number, id: number) => {
@@ -226,7 +233,9 @@ function fetchNetLiquidation(api: import('@stoqey/ib').IBApi, account: string): 
             if (id !== reqId) return;
             if (tag === 'NetLiquidation' && (!account || acct === account)) {
                 const n = Number(val);
-                if (Number.isFinite(n)) value = n;
+                // Finite is not enough: the IBKR error sentinel is finite and
+                // would turn every %-of-NetLiq cap into a no-op downstream.
+                if (Number.isFinite(n) && n > 0 && n < 1e12) value = n;
             }
         };
         const onEnd = (id: number) => {

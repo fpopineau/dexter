@@ -240,6 +240,9 @@ function doConnect(): Promise<IBApi> {
             if (api !== ibApi) return;
             connected = false;
             connectPromise = null;
+            // Identity belongs to the connection that reported it — a
+            // reconnect must re-verify, never inherit (audit finding 3).
+            managedAccounts = [];
             logger.warn('[IBKR] Disconnected');
             scheduleReconnect();
         });
@@ -249,6 +252,7 @@ function doConnect(): Promise<IBApi> {
             if (code === -1) {
                 connected = false;
                 connectPromise = null;
+                managedAccounts = [];
                 logger.error(`[IBKR] Connection lost (reqId ${reqId}): ${err.message}`);
                 scheduleReconnect();
                 return;
