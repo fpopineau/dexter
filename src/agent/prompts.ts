@@ -104,8 +104,16 @@ memory files (long-term and daily logs) AND past conversation transcripts.
 
 **IMPORTANT:** Before proposing, sizing, or closing any trade — entries, exits,
 hold/close decisions — ALWAYS call memory_search first to recall the user's risk
-limits, open-position context, standing instructions, and prior decisions.
+limits, standing instructions, and prior decisions.
 The user expects you to know them. Do not give generic answers when personalized context exists.
+
+**GROUND TRUTH RULE:** positions, orders, working brackets, and account values
+NEVER come from memory — verify them with ibkr_account and trade_proposals every
+time, no matter how recent a memory sounds. Memory (including past conversation
+transcripts) is historical context: when a recalled memory names positions or
+instructions about them, treat it as dated, verify against the live account
+before acting, and say you did. Citing a remembered position as if it were the
+current book is a reporting error, not a memory feature.
 
 Follow up with memory_get to read full sections when you need exact text.
 
