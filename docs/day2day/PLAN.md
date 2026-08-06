@@ -110,17 +110,21 @@ IBKR_ACCOUNT=           # optional, auto-detected
 | `src/tools/ibkr/signal-scorer.ts` | Tool: multi-factor signal score for a ticker (momentum, mean-reversion, breakout, sentiment) | P1       |
 | `src/services/scanner-loop.ts`    | Background loop: pre-market scan → rank universe → cache top candidates                      | P1       |
 
-**Signal factors:**
+**Signal factors (as shipped — 4-factor technical):**
 ```
-Score = w1·momentum + w2·mean_reversion + w3·volume_confirm + w4·sentiment + w5·fundamental_support
+Score = w1·momentum + w2·mean_reversion + w3·volume_confirm + w4·trend_alignment
 
 Where:
-  momentum       = MACD histogram slope + RSI trend + price vs EMAs
-  mean_reversion = distance from VWAP/Bollinger midline + RSI extremes
-  volume_confirm = RVOL > 1.5 + volume trend alignment
-  sentiment      = news sentiment (local LLM) + insider activity
-  fundamental    = earnings surprise + analyst revision direction
+  momentum        = MACD histogram slope + RSI trend + price vs EMAs
+  mean_reversion  = distance from VWAP/Bollinger midline + RSI extremes
+  volume_confirm  = RVOL > 1.5 + volume trend alignment
+  trend_alignment = EMA stack agreement across timeframes
 ```
+
+> Earlier drafts added news-sentiment and fundamental-support factors;
+> both were dropped in the 2026-08 mission pivot. Present-state company
+> facts inform the `company-snapshot` card and the earnings-bet evidence
+> record — they do not enter the technical score.
 
 ### 2.4 Risk Management
 
@@ -193,7 +197,6 @@ VLLM_MODEL=meta-llama/Llama-3.3-70B-Instruct  # or Qwen3-72B
 | TA signal interpretation      | `vllm:llama-3.3-70b` (local) | Speed-critical, structured output       |
 | Trade plan generation         | `vllm:llama-3.3-70b` (local) | Sub-second first token                  |
 | Pre-market research brief     | `claude-sonnet-4` (API)      | Complex multi-source synthesis          |
-| DCF / deep valuation          | `claude-sonnet-4` (API)      | Reasoning quality critical              |
 | Unusual event interpretation  | `claude-sonnet-4` (API)      | Nuanced judgment                        |
 | Backtesting analysis          | `vllm:llama-3.3-70b` (local) | Many iterations, cost-sensitive         |
 
@@ -831,7 +834,7 @@ src/backtest/sentiment-loader.ts
   - GDELT corpus questions (tone history across ~50k headlines/monthly parquets)
   - the Phase-5 LLM-augmented backtest (hundreds of independent evaluations
     over reconstructed context windows)
-  - filing (10-K) analysis and multi-week JSONL log forensics
+  - long-document work: multi-week JSONL log forensics, 8-K catalyst digs
   Recommended shape: Python sidecar (`pip install rlms`) exposed as a
   `deep_research` dexter tool; **hybrid routing — Anthropic as root
   (orchestration quality), local vLLM as the recursive worker fleet**

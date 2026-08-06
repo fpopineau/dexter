@@ -23,6 +23,17 @@ dependency (that API is now prepaid-credits only; a circuit breaker
 short-circuits its calls for 1h after a 401/402 so briefs never burn
 iterations on a dead provider).
 
+**Per-symbol Nasdaq endpoints (FREE, wired 2026-08-06):** the same host
+serves keyless per-symbol JSON that the earnings-bet machinery and the
+company-snapshot skill rely on (probed working):
+
+| Endpoint | Used for |
+|---|---|
+| `/api/company/{sym}/earnings-surprise` | ~4 verified report dates + EPS surprise % — seeds the post-print reaction record (`earnings_bet_intel`), extended to 8+ prints by gap inference over IBKR daily bars |
+| `/api/quote/{sym}/short-interest` | short interest + days-to-cover trend (snapshot card) |
+| `/api/company/{sym}/insider-trades` | open-market insider buys vs sells, 3/12 months (snapshot card) |
+| `/api/quote/{sym}/summary` | sector, industry, market cap, average volume (snapshot card) |
+
 ## 1. Live sources (wired)
 
 ### 1.1 Interactive Brokers (IBKR) — the market backbone
@@ -77,11 +88,15 @@ briefs and every trigger evaluation call `web_search`.
 **At least one key is effectively required** for the trading briefs and
 triggers to work as designed.
 
-### 1.4 Financial Datasets API — fundamentals
+### 1.4 Financial Datasets API — present-state fundamentals (plan-limited)
 
 `FINANCIAL_DATASETS_API_KEY`. Upstream Dexter's finance tools
-(fundamentals, earnings, news, screening); used by research skills and as
-context enrichment in briefs. Not in the execution path.
+(fundamentals, screening); the company-snapshot skill uses them as a
+best-effort financial-health check. Not in the execution path — and as of
+2026-08-06 the current plan 403s the probed endpoints (`/earnings`,
+`/prices`), so treat the whole surface as optional: the snapshot card
+says "fundamental snapshot unavailable" and carries on with the Nasdaq
+and IBKR sources above.
 
 ### 1.5 X / Twitter — optional sentiment
 

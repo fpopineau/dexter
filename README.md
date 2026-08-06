@@ -1,61 +1,69 @@
 # Dexter 🤖
 
-Dexter is an autonomous financial research agent that thinks, plans, and learns as it works. It performs analysis using task planning, self-reflection, and real-time market data. Think Claude Code, but built specifically for financial research.
+Dexter is a day/overnight trading agent that lives in a terminal. It scans, evaluates catalysts, and proposes trades with explicit entry/stop/target and a computed size — then a human says yes or no. The judgment comes from an LLM; the discipline comes from deterministic machines the LLM cannot override: risk gates, a position sizer, a profit trail, an end-of-day triage, and a nightly benchmark that measures the calls against the market.
 
-<img width="665" height="452" alt="Screenshot 2026-04-02 at 4 16 57 PM" src="https://github.com/user-attachments/assets/02418111-5f48-4a66-be5d-dc9bf9806284" />
+Who Dexter is — voice, values, and how it thinks about risk — lives in [SOUL.md](SOUL.md). The engineering reference lives in [docs/handbook/](docs/handbook/README.md).
+
+<img width="665" height="452" alt="Dexter TUI" src="https://github.com/user-attachments/assets/02418111-5f48-4a66-be5d-dc9bf9806284" />
 
 ## Table of Contents
 
+- [⚠️ Disclaimer](#%EF%B8%8F-disclaimer)
 - [👋 Overview](#-overview)
 - [✅ Prerequisites](#-prerequisites)
 - [💻 How to Install](#-how-to-install)
 - [🚀 How to Run](#-how-to-run)
-- [📊 How to Evaluate](#-how-to-evaluate)
+- [🧪 How to Test](#-how-to-test)
 - [🐛 How to Debug](#-how-to-debug)
 - [📱 How to Use with WhatsApp](#-how-to-use-with-whatsapp)
-- [📈 Day2Day Trading Extension](#-day2day-trading-extension)
+- [🛡️ Safety Model](#%EF%B8%8F-safety-model)
 - [🤝 How to Contribute](#-how-to-contribute)
 - [📄 License](#-license)
 
 ## ⚠️ Disclaimer
 
-This project is for **educational, entertainment, and informational purposes only**. It is not intended for real trading or investment.
+Dexter is a **personal trading system**. It proposes trades; a human accepts them. Real-money execution exists, and it sits behind explicit safety gates — a paper/live lock, interactive approval on every order, deterministic risk rules, and a kill-switch.
 
-- Not financial, investment, tax, or legal advice
-- No guarantees of accuracy, completeness, or fitness for any purpose
-- Outputs may be incorrect, incomplete, or out of date
-- Creator and contributors assume no liability for any financial losses or damages
-- Consult a licensed financial advisor before making investment decisions
-- Past performance does not indicate future results
+- Nothing produced by this software is financial, investment, tax, or legal advice
+- No guarantees of accuracy, completeness, or fitness for any purpose — outputs can be wrong, stale, or incomplete
+- Trading involves substantial risk of loss; past performance does not indicate future results
+- The author and contributors assume no liability for any losses or damages
 
-By using this software, you agree to use it solely for learning and informational purposes and accept all risks associated with its use.
+If you run this, you are trading your own account under your own judgment, entirely at your own risk.
 
 ## 👋 Overview
 
-Dexter takes complex financial questions and turns them into clear, step-by-step research plans. It runs those tasks using live market data, checks its own work, and refines the results until it has a confident, data-backed answer.  
+Dexter trades **moves, not businesses** — at a horizon of hours to a few nights, stretched to ~2 weeks for swing patterns. Financial data is used only to understand the present state of a company, never for long-term valuation.
 
-**Key Capabilities:**
-- **Intelligent Task Planning**: Automatically decomposes complex queries into structured research steps
-- **Autonomous Execution**: Selects and executes the right tools to gather financial data
-- **Self-Validation**: Checks its own work and iterates until tasks are complete
-- **Real-Time Financial Data**: Access to income statements, balance sheets, and cash flow statements
-- **Safety Features**: Built-in loop detection and step limits to prevent runaway execution
+**Three trade classes**, each with its own risk budget and caps enforced by a deterministic gate:
 
-[![Twitter Follow](https://img.shields.io/twitter/follow/virattt?style=social)](https://twitter.com/virattt) [![Discord](https://img.shields.io/badge/Discord-Join%20Server-5865F2?style=social&logo=discord)](https://discord.gg/jpGHv2XB6T)
+| Class | Horizon | Sizing basis |
+|---|---|---|
+| `intraday` | hours to a few nights | stop distance vs the per-trade risk budget |
+| `swing` | up to ~2 weeks (pullback / flat base / cup-and-handle), max 3 open | stop distance vs the swing budget |
+| `earnings-bet` | deliberately through one earnings print, max 1 open | the **worst historical post-print gap** — a stop cannot protect through a print |
 
-<img width="1042" height="638" alt="Screenshot 2026-02-18 at 12 21 25 PM" src="https://github.com/user-attachments/assets/2a6334f9-863f-4bd2-a56f-923e42f4711e" />
+**Key capabilities:**
+- **Deterministic risk machinery**: creation- and acceptance-time risk gates, confidence-weighted position sizer, noise-stop and extension (anti-chasing) filters, daily-loss guard, profit trail that lets winners run, EOD triage
+- **Proposal lifecycle**: every idea becomes a persisted proposal (`open → executed → closed`) with entry/stop/target/size; the LLM can create, only a human can accept; outcomes are tracked and reported per class — losses included
+- **Scanning**: IBKR scanners and a continuous opportunity engine for intraday; a nightly swing-pattern scan (pullback, flat base, cup-and-handle) over the midcap universe
+- **Earnings machinery**: calendar (who reports, when), a per-symbol post-print reaction record with a deterministic evidence bar, and the options-implied move for comparison
+- **Skills**: `pre-market`, `day-trade`, `overnight`, `earnings-bet`, `company-snapshot`, `x-research`
+- **Channels**: interactive TUI, WhatsApp gateway with scheduled briefs (pre-market, open, midday, pre-close), event triggers, and a heartbeat that watches positions vs stops
+- **Measurement**: nightly benchmark ledger and refusal counterfactual replay — the process is judged against the market, not against itself
 
+Built on [virattt/dexter](https://github.com/virattt/dexter), the open-source financial research agent — the agent loop, TUI, and tool plumbing come from there; the trading mission, risk machinery, and IBKR integration are this fork's.
 
 ## ✅ Prerequisites
 
 - [Bun](https://bun.com) runtime (v1.0 or higher)
-- OpenAI API key (get [here](https://platform.openai.com/api-keys))
-- Financial Datasets API key (get [here](https://financialdatasets.ai))
-- Exa API key (get [here](https://exa.ai)) - optional, for web search
+- At least one LLM API key (OpenAI, Anthropic, Google, xAI, OpenRouter — or a local Ollama/vLLM)
+- [IB Gateway](https://www.interactivebrokers.com/en/trading/ibgateway-stable.php) or TWS, logged into a **paper** account (port 4002 for IB Gateway paper, 7497 for TWS paper)
+- A web-search key (Exa preferred; Perplexity/Tavily/LangSearch fallbacks) — catalysts must be verifiable
+- Optional: Financial Datasets API key (present-state fundamentals; the system degrades gracefully without it)
+- Optional, for backtests: FirstRate 1-minute OHLCV archives (`FIRSTRATE_DATA_DIR`) and GDELT sentiment parquets (`GDELT_DATA_DIR`) — proprietary data, not included
 
 #### Installing Bun
-
-If you don't have Bun installed, you can install it using curl:
 
 **macOS/Linux:**
 ```bash
@@ -67,104 +75,78 @@ curl -fsSL https://bun.com/install | bash
 powershell -c "irm bun.sh/install.ps1|iex"
 ```
 
-After installation, restart your terminal and verify Bun is installed:
-```bash
-bun --version
-```
-
 ## 💻 How to Install
 
-1. Clone the repository:
+1. Clone the repository and install dependencies:
 ```bash
 git clone https://github.com/virattt/dexter.git
 cd dexter
-```
-
-2. Install dependencies with Bun:
-```bash
 bun install
 ```
 
-3. Set up your environment variables:
+2. Set up your environment:
 ```bash
-# Copy the example environment file
 cp env.example .env
+# LLM provider (at least one):
+#   OPENAI_API_KEY / ANTHROPIC_API_KEY / GOOGLE_API_KEY / XAI_API_KEY / OPENROUTER_API_KEY
+# IBKR (paper first, always):
+#   IBKR_HOST / IBKR_PORT=4002 / IBKR_CLIENT_ID
+#   IBKR_MARKET_DATA_TYPE=3 for delayed data on unsubscribed paper accounts
+#   IBKR_ALLOW_LIVE=false  ← order placement is refused on live ports/accounts otherwise
+# Web search:
+#   EXASEARCH_API_KEY (preferred) / PERPLEXITY_API_KEY / TAVILY_API_KEY / LANGSEARCH_API_KEY
 
-# Edit .env and add your API keys (if using cloud providers)
-# OPENAI_API_KEY=your-openai-api-key
-# ANTHROPIC_API_KEY=your-anthropic-api-key (optional)
-# GOOGLE_API_KEY=your-google-api-key (optional)
-# XAI_API_KEY=your-xai-api-key (optional)
-# OPENROUTER_API_KEY=your-openrouter-api-key (optional)
-
-# Institutional-grade market data for agents
-# FINANCIAL_DATASETS_API_KEY=your-financial-datasets-api-key
-
-# (Optional) If using Ollama locally
-# OLLAMA_BASE_URL=http://127.0.0.1:11434
-
-# Web Search (Exa preferred, Tavily fallback)
-# EXASEARCH_API_KEY=your-exa-api-key
-# TAVILY_API_KEY=your-tavily-api-key
+# Verify the IBKR wiring end-to-end (read-only, never places orders):
+bun run scripts/smoke-ibkr.ts AAPL
 ```
+
+3. Review [src/config/risk-rules.yaml](src/config/risk-rules.yaml) — every number in it is a risk-appetite decision, and the gate enforces them without asking the LLM's opinion. The live profile ([risk-rules.live.yaml](src/config/risk-rules.live.yaml)) loads on top when a non-paper account is detected.
 
 ## 🚀 How to Run
 
-Run Dexter in interactive mode:
+Interactive TUI:
 ```bash
 bun start
 ```
 
-Or with watch mode for development:
+The full trading loop (schedules, triggers, WhatsApp, heartbeat):
 ```bash
-bun dev
+bun run gateway
 ```
 
-## 📊 How to Evaluate
+A trading day, hour by hour — and everything else operational — is in the [User Manual](docs/handbook/USER-MANUAL.md).
 
-Dexter includes an evaluation suite that tests the agent against a dataset of financial questions. Evals use LangSmith for tracking and an LLM-as-judge approach for scoring correctness.
+## 🧪 How to Test
 
-**Run on all questions:**
 ```bash
-bun run src/evals/run.ts
+bun run typecheck
+bun test
 ```
 
-**Run on a random sample of data:**
-```bash
-bun run src/evals/run.ts --sample 10
-```
-
-The eval runner displays a real-time UI showing progress, current question, and running accuracy statistics. Results are logged to LangSmith for analysis.
+The suite includes deterministic scenario tests for the trading machinery — the risk gate, the per-class position sizer (including worst-case-gap sizing for earnings bets), the pattern detectors, and the earnings-reaction math. Trade-decision *judgment* is not unit-tested; it is measured by the nightly benchmark ledger against what the market actually did.
 
 ## 🐛 How to Debug
 
-Dexter logs all tool calls to a scratchpad file for debugging and history tracking. Each query creates a new JSONL file in `.dexter/scratchpad/`.
+Dexter logs all tool calls to a scratchpad file. Each query creates a new JSONL file in `.dexter/scratchpad/`:
 
-**Scratchpad location:**
 ```
 .dexter/scratchpad/
 ├── 2026-01-30-111400_9a8f10723f79.jsonl
-├── 2026-01-30-143022_a1b2c3d4e5f6.jsonl
 └── ...
 ```
 
-Each file contains newline-delimited JSON entries tracking:
-- **init**: The original query
-- **tool_result**: Each tool call with arguments, raw result, and LLM summary
-- **thinking**: Agent reasoning steps
+Each file tracks the original query, every tool call with arguments and results, and the agent's reasoning steps:
 
-**Example scratchpad entry:**
 ```json
-{"type":"tool_result","timestamp":"2026-01-30T11:14:05.123Z","toolName":"get_income_statements","args":{"ticker":"AAPL","period":"annual","limit":5},"result":{...},"llmSummary":"Retrieved 5 years of Apple annual income statements showing revenue growth from $274B to $394B"}
+{"type":"tool_result","timestamp":"2026-08-05T15:31:05.123Z","toolName":"signal_scorer","args":{"ticker":"AMD"},"result":{...},"llmSummary":"AMD scores 82: momentum and volume aligned, extension 1.4× ATR — inside the chase gate"}
 ```
 
-This makes it easy to inspect exactly what data the agent gathered and how it interpreted results.
+Gateway logs land in `.dexter/logs/` (JSONL, daily rotation).
 
 ## 📱 How to Use with WhatsApp
 
-Chat with Dexter through WhatsApp by linking your phone to the gateway. Messages you send to yourself are processed by Dexter and responses are sent back to the same chat.
+WhatsApp is the alert channel: briefs, trigger alerts, and trade proposals arrive there, and `accept P-XXXX` executes one (paper).
 
-**Quick start:**
 ```bash
 # Link your WhatsApp account (scan QR code)
 bun run gateway:login
@@ -173,33 +155,15 @@ bun run gateway:login
 bun run gateway
 ```
 
-Then open WhatsApp, go to your own chat (message yourself), and ask Dexter a question.
+For pairing details, the command reference, and troubleshooting, see the [WhatsApp Gateway README](src/gateway/channels/whatsapp/README.md) and [User Manual §8](docs/handbook/USER-MANUAL.md).
 
-For detailed setup instructions, configuration options, and troubleshooting, see the [WhatsApp Gateway README](src/gateway/channels/whatsapp/README.md).
+## 🛡️ Safety Model
 
-## 📈 Day2Day Trading Extension
-
-The `day2day` branch extends Dexter into a day/overnight trading **recommendation** system (advisory-first: explicit entry/stop/target; execution is opt-in and gated by user approval plus a paper/live safety lock). See [docs/day2day/PLAN.md](docs/day2day/PLAN.md) for the full architecture.
-
-**Additional prerequisites:**
-- [IB Gateway](https://www.interactivebrokers.com/en/trading/ibgateway-stable.php) or TWS, logged into a **paper** account (port 4002 for IB Gateway paper, 7497 for TWS paper)
-- Optional: a local [vLLM](https://docs.vllm.ai) server exposing an OpenAI-compatible API for latency-sensitive tasks (`VLLM_BASE_URL`)
-- Optional, for backtests: FirstRate 1-minute OHLCV ZIP archives (`FIRSTRATE_DATA_DIR`) and cleaned GDELT sentiment parquet files (`GDELT_DATA_DIR`) — proprietary data, not included
-
-**Setup:**
-```bash
-cp env.example .env
-# Set IBKR_HOST / IBKR_PORT (4002 = paper) / IBKR_CLIENT_ID.
-# On paper accounts without a market-data subscription, set IBKR_MARKET_DATA_TYPE=3 (delayed).
-# Keep IBKR_ALLOW_LIVE=false — order placement is refused on live ports/accounts otherwise.
-
-# Verify the IBKR wiring end-to-end (read-only, never places orders):
-bun run scripts/smoke-ibkr.ts AAPL
-```
-
-**What's included:** IBKR tools (market data, historical bars, orders, account, scanner, risk manager, signal scorer, technical analysis), a realtime streaming sidecar with automatic reconnection, trading skills (`pre-market`, `day-trade`, `overnight`), seeded trading cron jobs (gateway), risk rules in `src/config/risk-rules.yaml`, and a backtest pipeline (`src/backtest/`) with Sharpe/Sortino/drawdown metrics.
-
-**Safety model:** orders always require interactive user approval; placement is additionally refused when connected to a live port (4001/7496) or a non-paper account unless `IBKR_ALLOW_LIVE=true`; risk rules cap position size, daily loss, and overnight exposure; file logs land in `.dexter/logs/` (JSONL, daily rotation).
+- **Human-only execution**: the LLM creates proposals; only an explicit human accept (or the opt-in, paper-only auto-executor) places a bracket — entry, stop, and target transmitted atomically
+- **Paper/live lock**: order placement is refused on live ports (4001/7496) or non-paper accounts unless `IBKR_ALLOW_LIVE=true`; the live risk profile trades fewer, smaller positions and keeps the earnings-bet class **disabled until it has a proven paper record**
+- **Deterministic gates outrank the model**: risk/reward, noise-stop, extension, per-class budgets and caps, daily-loss guard, duplicate-setup guard, chase gate at acceptance — a refusal is information, not an obstacle
+- **Kill-switch**: one command flattens and halts ([User Manual §10](docs/handbook/USER-MANUAL.md))
+- **Honest ledger**: every outcome is recorded as it happened — stops, unlabeled exits, and refusals included — and replayed against the market nightly
 
 ## 🤝 How to Contribute
 
@@ -209,8 +173,7 @@ bun run scripts/smoke-ibkr.ts AAPL
 4. Push to the branch
 5. Create a Pull Request
 
-**Important**: Please keep your pull requests small and focused.  This will make it easier to review and merge.
-
+**Important**: Please keep your pull requests small and focused. This will make it easier to review and merge.
 
 ## 📄 License
 

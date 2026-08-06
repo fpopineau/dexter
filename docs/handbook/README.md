@@ -1,7 +1,8 @@
 # Dexter Day2Day — Handbook
 
-Reference documentation for the day/overnight trading extension built on
-[Dexter](https://github.com/virattt/dexter) (branch `day2day`).
+Reference documentation for the day/overnight trading system — the
+mission of this fork — built on [Dexter](https://github.com/virattt/dexter)
+(branch `day2day`).
 
 | Document | What it covers |
 |---|---|

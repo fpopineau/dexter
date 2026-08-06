@@ -202,7 +202,7 @@ executed proposals), outcome alerts, and the archive scheduler.
 Useful alternatives:
 
 ```bash
-bun run start                            # interactive TUI (research + tools)
+bun run start                            # interactive TUI (trade evaluation + tools)
 bun run scripts/demo-opportunities.ts    # one engine cycle, printed, no LLM
 bun run scripts/smoke-ibkr.ts NVDA       # IBKR wiring check
 ```
@@ -302,6 +302,23 @@ P-3F2A LONG 50 NVDA @182.5 stop 178.2 target 191.0 (score 82) [open]
 
 **Who creates them:** the 09:35 and 15:30 briefs, event triggers, or the
 agent when you ask it to. Creation never trades.
+
+**Trade classes (2026-08):** every proposal carries a `tradeClass` that
+selects its risk budget and caps — shown as `{swing}` / `{earnings-bet}`
+in proposal lines, and broken out per class in performance reports:
+
+| Class | Horizon | Budget | Caps | Sizing basis |
+|---|---|---|---|---|
+| `intraday` (default) | hours–few nights | `max_risk_per_trade_pct` | — | stop distance |
+| `swing` | up to ~2 weeks, GTC | `swing_risk_pct` | max `max_swing_positions` (3) | stop distance |
+| `earnings-bet` | through one print, GTC | `earnings_bet_risk_pct` | max `max_earnings_bets` (1) | worst-case gap (`worstCaseGapPct`, floored at `earnings_bet_gap_floor_pct`) |
+
+Swings and earnings bets require GTC brackets and a `company-snapshot`
+card; earnings bets additionally require the `earnings_bet_intel`
+evidence bar (≥8 prints, ≥75% consistency, ≥1 external signal) and are
+**disabled outright in the live profile** (`earnings_bet_enabled: false`
+in risk-rules.live.yaml) until the class earns ~10 proven paper bets —
+see the per-class lines in `performance` reports for that ledger.
 
 **The risk gate at creation** silently protects you: any proposal with
 R/R < `min_risk_reward`, entry < `min_price`, an incoherent stop/target, a
