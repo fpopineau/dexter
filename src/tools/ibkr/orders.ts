@@ -7,7 +7,8 @@
  *   non-paper managed accounts unless IBKR_ALLOW_LIVE=true (see connection.ts)
  * - Registered in TOOLS_REQUIRING_APPROVAL so the agent must get user consent
  * - transmit=true by default but can be set to false for "what-if" orders
- * - Quantity and price sanity checks
+ * - REDUCE-ONLY placement: orders may only close/trim an existing position;
+ *   risk-increasing orders are refused toward the proposal path
  */
 
 import { DynamicStructuredTool } from '@langchain/core/tools';
@@ -18,6 +19,30 @@ import { formatToolResult } from '../types.js';
 import { assertAccountsVerified, getIBApi, isNonFatalIbkrError } from './connection.js';
 import { withOrderLock } from './order-lock.js';
 import { assertDailyLossOk } from '@/services/daily-loss-guard.js';
+import { fetchPositions } from '@/services/position-actions.js';
+
+// ---------------------------------------------------------------------------
+// Reduce-only guard (audit 2026-08-06, finding 1): risk-INCREASING orders go
+// through the proposal path (gate, sizer, mandatory bracket). This tool may
+// only close or trim what already exists.
+// ---------------------------------------------------------------------------
+
+/** Pure reduce-only check: the order must shrink an existing position. */
+export function checkReduceOnly(
+    side: 'BUY' | 'SELL', quantity: number, positionQty: number,
+): { ok: boolean; reason?: string } {
+    if (positionQty === 0) {
+        return { ok: false, reason: 'no open position in this symbol — opening exposure requires a trade proposal' };
+    }
+    const reducing = positionQty > 0 ? side === 'SELL' : side === 'BUY';
+    if (!reducing) {
+        return { ok: false, reason: `position is ${positionQty > 0 ? 'long' : 'short'} ${Math.abs(positionQty)} — a ${side} adds exposure` };
+    }
+    if (quantity > Math.abs(positionQty)) {
+        return { ok: false, reason: `quantity ${quantity} exceeds the ${Math.abs(positionQty)}-share position — the excess would open a reverse position` };
+    }
+    return { ok: true };
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -49,7 +74,10 @@ evaluations) this tool is AUTO-DENIED by design and will never succeed;
 there, create a trade_proposal instead and tell the user to reply
 'accept <ID>'. Supports three actions:
 
-**place** — Submit a new order. Requires ticker, action (BUY/SELL), quantity, and order type.
+**place** — REDUCE-ONLY: submit an order that closes or trims an EXISTING
+  position (sell against a long, buy against a short, never more shares
+  than held). Orders that open or increase exposure are refused — create a
+  trade_proposal instead. Requires ticker, action (BUY/SELL), quantity, and order type.
   Order types: MKT (market), LMT (limit), STP (stop), STP_LMT (stop-limit),
   TRAIL (trailing stop), TRAIL_LIMIT, MOC (market-on-close), LOC (limit-on-close), MIDPRICE.
   For limit orders, provide limitPrice. For stop orders, provide stopPrice.
@@ -144,6 +172,21 @@ export function createIbkrOrders() {
                     // Daily-loss kill-switch applies to EVERY risk-increasing
                     // order path, not only proposals (review finding #2).
                     await assertDailyLossOk();
+                    // Reduce-only: this path may only shrink an existing
+                    // position. Entries and adds go through trade_proposals
+                    // (create) -> human accept, where the gate, the sizer,
+                    // and the mandatory bracket protect them.
+                    {
+                        const sym = input.ticker.trim().toUpperCase();
+                        const pos = (await fetchPositions(api)).find((q) => q.symbol === sym);
+                        const check = checkReduceOnly(input.side, input.quantity, pos?.quantity ?? 0);
+                        if (!check.ok) {
+                            return formatToolResult({
+                                error: `ibkr_orders place is REDUCE-ONLY: ${check.reason}. ` +
+                                    'Use trade_proposals (action create) for any order that opens or increases exposure.',
+                            });
+                        }
+                    }
                     return withOrderLock(() => placeOrder(api, input));
                 case 'cancel':
                     return cancelOrder(api, input);

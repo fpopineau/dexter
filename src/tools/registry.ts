@@ -208,7 +208,7 @@ export function getToolRegistry(model: string): RegisteredTool[] {
         name: 'ibkr_orders',
         tool: createIbkrOrders(),
         description: IBKR_ORDERS_DESCRIPTION,
-        compactDescription: 'Place, cancel, or list orders through IBKR. Supports MKT, LMT, STP, trailing stop, MOC, etc.',
+        compactDescription: 'REDUCE-ONLY order management through IBKR: close/trim existing positions, cancel, list. New exposure goes through trade_proposals.',
         concurrencySafe: false,
       },
       {

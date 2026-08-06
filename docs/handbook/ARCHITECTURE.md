@@ -210,7 +210,10 @@ Structural guarantees on top of the gates:
   there is no window where the entry exists without its exits.
 - **Single execution path.** Every order-creating flow (WhatsApp accept,
   TUI approval, auto-exec) funnels through `acceptProposal`. There is no
-  second code path to `placeBracketOrder` outside the executor.
+  second code path to `placeBracketOrder` outside the executor — and since
+  2026-08-07 `ibkr_orders place` is **reduce-only** (it can close or trim
+  an existing position, never open or increase one), so the proposal path
+  is the only way to add exposure.
 - **Exactly-once execution.** Accepting takes an atomic claim
   (`open → executing`, conditional UPDATE + claim token) — concurrent
   accepts cannot double-place; interrupted claims are swept to `failed`
