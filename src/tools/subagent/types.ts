@@ -29,7 +29,8 @@ export const SUBAGENT_DISALLOWED_TOOLS = new Set<string>(['spawn_subagent']);
 /**
  * Read-only tools available to a general-purpose subagent. Deliberately excludes
  * write/edit/memory-mutation tools: subagents run in parallel and must not race
- * on approval prompts or side effects.
+ * on approval prompts or side effects. Tool names not registered in the current
+ * session (e.g. IBKR tools without a Gateway) are silently unavailable.
  */
 const READ_ONLY_TOOLS = [
   'get_financials',
@@ -42,6 +43,7 @@ const READ_ONLY_TOOLS = [
   'read_file',
   'memory_search',
   'memory_get',
+  'earnings_calendar',
 ];
 
 const WORKER_PREAMBLE =
@@ -54,21 +56,21 @@ const WORKER_PREAMBLE =
 
 export const SUBAGENT_TYPES: Record<string, SubagentTypeConfig> = {
   'general-purpose': {
-    whenToUse: 'Multi-step research or analysis on one focused sub-task.',
-    systemPrompt: `${WORKER_PREAMBLE}\n\nYou are a general-purpose research worker. Use the available tools to gather and analyze whatever the task requires, then report your findings.`,
+    whenToUse: 'Focused research or data-gathering that fits none of the trade-specific workers.',
+    systemPrompt: `${WORKER_PREAMBLE}\n\nYou are a general-purpose worker for a trading agent. Use the available tools to gather and analyze whatever the task requires, then report your findings with the numbers that support them.`,
     tools: READ_ONLY_TOOLS,
     maxIterations: 8,
   },
-  research: {
-    whenToUse: 'Gather and synthesize external information on a single topic.',
-    systemPrompt: `${WORKER_PREAMBLE}\n\nYou are a research worker. Gather information from the web, news, and filings, cross-check sources, and synthesize a clear, sourced summary of what you found.`,
-    tools: ['web_search', 'x_search', 'web_fetch', 'read_filings', 'get_market_data'],
+  catalyst: {
+    whenToUse: 'Catalyst check on one name: why is it moving, what is coming (news, prints, positioning).',
+    systemPrompt: `${WORKER_PREAMBLE}\n\nYou are a catalyst-check worker. For the given symbol, establish: (1) WHY it is moving or expected to move — the specific story (guidance, halt, FDA, offering, analyst action, M&A), not "momentum"; (2) WHAT is scheduled ahead — earnings date and timing, known events inside the holding window; (3) WHO is positioned where — crowding and trapped-side risk when discernible. Cite sources with dates. Say plainly when you cannot verify a catalyst — an unverified story is a finding, not a gap to paper over.`,
+    tools: ['web_search', 'x_search', 'web_fetch', 'read_filings', 'get_market_data', 'earnings_calendar'],
     maxIterations: 8,
   },
-  analysis: {
-    whenToUse: 'Quantitative financial analysis on specific companies.',
-    systemPrompt: `${WORKER_PREAMBLE}\n\nYou are a financial analysis worker. Pull the relevant financials, metrics, and market data, then deliver a focused quantitative analysis with the numbers that support it.`,
-    tools: ['get_financials', 'get_market_data', 'stock_screener', 'read_filings'],
+  'setup-validation': {
+    whenToUse: 'Validate one trade setup: structure, score, levels, data freshness.',
+    systemPrompt: `${WORKER_PREAMBLE}\n\nYou are a setup-validation worker. For the given symbol and setup, verify with live data: (1) technical structure — trend, key levels, where the honest stop sits relative to ATR; (2) the signal score and each factor driving it; (3) data freshness — stale bars or disagreeing quotes make the setup unverifiable, and you must say so; (4) for earnings-bet candidates, the post-print record and evidence verdict (earnings_bet_intel). Report level-precise findings and a verdict on whether the setup holds up. You validate — you never propose or size trades.`,
+    tools: ['technical_analysis', 'signal_scorer', 'ibkr_market_data', 'ibkr_historical', 'earnings_calendar', 'earnings_bet_intel', 'swing_patterns', 'risk_manager'],
     maxIterations: 8,
   },
 };

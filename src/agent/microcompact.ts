@@ -22,7 +22,14 @@ export const COUNT_KEEP_RECENT = 4;
 /** Fire when total compactable ToolMessage content exceeds this many estimated tokens. */
 export const TOKEN_TRIGGER_THRESHOLD = 80_000;
 
-/** Tool names whose results can be safely cleared (read-only tools). */
+/** Tool names whose results can be safely cleared (read-only context tools).
+ *  DELIBERATELY absent: every trade-critical tool — IBKR market/account data,
+ *  technical_analysis, signal_scorer, risk_manager, trade_proposals,
+ *  earnings_calendar, earnings_bet_intel, swing_patterns, opportunities.
+ *  Their results carry the levels, sizes, and verdicts a live decision rests
+ *  on; clearing them mid-session would erase exactly the numbers that must
+ *  survive (see compact.ts "Open Trade State" for the same rule at full
+ *  compaction). */
 const COMPACTABLE_TOOLS = new Set([
   'get_financials', 'get_market_data', 'read_filings', 'stock_screener',
   'web_fetch', 'web_search', 'x_search', 'browser', 'read_file',

@@ -115,6 +115,9 @@ Call `web_search`:
 ### 4.3 Score Any New Candidates
 Call `signal_scorer` for promising setups:
 - Include the assessment of whether to wait for a pullback or enter at open.
+- These are prep-only candidates: nothing is proposed here. Any that
+  graduate to a swing proposal (pre-market flow) must first pass the
+  `company-snapshot` skill — its RED FLAGS line decides.
 
 ## Step 5: Output Overnight Action Plan
 

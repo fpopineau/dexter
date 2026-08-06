@@ -4,8 +4,10 @@ import { dexterPath } from '../../utils/paths.js';
 
 const HEARTBEAT_MD_PATH = dexterPath('HEARTBEAT.md');
 
-const DEFAULT_CHECKLIST = `- Major index moves (S&P 500, NASDAQ, Dow) — alert if any move more than 2% in a session
-- Breaking financial news — major earnings surprises, Fed announcements, significant market events`;
+const DEFAULT_CHECKLIST = `- Open positions vs their stops (ibkr_account, then ibkr_market_data per position): alert on anything trading within ~0.5× daily ATR of its stop, gapping past it, or left without a working stop order — give the level and the suggested action
+- Proposal freshness (trade_proposals action list, status open): flag proposals whose entry the price has run away from or traded through, and any proposal that now holds through an earnings print (earnings_calendar action check) — suggest reject or re-propose
+- Watchlist names (memory_search for the current watchlist) crossing their key levels or spiking volume between scheduled scans — verify with ibkr_market_data before alerting
+- Market context, one line at most: SPY/QQQ moving more than 1.5% intraday or VIX spiking — context for the items above, never an alert on its own`;
 
 /**
  * Load .dexter/HEARTBEAT.md content.
@@ -68,6 +70,6 @@ ${checklist}
 - If you find something noteworthy, write a concise alert message for the user
 - If nothing noteworthy is happening, respond with exactly: ${HEARTBEAT_OK_TOKEN}
 - Do NOT send a message just to say "everything is fine" — only message if there's something actionable or noteworthy
-- Keep alerts brief and focused — lead with the key finding
+- Keep alerts brief and focused — lead with the position or level affected and the action to take
 - You may combine multiple findings into one message`;
 }

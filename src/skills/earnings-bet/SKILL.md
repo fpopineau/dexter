@@ -26,7 +26,7 @@ Earnings Bet Progress:
 - [ ] Step 2: Entry window check
 - [ ] Step 3: Reaction record — evidence bar
 - [ ] Step 4: External signals (need at least one)
-- [ ] Step 5: Direction and vehicle
+- [ ] Step 5: Snapshot, direction, and vehicle
 - [ ] Step 6: Propose (labeled, auto-sized)
 ```
 
@@ -82,7 +82,13 @@ must say this print isn't the exception:
 
 Zero supporting signals = no bet, even with a perfect record.
 
-## Step 5: Direction and Vehicle
+## Step 5: Snapshot, Direction, and Vehicle
+
+Run the `company-snapshot` skill on the candidate — REQUIRED for this
+class. Its RED FLAGS line can kill a bet the record supports: an
+offering-prone cash burner, or dilution into strength, turns a "7 of 8
+up" record into a trap. Carry the card's red-flags line into the
+proposal rationale.
 
 - **Long**: straight equity buy.
 - **Short**: try the real short first. If the account cannot short (cash
