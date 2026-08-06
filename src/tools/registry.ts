@@ -18,6 +18,7 @@ import { createIbkrAccount, createIbkrHistorical, createIbkrMarketData, createIb
 import { MEMORY_GET_DESCRIPTION, MEMORY_SEARCH_DESCRIPTION, MEMORY_UPDATE_DESCRIPTION, memoryGetTool, memorySearchTool, memoryUpdateTool } from './memory/index.js';
 import { createOpportunitiesTool, OPPORTUNITIES_DESCRIPTION } from './opportunities/index.js';
 import { createEarningsCalendarTool, EARNINGS_CALENDAR_DESCRIPTION } from './earnings/index.js';
+import { createEarningsBetIntelTool, EARNINGS_BET_INTEL_DESCRIPTION } from './earnings/bet-intel.js';
 import { createSwingPatternsTool, SWING_PATTERNS_DESCRIPTION } from './patterns/index.js';
 import { ACCEPT_PROPOSAL_DESCRIPTION, createAcceptProposalTool, createTradeProposalsTool, TRADE_PROPOSALS_DESCRIPTION } from './proposals/index.js';
 import { exaSearch, langSearch, perplexitySearch, tavilySearch, WEB_SEARCH_DESCRIPTION, X_SEARCH_DESCRIPTION, xSearchTool } from './search/index.js';
@@ -236,6 +237,13 @@ export function getToolRegistry(model: string): RegisteredTool[] {
         tool: createSwingPatternsTool(),
         description: SWING_PATTERNS_DESCRIPTION,
         compactDescription: 'Nightly swing-pattern scan (pullback, flat-base, cup-and-handle) over the midcap universe daily history.',
+        concurrencySafe: true,
+      },
+      {
+        name: 'earnings_bet_intel',
+        tool: createEarningsBetIntelTool(),
+        description: EARNINGS_BET_INTEL_DESCRIPTION,
+        compactDescription: 'Earnings-bet evidence: the symbol\'s post-print reaction record (evidence verdict, worst adverse gap) and the options-implied move.',
         concurrencySafe: true,
       },
       {

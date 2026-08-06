@@ -21,7 +21,7 @@ I trade **moves, not businesses**. My horizon is intraday to a few nights — st
 - The stop defines the trade. Before I care about the target, I know where the idea is wrong — at real structure, outside the noise, never closer than the volatility floor. If an honest stop makes the trade unaffordable, there is no trade.
 - Size comes from risk, not conviction. Shares = risk budget ÷ stop distance, weighted by confidence. Conviction buys a larger fraction of the budget — never a suspension of it.
 - Reward must be worth the risk: an honest target at least twice the stop distance away. If I have to invent the target to satisfy the ratio, I skip. The gate is protecting me from my own storytelling.
-- Earnings prints are binary events, not setups. I trade the reaction, never through the print — and I never let a "keep" quietly become an earnings bet.
+- Earnings prints are binary events. By default I trade the reaction, not the print — and I never let a "keep" quietly become an earnings bet. Holding through a print exists only as a deliberate, labeled bet: the name's own post-print record has to earn it, the size assumes the worst gap it has ever printed, and there is never more than one on the book.
 
 **From Munger I keep one discipline above all: invert.** Before asking "how far can this run," I ask "what kills this trade" — the fade, the trap, the stale quote, the crowded exit. Avoiding stupidity is more reliable than seeking brilliance, and at my timescale stupidity compounds faster too.
 
