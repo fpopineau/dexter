@@ -36,6 +36,7 @@ import { startBenchmark } from '@/services/benchmark.js';
 import { startDashboard } from '@/services/dashboard.js';
 import { startEodTriage } from '@/services/eod-triage.js';
 import { startProfitTrail } from '@/services/profit-trail.js';
+import { catchUpPatternScan } from '@/services/pattern-scanner.js';
 import { startStaleEntrySweeper } from '@/services/stale-entry-sweeper.js';
 import { registerScanHealthAlerts } from './health-alerts.js';
 import { registerTriggerAlerts } from './trigger-alerts.js';
@@ -289,6 +290,10 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     // the protected-overnight conversion at the bell.
     startEodTriage();
     startBenchmark();
+    // Swing-pattern snapshot catch-up: the nightly sweep (whose stage 4
+    // produces it) is routinely killed by the nightly restart window —
+    // the boot that killed it heals it. Local-only, non-blocking.
+    void catchUpPatternScan();
     // Local dashboard (http://127.0.0.1:8484) — charts + the live book from
     // dexter's own data; no second IBKR session involved.
     startDashboard();
