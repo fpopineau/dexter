@@ -18,6 +18,26 @@ import { readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
+/**
+ * Trade classes — every proposal belongs to exactly one:
+ *
+ *   'intraday'     hours to a few nights; stop-distance sizing against
+ *                  max_risk_per_trade_pct (the default class).
+ *   'swing'        pattern trades (pullback, flat base, cup-and-handle);
+ *                  GTC brackets held up to ~2 weeks; stop-distance sizing
+ *                  against swing_risk_pct; capped at max_swing_positions.
+ *   'earnings-bet' a deliberate hold THROUGH an earnings print. A stop
+ *                  cannot protect through a gap, so sizing assumes the
+ *                  position gaps to its worst historical post-print move
+ *                  (floored at earnings_bet_gap_floor_pct) and that worst
+ *                  case may not exceed earnings_bet_risk_pct of the
+ *                  account. One at a time; disabled entirely unless
+ *                  earnings_bet_enabled (paper-only until proven).
+ */
+export type TradeClass = 'intraday' | 'swing' | 'earnings-bet';
+
+export const TRADE_CLASSES: readonly TradeClass[] = ['intraday', 'swing', 'earnings-bet'];
+
 export interface RiskRules {
     max_position_pct: number;
     max_open_positions: number;
@@ -60,6 +80,25 @@ export interface RiskRules {
      *  position cap. Brackets stay atomic: the sizer computes an explicit
      *  decimal quantity and all three legs carry it. */
     fractional_shares: boolean;
+    // --- Trade classes (see TradeClass) ---
+    /** Per-trade risk budget for the 'swing' class (% of net liquidation).
+     *  Swings are fewer and wider-stopped than intraday trades. */
+    swing_risk_pct: number;
+    /** Max concurrent swing-class positions (executed + working). */
+    max_swing_positions: number;
+    /** Master switch for the 'earnings-bet' class. false = the gate refuses
+     *  every earnings-bet proposal (used to keep the class paper-only until
+     *  it has a track record). */
+    earnings_bet_enabled: boolean;
+    /** Max concurrent earnings-bet positions (executed + working). */
+    max_earnings_bets: number;
+    /** Worst-case risk budget for the 'earnings-bet' class (% of net
+     *  liquidation). The worst case is a gap to the assumed adverse
+     *  post-print move — not the stop distance. */
+    earnings_bet_risk_pct: number;
+    /** Minimum assumed adverse gap (%) for earnings-bet sizing. The sizer
+     *  uses max(symbol's worst historical post-print move, this floor). */
+    earnings_bet_gap_floor_pct: number;
 }
 
 export const DEFAULT_RULES: RiskRules = {
@@ -87,6 +126,12 @@ export const DEFAULT_RULES: RiskRules = {
     min_risk_budget_usd: 0,
     profit_trail_replaces_target: true,
     fractional_shares: false,
+    swing_risk_pct: 0.5,
+    max_swing_positions: 3,
+    earnings_bet_enabled: false,
+    max_earnings_bets: 1,
+    earnings_bet_risk_pct: 0.25,
+    earnings_bet_gap_floor_pct: 20,
 };
 
 export type AccountProfile = 'paper' | 'live';

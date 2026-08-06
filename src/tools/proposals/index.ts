@@ -79,6 +79,10 @@ const CreateSchema = z.object({
         .describe('Number of shares (decimals allowed when the account profile enables fractional trading). OMIT to auto-size (recommended): the position sizer computes shares from the account risk budget, the confidence score, and the stop distance — this is the only way sizing stays correct across account sizes. Pass explicitly only when the user demanded a specific quantity.'),
     tif: z.enum(['DAY', 'GTC']).default('DAY')
         .describe("Bracket time-in-force. Use 'GTC' for overnight/swing setups so the stop and target SURVIVE the market close; 'DAY' brackets expire at the bell and can leave a filled position unprotected overnight."),
+    tradeClass: z.enum(['intraday', 'swing', 'earnings-bet']).default('intraday')
+        .describe("Trade class. 'intraday' (default): hours to a few nights. 'swing': pattern trade (pullback/flat-base/cup-and-handle) held up to ~2 weeks — requires tif GTC, capped at 3 concurrent, sized from the swing risk budget. 'earnings-bet': a DELIBERATE hold through an earnings print — requires tif GTC, one at a time, sized so a worst-case gap costs no more than the earnings-bet budget (the stop cannot protect through a print). Never label a trade earnings-bet to dodge the exit-before-print rule of other classes; the class has stricter sizing, not looser."),
+    worstCaseGapPct: z.coerce.number().min(0).max(100).optional()
+        .describe("Earnings bets only: the symbol's worst ADVERSE post-print move in %, from its own earnings history (e.g. 18 for -18%). The sizer floors this at the configured minimum gap assumption. Omit if unknown — the floor alone is used."),
     score: z.coerce.number().min(0).max(150).optional().describe('Signal/composite score backing this proposal.'),
     rationale: z.string().min(5).describe('One or two sentences: why this trade, catalyst, risk note.'),
     expiresMinutes: z.coerce.number().int().positive().max(24 * 60).default(120)
@@ -118,6 +122,14 @@ function coherent(input: z.infer<typeof CreateSchema>): string | null {
     if (input.direction === 'short' && !(input.target < input.entry && input.entry < input.stop)) {
         return 'short proposal requires target < entry < stop';
     }
+    // A multi-day class on a DAY bracket leaves the position unprotected at
+    // the first close — structurally incoherent, not a style choice.
+    if (input.tradeClass !== 'intraday' && input.tif !== 'GTC') {
+        return `${input.tradeClass} proposals require tif GTC — a DAY bracket expires at the close and leaves the position unprotected`;
+    }
+    if (input.worstCaseGapPct != null && input.tradeClass !== 'earnings-bet') {
+        return 'worstCaseGapPct only applies to earnings-bet proposals';
+    }
     return null;
 }
 
@@ -152,6 +164,7 @@ export function createTradeProposalsTool() {
                             }
                             const sized = computeQuantity({
                                 entry: input.entry, stop: input.stop, score: input.score, netLiquidation: netLiq,
+                                tradeClass: input.tradeClass, worstCaseGapPct: input.worstCaseGapPct,
                             });
                             if (sized.quantity == null) {
                                 logger.warn(`[trade-proposals] auto-size refused: ${input.symbol} ${input.direction} @${input.entry} stop ${input.stop} score ${input.score ?? '—'} — ${sized.reason}`);
@@ -177,6 +190,8 @@ export function createTradeProposalsTool() {
                             target: input.target,
                             quantity,
                             tif: input.tif,
+                            tradeClass: input.tradeClass,
+                            worstCaseGapPct: input.worstCaseGapPct,
                             score: input.score,
                             rationale: input.rationale,
                             source: 'agent',

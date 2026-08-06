@@ -24,6 +24,7 @@ import { assertProposalRisk, checkPriceRun } from './proposal-risk-gate.js';
 import {
     claimProposalForExecution,
     countExecutedSince,
+    countOpenByClass,
     countOpenExecuted,
     etDayStartMs,
     expireStale,
@@ -89,11 +90,17 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 stop: p.stop,
                 target: p.target,
                 quantity: p.quantity,
+                tradeClass: p.tradeClass,
             },
             {
                 netLiquidation: lossStatus.netLiquidation,
                 openPositions: await countOpenExecuted(),
                 executedToday: await countExecutedSince(etDayStartMs()),
+                // Class caps re-checked with live counts (this proposal
+                // excluded) — two accepts cannot both pass a full book.
+                openSwingPositions: await countOpenByClass('swing', p.id),
+                openEarningsBets: await countOpenByClass('earnings-bet', p.id),
+                ...(p.worstCaseGapPct != null ? { worstCaseGapPct: p.worstCaseGapPct } : {}),
                 // Committed notional on this symbol from OTHER working/filled
                 // proposals — the aggregate cap stops same-name stacking.
                 existingSymbolExposure: (await listTrackable())

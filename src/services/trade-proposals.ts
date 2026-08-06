@@ -22,6 +22,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { assertProposalRisk, type RiskGateContext } from './proposal-risk-gate.js';
+import type { TradeClass } from '@/tools/ibkr/risk-rules.js';
 
 export type ProposalStatus = 'open' | 'executing' | 'executed' | 'closed' | 'rejected' | 'expired' | 'failed';
 
@@ -46,6 +47,15 @@ export interface TradeProposal {
     /** Bracket time-in-force: DAY (intraday, expires at the close) or GTC
      *  (overnight/swing — the bracket survives the close). */
     tif: 'DAY' | 'GTC';
+    /** Trade class: 'intraday' (default), 'swing' (pattern trade, up to
+     *  ~2 weeks), or 'earnings-bet' (deliberate hold through a print).
+     *  Selects the risk budget/caps at the gate and tags the outcome
+     *  ledger so each class accrues its own track record. */
+    tradeClass: TradeClass;
+    /** Earnings bets: the adverse post-print gap (%) the sizing assumed
+     *  (worst historical move, floored at earnings_bet_gap_floor_pct).
+     *  Null for other classes. */
+    worstCaseGapPct: number | null;
     score: number | null;
     rationale: string;
     /** Who created it: cron job name, 'trigger', 'tui', … */
@@ -291,6 +301,8 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     ['tif', 'TEXT'],
     ['entry_limit', 'REAL'],
     ['claim_token', 'TEXT'],
+    ['trade_class', 'TEXT'],
+    ['worst_case_gap_pct', 'REAL'],
 ];
 
 function migrate(database: SqliteDatabase): void {
@@ -328,6 +340,8 @@ interface Row {
     exit_fill_price: number | null;
     exit_reason: ExitReason | null;
     tif: string | null;
+    trade_class: string | null;
+    worst_case_gap_pct: number | null;
     realized_pnl: number | null;
     commissions: number | null;
     closed_at: number | null;
@@ -359,6 +373,8 @@ function fromRow(r: Row): TradeProposal {
         exitFillPrice: r.exit_fill_price ?? null,
         exitReason: r.exit_reason ?? null,
         tif: r.tif === 'GTC' ? 'GTC' : 'DAY',
+        tradeClass: (r.trade_class === 'swing' || r.trade_class === 'earnings-bet') ? r.trade_class : 'intraday',
+        worstCaseGapPct: r.worst_case_gap_pct ?? null,
         realizedPnl: r.realized_pnl ?? null,
         commissions: r.commissions ?? null,
         closedAt: r.closed_at ?? null,
@@ -381,6 +397,10 @@ export interface CreateProposalInput {
     quantity: number;
     /** DAY (default) or GTC for overnight/swing brackets. */
     tif?: 'DAY' | 'GTC';
+    /** Trade class; defaults to 'intraday'. */
+    tradeClass?: TradeClass;
+    /** Earnings bets: worst historical adverse post-print move (%). */
+    worstCaseGapPct?: number;
     score?: number;
     rationale: string;
     source: string;
@@ -391,6 +411,19 @@ export interface CreateProposalInput {
  *  the same symbol are duplicates (the daily brief re-proposing yesterday's
  *  swing setup), not new trades. */
 export const DUPLICATE_ENTRY_TOLERANCE = 0.02;
+
+/**
+ * Count real commitments of a trade class: proposals executing or executed
+ * (not yet closed). Un-accepted 'open' proposals do not count — proposing
+ * alternatives is free; the cap binds at acceptance.
+ */
+export async function countOpenByClass(tradeClass: TradeClass, excludeId?: string): Promise<number> {
+    const database = await getDb();
+    const rows = database.query<Row>(
+        `SELECT * FROM proposals WHERE status IN ('executing', 'executed')`,
+    ).all();
+    return rows.map(fromRow).filter((t) => t.tradeClass === tradeClass && t.id !== excludeId).length;
+}
 
 export async function createProposal(
     input: CreateProposalInput,
@@ -415,6 +448,9 @@ export async function createProposal(
 
     // Deterministic risk gate — a proposal violating risk-rules.yaml is never
     // persisted, regardless of who created it (LLM, cron, TUI, script).
+    // Class caps count real commitments (executing/executed) server-side;
+    // callers cannot understate them.
+    const tradeClass: TradeClass = input.tradeClass ?? 'intraday';
     assertProposalRisk({
         symbol: input.symbol,
         direction: input.direction,
@@ -424,7 +460,13 @@ export async function createProposal(
         stop: input.stop,
         target: input.target,
         quantity: input.quantity,
-    }, gateContext);
+        tradeClass,
+    }, {
+        ...gateContext,
+        ...(tradeClass === 'swing' ? { openSwingPositions: await countOpenByClass('swing') } : {}),
+        ...(tradeClass === 'earnings-bet' ? { openEarningsBets: await countOpenByClass('earnings-bet') } : {}),
+        ...(input.worstCaseGapPct != null ? { worstCaseGapPct: input.worstCaseGapPct } : {}),
+    });
 
     const database = await getDb();
     const now = Date.now();
@@ -442,13 +484,15 @@ export async function createProposal(
     database.query<void>(
         `INSERT INTO proposals
          (id, created_at, expires_at, updated_at, status, symbol, direction, entry_type,
-          entry, entry_limit, stop, target, quantity, tif, score, rationale, source, order_ids, note)
-         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+          entry, entry_limit, stop, target, quantity, tif, trade_class, worst_case_gap_pct,
+          score, rationale, source, order_ids, note)
+         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
     ).run(
         id, now, expiry, now,
         input.symbol.trim().toUpperCase(), input.direction, input.entryType,
         input.entry ?? null, input.entryLimit ?? null, input.stop, input.target, input.quantity,
         input.tif === 'GTC' ? 'GTC' : 'DAY',
+        tradeClass, input.worstCaseGapPct ?? null,
         input.score ?? null, input.rationale, input.source,
     );
 
@@ -683,6 +727,9 @@ export interface PerformanceSummary {
     best: { id: string; symbol: string; pnl: number } | null;
     worst: { id: string; symbol: string; pnl: number } | null;
     byExitReason: Record<string, number>;
+    /** Per-class ledger (intraday / swing / earnings-bet). Each class earns
+     *  its own track record — the earnings-bet live switch is gated on this. */
+    byClass: Record<string, { closed: number; wins: number; losses: number; netPnl: number }>;
     openExecuted: number;
     openProposals: number;
 }
@@ -705,13 +752,19 @@ export async function getPerformanceSummary(
     let best: PerformanceSummary['best'] = null;
     let worst: PerformanceSummary['worst'] = null;
     const byExitReason: Record<string, number> = {};
+    const byClass: PerformanceSummary['byClass'] = {};
 
     for (const p of rows) {
         byExitReason[p.exitReason ?? 'unknown'] = (byExitReason[p.exitReason ?? 'unknown'] ?? 0) + 1;
+        const cls = (byClass[p.tradeClass] ??= { closed: 0, wins: 0, losses: 0, netPnl: 0 });
+        cls.closed++;
         if (p.realizedPnl == null) {
             unlabeled++;
             continue;
         }
+        cls.netPnl = Math.round((cls.netPnl + p.realizedPnl - (p.commissions ?? 0)) * 100) / 100;
+        if (p.realizedPnl > 0) cls.wins++;
+        else if (p.realizedPnl < 0) cls.losses++;
         grossPnl += p.realizedPnl;
         commissions += p.commissions ?? 0;
         if (p.realizedPnl > 0) wins++;
@@ -737,6 +790,7 @@ export async function getPerformanceSummary(
         best,
         worst,
         byExitReason,
+        byClass,
         openExecuted: await countOpenExecuted(),
         openProposals: (await listProposals('open', 100)).length,
     };
@@ -746,11 +800,11 @@ export async function getPerformanceSummary(
 export function formatPerformanceReport(s: PerformanceSummary, label: string): string {
     if (s.closed === 0 && s.openExecuted === 0) {
         const since = s.baseline ? ` since the ${new Date(s.baseline.epochMs).toISOString().slice(0, 10)} baseline` : '';
-        return `📊 Performance (${label}): no closed trades${since}, nothing executing.`;
+        return `Performance (${label}): no closed trades${since}, nothing executing.`;
     }
     const sign = (n: number) => (n >= 0 ? `+$${n.toFixed(2)}` : `-$${Math.abs(n).toFixed(2)}`);
     const lines = [
-        `📊 Performance (${label}): ${s.closed} closed, ${s.wins}W/${s.losses}L` +
+        `Performance (${label}): ${s.closed} closed, ${s.wins}W/${s.losses}L` +
         (s.winRatePct != null ? ` (${s.winRatePct}% win rate)` : '') +
         (s.unlabeled ? `, ${s.unlabeled} without P&L` : ''),
         `Net P&L ${sign(s.netPnl)} (gross ${sign(s.grossPnl)}, commissions $${s.commissions.toFixed(2)})`,
@@ -759,6 +813,15 @@ export function formatPerformanceReport(s: PerformanceSummary, label: string): s
     if (s.worst && s.worst.id !== s.best?.id) lines.push(`Worst: ${s.worst.symbol} ${sign(s.worst.pnl)} (${s.worst.id})`);
     const reasons = Object.entries(s.byExitReason).map(([r, n]) => `${r} ${n}`).join(', ');
     if (reasons) lines.push(`Exits: ${reasons}`);
+    // Per-class lines only when a non-intraday class traded — the class
+    // ledgers are what the swing review and the earnings-bet live switch
+    // are judged on.
+    if (Object.keys(s.byClass).some((c) => c !== 'intraday')) {
+        for (const [c, v] of Object.entries(s.byClass)) {
+            if (v.closed === 0) continue;
+            lines.push(`  ${c}: ${v.closed} closed, ${v.wins}W/${v.losses}L, net ${sign(v.netPnl)}`);
+        }
+    }
     if (s.openExecuted > 0) lines.push(`Still executing: ${s.openExecuted}`);
     if (s.openProposals > 0) lines.push(`Open proposals: ${s.openProposals}`);
     if (s.baseline) {
@@ -833,6 +896,7 @@ export function formatProposalLine(p: TradeProposal): string {
     const asOf = p.status === 'open'
         ? ` · levels as of ${new Date(p.createdAt).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false })} ET`
         : '';
+    const classTag = p.tradeClass !== 'intraday' ? ` {${p.tradeClass}}` : '';
     return `${p.id} ${p.direction.toUpperCase()} ${p.quantity} ${p.symbol} ${entry} stop ${p.stop} target ${p.target}` +
-        (p.score != null ? ` (score ${p.score})` : '') + ` [${p.status}${outcome}]${asOf}`;
+        (p.score != null ? ` (score ${p.score})` : '') + `${classTag} [${p.status}${outcome}]${asOf}`;
 }

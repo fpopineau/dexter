@@ -11,6 +11,7 @@ process.env.DEXTER_DATA_DIR = dir;
 import {
     closeProposal,
     countExecutedSince,
+    countOpenByClass,
     countOpenExecuted,
     createProposal,
     etDayStartMs,
@@ -317,5 +318,68 @@ describe('recordLateExitFill (P&L attribution after the fact)', () => {
         await closeProposal(s.id, { exitReason: 'stop', realizedPnl: -50 });
         await recordLateExitFill(s.id, { exitFillPrice: 1, realizedPnl: 999 });
         expect((await getProposal(s.id))?.realizedPnl).toBe(-50);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Trade classes — persistence, counting, and the server-side swing cap
+// ---------------------------------------------------------------------------
+
+describe('trade classes', () => {
+    test('tradeClass persists and defaults to intraday', async () => {
+        const plain = await createProposal(validInput({ symbol: 'CLSA' }));
+        expect(plain.tradeClass).toBe('intraday');
+        const swing = await createProposal(validInput({
+            symbol: 'CLSB', tradeClass: 'swing', tif: 'GTC',
+        }));
+        expect(swing.tradeClass).toBe('swing');
+        expect((await getProposal(swing.id))?.tradeClass).toBe('swing');
+        expect(formatProposalLine(swing)).toContain('{swing}');
+        expect(formatProposalLine(plain)).not.toContain('{intraday}');
+    });
+
+    test('countOpenByClass counts executing/executed only, and can exclude one id', async () => {
+        const a = await createProposal(validInput({ symbol: 'CLSC', tradeClass: 'swing', tif: 'GTC' }));
+        const b = await createProposal(validInput({ symbol: 'CLSD', tradeClass: 'swing', tif: 'GTC' }));
+        const before = await countOpenByClass('swing');
+        await setProposalStatus(a.id, 'executed', { executedAt: Date.now() });
+        await setProposalStatus(b.id, 'executed', { executedAt: Date.now() });
+        expect(await countOpenByClass('swing')).toBe(before + 2);
+        expect(await countOpenByClass('swing', a.id)).toBe(before + 1);
+        // Closing frees the slot.
+        await closeProposal(a.id, { exitReason: 'target', realizedPnl: 10 });
+        expect(await countOpenByClass('swing')).toBe(before + 1);
+        // cleanup for the cap test below
+        await closeProposal(b.id, { exitReason: 'target', realizedPnl: 10 });
+    });
+
+    test('the swing cap is enforced server-side at creation', async () => {
+        const syms = ['CLSE', 'CLSF', 'CLSG'];
+        const ids: string[] = [];
+        for (const sym of syms) {
+            const p = await createProposal(validInput({ symbol: sym, tradeClass: 'swing', tif: 'GTC' }));
+            await setProposalStatus(p.id, 'executed', { executedAt: Date.now() });
+            ids.push(p.id);
+        }
+        // Fourth swing: the store counts 3 executing/executed swings itself —
+        // no caller-supplied context can understate the book.
+        await expect(
+            createProposal(validInput({ symbol: 'CLSH', tradeClass: 'swing', tif: 'GTC' })),
+        ).rejects.toThrow(/max 3/);
+        // An intraday proposal is unaffected by the full swing book.
+        const ok = await createProposal(validInput({ symbol: 'CLSI' }));
+        expect(ok.tradeClass).toBe('intraday');
+        for (const id of ids) await closeProposal(id, { exitReason: 'manual', realizedPnl: 0 });
+    });
+
+    test('per-class ledger appears in the performance summary', async () => {
+        const p = await createProposal(validInput({ symbol: 'CLSJ', tradeClass: 'swing', tif: 'GTC' }));
+        await setProposalStatus(p.id, 'executed', { executedAt: Date.now() });
+        await closeProposal(p.id, { exitReason: 'target', realizedPnl: 25 });
+        const s = await getPerformanceSummary(Date.now() - 60_000, { includeAllHistory: true });
+        expect(s.byClass.swing).toBeDefined();
+        expect(s.byClass.swing.wins).toBeGreaterThanOrEqual(1);
+        const report = formatPerformanceReport(s, 'test');
+        expect(report).toContain('swing:');
     });
 });

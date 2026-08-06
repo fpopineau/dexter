@@ -38,3 +38,16 @@ max_risk_per_trade_pct: 0.25 # Max loss if the stop fills (qty × stop distance)
 profit_trail_arm_pct: 5 # Arm the trail once unrealized gain reaches this %
 profit_trail_pullback_pct: 1.5 # Close when price gives back this % from the peak
 profit_trail_replaces_target: true # Runner mode: on arming, cancel the fixed target leg — the trail manages the exit (stop stays)
+
+# --- Trade Classes ---
+# intraday (default): sized by stop distance against max_risk_per_trade_pct.
+# swing: pattern trades (pullback / flat base / cup-and-handle), GTC, held up
+#        to ~2 weeks; must plan an exit before any earnings print in window.
+# earnings-bet: deliberate hold THROUGH a print. A stop cannot protect through
+#        a gap, so sizing assumes the worst historical post-print move.
+swing_risk_pct: 0.5 # Per-trade risk budget for swing positions (% of NetLiq)
+max_swing_positions: 3 # Max concurrent swing positions (executed + working)
+earnings_bet_enabled: true # Paper profile: the class is live for its burn-in
+max_earnings_bets: 1 # One open earnings bet at a time — training wheels
+earnings_bet_risk_pct: 0.25 # Worst-case gap loss budget (% of NetLiq)
+earnings_bet_gap_floor_pct: 20 # Assume at least a 20% adverse gap when sizing

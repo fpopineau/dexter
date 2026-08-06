@@ -10,8 +10,13 @@
  *                   bands in risk-rules; unscored gets the low multiplier)
  *   stop distance = |entry − stop| (the structural stop the gates enforce)
  *
- *   quantity = floor(budget × confidence / stopDistance),
+ *   quantity = floor(budget × confidence / riskPerShare),
  *              capped by max_position_pct of the account.
+ *
+ * The budget and riskPerShare depend on the trade class: intraday and
+ * swing size against the stop distance (0.25% / swing_risk_pct budgets);
+ * earnings bets size against the assumed worst-case gap — a stop cannot
+ * protect through a print (see TradeClass in risk-rules.ts).
  *
  * Whole shares only — dexter's gates, brackets and tracker assume integer
  * quantities (fractional support is a separate project). A trade the
@@ -25,7 +30,7 @@
  * be added when it matters.
  */
 
-import { getRiskRules, type RiskRules } from '@/tools/ibkr/risk-rules.js';
+import { getRiskRules, type RiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
 
 export interface SizeInput {
     entry: number;
@@ -34,6 +39,13 @@ export interface SizeInput {
     score?: number | null;
     /** Account net liquidation (base currency). */
     netLiquidation: number;
+    /** Trade class; defaults to 'intraday'. Selects the risk budget and,
+     *  for 'earnings-bet', switches to worst-case-gap sizing. */
+    tradeClass?: TradeClass;
+    /** Earnings bets only: the symbol's worst historical adverse post-print
+     *  move (%). The sizer floors it at earnings_bet_gap_floor_pct; omitted
+     *  → the floor alone is assumed. Ignored for other classes. */
+    worstCaseGapPct?: number | null;
 }
 
 export interface SizeResult {
@@ -78,13 +90,45 @@ export function confidenceMultiplier(score: number | null | undefined, rules: Ri
     return rules.sizing_low_mult;
 }
 
+/** Risk budget percentage for a trade class. */
+export function classRiskPct(tradeClass: TradeClass, rules: RiskRules): number {
+    switch (tradeClass) {
+        case 'swing': return rules.swing_risk_pct;
+        case 'earnings-bet': return rules.earnings_bet_risk_pct;
+        default: return rules.max_risk_per_trade_pct;
+    }
+}
+
+/**
+ * Per-share risk for earnings-bet sizing: the assumed adverse gap in
+ * dollars. A stop cannot protect through a print, so the "stop distance"
+ * for budget math is entry × the assumed worst-case gap — the symbol's
+ * worst historical post-print move, floored at earnings_bet_gap_floor_pct.
+ */
+export function gapRiskPerShare(entry: number, worstCaseGapPct: number | null | undefined, rules: RiskRules): number {
+    const assumed = Math.max(worstCaseGapPct ?? 0, rules.earnings_bet_gap_floor_pct);
+    return entry * (assumed / 100);
+}
+
 /** Compute the whole-share quantity for a proposal, or refuse with a reason. */
 export function computeQuantity(input: SizeInput, rules: RiskRules = getRiskRules()): SizeResult {
+    const tradeClass: TradeClass = input.tradeClass ?? 'intraday';
     const stopDistance = Math.abs(input.entry - input.stop);
+    // Earnings bets size against the assumed adverse gap, never the stop —
+    // the gap does not respect the stop.
+    const riskPerShare = tradeClass === 'earnings-bet'
+        ? gapRiskPerShare(input.entry, input.worstCaseGapPct, rules)
+        : stopDistance;
     const multiplier = confidenceMultiplier(input.score, rules);
-    const fullBudget = (rules.max_risk_per_trade_pct / 100) * input.netLiquidation;
+    const fullBudget = (classRiskPct(tradeClass, rules) / 100) * input.netLiquidation;
     const riskBudget = Math.round(fullBudget * multiplier * 100) / 100;
 
+    if (tradeClass === 'earnings-bet' && !rules.earnings_bet_enabled) {
+        return {
+            quantity: null, multiplier, riskBudget,
+            reason: 'earnings bets are disabled in this account profile (paper-only until the class is proven)',
+        };
+    }
     if (!(input.entry > 0) || !(stopDistance > 0)) {
         return { quantity: null, multiplier, riskBudget, reason: 'entry and stop must be positive and distinct' };
     }
@@ -104,7 +148,7 @@ export function computeQuantity(input: SizeInput, rules: RiskRules = getRiskRule
 
     const fractional = rules.fractional_shares;
     const maxPositionValue = (rules.max_position_pct / 100) * input.netLiquidation;
-    const byRisk = floorToPlaceable(riskBudget / stopDistance, fractional);
+    const byRisk = floorToPlaceable(riskBudget / riskPerShare, fractional);
     const byCap = floorToPlaceable(maxPositionValue / input.entry, fractional);
     const quantity = Math.min(byRisk, byCap);
     const minQty = fractional ? FRACTIONAL_STEP : 1;
@@ -112,13 +156,17 @@ export function computeQuantity(input: SizeInput, rules: RiskRules = getRiskRule
     if (quantity < minQty) {
         const maxAffordableEntry = Math.floor(maxPositionValue * 100) / 100;
         const unit = fractional ? `${FRACTIONAL_STEP} share` : 'one share';
+        const riskLabel = tradeClass === 'earnings-bet' ? 'assumed worst-case gap' : 'stop distance';
         return {
             quantity: null, multiplier, riskBudget,
             reason: byCap < minQty
                 ? `${unit} at $${input.entry} exceeds the ${rules.max_position_pct}% position cap ` +
                   `($${maxAffordableEntry.toFixed(0)}) — the account cannot afford this symbol; pick one under that price`
-                : `the $${riskBudget.toFixed(0)} risk budget does not cover ${unit}'s stop distance ` +
-                  `($${stopDistance.toFixed(2)}) — tighten to real structure closer in, or skip`,
+                : `the $${riskBudget.toFixed(0)} risk budget does not cover ${unit}'s ${riskLabel} ` +
+                  `($${riskPerShare.toFixed(2)})` +
+                  (tradeClass === 'earnings-bet'
+                      ? ' — the account cannot afford this bet; pick a cheaper or less volatile name, or skip'
+                      : ' — tighten to real structure closer in, or skip'),
         };
     }
 

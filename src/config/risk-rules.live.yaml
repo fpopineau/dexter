@@ -32,6 +32,19 @@ sizing_low_mult: 0.35 # below 60, or unscored
 # --- Small-account floor ---
 min_risk_budget_usd: 15 # refuse trades whose weighted budget is below this — commissions/spread would eat the edge
 
+# --- Trade Classes ---
+# Swings scale with the live intraday budget (1.0%): 1.5% keeps a 3-swing
+# book's total stop-out cost under ~5% of the account.
+swing_risk_pct: 1.5 # ~€55 max loss per swing stop-out on €3.7K — REVIEW before go-live
+max_swing_positions: 3
+# Earnings bets are PAPER-ONLY until the class has its own track record
+# (~10 bets with acceptable outcomes on paper). Flip earnings_bet_enabled
+# only after that review — the budget below is pre-set for that day.
+earnings_bet_enabled: false
+max_earnings_bets: 1
+earnings_bet_risk_pct: 1.0 # worst-case gap loss ~€37 on €3.7K, once enabled
+earnings_bet_gap_floor_pct: 20
+
 # --- Fractional shares ---
 # KEEP FALSE: IBKR hard-blocks fractional EQUITY orders via the TWS API
 # (error 10243 "use the desktop version", verified live on paper

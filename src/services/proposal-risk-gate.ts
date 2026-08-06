@@ -15,8 +15,8 @@
  * gate unit-testable and free of connection state.
  */
 
-import { getRiskRules, type RiskRules } from '@/tools/ibkr/risk-rules.js';
-import { isValidQuantity } from '@/services/position-sizer.js';
+import { getRiskRules, type RiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
+import { isValidQuantity, classRiskPct, gapRiskPerShare } from '@/services/position-sizer.js';
 import { logger } from '@/utils';
 
 export interface RiskGateProposal {
@@ -31,6 +31,9 @@ export interface RiskGateProposal {
     stop: number;
     target: number;
     quantity: number;
+    /** Trade class; omitted = 'intraday'. Selects the risk budget and the
+     *  class-specific checks (swing cap, earnings-bet cap/switch/gap math). */
+    tradeClass?: TradeClass;
 }
 
 export interface RiskGateContext {
@@ -55,6 +58,16 @@ export interface RiskGateContext {
      *  exactly the days institutions are repricing (Jul 30 MSFT +15%,
      *  refused 3× at 3.2–4.6× ATR). */
     recentEarnings?: boolean;
+    /** Open swing-class positions/working proposals (excluding this one).
+     *  Enables the max_swing_positions cap. */
+    openSwingPositions?: number;
+    /** Open earnings-bet positions/working proposals (excluding this one).
+     *  Enables the max_earnings_bets cap. */
+    openEarningsBets?: number;
+    /** Earnings bets: the symbol's worst historical adverse post-print
+     *  move (%). Floored at earnings_bet_gap_floor_pct for the worst-case
+     *  budget check; omitted → the floor alone is assumed. */
+    worstCaseGapPct?: number;
 }
 
 export interface RiskGateResult {
@@ -79,6 +92,32 @@ export function checkProposalRisk(
 ): RiskGateResult {
     const violations: string[] = [];
     const notes: string[] = [];
+    const tradeClass: TradeClass = p.tradeClass ?? 'intraday';
+
+    // --- Trade-class switches and caps ---
+    // The earnings-bet master switch is the paper-only-until-proven lock:
+    // in the live profile it stays false until the class has its own
+    // track record (~10 bets with acceptable outcomes).
+    if (tradeClass === 'earnings-bet' && !rules.earnings_bet_enabled) {
+        violations.push(
+            'earnings bets are disabled in this account profile (paper-only until the class is proven) — ' +
+            'do not re-propose as another class to work around this',
+        );
+    }
+    if (tradeClass === 'earnings-bet' && ctx.openEarningsBets !== undefined
+        && ctx.openEarningsBets >= rules.max_earnings_bets) {
+        violations.push(
+            `${ctx.openEarningsBets} earnings bet(s) already open — max ${rules.max_earnings_bets} at a time; ` +
+            'wait for the open bet to resolve',
+        );
+    }
+    if (tradeClass === 'swing' && ctx.openSwingPositions !== undefined
+        && ctx.openSwingPositions >= rules.max_swing_positions) {
+        violations.push(
+            `${ctx.openSwingPositions} swing positions already open/working — max ${rules.max_swing_positions}; ` +
+            'close or cancel one first, or skip',
+        );
+    }
 
     // --- Quantity sanity (whole shares, or IBKR 0.0001 fractions when the
     // active profile enables fractional_shares) ---
@@ -211,17 +250,35 @@ export function checkProposalRisk(
     }
 
     // --- Risk budget per trade (needs net liquidation) ---
-    // Normalizes what a stop-out costs: quantity × stop distance may not
-    // exceed max_risk_per_trade_pct of the account.
+    // Normalizes what the worst planned loss costs, per class: intraday and
+    // swing pay quantity × stop distance against their class budget; an
+    // earnings bet pays quantity × the assumed adverse GAP (a stop cannot
+    // protect through a print) against earnings_bet_risk_pct.
     if (ctx.netLiquidation !== undefined && ctx.netLiquidation > 0 && risk > 0) {
-        const riskDollars = Math.round(p.quantity * risk * 100) / 100;
-        const maxRisk = (rules.max_risk_per_trade_pct / 100) * ctx.netLiquidation;
-        if (riskDollars > maxRisk) {
-            const maxShares = Math.floor(maxRisk / risk);
-            violations.push(
-                `a stop-out would cost $${riskDollars.toFixed(0)} (${p.quantity} × $${risk.toFixed(2)} stop distance) — ` +
-                `over the ${rules.max_risk_per_trade_pct}% risk budget ($${maxRisk.toFixed(0)}); max ${maxShares} shares at these levels`,
-            );
+        const budgetPct = classRiskPct(tradeClass, rules);
+        const maxRisk = (budgetPct / 100) * ctx.netLiquidation;
+        if (tradeClass === 'earnings-bet') {
+            const entryPrice = entry;
+            const perShare = gapRiskPerShare(entryPrice, ctx.worstCaseGapPct, rules);
+            const assumedPct = Math.max(ctx.worstCaseGapPct ?? 0, rules.earnings_bet_gap_floor_pct);
+            const worstCase = Math.round(p.quantity * perShare * 100) / 100;
+            if (worstCase > maxRisk) {
+                const maxShares = Math.floor(maxRisk / perShare);
+                violations.push(
+                    `a worst-case earnings gap (${assumedPct}%) would cost $${worstCase.toFixed(0)} ` +
+                    `(${p.quantity} × $${perShare.toFixed(2)}) — over the ${budgetPct}% earnings-bet budget ` +
+                    `($${maxRisk.toFixed(0)}); max ${maxShares} shares. The stop does not protect through the print`,
+                );
+            }
+        } else {
+            const riskDollars = Math.round(p.quantity * risk * 100) / 100;
+            if (riskDollars > maxRisk) {
+                const maxShares = Math.floor(maxRisk / risk);
+                violations.push(
+                    `a stop-out would cost $${riskDollars.toFixed(0)} (${p.quantity} × $${risk.toFixed(2)} stop distance) — ` +
+                    `over the ${budgetPct}% ${tradeClass} risk budget ($${maxRisk.toFixed(0)}); max ${maxShares} shares at these levels`,
+                );
+            }
         }
     }
 
