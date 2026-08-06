@@ -119,14 +119,31 @@ export function lastCompletedTradingDayEt(now: Date = new Date()): string {
     return `${et.getFullYear()}-${String(et.getMonth() + 1).padStart(2, '0')}-${String(et.getDate()).padStart(2, '0')}`;
 }
 
+/** UTC instant of the regular-session close on an ET date (16:00, or 13:00
+ *  on half days). Tries both possible UTC offsets and keeps the one that
+ *  lands on the intended ET wall-clock hour (EDT vs EST). */
+export function etCloseInstantMs(dateIso: string): number {
+    const closeHour = isMarketHalfDay(dateIso) ? 13 : 16;
+    const hh = String(closeHour).padStart(2, '0');
+    for (const off of ['-04:00', '-05:00']) {
+        const ms = Date.parse(`${dateIso}T${hh}:00:00${off}`);
+        const et = new Date(new Date(ms).toLocaleString('en-US', { timeZone: ET }));
+        if (et.getHours() === closeHour) return ms;
+    }
+    return Date.parse(`${dateIso}T${hh}:00:00-05:00`);
+}
+
 /**
- * Stale = no snapshot, or one produced before the last completed session
- * ended. A scan run the evening of the last trading day (same ET date)
- * is fresh; so is one run later (e.g. this morning pre-market).
+ * Stale = no snapshot, or one produced BEFORE the close of the last
+ * completed session — an instant comparison, not a calendar-date one.
+ * A same-day pre-close scan does not contain that session: this morning's
+ * pre-market rescue scan must count as stale again tonight, or a killed
+ * sweep leaves tomorrow's brief on two-day-old bars while the catch-up
+ * declares everything fine.
  */
 export function isPatternScanStale(ranAtMs: number | null | undefined, now: Date = new Date()): boolean {
     if (ranAtMs == null || !Number.isFinite(ranAtMs)) return true;
-    return toEtDate(ranAtMs) < lastCompletedTradingDayEt(now);
+    return ranAtMs < etCloseInstantMs(lastCompletedTradingDayEt(now));
 }
 
 let catchUpRan = false;
