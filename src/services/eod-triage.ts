@@ -21,6 +21,19 @@
  * Positions whose symbol reports within EARNINGS_GUARD_DAYS are closed
  * before the bell REGARDLESS of P&L. Disable with EOD_EARNINGS_GUARD=false.
  *
+ * GUARD EXTENSIONS (2026-08-06, trade classes):
+ *   - GTC positions (swings, pre-close overnight setups) get the earnings
+ *     guard too — rule 4 ("every non-bet class exits before the print")
+ *     is deterministic, not advisory. Their momentum is NOT triaged: a
+ *     swing keeps its thesis; only an imminent print can force it flat.
+ *   - tradeClass 'earnings-bet' is exempt BY DESIGN — holding through the
+ *     print is the entire point of that class, and it was sized for the
+ *     worst-case gap at creation. The report still names it.
+ *   - A print dated TODAY with 'pre-market' timing already happened by
+ *     15:52 — closing on it would flatten exactly the legitimate
+ *     post-print reaction trades this desk exists to take. Past prints
+ *     never trigger the guard ('unknown' timing stays conservative).
+ *
  * Deterministic, no LLM. Disable with EOD_TRIAGE=false.
  */
 
@@ -33,6 +46,7 @@ import { isMarketHoliday } from '@/utils/market-hours.js';
 import { findUpcomingEarnings, type UpcomingEarnings } from './earnings-calendar.js';
 import { closePosition, fetchPositions } from './position-actions.js';
 import { listTrackable } from './trade-proposals.js';
+import type { TradeClass } from '@/tools/ibkr/risk-rules.js';
 
 const ET = 'America/New_York';
 const TRIAGE_CRON = '52 15 * * 1-5';
@@ -87,6 +101,19 @@ export function decideEodAction(input: {
 }
 
 /**
+ * Is this calendar hit a print still AHEAD of the 15:52 triage? A report
+ * dated today with pre-market timing already happened this morning —
+ * closing on it would punish the legitimate post-print reaction trade.
+ * 'unknown' timing stays conservative (treated as upcoming).
+ */
+export function isUpcomingPrint(
+    earnings: Pick<UpcomingEarnings, 'date' | 'time'>,
+    todayIso: string,
+): boolean {
+    return !(earnings.date === todayIso && earnings.time === 'pre-market');
+}
+
+/**
  * Earnings guard: an imminent print overrides ANY momentum decision —
  * winners included. Holding through earnings turns a technical trade into
  * a binary bet the stop/target math was never sized for.
@@ -94,14 +121,37 @@ export function decideEodAction(input: {
 export function applyEarningsGuard(
     base: EodDecision,
     earnings: Pick<UpcomingEarnings, 'date' | 'time'> | null,
+    todayIso: string,
 ): EodDecision {
-    if (!earnings) return base;
+    if (!earnings || !isUpcomingPrint(earnings, todayIso)) return base;
     const would = base.action === 'keep' ? ` (would otherwise keep: ${base.reason})` : '';
     return {
         action: 'close',
         reason:
             `reports earnings ${earnings.date}${earnings.time !== 'unknown' ? ` ${earnings.time}` : ''} — ` +
             `flat before the print regardless of P&L (earnings guard)${would}`,
+    };
+}
+
+/**
+ * Earnings guard for GTC positions (swings and pre-close overnight
+ * setups). No momentum triage — the position keeps its thesis — but a
+ * print ahead forces it flat, because only the 'earnings-bet' class is
+ * sized to survive a gap. Returns null when nothing needs doing.
+ */
+export function decideGtcEarningsGuard(
+    tradeClass: TradeClass,
+    earnings: Pick<UpcomingEarnings, 'date' | 'time'> | null,
+    todayIso: string,
+): EodDecision | null {
+    if (tradeClass === 'earnings-bet') return null; // sanctioned hold — sized for the gap
+    if (!earnings || !isUpcomingPrint(earnings, todayIso)) return null;
+    return {
+        action: 'close',
+        reason:
+            `reports earnings ${earnings.date}${earnings.time !== 'unknown' ? ` ${earnings.time}` : ''} — ` +
+            `a ${tradeClass} position must be flat before the print; holding through is only valid ` +
+            `as an explicit earnings-bet (earnings guard)`,
     };
 }
 
@@ -142,10 +192,14 @@ export async function runEodTriageOnce(): Promise<void> {
     const today = new Date().toLocaleDateString('en-CA', { timeZone: ET });
     if (isMarketHoliday(today)) return;
 
+    const trackable = await listTrackable();
     // Filled DAY-bracket proposals still working = positions whose exits
-    // die at the bell.
-    const candidates = (await listTrackable()).filter((t) => t.tif === 'DAY' && t.entryFillPrice != null);
-    if (candidates.length === 0) return;
+    // die at the bell → full triage (momentum + earnings guard).
+    const dayCandidates = trackable.filter((t) => t.tif === 'DAY' && t.entryFillPrice != null);
+    // Filled GTC positions (swings, overnight setups, earnings bets) →
+    // earnings guard only; their exits survive the close.
+    const gtcCandidates = trackable.filter((t) => t.tif === 'GTC' && t.entryFillPrice != null);
+    if (dayCandidates.length === 0 && gtcCandidates.length === 0) return;
 
     const api = await getIBApi();
     const positions = await fetchPositions(api);
@@ -158,7 +212,8 @@ export async function runEodTriageOnce(): Promise<void> {
     let earningsUnknownDays: string[] = [];
     if (isEarningsGuardEnabled()) {
         try {
-            const { hits, unknownDays } = await findUpcomingEarnings(candidates.map((t) => t.symbol), EARNINGS_GUARD_DAYS);
+            const symbols = [...new Set([...dayCandidates, ...gtcCandidates].map((t) => t.symbol))];
+            const { hits, unknownDays } = await findUpcomingEarnings(symbols, EARNINGS_GUARD_DAYS);
             earningsBySymbol = new Map(hits.map((h) => [h.symbol, h]));
             earningsUnknownDays = unknownDays;
         } catch (err) {
@@ -167,7 +222,7 @@ export async function runEodTriageOnce(): Promise<void> {
         }
     }
 
-    for (const t of candidates) {
+    for (const t of dayCandidates) {
         const pos = positions.find((p) => p.symbol === t.symbol && p.quantity !== 0);
         if (!pos) continue; // already flat (target/stop just filled, or closed)
 
@@ -185,7 +240,7 @@ export async function runEodTriageOnce(): Promise<void> {
         const base = last !== null
             ? decideEodAction({ direction: t.direction, entryFill: t.entryFillPrice!, last, hourAgo })
             : { action: 'keep' as const, reason: 'price unavailable — keeping (fail-open to hold)' };
-        const decision = applyEarningsGuard(base, earningsBySymbol.get(t.symbol) ?? null);
+        const decision = applyEarningsGuard(base, earningsBySymbol.get(t.symbol) ?? null, today);
 
         logger.info(`[eod-triage] ${t.id} ${t.symbol}: ${decision.action} — ${decision.reason}`);
         if (decision.action === 'close') {
@@ -196,11 +251,31 @@ export async function runEodTriageOnce(): Promise<void> {
         }
     }
 
+    // GTC positions: silent when healthy (their brackets survive the bell);
+    // a line only when the guard closes one, or an earnings bet is about
+    // to do exactly what it was sized for.
+    for (const t of gtcCandidates) {
+        const pos = positions.find((p) => p.symbol === t.symbol && p.quantity !== 0);
+        if (!pos) continue;
+
+        const hit = earningsBySymbol.get(t.symbol) ?? null;
+        if (t.tradeClass === 'earnings-bet' && hit && isUpcomingPrint(hit, today)) {
+            lines.push(`• ${t.symbol} (${t.id}, earnings-bet): holds through the ${hit.date} print BY DESIGN — sized for the worst-case gap.`);
+            continue;
+        }
+        const decision = decideGtcEarningsGuard(t.tradeClass, hit, today);
+        if (!decision) continue;
+
+        logger.info(`[eod-triage] ${t.id} ${t.symbol} {${t.tradeClass}, GTC}: ${decision.action} — ${decision.reason}`);
+        const outcome = await closePosition(t.symbol, 'EOD triage (earnings guard)');
+        lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} GTC): ${decision.reason}. ${outcome.ok ? 'Closed.' : outcome.message}`);
+    }
+
     if (lines.length) {
         const footer = earningsUnknownDays.length
             ? `\n⚠ earnings calendar unavailable (${earningsUnknownDays.join(', ')}) — keeps are NOT verified print-free.`
             : '';
-        await notify(`🌇 EOD triage (15:52 ET) — unresolved DAY positions:\n${lines.join('\n')}${footer}`);
+        await notify(`🌇 EOD triage (15:52 ET):\n${lines.join('\n')}${footer}`);
     }
 }
 
@@ -214,7 +289,9 @@ export function startEodTriage(): void {
     });
     logger.info(
         '[eod-triage] scheduled 15:52 ET: close losing-and-fading DAY positions; keep the rest for protected overnight' +
-        (isEarningsGuardEnabled() ? `; earnings guard ON (flat before any print within ${EARNINGS_GUARD_DAYS}d)` : '; earnings guard OFF'),
+        (isEarningsGuardEnabled()
+            ? `; earnings guard ON (flat before any print within ${EARNINGS_GUARD_DAYS}d, DAY and GTC non-bet classes; past BMO prints exempt)`
+            : '; earnings guard OFF'),
     );
 }
 
