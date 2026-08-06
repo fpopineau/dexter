@@ -48,7 +48,7 @@ export async function loadSoulDocument(): Promise<string | null> {
 }
 
 /**
- * Load user-defined research rules from .dexter/RULES.md.
+ * Load user-defined trading rules from .dexter/RULES.md.
  * Returns null if the file doesn't exist (rules are optional).
  */
 export async function loadRulesDocument(): Promise<string | null> {
@@ -81,7 +81,7 @@ ${skillList}
 
 - Check if available skills can help complete the task more effectively
 - When a skill is relevant, invoke it IMMEDIATELY as your first action
-- Skills provide specialized workflows for complex tasks (e.g., DCF valuation)
+- Skills provide specialized workflows for complex tasks (e.g., a day-trade scan or overnight review)
 - Do not invoke a skill that has already been invoked for the current query`;
 }
 
@@ -102,10 +102,10 @@ You have persistent memory stored as Markdown files in .dexter/memory/.${fileLis
 Use memory_search to recall stored facts, preferences, or notes. The search covers all
 memory files (long-term and daily logs) AND past conversation transcripts.
 
-**IMPORTANT:** Before giving any personalized financial advice — buy/sell decisions,
-portfolio suggestions, stock recommendations, or trade sizing — ALWAYS call memory_search
-first to recall the user's goals, risk tolerance, position limits, and prior decisions.
-The user expects you to know them. Do not give generic advice when personalized context exists.
+**IMPORTANT:** Before proposing, sizing, or closing any trade — entries, exits,
+hold/close decisions — ALWAYS call memory_search first to recall the user's risk
+limits, open-position context, standing instructions, and prior decisions.
+The user expects you to know them. Do not give generic answers when personalized context exists.
 
 Follow up with memory_get to read full sections when you need exact text.
 
@@ -152,15 +152,15 @@ STRICT FORMAT - each row must:
 - Have no trailing spaces after the final |
 - Use |---| separator (with optional : for alignment)
 
-| Ticker | Rev    | OM  |
-|--------|--------|-----|
-| AAPL   | 416.2B | 31% |
+| Ticker | Entry | Stop  |
+|--------|-------|-------|
+| AMD    | 182.4 | 178.9 |
 
 Keep tables compact:
-- Max 2-3 columns; prefer multiple small tables over one wide table
-- Headers: 1-3 words max. "FY Rev" not "Most recent fiscal year revenue"
+- Max 3-4 columns; prefer multiple small tables over one wide table
+- Headers: 1-3 words max. "Stop" not "Stop loss price level"
 - Tickers not names: "AAPL" not "Apple Inc."
-- Abbreviate: Rev, Op Inc, Net Inc, OCF, FCF, GM, OM, EPS
+- Abbreviate: Ent, Stp, Tgt, R/R, ATR, RVOL, Vol, P&L
 - Numbers compact: 102.5B not $102,466,000,000
 - Omit units in cells if header has them`;
 
@@ -231,7 +231,7 @@ export function buildSystemPrompt(
     ? `\n## Tables (for comparative/tabular data)\n\n${profile.tables}`
     : '';
 
-  return `You are Dexter, a ${profile.label} assistant with access to research tools.
+  return `You are Dexter, a trading agent on ${profile.label} with access to market, risk, and research tools.
 
 Current date: ${getCurrentDate()}
 
@@ -243,10 +243,11 @@ ${toolDescriptions}
 
 ## Tool Usage Policy
 
+- For trade evaluations, spend calls on what decides the trade — catalyst check, price/volume structure, risk validation — before any narrative context. Financial data is for the present state of the business, never for a long-term thesis.
 - Call get_financials or get_market_data ONCE with the full natural language query — they handle multi-company/multi-metric requests internally. Do NOT break up queries into multiple calls.
 - Only use web_fetch when headlines are insufficient (need quotes, deal specifics, earnings details).
 - Tool results are automatically capped. If a result says "persisted to file", use read_file to access specific sections rather than processing the full dataset.
-- Use spawn_subagent to delegate a focused, self-contained sub-task (deep research on one topic, analysis of one company) when it keeps your own context clean or when sub-tasks are independent.
+- Use spawn_subagent to delegate a focused, self-contained sub-task (a catalyst check on one name, validating one setup, focused research on one topic) when it keeps your own context clean or when sub-tasks are independent.
 - For INDEPENDENT sub-tasks, emit multiple spawn_subagent calls in a SINGLE turn — they run in parallel. Chain across turns only when one sub-task depends on another's output.
 - Each subagent runs in isolation and cannot see this conversation; put everything it needs in the task (and context), and give a short 3-5 word description for the UI. It returns one final answer for you to synthesize. Don't delegate trivial single-tool lookups you can do directly.
 - Only respond directly for conceptual definitions, stable historical facts, or conversational queries.
@@ -259,7 +260,7 @@ ${buildMemorySection(memoryFiles ?? [], memoryContext)}
 
 ${behaviorBullets}
 
-${rulesContent ? `## Research Rules
+${rulesContent ? `## Trading Rules
 
 The following rules were set by the user. Follow them on every query.
 
@@ -267,14 +268,14 @@ ${rulesContent}
 ` : ''}
 ## Rule Management
 
-To manage research rules, the user can say "add a rule", "show my rules", "remove rule about X".
+To manage trading rules, the user can say "add a rule", "show my rules", "remove rule about X".
 Rules are stored in .dexter/RULES.md — use write_file or edit_file to modify them.
 
 ${soulContent ? `## Identity
 
 ${soulContent}
 
-Embody the identity and investing philosophy described above. Let it shape your tone, your values, and how you engage with financial questions.
+Embody the identity and trading philosophy described above. Let it shape your tone, your values, and how you engage with market decisions.
 ` : ''}
 
 ## Response Format

@@ -35,7 +35,7 @@ Delegate a focused, self-contained sub-task to an isolated subagent that runs it
 
 ## When to Use
 
-- A sub-task is substantial enough that its intermediate tool output would clutter your own context (deep research on one topic, analysis of one company).
+- A sub-task is substantial enough that its intermediate tool output would clutter your own context (a catalyst check on one name, validating one setup, focused research on one topic).
 - You have multiple INDEPENDENT sub-tasks: emit several spawn_subagent calls in a SINGLE turn and they run in parallel.
 
 ## When NOT to Use
@@ -57,7 +57,7 @@ ${Object.entries(SUBAGENT_TYPES)
 const SpawnSubagentInputSchema = z.object({
   description: z
     .string()
-    .describe('A short 3-5 word summary of the sub-task, shown in the UI (e.g. "Analyze NVDA moat").'),
+    .describe('A short 3-5 word summary of the sub-task, shown in the UI (e.g. "Check AMD catalysts").'),
   task: z
     .string()
     .describe('The self-contained instruction for the subagent. Include all needed specifics.'),

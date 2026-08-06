@@ -6,7 +6,7 @@ export interface SlashCommand {
 export const SLASH_COMMANDS: SlashCommand[] = [
   { name: 'model', description: 'Switch LLM provider and model' },
   { name: 'search', description: 'Choose preferred web search provider' },
-  { name: 'rules', description: 'Show your research rules' },
+  { name: 'rules', description: 'Show your trading rules' },
   { name: 'clear', description: 'Clear the conversation' },
   { name: 'memory', description: 'Show what Dexter remembers about you' },
   { name: 'heartbeat', description: 'Show your heartbeat monitoring checklist' },

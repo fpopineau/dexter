@@ -1,7 +1,7 @@
 {
   "name": "dexter-ts",
   "version": "2026.6.9",
-  "description": "Dexter - AI agent for deep financial research.",
+  "description": "Dexter - a day2day/overnight trading agent that lives in a terminal.",
   "type": "module",
   "main": "src/index.tsx",
   "bin": {

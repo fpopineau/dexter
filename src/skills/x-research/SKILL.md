@@ -1,18 +1,18 @@
 ---
 name: x-research
 description: >
-  X/Twitter public sentiment research. Searches X for real-time perspectives,
-  market sentiment, expert opinions, breaking news, and community discourse.
-  Use when: user asks "what are people saying about", "X/Twitter sentiment",
-  "check X for", "search twitter for", "what's CT saying about", or wants
-  public opinion on a stock, sector, company, or market event.
+  X/Twitter real-time positioning and catalyst intel. Searches X for breaking
+  news, crowd positioning, sentiment shifts, and catalyst chatter on a ticker,
+  sector, or market event. Use when: user asks "what are people saying about",
+  "X/Twitter sentiment", "check X for", "what's CT saying about", or when a
+  trade evaluation needs to know who is on which side of a name and why.
 ---
 
 # X Research Skill
 
-Agentic research over X/Twitter using the `x_search` tool. Decompose the
-research question into targeted searches, iterate to refine signal, and
-synthesize into a sourced sentiment briefing.
+Agentic intel-gathering over X/Twitter using the `x_search` tool. Decompose
+the question into targeted searches, iterate to refine signal, and synthesize
+into a positioning read that feeds a trade decision.
 
 ## Research Loop
 
@@ -22,8 +22,8 @@ Turn the research question into 3–5 targeted queries using X operators:
 
 - **Core query**: Direct keywords or `$TICKER` cashtag
 - **Expert voices**: `from:username` for known analysts or accounts
-- **Bearish signal**: keywords like `(overvalued OR bubble OR risk OR concern)`
-- **Bullish signal**: keywords like `(bullish OR upside OR catalyst OR beat)`
+- **Bearish signal**: keywords like `(bearish OR short OR fade OR dilution OR offering OR miss)`
+- **Bullish signal**: keywords like `(bullish OR breakout OR squeeze OR catalyst OR beat)`
 - **News/links**: add `has:links` to surface tweets with sources
 - **Noise reduction**: `-is:reply` to focus on original posts; `-airdrop -giveaway` for crypto topics
 
@@ -60,9 +60,9 @@ Group findings by theme (bullish, bearish, neutral, news/catalysts):
 - @username2: "[another perspective]" — [likes]♥ [Tweet](url)
 ```
 
-End with an **Overall Sentiment** paragraph: predominant tone (bullish/bearish/
-mixed/neutral), confidence level, and any notable divergence between retail and
-institutional voices.
+End with a **Positioning Read** paragraph: predominant tone (bullish/bearish/
+mixed/neutral), how crowded each side looks, who is trapped if the move
+reverses, and any notable divergence between retail and institutional voices.
 
 ## Refinement Heuristics
 
@@ -76,9 +76,9 @@ institutional voices.
 
 ## Output Format
 
-Present a structured briefing:
+Present a structured read:
 
 1. **Query Summary**: what was searched and time window
 2. **Sentiment Themes**: grouped findings with sourced quotes and tweet links
-3. **Overall Sentiment**: tone, confidence, key voices
-4. **Caveats**: X sentiment is not a reliable predictor; sample bias toward vocal minorities; last-7-days window only
+3. **Positioning Read**: tone, crowding, who's trapped on a reversal, key voices
+4. **Trade Relevance**: one paragraph — does this confirm or deny the catalyst, and does crowding change the risk? X is noisy and not predictive on its own; state what it adds to the decision, not a verdict.

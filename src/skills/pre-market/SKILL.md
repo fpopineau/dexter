@@ -100,10 +100,10 @@ Output a structured brief in this format:
 ```
 # Pre-Market Brief — [DATE]
 
-## 🌍 Overnight Recap
+## Overnight Recap
 [3–5 bullet points: global markets, key overnight developments]
 
-## 📊 Market Snapshot
+## Market Snapshot
 | Index | Pre-Market | Change | Trend |
 |-------|-----------|--------|-------|
 | SPY   | $[price]  | [%]    | [↑/↓] |
@@ -112,22 +112,22 @@ Output a structured brief in this format:
 
 **VIX:** [level] | **10Y Yield:** [level] | **DXY:** [level]
 
-## 📅 Today's Calendar
+## Today's Calendar
 **Economic:** [events with times]
 **Earnings (BMO):** [tickers]
 **Earnings (AMC):** [tickers]
 
-## 🔥 Pre-Market Movers
+## Pre-Market Movers
 | Ticker | Gap % | Catalyst | Daily Trend | Watch Level |
 |--------|-------|----------|-------------|-------------|
 | [TICK] | [%]   | [reason] | [trend]     | $[level]    |
 
-## 📋 Watchlist Levels
+## Watchlist Levels
 | Ticker | Price  | Support | Resistance | RSI  | Trend  | Setup       |
 |--------|--------|---------|------------|------|--------|-------------|
 | [TICK] | $[px]  | $[s]    | $[r]       | [v]  | [dir]  | [type/none] |
 
-## 🎯 Today's Game Plan
+## Today's Game Plan
 [2–3 sentences: overall market bias, strategy focus (momentum/mean-reversion/range-bound), key levels to watch on SPY, sectors to focus on]
 
 **Avoid:** [Any warnings — earnings risk, low liquidity names, choppy conditions]

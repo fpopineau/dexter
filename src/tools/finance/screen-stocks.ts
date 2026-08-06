@@ -15,14 +15,13 @@ Screens for stocks matching financial criteria. Takes a natural language query d
 
 ## When to Use
 
-- Finding stocks by financial criteria (e.g., "P/E below 15 and revenue growth above 20%")
-- Screening for value, growth, dividend, or quality stocks
-- Filtering the market by valuation ratios, profitability metrics, or growth rates
+- Present-state context filters on the universe (e.g., "profitable, revenue growth above 20%, market cap above 2B")
+- Checking whether a trade candidate's business is currently healthy (profitability, leverage, growth)
 - Filtering by sector or industry (e.g., "health care stocks", "oil and gas companies")
-- Finding stocks matching a specific investment thesis
 
 ## When NOT to Use
 
+- Finding trade candidates — momentum, gaps, volume, patterns come from the IBKR scanner / opportunities / swing_patterns tools, not fundamental screens
 - Looking up a specific company's financials (use get_financials)
 - Current stock prices or market data (use get_market_data)
 - SEC filing content (use read_filings)
@@ -110,11 +109,10 @@ const ScreenStocksInputSchema = z.object({
 export function createScreenStocks(model: string): DynamicStructuredTool {
   return new DynamicStructuredTool({
     name: 'stock_screener',
-    description: `Screens for stocks matching financial criteria. Takes a natural language query and returns matching tickers with metric values. Use for:
-- Finding stocks by valuation (P/E, P/B, EV/EBITDA)
-- Screening by profitability (margins, ROE, ROA)
+    description: `Screens for stocks matching present-state financial criteria (context filters — not the trade funnel). Takes a natural language query and returns matching tickers with metric values. Use for:
+- Checking business health of candidates (profitability, margins, leverage)
 - Filtering by growth rates (revenue, earnings, EPS growth)
-- Dividend screening (yield, payout ratio)
+- Filtering by size or liquidity proxies (market cap)
 - Filtering by sector or industry (e.g., "health care", "oil and gas")`,
     schema: ScreenStocksInputSchema,
     func: async (input, _runManager, config?: RunnableConfig) => {

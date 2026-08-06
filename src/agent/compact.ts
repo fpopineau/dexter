@@ -42,21 +42,22 @@ const ANALYSIS_INSTRUCTION = `Before providing your final summary, wrap your ana
    - How this data relates to the user's original query
 2. Double-check for numerical accuracy and completeness, addressing each required element thoroughly.`;
 
-const BASE_COMPACT_PROMPT = `Your task is to create a detailed summary of the research session below. This summary must preserve all important data, findings, and numerical results so that work can continue without losing context.
+const BASE_COMPACT_PROMPT = `Your task is to create a detailed summary of the trading session below. This summary must preserve all important data, findings, and numerical results so that work can continue without losing context.
 
 ${ANALYSIS_INSTRUCTION}
 
 Your summary should include the following sections:
 
-1. Original Query and Intent: The user's exact request and what they are trying to learn or accomplish.
-2. Key Concepts: Important tickers, companies, sectors, financial metrics, or technical concepts involved.
-3. Data Retrieved: For each tool call, summarize the tool name, arguments, and key results. Preserve important data points.
-4. Errors and Retries: Any tool failures, empty results, or retried calls and their outcomes.
-5. Analysis Progress: What has been analyzed so far, what conclusions or comparisons have been reached.
-6. Numerical Data: ALL key numbers retrieved — prices, revenue figures, margins, ratios, growth rates, estimates, dates. This section is critical; do not omit any numbers that were returned by tools.
-7. Pending Data Needs: What data has NOT yet been retrieved that would be needed to fully answer the query.
-8. Current Work State: What was being worked on when this summary was requested.
-9. Recommended Next Steps: What tool calls or analysis should happen next to complete the answer.
+1. Original Query and Intent: The user's exact request and what they are trying to decide or accomplish.
+2. Key Concepts: Important tickers, setups, catalysts, sectors, or technical concepts involved.
+3. Open Trade State: Every open or proposed trade with its EXACT levels — entry, stop, target, position size, risk amount, R multiple, risk-gate verdicts, order status, time in trade. This section is the most critical of all; these numbers must survive compaction verbatim. Write "None" only if no position or proposal was discussed.
+4. Data Retrieved: For each tool call, summarize the tool name, arguments, and key results. Preserve important data points.
+5. Errors and Retries: Any tool failures, empty results, or retried calls and their outcomes.
+6. Decision Progress: What has been evaluated so far, what was ruled in or out, and why.
+7. Numerical Data: ALL other key numbers retrieved — prices, key levels, ATR, volume/RVOL, scores, P&L, account values, financial figures, dates. This section is critical; do not omit any numbers that were returned by tools.
+8. Pending Data Needs: What data has NOT yet been retrieved that would be needed to fully complete the task.
+9. Current Work State: What was being worked on when this summary was requested.
+10. Recommended Next Steps: What tool calls or analysis should happen next to complete the decision.
 
 Here's an example of how your output should be structured:
 
@@ -70,36 +71,40 @@ Here's an example of how your output should be structured:
    [Detailed description of what the user asked]
 
 2. Key Concepts:
-   - [Ticker/concept 1]
-   - [Ticker/concept 2]
+   - [Ticker/setup/concept 1]
+   - [Ticker/setup/concept 2]
 
-3. Data Retrieved:
+3. Open Trade State:
+   - [TICKER long 25 sh @ 182.40, stop 178.90, target 189.60, risk $87 (0.24%), gate: approved, entered 10:42 ET]
+   - [or "None"]
+
+4. Data Retrieved:
    - [tool_name(args)]: [Key findings and data points]
    - [tool_name(args)]: [Key findings and data points]
 
-4. Errors and Retries:
+5. Errors and Retries:
    - [Error description and resolution, or "None"]
 
-5. Analysis Progress:
-   [What has been analyzed, comparisons made, conclusions reached]
+6. Decision Progress:
+   [What has been evaluated, what was ruled in/out, and why]
 
-6. Numerical Data:
+7. Numerical Data:
    - [Ticker/metric]: [value] ([date/period])
    - [Ticker/metric]: [value] ([date/period])
 
-7. Pending Data Needs:
+8. Pending Data Needs:
    - [Data still needed]
 
-8. Current Work State:
+9. Current Work State:
    [What was being worked on]
 
-9. Recommended Next Steps:
+10. Recommended Next Steps:
    [Next actions to take]
 
 </summary>
 </example>
 
-Please provide your summary based on the research session below, following this structure and ensuring precision and thoroughness — especially for numerical data.`;
+Please provide your summary based on the trading session below, following this structure and ensuring precision and thoroughness — especially for open trade state and numerical data.`;
 
 const NO_TOOLS_TRAILER =
   '\n\nREMINDER: Do NOT call any tools. Respond with plain text only — ' +
@@ -154,11 +159,11 @@ export function formatCompactSummary(rawSummary: string): string {
 export function buildCompactSummaryMessage(summary: string): string {
   const formatted = formatCompactSummary(summary);
 
-  return `This session is being continued from a previous research session that ran out of context. The summary below covers the data retrieved and analysis performed so far.
+  return `This session is being continued from a previous session that ran out of context. The summary below covers the data retrieved and work performed so far.
 
 ${formatted}
 
-Continue working toward answering the query without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening. Pick up the research as if the break never happened.`;
+Continue working toward completing the task without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening. Pick up the work as if the break never happened.`;
 }
 
 // ---------------------------------------------------------------------------

@@ -7,23 +7,23 @@ Search the web for current information on any topic. Returns relevant search res
 
 ## When to Use
 
-- Historical stock prices for equities (use get_market_data)
-- Factual questions about entities (companies, people, organizations) where status can change
+- Catalyst hunting on a named ticker: why is it moving, halt reason, guidance change, FDA/PDUFA, offering, analyst action, M&A chatter
 - Current events, breaking news, recent developments
-- Technology updates, product announcements, industry trends
+- Factual questions about entities (companies, people, organizations) where status can change
 - Verifying claims about real-world state (public/private, active/defunct, current leadership)
-- Research on topics outside of structured financial data
+- Technology updates, product announcements, industry trends
 
 ## When NOT to Use
 
+- Historical stock prices for equities (use get_market_data)
 - Structured financial data (company financials, SEC filings, key ratios - use get_financials instead)
-- Pure conceptual/definitional questions ("What is a DCF?")
+- Pure conceptual/definitional questions ("What is RVOL?")
 
 ## Usage Notes
 
 - Provide specific, well-formed search queries for best results
 - Returns up to 5 results with URLs and content snippets
-- Use for supplementary research when get_financials doesn't cover the topic
+- Under time pressure, search for the specific catalyst ("XYZ halt reason", "XYZ guidance cut") — not the company name alone
 `.trim();
 
 export { tavilySearch } from './tavily.js';

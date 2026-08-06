@@ -121,33 +121,33 @@ Call `signal_scorer` for promising setups:
 ```
 # Overnight Review — [DATE] [TIME] ET
 
-## 📊 Day Summary
+## Day Summary
 **Market:** SPY [+/-X%] | QQQ [+/-X%] | VIX [level]
 **Day type:** [Trending up / Trending down / Range-bound / Choppy]
 **Account P&L today:** [+/- $X]
 
-## 📋 Position Actions
+## Position Actions
 
 ### [TICKER] — [LONG/SHORT] @ $[entry]
 **Current:** $[price] | **P&L:** [+/- $X] ([+/- Y%])
-**Action:** ✅ HOLD / ⚠️ TRIM to [X shares] / ❌ CLOSE
+**Action:** HOLD / TRIM to [X shares] / CLOSE
 **Reason:** [1-2 sentences]
 **Tomorrow's stop:** $[adjusted stop if holding]
 **Tomorrow's target:** $[next target level]
 
 [Repeat for each position]
 
-## ⚠️ Overnight Risk Factors
+## Overnight Risk Factors
 - [Earnings: TICKER1, TICKER2 reporting after close]
 - [Macro: Event at TIME tomorrow]
 - [Technical: SPY testing 200 EMA support]
 
-## 🔮 Tomorrow's Watchlist
+## Tomorrow's Watchlist
 | Ticker | Setup Type | Entry Zone | Stop | Target | Notes |
 |--------|-----------|------------|------|--------|-------|
 | [TICK] | [type]    | $[range]   | $[s] | $[t]   | [note]|
 
-## 📝 Key Levels for Tomorrow
+## Key Levels for Tomorrow
 - **SPY:** Support $[X], Resistance $[Y]
 - **QQQ:** Support $[X], Resistance $[Y]
 ```
@@ -156,4 +156,4 @@ Call `signal_scorer` for promising setups:
 - This skill is most valuable 30–60 minutes before market close (15:00–15:30 ET).
 - If running after hours, some data (TA on intraday bars) may reflect the regular session close, not after-hours moves.
 - Overnight holding is inherently riskier due to gap risk — bias toward reducing exposure unless the setup is compelling.
-- Never recommend holding through earnings without explicit user acknowledgment of the risk.
+- Never hold a position through an earnings print as part of an overnight keep. Holding through a print is a separate, explicitly-labeled earnings-bet decision with its own sizing rules — close the position or propose that bet explicitly. A keep must never quietly become an earnings bet.

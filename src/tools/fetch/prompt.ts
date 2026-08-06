@@ -23,7 +23,7 @@ Use web_fetch as your FIRST choice whenever you need to read the content of a we
 
 ## When to Use
 
-- Reading earnings reports, press releases, or investor relations pages
+- Reading press releases, earnings coverage, halt notices, or breaking news articles
 - Reading articles from news sites (CNBC, Bloomberg, Reuters, etc.)
 - Accessing any URL discovered via web_search
 - Reading documentation, blog posts, or any static web content

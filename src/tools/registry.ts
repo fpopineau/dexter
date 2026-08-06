@@ -75,7 +75,7 @@ export function getToolRegistry(model: string): RegisteredTool[] {
       name: 'stock_screener',
       tool: createScreenStocks(model),
       description: SCREEN_STOCKS_DESCRIPTION,
-      compactDescription: 'Screen stocks by financial criteria (P/E, growth, margins, etc.).',
+      compactDescription: 'Screen stocks by present-state financial criteria — context filters, not the trade funnel.',
       concurrencySafe: true,
     },
     {
@@ -305,7 +305,7 @@ export function getToolRegistry(model: string): RegisteredTool[] {
       name: 'skill',
       tool: skillTool,
       description: SKILL_TOOL_DESCRIPTION,
-      compactDescription: 'Invoke a specialized skill workflow (e.g., DCF valuation).',
+      compactDescription: 'Invoke a specialized skill workflow (e.g., day-trade scan, overnight review).',
       concurrencySafe: false,
     });
   }

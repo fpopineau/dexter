@@ -10,7 +10,7 @@ export type SkillSource = 'builtin' | 'user' | 'project';
  * Only contains the name and description from YAML frontmatter.
  */
 export interface SkillMetadata {
-  /** Unique skill name (e.g., "dcf") */
+  /** Unique skill name (e.g., "day-trade-scan") */
   name: string;
   /** Description of when to use this skill */
   description: string;

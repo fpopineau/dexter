@@ -13,7 +13,7 @@ Execute a skill to get specialized instructions for complex tasks.
 ## When to Use
 
 - When the user's query matches an available skill's description
-- For complex workflows that benefit from structured guidance (e.g., DCF valuation, financial reports)
+- For complex workflows that benefit from structured guidance (e.g., a pre-market brief or overnight review)
 - When you need step-by-step instructions for a specialized task
 
 ## When NOT to Use
@@ -38,7 +38,7 @@ export const skillTool = new DynamicStructuredTool({
   name: 'skill',
   description: 'Execute a skill to get specialized instructions for a task. Returns instructions to follow.',
   schema: z.object({
-    skill: z.string().describe('Name of the skill to invoke (e.g., "dcf")'),
+    skill: z.string().describe('Name of the skill to invoke (e.g., "day-trade-scan")'),
     args: z.string().optional().describe('Optional arguments for the skill (e.g., ticker symbol)'),
   }),
   func: async ({ skill, args }) => {

@@ -346,7 +346,7 @@ export async function runCli() {
   ctrl+c       Exit Dexter
   /model       Switch LLM provider and model
   /search      Choose preferred web search provider
-  /rules       Show research rules
+  /rules       Show trading rules
   /clear       Clear conversation
   ↑ / ↓        Navigate input history`;
 
@@ -362,11 +362,11 @@ export async function runCli() {
         try {
           const rulesContent = await readFile(dexterPath('RULES.md'), 'utf-8');
           chatLog.addChild(new Spacer(1));
-          chatLog.addChild(new Text(theme.muted('Research Rules:'), 0, 0));
+          chatLog.addChild(new Text(theme.muted('Trading Rules:'), 0, 0));
           chatLog.addChild(new Text(rulesContent, 0, 0));
         } catch {
           chatLog.addChild(new Spacer(1));
-          chatLog.addChild(new Text(theme.muted('No research rules set. Use "add a rule <text>" to create one.'), 0, 0));
+          chatLog.addChild(new Text(theme.muted('No trading rules set. Use "add a rule <text>" to create one.'), 0, 0));
         }
         tui.requestRender();
         break;

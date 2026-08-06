@@ -102,7 +102,7 @@ Given a user's natural language query about financial data, call the appropriate
    - For "latest earnings", "recent earnings", or "earnings feed" across the market, call get_earnings without a ticker
    - For debt, assets, equity → get_balance_sheets
    - For cash flow, free cash flow → get_cash_flow_statements
-   - For comprehensive analysis → get_all_financial_statements
+   - For multiple statement types explicitly needed in one request → get_all_financial_statements
 
 4. **Efficiency**:
    - Prefer specific tools over general ones when possible
