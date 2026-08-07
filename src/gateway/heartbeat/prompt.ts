@@ -4,7 +4,7 @@ import { dexterPath } from '../../utils/paths.js';
 
 const HEARTBEAT_MD_PATH = dexterPath('HEARTBEAT.md');
 
-const DEFAULT_CHECKLIST = `- Open positions vs their stops (ibkr_account, then ibkr_market_data per position): alert on anything trading within ~0.5× daily ATR of its stop, gapping past it, or left without a working stop order — give the level and the suggested action
+const DEFAULT_CHECKLIST = `- Open positions vs their stops (ibkr_account, then ibkr_market_data per position): alert on anything trading within ~0.5× daily ATR of its stop, gapping past it, or left without a working stop order. Protection is verified with ibkr_orders (action list) — LIVE open orders only. NEVER infer protection from the proposals store: auto-protect GTC exits exist only at the broker (2026-08-07 false alarm: MGNI called naked while GTC stop/target were working)
 - Proposal freshness (trade_proposals action list, status open): flag proposals whose entry the price has run away from or traded through, and any proposal that now holds through an earnings print (earnings_calendar action check) — suggest reject or re-propose
 - Watchlist names (memory_search for the current watchlist) crossing their key levels or spiking volume between scheduled scans — verify with ibkr_market_data before alerting
 - Market context, one line at most: SPY/QQQ moving more than 1.5% intraday or VIX spiking — context for the items above, never an alert on its own`;

@@ -24,9 +24,11 @@ Overnight Review Progress:
 ## Step 1: Assess Current Positions & P&L
 
 ### 1.1 Position Inventory
-Call `memory_search`:
-- **Query:** `"open positions"` or `"current trades"` — retrieve any tracked positions.
-- If the user mentions specific positions, use those directly.
+Call `ibkr_account` (action positions) — the broker is the ONLY authority on
+what is held. Then call `ibkr_orders` (action list) for live open orders:
+a position's protection is judged from working exit orders at the broker,
+NEVER from the proposals store or memory (auto-protect GTC exits are not
+persisted in proposals; memory is historical context, not the book).
 
 For each open position, call `ibkr_market_data`:
 - Get current price, day's high/low, volume.
