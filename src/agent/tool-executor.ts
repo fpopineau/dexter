@@ -135,7 +135,13 @@ export class AgentToolExecutor {
 
     // Approval flow for sensitive tools
     const sessionApproved = this.sessionApprovedTools.has(toolName) && !SESSION_APPROVAL_EXCLUDED.has(toolName);
-    if (this.requiresApproval(toolName) && !sessionApproved) {
+    // Read-only actions never need approval: headless runs (cron briefs,
+    // heartbeat) auto-deny gated tools, and since the protection checks
+    // must read LIVE open orders (2026-08-10: pre-close could not verify
+    // MGNI's brackets), ibkr_orders list must work everywhere. place and
+    // cancel keep the gate — cancelling a stop is risk-increasing.
+    const readOnlyAction = toolName === 'ibkr_orders' && (toolArgs as { action?: string })?.action === 'list';
+    if (this.requiresApproval(toolName) && !sessionApproved && !readOnlyAction) {
       // No approval channel (headless: gateway/cron/trigger runs) → auto-deny.
       const headless = this.requestToolApproval === undefined;
       const decision = (await this.requestToolApproval?.({ tool: toolName, args: toolArgs })) ?? 'deny';
