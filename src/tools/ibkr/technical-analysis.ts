@@ -254,11 +254,23 @@ export function createTechnicalAnalysis() {
             const ohlcv = barsToOHLCV(bars);
             const indicators = computeAll(ohlcv);
 
+            // Deterministic freshness verdict — the model must never judge
+            // staleness from raw timestamps (2026-08-10: Friday's close was
+            // called "three days stale" at 07:07 ET Monday; pre-market, the
+            // prior session's close IS the newest possible RTH bar).
+            const { assessBarFreshness } = await import('./signal-scorer.js');
+            const freshness = assessBarFreshness(ohlcv.time[ohlcv.time.length - 1]);
             return formatToolResult({
                 ticker,
                 barSize: barSizeLabel,
                 barCount: bars.length,
                 latestBar: ohlcv.time[ohlcv.time.length - 1],
+                freshness: {
+                    ...freshness,
+                    note: freshness.stale
+                        ? freshness.staleNote
+                        : 'Bars are as fresh as the session allows. Outside regular hours the newest bar is the previous session close — that is NORMAL, not a stale feed.',
+                },
                 snapshot: buildSnapshot(indicators, ohlcv),
                 recentHistory: buildRecentHistory(indicators, ohlcv),
             });
