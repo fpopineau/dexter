@@ -9,6 +9,17 @@ description: >
 
 # Day Trade Scan Skill
 
+## Pre-Open Gap Plans (exception to the first-minutes rule)
+
+The documented first-15-minutes loss pattern bans DISCRETIONARY entries at
+the open, not confirmation triggers. A pre-open STP_LMT armed just above
+the PRE-MARKET HIGH (from extended-hours bars, useRTH false) fills only if
+the open drives through the most-watched level of the first hour - that
+fill IS the confirmation. Rules: verified catalyst + real pre-market
+dollar volume required; stop at prior-session RTH structure, never at
+thin pre-market wicks; sizing stays on RTH ATR (the sizer handles it);
+no-fill is a good outcome. Never market-buy an open.
+
 ## Workflow Checklist
 
 Copy and track progress:
