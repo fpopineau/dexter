@@ -27,6 +27,48 @@ import { dirname, join } from 'node:path';
 import { addSymbol, removeSymbol } from './ibkr-stream.js';
 import { breadthThresholdRelief, breadthWatchlist, detectBreadth, type BreadthEvent } from './breadth-detector.js';
 import { runScan, type ScanCode, type ScanResult } from './scanner-loop.js';
+import { etDatePlus, getEarningsForDate, previousTradingDate } from './earnings-calendar.js';
+
+// ---------------------------------------------------------------------------
+// Earnings reactors — names that printed last night (AMC) or this morning
+// (BMO). Capture reports 2026-08-06/07: 7 of 15 top movers were reactors the
+// scanners NEVER SAW, and TEAM sat at rank 84 in 4th place where only the
+// top-3 are trigger-eligible. Reactors get candidate priority, trigger
+// eligibility to REACTOR_TRIGGER_DEPTH, and threshold relief.
+// ---------------------------------------------------------------------------
+
+const REACTOR_TRIGGER_DEPTH = 10;
+
+function reactorRelief(): number {
+    const n = Number(process.env.OPP_REACTOR_RELIEF);
+    return Number.isFinite(n) && n >= 0 ? n : 10;
+}
+
+let reactorCacheDate = '';
+let reactorCache = new Set<string>();
+
+/** Today's reactor set (cached per ET day; calendar service caches fetches). */
+export async function reactorWatchlist(): Promise<Set<string>> {
+    const today = etDatePlus(0);
+    if (reactorCacheDate === today) return reactorCache;
+    const out = new Set<string>();
+    try {
+        const prev = await getEarningsForDate(previousTradingDate());
+        for (const e of prev ?? []) {
+            if (e.time === 'after-hours' || e.time === 'unknown') out.add(e.symbol.toUpperCase());
+        }
+        const cur = await getEarningsForDate(today);
+        for (const e of cur ?? []) {
+            if (e.time === 'pre-market' || e.time === 'unknown') out.add(e.symbol.toUpperCase());
+        }
+        reactorCacheDate = today;
+        reactorCache = out;
+        logger.info(`[opportunity-engine] reactor watchlist for ${today}: ${out.size} fresh reporters`);
+    } catch (err) {
+        logger.warn(`[opportunity-engine] reactor watchlist unavailable (${err}) — continuing without`);
+    }
+    return out;
+}
 import { ScanHealthMonitor, type HealthTransition } from './scan-health.js';
 
 // ---------------------------------------------------------------------------
@@ -379,9 +421,14 @@ export async function runCycleOnce(forcePhase?: EnginePhase): Promise<Opportunit
 
         lastSurfaced = [...found.entries()].map(([symbol, meta]) => ({ symbol, sources: [...meta.sources] }));
 
-        // 2. Pick candidates: multi-scan symbols first, then by scanner rank
+        // 2. Pick candidates: reactors first (fresh prints must never lose
+        // the scoring slot to a stale mover), then multi-scan, then rank.
+        const reactors = await reactorWatchlist();
         const candidates = [...found.entries()]
-            .sort((a, b) => (b[1].sources.length - a[1].sources.length) || (a[1].result.rank - b[1].result.rank))
+            .sort((a, b) =>
+                (Number(reactors.has(b[0].toUpperCase())) - Number(reactors.has(a[0].toUpperCase())))
+                || (b[1].sources.length - a[1].sources.length)
+                || (a[1].result.rank - b[1].result.rank))
             .slice(0, maxCandidates());
 
         // 3. Score sequentially (IBKR historical-data pacing)
@@ -614,8 +661,15 @@ async function evaluateTriggers(snapshot: OpportunitySnapshot): Promise<void> {
     const watch = breadthDay ? breadthWatchlist() : null;
     const relief = breadthDay ? breadthThresholdRelief() : 0;
 
-    for (const opp of snapshot.opportunities.slice(0, 3)) {
-        const oppThreshold = watch?.has(opp.symbol.toUpperCase()) ? threshold - relief : threshold;
+    const reactors = await reactorWatchlist();
+    for (const [idx, opp] of snapshot.opportunities.slice(0, REACTOR_TRIGGER_DEPTH).entries()) {
+        const isReactor = reactors.has(opp.symbol.toUpperCase());
+        // Non-reactors keep the historical top-3 eligibility window; a fresh
+        // reporter is trigger-eligible anywhere in the top 10 (TEAM, rank 84,
+        // 4th on 2026-08-07 — never fired under top-3-only).
+        if (!isReactor && idx >= 3) continue;
+        let oppThreshold = watch?.has(opp.symbol.toUpperCase()) ? threshold - relief : threshold;
+        if (isReactor) oppThreshold = Math.min(oppThreshold, threshold - reactorRelief());
         if (opp.compositeRank < oppThreshold) continue;
         if (triggersToday >= maxTriggers) {
             logger.info(`[opportunity-engine] trigger cap reached for today (${maxTriggers}${capBonus ? ` incl. breadth bonus +${capBonus}` : ''})`);
