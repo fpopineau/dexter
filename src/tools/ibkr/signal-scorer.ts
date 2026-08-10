@@ -20,6 +20,7 @@ import { z } from 'zod';
 import { formatToolResult } from '../types.js';
 import { allocReqId, getIBApi, isNonFatalIbkrError } from './connection.js';
 import { type AllIndicators, type OHLCV, computeAll } from './ta-indicators.js';
+import { isMarketHoliday } from '@/utils/market-hours.js';
 
 // ---------------------------------------------------------------------------
 // Factor weights — calibratable via scripts/calibrate-scorer.ts
@@ -688,8 +689,17 @@ export function assessBarFreshness(lastBarTime: string | undefined, now: Date = 
 
     const day = et.getDay();
     const hour = et.getHours();
-    const expectFresh = day >= 1 && day <= 5 && hour >= 4 && hour < 20;
-    const stale = expectFresh && ageMin > STALE_AFTER_MIN;
+    const minute = et.getMinutes();
+    // Scorer bars are REGULAR-HOURS: outside 09:35-16:00 ET (and on
+    // weekends/holidays) the newest possible bar IS the previous session's
+    // close - Friday's 15:55 bar on a Monday pre-market is fresh, not a
+    // lagging feed (live incident 2026-08-10: NVDA refused pre-market over
+    // a "3700-minute" weekend gap). The lag check only means something
+    // while new bars are actually being printed.
+    const iso = `${et.getFullYear()}-${String(et.getMonth() + 1).padStart(2, '0')}-${String(et.getDate()).padStart(2, '0')}`;
+    const inRth = day >= 1 && day <= 5 && !isMarketHoliday(iso)
+        && (hour > 9 || (hour === 9 && minute >= 35)) && hour < 16;
+    const stale = inRth && ageMin > STALE_AFTER_MIN;
 
     return {
         lastBarTime: raw,
