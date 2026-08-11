@@ -84,7 +84,10 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         // guaranteed broker rejections (IBKR 201 "exchange is closed" —
         // observed live 2026-08-11, bell-race triggers). GTC brackets rest
         // legally at any hour; pre-market DAY orders rest until the open.
-        if (p.tif !== 'GTC' && !isTradeableSession(getMarketSession().session)) {
+        // Gated off in tests (wall-clock dependent, same as the tracker's
+        // DAY-expiry detection) — the scenario suites must not change
+        // verdicts with the hour they run at.
+        if (process.env.NODE_ENV !== 'test' && p.tif !== 'GTC' && !isTradeableSession(getMarketSession().session)) {
             throw new Error(
                 '[session-gate] the session is over — a DAY bracket placed now is a guaranteed broker rejection. ' +
                 'Re-propose as a GTC overnight setup if the thesis survives the night, or wait for the next session.',
