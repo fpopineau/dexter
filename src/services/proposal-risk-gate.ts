@@ -68,6 +68,71 @@ export interface RiskGateContext {
      *  move (%). Floored at earnings_bet_gap_floor_pct for the worst-case
      *  budget check; omitted → the floor alone is assumed. */
     worstCaseGapPct?: number;
+    /** Σ planned worst-case losses (USD) of the open book — every
+     *  executing/executed proposal EXCLUDING this one, each priced by
+     *  plannedWorstLossUsd. Enables the daily-loss headroom check. */
+    openPlannedRiskUsd?: number;
+    /** Net realized P&L (USD) of trades closed today. Clamped to ≤ 0
+     *  inside the check: losses shrink the headroom, wins never expand
+     *  the planned-stop budget (conservative by design). */
+    realizedLossTodayUsd?: number;
+}
+
+/**
+ * Planned worst-case loss (USD) of one working/held proposal: stop-out
+ * cost for stop-protected classes, assumed adverse gap for earnings bets
+ * (a stop cannot protect through a print). Null when the row lacks a
+ * usable price basis (e.g. a MKT accept mid-flight before its fill) —
+ * callers treat null as "not countable", never as zero risk.
+ */
+export function plannedWorstLossUsd(
+    t: {
+        quantity: number;
+        entry: number | null;
+        entryFillPrice?: number | null;
+        entryLimit?: number | null;
+        stop: number;
+        tradeClass?: TradeClass;
+        worstCaseGapPct?: number | null;
+    },
+    rules: RiskRules = getRiskRules(),
+): number | null {
+    const basis = t.entryFillPrice ?? t.entry ?? t.entryLimit ?? null;
+    if (basis == null || !(basis > 0) || !(t.quantity > 0)) return null;
+    if ((t.tradeClass ?? 'intraday') === 'earnings-bet') {
+        const perShare = gapRiskPerShare(basis, t.worstCaseGapPct ?? undefined, rules);
+        return Math.round(t.quantity * perShare * 100) / 100;
+    }
+    const dist = Math.abs(basis - t.stop);
+    if (!(dist > 0)) return null;
+    return Math.round(t.quantity * dist * 100) / 100;
+}
+
+/**
+ * The worst planned book the caps AUTHORIZE, as % of NetLiq: fill the
+ * class caps with the most expensive mix that fits max_open_positions.
+ * Pure config arithmetic — when this exceeds max_daily_loss_pct, the
+ * config is self-contradictory (the sizer may build a book whose planned
+ * stop-outs breach the kill-switch) and the headroom gate will bind
+ * before the position caps do. Surfaced as a startup warning.
+ */
+export function plannedBookWorstCasePct(rules: RiskRules = getRiskRules()): number {
+    let slots = rules.max_open_positions;
+    let pct = 0;
+    const take = (n: number, each: number) => {
+        const used = Math.max(0, Math.min(n, slots));
+        slots -= used;
+        pct += used * each;
+    };
+    // Most expensive classes first (swing > earnings-bet ≥ intraday in
+    // both profiles; ties are order-independent).
+    const classes = [
+        { n: rules.max_swing_positions, each: rules.swing_risk_pct },
+        { n: rules.earnings_bet_enabled ? rules.max_earnings_bets : 0, each: rules.earnings_bet_risk_pct },
+    ].sort((a, b) => b.each - a.each);
+    for (const c of classes) if (c.each > rules.max_risk_per_trade_pct) take(c.n, c.each);
+    take(slots, rules.max_risk_per_trade_pct);
+    return Math.round(pct * 100) / 100;
 }
 
 export interface RiskGateResult {
@@ -277,6 +342,35 @@ export function checkProposalRisk(
                 violations.push(
                     `a stop-out would cost $${riskDollars.toFixed(0)} (${p.quantity} × $${risk.toFixed(2)} stop distance) — ` +
                     `over the ${budgetPct}% ${tradeClass} risk budget ($${maxRisk.toFixed(0)}); max ${maxShares} shares at these levels`,
+                );
+            }
+        }
+    }
+
+    // --- Daily-loss headroom (acceptance-time) ---
+    // The kill-switch must never be breachable by the PLANNED stops alone:
+    // a book whose intended stop-outs already exceed max_daily_loss_pct is
+    // a halt waiting to latch, entered on purpose. The live profile made
+    // this real (audit 2026-08-11): 3 slots × 1.0–1.5% budgets vs a 2%
+    // halt. Wins never expand the budget (realized P&L clamps at 0);
+    // realized losses shrink it.
+    if (ctx.netLiquidation !== undefined && ctx.netLiquidation > 0
+        && ctx.openPlannedRiskUsd !== undefined) {
+        const thisRisk = plannedWorstLossUsd(
+            { ...p, worstCaseGapPct: ctx.worstCaseGapPct ?? null },
+            rules,
+        );
+        if (thisRisk !== null) {
+            const limit = (rules.max_daily_loss_pct / 100) * ctx.netLiquidation;
+            const realized = Math.min(0, ctx.realizedLossTodayUsd ?? 0);
+            const headroom = Math.round((limit + realized - ctx.openPlannedRiskUsd) * 100) / 100;
+            if (thisRisk > headroom) {
+                violations.push(
+                    `planned worst case $${thisRisk.toFixed(0)} exceeds the remaining daily-loss headroom ` +
+                    `$${Math.max(0, headroom).toFixed(0)} (kill-switch ${rules.max_daily_loss_pct}% = $${limit.toFixed(0)}` +
+                    (realized < 0 ? `, $${Math.abs(realized).toFixed(0)} already realized in losses today` : '') +
+                    `, $${ctx.openPlannedRiskUsd.toFixed(0)} committed to the open book's planned stops) — ` +
+                    `the book must never be able to stop out through the halt. Close or trim something first, or skip`,
                 );
             }
         }

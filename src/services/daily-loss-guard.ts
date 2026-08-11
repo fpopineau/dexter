@@ -312,8 +312,13 @@ export async function getDailyLossStatus(): Promise<DailyLossStatus> {
         return { halted: true, latched: false, reason, limitPct };
     }
 
-    const limitDollars = (limitPct / 100) * netLiq;
+    // The limit anchors to the SESSION BASELINE equity (pre-trading NetLiq),
+    // not the current one: deriving it from current equity shrinks the limit
+    // as losses mount, counting the same loss on both sides of the
+    // comparison (audit 2026-08-11). Baseline captured at gateway boot; a
+    // mid-day first start anchors late — a known fallback-path limitation.
     const baseline = writeNetLiqBaselineIfAbsent(netLiq);
+    const limitDollars = (limitPct / 100) * baseline.netLiq;
 
     // Preferred source: IBKR's own daily P&L. Known-flaky on paper
     // accounts — fall back to the NetLiq-vs-session-baseline proxy.
@@ -335,7 +340,7 @@ export async function getDailyLossStatus(): Promise<DailyLossStatus> {
         const rec: HaltRecord = {
             date: tradingDate(),
             reason: `daily P&L ${dailyPnL.toFixed(0)}${source === 'netliq-proxy' ? ' (NetLiq proxy vs session baseline)' : ''} ` +
-                `breached -${limitPct}% of net liquidation (${netLiq.toFixed(0)})`,
+                `breached -${limitPct}% of session-baseline equity (${baseline.netLiq.toFixed(0)})`,
             dailyPnL,
             netLiquidation: netLiq,
             trippedAt: new Date().toISOString(),

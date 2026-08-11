@@ -36,6 +36,8 @@ import { startBenchmark, stopBenchmark } from '@/services/benchmark.js';
 import { startDashboard, stopDashboard } from '@/services/dashboard.js';
 import { startEodTriage, stopEodTriage } from '@/services/eod-triage.js';
 import { startNewsPulse, stopNewsPulse } from '@/services/news-pulse.js';
+import { plannedBookWorstCasePct } from '@/services/proposal-risk-gate.js';
+import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
 import { startProfitTrail, stopProfitTrail } from '@/services/profit-trail.js';
 import { catchUpPatternScan } from '@/services/pattern-scanner.js';
 import { startStaleEntrySweeper, stopStaleEntrySweeper } from '@/services/stale-entry-sweeper.js';
@@ -318,6 +320,22 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     // Session NetLiq baseline: the kill-switch's P&L fallback references
     // pre-trading equity. Best-effort; retried on the first gate check.
     void captureNetLiqBaseline();
+    // Config coherence: announce when the caps authorize a book whose
+    // planned stop-outs alone would breach the kill-switch — the
+    // acceptance-time headroom gate then binds BEFORE the position caps,
+    // which must never surprise the operator mid-session.
+    {
+      const rules = getRiskRules();
+      const worstCase = plannedBookWorstCasePct(rules);
+      if (worstCase > rules.max_daily_loss_pct) {
+        debugLog(
+          `[gateway] RISK-CONFIG WARNING: the class caps authorize a planned book worst case of ` +
+          `${worstCase}% of NetLiq, over the ${rules.max_daily_loss_pct}% daily-loss kill-switch — ` +
+          `the daily-loss headroom gate will refuse acceptances before the position caps fill. ` +
+          `Align max_daily_loss_pct with the class budgets (risk-rules yaml) or accept the tighter effective book.`,
+        );
+      }
+    }
     if (isOpportunityEngineEnabled()) {
       registerTriggerAlerts();
       registerScanHealthAlerts();

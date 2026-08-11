@@ -1,6 +1,13 @@
 import { describe, expect, test } from 'bun:test';
 import { DEFAULT_RULES } from '@/tools/ibkr/risk-rules.js';
-import { assertProposalRisk, checkPriceRun, checkProposalRisk, type RiskGateProposal } from './proposal-risk-gate.js';
+import {
+    assertProposalRisk,
+    checkPriceRun,
+    checkProposalRisk,
+    plannedBookWorstCasePct,
+    plannedWorstLossUsd,
+    type RiskGateProposal,
+} from './proposal-risk-gate.js';
 
 const RULES = { ...DEFAULT_RULES }; // min_rr 2.0, min_price 5, max_position 5%, max_open 10, max_daily 20
 
@@ -476,5 +483,134 @@ describe('fractional quantities at the gate', () => {
             { ...FRAC_RULES, max_position_pct: 20, max_risk_per_trade_pct: 1.0 },
         );
         expect(r.ok).toBe(true);
+    });
+});
+
+describe('plannedWorstLossUsd (per-proposal planned worst case)', () => {
+    test('stop-protected classes pay quantity × stop distance', () => {
+        expect(plannedWorstLossUsd({ quantity: 10, entry: 100, stop: 95 }, DEFAULT_RULES)).toBe(50);
+        expect(plannedWorstLossUsd(
+            { quantity: 10, entry: 100, stop: 105, tradeClass: 'swing' }, DEFAULT_RULES,
+        )).toBe(50); // shorts: |basis − stop|
+    });
+
+    test('a filled entry re-prices the risk from the actual fill', () => {
+        expect(plannedWorstLossUsd(
+            { quantity: 10, entry: 100, entryFillPrice: 101, stop: 95 }, DEFAULT_RULES,
+        )).toBe(60); // fill 101, not the planned 100
+    });
+
+    test('earnings bets pay the assumed adverse gap, never the stop', () => {
+        // 20% floor on a $100 basis = $20/share — the $5 stop is irrelevant
+        // because a stop cannot protect through a print.
+        expect(plannedWorstLossUsd(
+            { quantity: 10, entry: 100, stop: 95, tradeClass: 'earnings-bet', worstCaseGapPct: 12 },
+            DEFAULT_RULES,
+        )).toBe(200);
+    });
+
+    test('rows without a usable basis are null (not zero risk)', () => {
+        expect(plannedWorstLossUsd({ quantity: 10, entry: null, stop: 95 }, DEFAULT_RULES)).toBeNull();
+        expect(plannedWorstLossUsd({ quantity: 0, entry: 100, stop: 95 }, DEFAULT_RULES)).toBeNull();
+        expect(plannedWorstLossUsd({ quantity: 10, entry: 100, stop: 100 }, DEFAULT_RULES)).toBeNull();
+    });
+
+    test('entryLimit is the last-resort basis for unfilled STP_LMT rows', () => {
+        expect(plannedWorstLossUsd({ quantity: 10, entry: null, entryLimit: 102, stop: 97 }, DEFAULT_RULES)).toBe(50);
+    });
+});
+
+describe('daily-loss headroom gate (the kill-switch is a budget, not a tripwire)', () => {
+    // Live-profile shaped numbers: €3.7K account, 3% halt = $111 limit.
+    const LIVE_ISH = { ...DEFAULT_RULES, max_daily_loss_pct: 3, max_risk_per_trade_pct: 1.0, max_position_pct: 20 };
+
+    test('a book whose planned stops would breach the halt is refused', () => {
+        // Open book already commits $80 of planned stops; this trade plans
+        // $35 more (7 × $5 stop distance) — $115 > the $111 limit. Position
+        // value $700 stays under the 20% cap so ONLY the headroom fires.
+        const r = checkProposalRisk(
+            longProposal({ quantity: 7 }),
+            { netLiquidation: 3700, openPlannedRiskUsd: 80 },
+            LIVE_ISH,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('daily-loss headroom');
+        expect(r.violations.join(' ')).toContain('stop out through the halt');
+    });
+
+    test('the same trade passes when the book leaves room', () => {
+        const r = checkProposalRisk(
+            longProposal({ quantity: 7 }),
+            { netLiquidation: 3700, openPlannedRiskUsd: 60 }, // 35 + 60 ≤ 111
+            LIVE_ISH,
+        );
+        expect(r.ok).toBe(true);
+    });
+
+    test('realized losses today shrink the headroom', () => {
+        const r = checkProposalRisk(
+            longProposal({ quantity: 7 }),
+            { netLiquidation: 3700, openPlannedRiskUsd: 60, realizedLossTodayUsd: -20 },
+            LIVE_ISH, // 111 − 20 − 60 = 31 < 35 → refused
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('already realized in losses today');
+    });
+
+    test('wins never expand the planned-stop budget (clamped at zero)', () => {
+        // Wider per-trade budget (3%) so only the headroom can refuse:
+        // 7 × $10 stop distance = $70 planned vs headroom 111 − 60 = 51.
+        const r = checkProposalRisk(
+            longProposal({ quantity: 7, stop: 90, target: 120 }),
+            { netLiquidation: 3700, openPlannedRiskUsd: 60, realizedLossTodayUsd: 250 },
+            { ...LIVE_ISH, max_risk_per_trade_pct: 3 }, // +250 must NOT stretch 51 to fit 70
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('daily-loss headroom');
+    });
+
+    test('without book context the check does not run (creation-time unchanged)', () => {
+        const r = checkProposalRisk(
+            longProposal({ quantity: 7 }),
+            { netLiquidation: 3700 },
+            LIVE_ISH,
+        );
+        expect(r.ok).toBe(true);
+    });
+
+    test('earnings bets are priced by their gap in the headroom sum', () => {
+        const rules = { ...LIVE_ISH, earnings_bet_enabled: true, earnings_bet_risk_pct: 10 };
+        // 5 shares × $20 gap (20% floor on $100) = $100 planned > $111 − $60.
+        const r = checkProposalRisk(
+            longProposal({ quantity: 5, tradeClass: 'earnings-bet' }),
+            { netLiquidation: 3700, openPlannedRiskUsd: 60, worstCaseGapPct: 12 },
+            rules,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('daily-loss headroom');
+    });
+});
+
+describe('plannedBookWorstCasePct (config coherence)', () => {
+    test('live profile: 3 slots of 1.5% swings = 4.5% — the audited contradiction', () => {
+        const live = {
+            ...DEFAULT_RULES,
+            max_open_positions: 3,
+            max_risk_per_trade_pct: 1.0,
+            swing_risk_pct: 1.5,
+            max_swing_positions: 3,
+            earnings_bet_enabled: false,
+        };
+        expect(plannedBookWorstCasePct(live)).toBe(4.5);
+    });
+
+    test('paper profile: 3 swings + 7 intraday = 3.25%', () => {
+        // DEFAULT_RULES: 10 slots, swing 3 × 0.5%, intraday 0.25%.
+        expect(plannedBookWorstCasePct(DEFAULT_RULES)).toBe(3.25);
+    });
+
+    test('swing cap larger than the book is bounded by max_open_positions', () => {
+        const rules = { ...DEFAULT_RULES, max_open_positions: 2, max_swing_positions: 3, swing_risk_pct: 1 };
+        expect(plannedBookWorstCasePct(rules)).toBe(2);
     });
 });

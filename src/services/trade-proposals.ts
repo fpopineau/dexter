@@ -699,6 +699,18 @@ export async function listExposure(): Promise<TradeProposal[]> {
     return rows.map(fromRow);
 }
 
+/** Net realized P&L (USD) of trades closed since `sinceMs`. Rows with an
+ *  unknown outcome (realized_pnl NULL) contribute nothing — the headroom
+ *  gate stays conservative elsewhere, it must not invent losses here. */
+export async function sumRealizedPnlSince(sinceMs: number): Promise<number> {
+    const database = await getDb();
+    const rows = database.query<{ n: number | null }>(
+        `SELECT SUM(realized_pnl) AS n FROM proposals
+         WHERE status = 'closed' AND closed_at >= ? AND realized_pnl IS NOT NULL`,
+    ).all(sinceMs);
+    return Math.round((rows[0]?.n ?? 0) * 100) / 100;
+}
+
 /** Start of the current America/New_York day in epoch ms. */
 export function etDayStartMs(now = Date.now()): number {
     const et = new Date(new Date(now).toLocaleString('en-US', { timeZone: 'America/New_York' }));

@@ -16,6 +16,15 @@ max_open_positions: 3 # concentration beats dust at this size
 
 # --- Daily Limits ---
 max_daily_trades: 4 # commissions are a real tax at this size
+# Kill-switch, sized to the book the caps above authorize (audit
+# 2026-08-11: the base 2% was breachable by planned stops alone — 3 slots
+# x 1.0-1.5% budgets = 3.0-4.5% worst case, so two ordinary stop-outs
+# latched the halt). At 3.0%: a full 3-intraday book (3 x 1.0%) fits
+# exactly; swing-heavy mixes (up to 4.5%) hit the acceptance-time
+# daily-loss HEADROOM gate before the position caps do — deliberately
+# conservative. Raise to 4.5 only if the caps should always bind first.
+# ~E111 on E3.7K. >>> REVIEW before go-live. <<<
+max_daily_loss_pct: 3
 
 # --- Overnight ---
 max_overnight_position_pct: 15

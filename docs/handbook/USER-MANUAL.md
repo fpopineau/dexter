@@ -404,11 +404,22 @@ evaluation instead of chasing a stale price.
 
 ## 10. The kill-switch
 
-Once the account's daily P&L breaches −`max_daily_loss_pct` ×
-NetLiquidation (default −2%), all new orders are refused for the rest of
-the ET day. It **latches** (P&L recovering does not un-halt; restarts do
-not clear it) and **fails safe** (if nothing can be verified, orders are
-refused).
+Once the account's daily P&L breaches −`max_daily_loss_pct` × the
+**session-baseline** equity (pre-trading NetLiq; default −2% paper, −3%
+live), all new orders are refused for the rest of the ET day. It
+**latches** (P&L recovering does not un-halt; restarts do not clear it)
+and **fails safe** (if nothing can be verified, orders are refused).
+
+**The halt is also a budget, not just a tripwire** (2026-08-11): at
+acceptance time the risk gate refuses any proposal whose planned worst
+case — this trade's stop-out cost (gap cost for earnings bets) plus the
+open book's planned stop-outs plus today's realized losses — exceeds
+the daily-loss limit. The book can never be built so that its own
+intended stops latch the halt. Wins never expand this budget; realized
+losses shrink it. When the class caps authorize a worse book than the
+halt allows (they do, in both profiles), the gateway logs a
+RISK-CONFIG warning at startup and the headroom gate binds before the
+position caps.
 
 P&L verification has two sources: IBKR's `reqPnL` (preferred), falling
 back to a **NetLiq proxy** — current NetLiquidation minus the session

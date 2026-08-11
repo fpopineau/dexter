@@ -20,7 +20,7 @@ import { createIbkrMarketData } from '@/tools/ibkr/market-data.js';
 import { logger } from '@/utils';
 import { assertDailyLossOk } from './daily-loss-guard.js';
 import { trackExecutedProposal } from './outcome-tracker.js';
-import { assertProposalRisk, checkPriceRun } from './proposal-risk-gate.js';
+import { assertProposalRisk, checkPriceRun, plannedWorstLossUsd } from './proposal-risk-gate.js';
 import {
     claimProposalForExecution,
     countExecutedSince,
@@ -34,6 +34,7 @@ import {
     listTrackable,
     releaseProposalClaim,
     setProposalStatus,
+    sumRealizedPnlSince,
 } from './trade-proposals.js';
 
 export interface ExecutionOutcome {
@@ -81,6 +82,7 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
 
         // Risk gate with live account context. Re-runs the static checks too:
         // rules may have been tightened since the proposal was created.
+        const exposure = (await listExposure()).filter((t) => t.id !== p.id);
         assertProposalRisk(
             {
                 symbol: p.symbol,
@@ -104,9 +106,15 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 ...(p.worstCaseGapPct != null ? { worstCaseGapPct: p.worstCaseGapPct } : {}),
                 // Committed notional on this symbol from OTHER working/filled
                 // proposals — the aggregate cap stops same-name stacking.
-                existingSymbolExposure: (await listExposure())
-                    .filter((t) => t.symbol === p.symbol && t.id !== p.id)
+                existingSymbolExposure: exposure
+                    .filter((t) => t.symbol === p.symbol)
                     .reduce((sum, t) => sum + t.quantity * (t.entry ?? 0), 0),
+                // Daily-loss headroom: the open book's planned stop-outs
+                // (gap cost for bets) plus today's realized losses — the
+                // gate refuses a book that could stop out through the halt.
+                openPlannedRiskUsd: exposure
+                    .reduce((sum, t) => sum + (plannedWorstLossUsd(t) ?? 0), 0),
+                realizedLossTodayUsd: Math.min(0, await sumRealizedPnlSince(etDayStartMs())),
             },
         );
 

@@ -28,6 +28,7 @@ import {
     markEntryFilled,
     recordLateExitFill,
     setProposalStatus,
+    sumRealizedPnlSince,
     type CreateProposalInput,
 } from './trade-proposals.js';
 
@@ -163,6 +164,26 @@ describe('proposal store lifecycle', () => {
         expect(closed?.status).toBe('closed');
         expect(closed?.realizedPnl).toBe(-50.5);
         expect(await countOpenExecuted()).toBe(baseOpen);
+    });
+
+    test('sumRealizedPnlSince nets closed outcomes and ignores unknown P&L', async () => {
+        const before = await sumRealizedPnlSince(0);
+
+        const win = await createProposal(validInput({ symbol: 'PNLW' }));
+        await setProposalStatus(win.id, 'executed', { orderIds: [501, 502, 503], executedAt: Date.now() });
+        await closeProposal(win.id, { exitReason: 'target', realizedPnl: 120.25 });
+
+        const loss = await createProposal(validInput({ symbol: 'PNLL' }));
+        await setProposalStatus(loss.id, 'executed', { orderIds: [511, 512, 513], executedAt: Date.now() });
+        await closeProposal(loss.id, { exitReason: 'stop', realizedPnl: -45.75 });
+
+        const unknown = await createProposal(validInput({ symbol: 'PNLU' }));
+        await setProposalStatus(unknown.id, 'executed', { orderIds: [521, 522, 523], executedAt: Date.now() });
+        await closeProposal(unknown.id, { exitReason: 'manual' }); // realizedPnl null — contributes nothing
+
+        expect(await sumRealizedPnlSince(0)).toBeCloseTo(before + 74.5, 2);
+        // A cutoff after these closes sees none of them.
+        expect(await sumRealizedPnlSince(Date.now() + 60_000)).toBe(0);
     });
 
     test('EOD-keep transition refuses unfilled entries and rows a concurrent close already won', async () => {
