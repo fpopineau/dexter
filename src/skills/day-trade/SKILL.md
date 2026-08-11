@@ -39,7 +39,7 @@ Day Trade Scan Progress:
 Determine the current session and adapt strategy:
 
 - **Pre-market (04:00–09:30 ET):** Focus on gap analysis, pre-market movers, and planning. Do NOT recommend entries until open unless explicitly asked for pre-market trades.
-- **Regular hours (09:30–16:00 ET):** Full scanning mode. Prioritize momentum in the first 30 min, mean-reversion mid-day, and trend trades in the afternoon.
+- **Regular hours (09:30–16:00 ET):** Full scanning mode. Momentum leadership shows itself in the first 30 min — build the candidate list from it, but do NOT enter before the opening range forms (~09:45): first-15-minute fills buy the gap-fade zone (see the felt lessons below). Before ~09:50, express entries as STP_LMT confirmation triggers above the opening-range high (below the OR low for shorts), never immediate LMT/MKT fills. Mean-reversion mid-day, trend trades in the afternoon.
 - **After-hours (16:00–20:00 ET):** Earnings reactions only. Flag but do not recommend new entries unless the user specifically asks.
 - **Closed / Holiday:** Report that the market is closed. Offer to prepare a watchlist for the next session instead.
 

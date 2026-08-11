@@ -139,6 +139,23 @@ Output a structured brief in this format:
 ```
 
 **Important reminders:**
-- This is a preparation skill — do NOT generate specific entry/stop/target trade plans. Use the `day-trade-scan` skill for that.
+- Proposals ARE part of the scheduled brief's deliverable — this stopped
+  being a prose-only preparation skill with the day2day pivot. When a
+  setup qualifies (the 08:00 cron prompt or the operator asks), register
+  it with `trade_proposals`:
+  - **Gap plan** (1–2 gappers with a VERIFIED catalyst and real pre-market
+    dollar volume): confirmation-based DAY proposal — `STP_LMT`, trigger
+    just above the PRE-MARKET HIGH, `entryLimit` ~0.3% above, stop at RTH
+    structure from the PRIOR session, target an honest ≥ 2:1 objective,
+    quantity OMITTED, `expiresMinutes` 150 so unfilled plans die by
+    ~10:30. These fill only on opening strength — a no-fill is a good
+    outcome, say so plainly.
+  - **Swing candidates** (from `swing_patterns`): GTC `STP_LMT` per the
+    swing flow — the `company-snapshot` skill is REQUIRED first; an
+    unneutralized RED FLAGS line kills the candidate.
+  Two hard rules survive from the era when this skill banned trade plans
+  outright, because they are why it did: never propose a MKT entry
+  pre-open, and never derive stops or scores from thin pre-market quotes
+  (swing levels come from PRIOR-session daily bars).
 - If running before 4:00 AM ET, note that pre-market data is limited. Focus on overnight futures and global markets.
 - Always note the time the brief was generated — pre-market data changes rapidly.

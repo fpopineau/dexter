@@ -17,8 +17,9 @@ Overnight Review Progress:
 - [ ] Step 1: Assess current positions & P&L
 - [ ] Step 2: Evaluate overnight catalysts & risk
 - [ ] Step 3: Review each position hold/trim/close
-- [ ] Step 4: Identify swing setups for tomorrow
-- [ ] Step 5: Output overnight action plan
+- [ ] Step 4: Register tonight's proposals (overnight setups, earnings-bet window)
+- [ ] Step 5: Identify swing setups for tomorrow
+- [ ] Step 6: Output overnight action plan
 ```
 
 ## Step 1: Assess Current Positions & P&L
@@ -110,29 +111,54 @@ Overnight caps are enforced DETERMINISTICALLY, not by you:
 - `risk_manager` remains advisory context (per-position overnight check
   only); never report a cap as "validated" on its say-so.
 
-## Step 4: Identify Swing Setups for Tomorrow
+## Step 4: Register Tonight's Proposals
+
+The pre-close review PROPOSES — this skill's output is trade proposals
+when candidates qualify, not only an action plan. Two lanes, both inside
+the 15:00–16:00 window:
+
+### 4.1 Overnight Setups (at most 2)
+From the opportunities snapshot and the watchlist: candidates whose move
+has a stated reason to survive the night (catalyst, pattern
+continuation). Prefer lower-ATR names; check `earnings_calendar`
+(withinDays 2) and `event_risk` (macro binaries) first. Register with
+`trade_proposals`: `tif` "GTC" so the bracket survives the close,
+quantity OMITTED, `expiresMinutes` 45. The acceptance gate enforces the
+overnight caps — propose honest levels and let it answer.
+
+### 4.2 The Earnings-Bet Window (at most 1)
+15:00–15:55 is the ONLY entry window for an earnings bet. Where a
+reporter passes the evidence bar (`earnings_bet_intel` reactions: ≥8
+prints, ≥75% consistency, plus one external signal — `externalSignal`
+counts), register ONE labeled proposal: `tradeClass` "earnings-bet",
+`worstCaseGapPct` from the reactions record, quantity OMITTED,
+`expiresMinutes` short enough to die by 15:55. "No reporter qualifies"
+is the normal outcome most days — say it plainly.
+
+## Step 5: Identify Swing Setups for Tomorrow
 
 Look for potential setups to enter at tomorrow's open or on pullbacks.
 
-### 4.1 Daily Chart Setups
+### 5.1 Daily Chart Setups
 Call `technical_analysis` with `barSize: "1 day"` on watchlist tickers:
 - **Pullback-to-EMA:** Price pulling back to 21 EMA in an uptrend (50 EMA rising).
 - **Breakout setup:** Price consolidating near resistance with increasing volume.
 - **Oversold bounce:** RSI < 35 with hammer/doji candle on support.
 
-### 4.2 After-Hours Movers
+### 5.2 After-Hours Movers
 Call `web_search`:
 - **Query:** `"after hours movers today [DATE]"` — identify earnings-driven gaps to trade at tomorrow's open.
 - For any big gap, evaluate: gap-and-go vs gap-fill setup based on daily context.
 
-### 4.3 Score Any New Candidates
+### 5.3 Score Any New Candidates
 Call `signal_scorer` for promising setups:
 - Include the assessment of whether to wait for a pullback or enter at open.
-- These are prep-only candidates: nothing is proposed here. Any that
-  graduate to a swing proposal (pre-market flow) must first pass the
-  `company-snapshot` skill — its RED FLAGS line decides.
+- TOMORROW's candidates are prep-only in THIS step (tonight's proposals
+  belong to Step 4). Any that graduate to a swing proposal in the
+  pre-market flow must first pass the `company-snapshot` skill — its RED
+  FLAGS line decides.
 
-## Step 5: Output Overnight Action Plan
+## Step 6: Output Overnight Action Plan
 
 ```
 # Overnight Review — [DATE] [TIME] ET
@@ -171,5 +197,10 @@ Call `signal_scorer` for promising setups:
 **Important reminders:**
 - This skill is most valuable 30–60 minutes before market close (15:00–15:30 ET).
 - If running after hours, some data (TA on intraday bars) may reflect the regular session close, not after-hours moves.
-- Overnight holding is inherently riskier due to gap risk — bias toward reducing exposure unless the setup is compelling.
+- Overnight gap risk is real, but the deterministic 15:52 EOD triage
+  keeps winners and stabilizing losers BY DEFAULT (operator policy) — do
+  not blanket-recommend flattening what the machine will keep 22 minutes
+  later. Your judgment adds the exits the triage won't take: name the
+  specific positions to close and why (thesis dead, macro binary night,
+  cap overshoot), and let the rest ride protected.
 - Never hold a position through an earnings print as part of an overnight keep. Holding through a print is a separate, explicitly-labeled earnings-bet decision with its own sizing rules — close the position or propose that bet explicitly. A keep must never quietly become an earnings bet.
