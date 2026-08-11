@@ -137,10 +137,12 @@ R/R requirement:**
 2. **Target at a real objective**: prior high/low, measured move, gap fill.
    If the honest objective is closer than 2× the stop distance, there is no
    trade — do NOT stretch the target or tighten the stop to manufacture 2:1.
-3. **Size from the risk budget**: `shares = floor(0.25% of NetLiq / (entry − stop))`.
-   Every trade then loses the same amount when wrong. Never size up to the
-   5% position-value cap on a tight stop — that cap is a ceiling, not a
-   sizing method.
+3. **Size from the risk budget**: `shares = floor(per-trade risk budget /
+   (entry − stop))`, where the budget is `max_risk_per_trade_pct` of NetLiq
+   FROM THE ACTIVE PROFILE (0.25% paper, 1.0% live — never hardcode either
+   in an alert), weighted by the confidence multiplier. Every trade then
+   loses the same amount when wrong. Never size up to the position-value
+   cap on a tight stop — that cap is a ceiling, not a sizing method.
 
 Call `risk_manager` for each trade candidate:
 - **Ticker:** The candidate
@@ -148,6 +150,8 @@ Call `risk_manager` for each trade candidate:
 - **Entry price:** Current price from TA data
 - **Stop price:** From structure as above (typically entry ± 1–1.5× ATR)
 - **Target price:** The real objective (must give ≥ 2:1 vs the stop)
+- **Score / tradeClass:** pass them — the suggestion then previews the
+  exact size the executor's sizer will compute at acceptance
 
 The risk manager validates (advisory — the deterministic gate at
 creation/acceptance is what actually binds):
@@ -204,7 +208,7 @@ with `trade_proposals` (action `create`, at most 3 per scan):
   `LMT` at the support level. `MKT` only when immediacy beats price.
 - `entry` is REQUIRED even for MKT proposals (pass the current price — it
   anchors the deterministic risk validation).
-- OMIT `quantity` — the deterministic position sizer computes it from the account, the score, and the stop distance (risk_manager's suggestion uses a placeholder account value and must never size a real proposal), `expiresMinutes` 90,
+- OMIT `quantity` — the deterministic position sizer computes it from the account, the score, and the stop distance (risk_manager's suggestion previews the same sizer against the live account, but the sizer at acceptance remains the authority), `expiresMinutes` 90,
   `rationale` one line (setup + catalyst + risk note), include the signal
   `score`.
 - Creation NEVER trades. Include each returned proposal ID in your answer

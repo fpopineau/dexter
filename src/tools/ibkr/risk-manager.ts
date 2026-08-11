@@ -3,11 +3,21 @@
  * rules loaded from src/config/risk-rules.yaml.
  *
  * Returns a pass/fail verdict with details on every rule checked.
- * Does NOT execute trades — advisory only.
+ * Does NOT execute trades — advisory only; the deterministic gate at
+ * creation/acceptance is the authority.
+ *
+ * Sizing suggestions delegate to the SAME position-sizer the executor
+ * runs, against the LIVE account value (fetched server-side, best
+ * effort). Until 2026-08-11 this tool sized from its own formula
+ * (0.25 × max_daily_loss_pct = 2× the real per-trade budget) against a
+ * $100K placeholder account — every narrated size disagreed with the
+ * executed size, exactly the mismatch that erodes trust in an alert.
  */
 
 import { DynamicStructuredTool } from '@langchain/core/tools';
 import { z } from 'zod';
+import { getNetLiquidation } from '@/services/daily-loss-guard.js';
+import { computeQuantity } from '@/services/position-sizer.js';
 import { formatToolResult } from '../types.js';
 import { getRiskRules, type RiskRules } from './risk-rules.js';
 
@@ -19,15 +29,23 @@ export { getRiskRules, type RiskRules } from './risk-rules.js';
 // ---------------------------------------------------------------------------
 
 export const RISK_MANAGER_DESCRIPTION = `
-Validate a proposed trade against risk management rules. Checks:
+Validate a proposed trade against risk management rules (ADVISORY — the
+deterministic gate at creation/acceptance is the authority). Checks:
   - Position size vs max allocation
   - Risk/reward ratio vs minimum threshold
   - Stop loss presence
   - Price and liquidity minimums
-  - Overnight exposure limits (if holding overnight)
+  - Per-position overnight cap (if holding overnight)
+
+Sizing suggestions use the SAME position sizer the executor runs
+(class budget × confidence multiplier ÷ risk per share) against the
+LIVE account value — pass the proposal's score and tradeClass to
+preview what the sizer will compute at acceptance. When the account
+value cannot be verified (IBKR down, no accountValue given), the
+account-relative checks are SKIPPED and say so — never validated
+against a placeholder.
 
 Returns PASS or FAIL with a breakdown of each rule checked.
-Does not require IBKR connection — works on the proposed numbers alone.
 `.trim();
 
 // ---------------------------------------------------------------------------
@@ -59,7 +77,19 @@ const RiskManagerSchema = z.object({
     accountValue: z
         .coerce.number()
         .optional()
-        .describe('Total account value in USD. Used for position sizing. Defaults to $100,000 if not provided.'),
+        .describe('FALLBACK account value in USD, used only when the live IBKR net liquidation cannot be fetched. Never defaults — without either, account-relative checks are skipped and reported as such.'),
+    score: z
+        .coerce.number()
+        .optional()
+        .describe("The proposal's confidence score (0–100+). Feeds the sizer's confidence multiplier so the suggestion matches what acceptance will compute. Omitted = sized as unscored (lowest multiplier)."),
+    tradeClass: z
+        .enum(['intraday', 'swing', 'earnings-bet'])
+        .optional()
+        .describe("Trade class; selects the risk budget the sizer uses (default 'intraday')."),
+    worstCaseGapPct: z
+        .coerce.number()
+        .optional()
+        .describe('Earnings bets only: the assumed adverse post-print gap (%) — the sizer sizes against it, not the stop.'),
     currentOpenPositions: z
         .coerce.number()
         .optional()
@@ -88,17 +118,25 @@ interface RuleCheck {
     detail: string;
 }
 
-function validateTrade(input: z.infer<typeof RiskManagerSchema>): {
+/** Exported for tests: pure validation against a RESOLVED account value
+ *  (null = unavailable → account-relative checks are skipped, visibly). */
+export function validateTrade(
+    input: z.infer<typeof RiskManagerSchema>,
+    accountValue: number | null,
+    rules: RiskRules = getRiskRules(),
+): {
     verdict: 'PASS' | 'FAIL';
     checks: RuleCheck[];
+    /** Account-relative checks that could NOT be evaluated — a PASS
+     *  verdict does not cover these. */
+    skipped: string[];
     suggestedShares: number | null;
     suggestedStop: number | null;
     riskReward: number | null;
     positionValuePct: number | null;
 } {
-    const rules: RiskRules = getRiskRules();
     const checks: RuleCheck[] = [];
-    const accountValue = input.accountValue ?? 100_000;
+    const skipped: string[] = [];
     let allPassed = true;
 
     const fail = (rule: string, detail: string) => {
@@ -165,31 +203,68 @@ function validateTrade(input: z.infer<typeof RiskManagerSchema>): {
         }
     }
 
-    // --- Position sizing ---
-    const maxPositionValue = accountValue * (rules.max_position_pct / 100);
+    // --- Account-relative checks: only against a REAL account value ---
     let suggestedShares: number | null = null;
-
-    if (input.shares !== undefined) {
-        const positionValue = input.shares * input.entryPrice;
-        const positionPct = (positionValue / accountValue) * 100;
-        if (positionPct > rules.max_position_pct) {
-            const maxShares = Math.floor(maxPositionValue / input.entryPrice);
-            fail('max_position_pct', `Position ${positionPct.toFixed(1)}% (${input.shares} shares × $${input.entryPrice}) > max ${rules.max_position_pct}%. Max shares: ${maxShares}`);
-        } else {
-            pass('max_position_pct', `Position ${positionPct.toFixed(1)}% ≤ max ${rules.max_position_pct}%`);
-        }
+    if (accountValue === null || !(accountValue > 0)) {
+        skipped.push(
+            'position sizing, max_position_pct and the overnight check were SKIPPED — the live account ' +
+            'value could not be verified and no accountValue was supplied. A PASS here does NOT cover them.',
+        );
     } else {
-        // Suggest position size based on risk if stop is known
-        if (stopForCalc != null) {
-            const riskPerShare = Math.abs(input.entryPrice - stopForCalc);
-            const maxRiskDollars = accountValue * (rules.max_daily_loss_pct / 100) * 0.25; // risk 25% of daily limit per trade
-            const sharesByRisk = riskPerShare > 0 ? Math.floor(maxRiskDollars / riskPerShare) : 0;
-            const sharesBySize = Math.floor(maxPositionValue / input.entryPrice);
-            suggestedShares = Math.min(sharesByRisk, sharesBySize);
-            pass('position_size', `Suggested: ${suggestedShares} shares ($${(suggestedShares * input.entryPrice).toFixed(0)}, ${((suggestedShares * input.entryPrice / accountValue) * 100).toFixed(1)}% of account)`);
+        const maxPositionValue = accountValue * (rules.max_position_pct / 100);
+
+        if (input.shares !== undefined) {
+            const positionValue = input.shares * input.entryPrice;
+            const positionPct = (positionValue / accountValue) * 100;
+            if (positionPct > rules.max_position_pct) {
+                const maxShares = Math.floor(maxPositionValue / input.entryPrice);
+                fail('max_position_pct', `Position ${positionPct.toFixed(1)}% (${input.shares} shares × $${input.entryPrice}) > max ${rules.max_position_pct}%. Max shares: ${maxShares}`);
+            } else {
+                pass('max_position_pct', `Position ${positionPct.toFixed(1)}% ≤ max ${rules.max_position_pct}%`);
+            }
+        } else if (stopForCalc != null) {
+            // THE sizer, not a lookalike: class budget × confidence
+            // multiplier ÷ risk per share (gap for earnings bets), then the
+            // position-value cap — the suggestion previews what acceptance
+            // will compute from the same inputs.
+            const size = computeQuantity({
+                entry: input.entryPrice,
+                stop: stopForCalc,
+                score: input.score ?? null,
+                netLiquidation: accountValue,
+                tradeClass: input.tradeClass,
+                worstCaseGapPct: input.worstCaseGapPct ?? null,
+            }, rules);
+            if (size.quantity === null) {
+                fail('position_size', `the position sizer refuses: ${size.reason ?? 'not viable at these levels'}`);
+            } else {
+                // The sizer already applies the max_position_pct cap itself.
+                suggestedShares = size.quantity;
+                pass('position_size',
+                    `Suggested ${suggestedShares} shares ($${(suggestedShares * input.entryPrice).toFixed(0)}, ` +
+                    `${((suggestedShares * input.entryPrice / accountValue) * 100).toFixed(1)}% of account) — same math the ` +
+                    `executor's sizer runs: ${input.tradeClass ?? 'intraday'} budget $${size.riskBudget.toFixed(0)} at ` +
+                    `confidence ×${size.multiplier}`);
+            }
         } else {
+            // No stop: only the allocation ceiling can be stated — and it is
+            // a CEILING, not a size. The stop defines the trade.
             suggestedShares = Math.floor(maxPositionValue / input.entryPrice);
-            pass('position_size', `Suggested (max allocation): ${suggestedShares} shares ($${(suggestedShares * input.entryPrice).toFixed(0)})`);
+            pass('position_size', `No stop given — $${maxPositionValue.toFixed(0)} (${suggestedShares} shares) is the max_position_pct CEILING, not a suggested size; the sizer needs the stop`);
+        }
+
+        // --- Overnight exposure (per-position; the total book cap is
+        // enforced by the acceptance gate) ---
+        if (input.holdOvernight) {
+            const overnightMaxPct = rules.max_overnight_position_pct;
+            const posValue = (input.shares ?? suggestedShares ?? 0) * input.entryPrice;
+            const posValuePct = (posValue / accountValue) * 100;
+            if (posValuePct > overnightMaxPct) {
+                const maxOvernightShares = Math.floor((accountValue * overnightMaxPct / 100) / input.entryPrice);
+                fail('max_overnight_position_pct', `Overnight position ${posValuePct.toFixed(1)}% > max ${overnightMaxPct}%. Reduce to ${maxOvernightShares} shares.`);
+            } else {
+                pass('max_overnight_position_pct', `Overnight position ${posValuePct.toFixed(1)}% ≤ max ${overnightMaxPct}%`);
+            }
         }
     }
 
@@ -202,27 +277,15 @@ function validateTrade(input: z.infer<typeof RiskManagerSchema>): {
         }
     }
 
-    // --- Overnight exposure ---
-    if (input.holdOvernight) {
-        const overnightMaxPct = rules.max_overnight_position_pct;
-        const posValue = (input.shares ?? suggestedShares ?? 0) * input.entryPrice;
-        const posValuePct = (posValue / accountValue) * 100;
-        if (posValuePct > overnightMaxPct) {
-            const maxOvernightShares = Math.floor((accountValue * overnightMaxPct / 100) / input.entryPrice);
-            fail('max_overnight_position_pct', `Overnight position ${posValuePct.toFixed(1)}% > max ${overnightMaxPct}%. Reduce to ${maxOvernightShares} shares.`);
-        } else {
-            pass('max_overnight_position_pct', `Overnight position ${posValuePct.toFixed(1)}% ≤ max ${overnightMaxPct}%`);
-        }
-    }
-
     const effectiveShares = input.shares ?? suggestedShares ?? 0;
-    const positionValuePct = accountValue > 0
+    const positionValuePct = accountValue !== null && accountValue > 0
         ? Math.round(((effectiveShares * input.entryPrice) / accountValue) * 10000) / 100
         : null;
 
     return {
         verdict: allPassed ? 'PASS' : 'FAIL',
         checks,
+        skipped,
         suggestedShares: input.shares === undefined ? suggestedShares : null,
         suggestedStop: input.stopPrice === undefined ? suggestedStop : null,
         riskReward,
@@ -238,10 +301,17 @@ export function createRiskManager() {
     return new DynamicStructuredTool({
         name: 'risk_manager',
         description:
-            'Validate a proposed trade against risk management rules (position size, R/R ratio, stop loss, overnight limits). Returns PASS/FAIL with details.',
+            'Validate a proposed trade against risk management rules (position size via the real sizer + live account, R/R ratio, stop loss, overnight limit). Advisory; returns PASS/FAIL with details.',
         schema: RiskManagerSchema,
         func: async (input) => {
-            const result = validateTrade(input);
+            // Live account value first (server-side, best effort); the
+            // caller-supplied number is only a fallback for a dead
+            // connection. There is deliberately no placeholder default —
+            // sizing against a fictional account is worse than saying
+            // "could not verify".
+            const liveNetLiq = await getNetLiquidation();
+            const accountValue = liveNetLiq ?? input.accountValue ?? null;
+            const result = validateTrade(input, accountValue);
             return formatToolResult({
                 ticker: input.ticker.trim().toUpperCase(),
                 direction: input.direction,
@@ -249,6 +319,10 @@ export function createRiskManager() {
                 stopPrice: input.stopPrice ?? result.suggestedStop,
                 targetPrice: input.targetPrice ?? null,
                 holdOvernight: input.holdOvernight,
+                accountValue,
+                accountValueSource: liveNetLiq !== null
+                    ? 'ibkr-live'
+                    : input.accountValue !== undefined ? 'caller-supplied (live NetLiq unavailable)' : 'unavailable',
                 ...result,
             });
         },
