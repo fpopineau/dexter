@@ -29,6 +29,10 @@
  *   - tradeClass 'earnings-bet' is exempt BY DESIGN — holding through the
  *     print is the entire point of that class, and it was sized for the
  *     worst-case gap at creation. The report still names it.
+ *   - UNFILLED GTC entries get the guard too (2026-08-11): a resting
+ *     entry survives the close, and a post-print gap fills it exactly
+ *     when it blows through the trigger — an entry-side accidental
+ *     earnings bet. With a print ahead, the resting orders are cancelled.
  *   - A print dated TODAY with 'pre-market' timing already happened by
  *     15:52 — closing on it would flatten exactly the legitimate
  *     post-print reaction trades this desk exists to take. Past prints
@@ -105,25 +109,53 @@ export function decideEodAction(input: {
 }
 
 /**
- * Pure: split trackable proposals into the two triage lanes.
+ * Pure: split trackable proposals into the three triage lanes.
  *   - momentum lane: filled DAY brackets (exits die at the bell) AND
  *     kept-overnight holds (converted DAY keeps — tif is GTC now, but they
  *     are intraday positions that must re-earn every additional night, not
  *     thesis-carrying swings);
  *   - guard-only lane: filled GTC positions entered deliberately (swings,
  *     overnight setups, earnings bets) — their thesis holds, only an
- *     imminent print can force them flat.
+ *     imminent print can force them flat;
+ *   - unfilled-GTC lane: executed proposals whose ENTRY still rests as a
+ *     GTC order. The entry survives the close, so a post-print gap can
+ *     blow through the trigger and fill INTO the reaction — an entry-side
+ *     accidental earnings bet. (Unfilled DAY entries die at the bell —
+ *     safe by construction, in no lane.)
  */
 export function splitTriageCandidates<T extends {
     tif: 'DAY' | 'GTC';
     entryFillPrice: number | null;
     keptOvernightAt: number | null;
-}>(trackable: T[]): { momentum: T[]; guardOnly: T[] } {
+}>(trackable: T[]): { momentum: T[]; guardOnly: T[]; unfilledGtc: T[] } {
     const filled = trackable.filter((t) => t.entryFillPrice != null);
     return {
         momentum: filled.filter((t) => t.tif === 'DAY' || t.keptOvernightAt != null),
         guardOnly: filled.filter((t) => t.tif === 'GTC' && t.keptOvernightAt == null),
+        unfilledGtc: trackable.filter((t) => t.entryFillPrice == null && t.tif === 'GTC'),
     };
+}
+
+/**
+ * Earnings guard for a RESTING GTC entry: with a print ahead, the order
+ * must not survive into it — tomorrow's gap fills exactly when it blows
+ * through the trigger, entering a position the stop math never priced.
+ * Cancel, never hold. Earnings bets are exempt (their entry window is the
+ * final hour before the print's close and their size assumes the gap);
+ * they are reported, not cancelled. Null = nothing needs doing.
+ */
+export function decideUnfilledEntryGuard(
+    tradeClass: TradeClass,
+    earnings: Pick<UpcomingEarnings, 'date' | 'time'> | null,
+    todayIso: string,
+): string | null {
+    if (tradeClass === 'earnings-bet') return null; // gap-sized by design
+    if (!earnings || !isUpcomingPrint(earnings, todayIso)) return null;
+    return (
+        `reports earnings ${earnings.date}${earnings.time !== 'unknown' ? ` ${earnings.time}` : ''} — ` +
+        `cancelling the resting ${tradeClass} entry: a post-print gap through the trigger would fill ` +
+        `INTO the reaction with a stop the sizing never priced for (entry-side earnings guard)`
+    );
 }
 
 /**
@@ -262,9 +294,10 @@ export async function runEodTriageOnce(): Promise<void> {
 
     const trackable = await listTrackable();
     // Momentum lane: DAY brackets + kept-overnight holds (full triage);
-    // guard-only lane: deliberate GTC positions (earnings guard only).
-    const { momentum: dayCandidates, guardOnly: gtcCandidates } = splitTriageCandidates(trackable);
-    if (dayCandidates.length === 0 && gtcCandidates.length === 0) return;
+    // guard-only lane: deliberate GTC positions (earnings guard only);
+    // unfilled-GTC lane: resting entries that would survive the close.
+    const { momentum: dayCandidates, guardOnly: gtcCandidates, unfilledGtc } = splitTriageCandidates(trackable);
+    if (dayCandidates.length === 0 && gtcCandidates.length === 0 && unfilledGtc.length === 0) return;
 
     const api = await getIBApi();
     const positions = await fetchPositions(api);
@@ -278,7 +311,7 @@ export async function runEodTriageOnce(): Promise<void> {
     let earningsUnknownDays: string[] = [];
     if (isEarningsGuardEnabled()) {
         try {
-            const symbols = [...new Set([...dayCandidates, ...gtcCandidates].map((t) => t.symbol))];
+            const symbols = [...new Set([...dayCandidates, ...gtcCandidates, ...unfilledGtc].map((t) => t.symbol))];
             const { hits, unknownDays } = await findUpcomingEarnings(symbols, EARNINGS_GUARD_DAYS);
             earningsBySymbol = new Map(hits.map((h) => [h.symbol, h]));
             earningsUnknownDays = unknownDays;
@@ -340,6 +373,26 @@ export async function runEodTriageOnce(): Promise<void> {
         lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} GTC): ${decision.reason}. ${outcome.ok ? 'Closed.' : outcome.message}`);
     }
 
+    // Unfilled GTC entries: a resting order is exposure-in-waiting. With a
+    // print ahead, cancel it (the outcome tracker finalizes the proposal as
+    // 'cancelled' when it sees the cancellations, same as the stale-entry
+    // sweeper). An unfilled earnings-bet entry is reported, never cancelled.
+    for (const t of unfilledGtc) {
+        const hit = earningsBySymbol.get(t.symbol) ?? null;
+        if (t.tradeClass === 'earnings-bet' && hit && isUpcomingPrint(hit, today)) {
+            lines.push(`• ${t.symbol} (${t.id}, earnings-bet): entry still resting into the ${hit.date} print — final-hour window, gap-sized BY DESIGN; it expires with the proposal if unfilled.`);
+            continue;
+        }
+        const reason = decideUnfilledEntryGuard(t.tradeClass, hit, today);
+        if (!reason) continue;
+        logger.info(`[eod-triage] ${t.id} ${t.symbol} {${t.tradeClass}, GTC, unfilled}: cancel — ${reason}`);
+        let cancelled = 0;
+        for (const oid of t.orderIds ?? []) {
+            try { api.cancelOrder(oid); cancelled++; } catch { /* already gone */ }
+        }
+        lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} entry UNFILLED): ${reason}. ${cancelled ? `${cancelled} resting order(s) cancelled.` : 'No live orders found — check ibkr_orders.'}`);
+    }
+
     // Overnight-cap usage (advisory, never trims): everything still open
     // after the decisions above rides the night — including positions the
     // caps would have refused as deliberate GTC entries.
@@ -366,7 +419,7 @@ export async function runEodTriageOnce(): Promise<void> {
     if (lines.length || (macroLine && macroEvents !== null) || capLine) {
         const footer =
             (earningsUnknownDays.length
-                ? `\n⚠ earnings calendar unavailable (${earningsUnknownDays.join(', ')}) — keeps are NOT verified print-free.`
+                ? `\n⚠ earnings calendar unavailable (${earningsUnknownDays.join(', ')}) — keeps and resting entries are NOT verified print-free.`
                 : '') +
             (capLine ? `\n${capLine}` : '') +
             (macroLine ? `\n${macroLine}` : '');

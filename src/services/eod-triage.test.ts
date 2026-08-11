@@ -1,5 +1,28 @@
 import { describe, expect, test } from 'bun:test';
-import { applyEarningsGuard, decideEodAction, decideGtcEarningsGuard, isUpcomingPrint, overnightCapWarning, splitTriageCandidates } from './eod-triage.js';
+import { applyEarningsGuard, decideEodAction, decideGtcEarningsGuard, decideUnfilledEntryGuard, isUpcomingPrint, overnightCapWarning, splitTriageCandidates } from './eod-triage.js';
+
+describe('decideUnfilledEntryGuard (entry-side accidental earnings bets)', () => {
+    const TODAY_ISO = '2026-08-11';
+
+    test('a resting swing entry with a print ahead is cancelled, with the gap rationale', () => {
+        const reason = decideUnfilledEntryGuard('swing', { date: '2026-08-12', time: 'pre-market' }, TODAY_ISO);
+        expect(reason).toContain('cancelling the resting swing entry');
+        expect(reason).toContain('INTO the reaction');
+    });
+
+    test('intraday GTC setups get the same guard', () => {
+        expect(decideUnfilledEntryGuard('intraday', { date: '2026-08-11', time: 'after-hours' }, TODAY_ISO)).toContain('cancelling');
+    });
+
+    test('earnings-bet entries are exempt — gap-sized by design', () => {
+        expect(decideUnfilledEntryGuard('earnings-bet', { date: '2026-08-11', time: 'after-hours' }, TODAY_ISO)).toBeNull();
+    });
+
+    test('no print, or a past BMO print today, leaves the entry resting', () => {
+        expect(decideUnfilledEntryGuard('swing', null, TODAY_ISO)).toBeNull();
+        expect(decideUnfilledEntryGuard('swing', { date: TODAY_ISO, time: 'pre-market' }, TODAY_ISO)).toBeNull();
+    });
+});
 
 describe('overnightCapWarning (cap usage visible, never force-trimmed)', () => {
     const CAPS = { max_overnight_exposure_pct: 30, max_overnight_position_pct: 3 };
@@ -50,10 +73,13 @@ describe('splitTriageCandidates (kept-overnight holds re-enter momentum triage)'
         expect(guardOnly).toEqual([]);
     });
 
-    test('unfilled entries are in neither lane', () => {
-        const { momentum, guardOnly } = splitTriageCandidates([mk('DAY', null), mk('GTC', null, Date.now())]);
+    test('unfilled GTC entries land in their own lane; unfilled DAY entries die at the bell (no lane)', () => {
+        const restingGtc = mk('GTC', null);
+        const dyingDay = mk('DAY', null);
+        const { momentum, guardOnly, unfilledGtc } = splitTriageCandidates([dyingDay, restingGtc]);
         expect(momentum).toEqual([]);
         expect(guardOnly).toEqual([]);
+        expect(unfilledGtc).toEqual([restingGtc]);
     });
 });
 
