@@ -44,6 +44,48 @@ function reactorRelief(): number {
     return Number.isFinite(n) && n >= 0 ? n : 10;
 }
 
+/** Extra composite-rank points a NON-reactor must clear to trigger from
+ *  rank positions 3..9 (the deep window). 0 = deep window at the base
+ *  threshold; NEGATIVE = disable the deep window (old top-3-only rule). */
+function deepTriggerMargin(): number {
+    const n = Number(process.env.OPP_DEEP_TRIGGER_MARGIN);
+    return Number.isFinite(n) ? n : 5;
+}
+
+/**
+ * Pure: is the candidate at rank position `idx` trigger-eligible, and at
+ * what effective threshold? Three windows:
+ *   - top-3: base threshold, breadth-watchlist relief applies (historical
+ *     behavior — the window that discards nothing it already ranked high);
+ *   - positions 3..depth-1: reactors keep their relief (a fresh print is
+ *     its own catalyst — the TEAM lesson, 2026-08-07); non-reactors are
+ *     now eligible too but must clear threshold + deepMargin — depth
+ *     costs conviction, it is not free (ABCL 83 and LINC 84 beat the 75
+ *     bar from rank 4+ and never fired; capture ledger 2026-08-10). No
+ *     breadth relief in the deep window: relieving AND deepening at once
+ *     would reopen the noise the top-3 window existed to keep out;
+ *   - at/beyond depth: nobody.
+ */
+export function triggerEligibility(input: {
+    idx: number;
+    isReactor: boolean;
+    onBreadthWatchlist: boolean;
+    threshold: number;
+    breadthRelief: number;
+    reactorReliefPts: number;
+    deepMargin: number;
+    depth: number;
+}): { eligible: boolean; effectiveThreshold: number } {
+    if (input.idx >= input.depth) return { eligible: false, effectiveThreshold: Infinity };
+    const base = input.onBreadthWatchlist ? input.threshold - input.breadthRelief : input.threshold;
+    if (input.isReactor) {
+        return { eligible: true, effectiveThreshold: Math.min(base, input.threshold - input.reactorReliefPts) };
+    }
+    if (input.idx < 3) return { eligible: true, effectiveThreshold: base };
+    if (input.deepMargin < 0) return { eligible: false, effectiveThreshold: Infinity }; // deep window disabled
+    return { eligible: true, effectiveThreshold: input.threshold + input.deepMargin };
+}
+
 let reactorCacheDate = '';
 let reactorCache = new Set<string>();
 
@@ -664,13 +706,17 @@ async function evaluateTriggers(snapshot: OpportunitySnapshot): Promise<void> {
     const reactors = await reactorWatchlist();
     for (const [idx, opp] of snapshot.opportunities.slice(0, REACTOR_TRIGGER_DEPTH).entries()) {
         const isReactor = reactors.has(opp.symbol.toUpperCase());
-        // Non-reactors keep the historical top-3 eligibility window; a fresh
-        // reporter is trigger-eligible anywhere in the top 10 (TEAM, rank 84,
-        // 4th on 2026-08-07 — never fired under top-3-only).
-        if (!isReactor && idx >= 3) continue;
-        let oppThreshold = watch?.has(opp.symbol.toUpperCase()) ? threshold - relief : threshold;
-        if (isReactor) oppThreshold = Math.min(oppThreshold, threshold - reactorRelief());
-        if (opp.compositeRank < oppThreshold) continue;
+        const gate = triggerEligibility({
+            idx,
+            isReactor,
+            onBreadthWatchlist: watch?.has(opp.symbol.toUpperCase()) ?? false,
+            threshold,
+            breadthRelief: relief,
+            reactorReliefPts: reactorRelief(),
+            deepMargin: deepTriggerMargin(),
+            depth: REACTOR_TRIGGER_DEPTH,
+        });
+        if (!gate.eligible || opp.compositeRank < gate.effectiveThreshold) continue;
         if (triggersToday >= maxTriggers) {
             logger.info(`[opportunity-engine] trigger cap reached for today (${maxTriggers}${capBonus ? ` incl. breadth bonus +${capBonus}` : ''})`);
             return;
@@ -682,7 +728,8 @@ async function evaluateTriggers(snapshot: OpportunitySnapshot): Promise<void> {
         triggersToday++;
         logger.info(
             `[opportunity-engine] TRIGGER ${opp.symbol} (${opp.direction}, rank ${opp.compositeRank}` +
-            `${opp.compositeRank < threshold ? `, breadth relief −${relief}` : ''})`,
+            `${opp.compositeRank < threshold ? `, breadth relief −${relief}` : ''}` +
+            `${!isReactor && idx >= 3 ? `, deep window pos ${idx + 1} at bar ${gate.effectiveThreshold}` : ''})`,
         );
         for (const cb of [...triggerCallbacks]) {
             try {
