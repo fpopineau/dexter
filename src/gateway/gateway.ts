@@ -294,6 +294,20 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     // produces it) is routinely killed by the nightly restart window —
     // the boot that killed it heals it. Local-only, non-blocking.
     void catchUpPatternScan();
+    // Market-data farm warm-up: IBKR's farms connect lazily after the
+    // nightly restart — the first snapshot after boot can be stale or
+    // empty (2026-08-11 brief: broken quotes on every candidate). A SPY
+    // canary absorbs the wake-up before any scheduled brief needs quotes.
+    void (async () => {
+      try {
+        const { createIbkrMarketData } = await import('@/tools/ibkr/market-data.js');
+        const raw = await createIbkrMarketData().invoke({ ticker: 'SPY', exchange: 'SMART', currency: 'USD' });
+        const d = (JSON.parse(String(raw)) as { data?: { last?: number; bid?: number; ask?: number } }).data;
+        debugLog(`[gateway] market-data warm-up: SPY last=${d?.last ?? '—'} bid=${d?.bid ?? '—'} ask=${d?.ask ?? '—'}`);
+      } catch (err) {
+        debugLog(`[gateway] market-data warm-up failed (farms may lag the first real request): ${err}`);
+      }
+    })();
     // Local dashboard (http://127.0.0.1:8484) — charts + the live book from
     // dexter's own data; no second IBKR session involved.
     startDashboard();

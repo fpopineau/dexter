@@ -44,6 +44,9 @@ const READ_ONLY_TOOLS = [
   'memory_search',
   'memory_get',
   'earnings_calendar',
+  // Read-only: returns skill instructions (company-snapshot etc.) — the
+  // 2026-08-11 brief's snapshot workers could not run the REQUIRED skill.
+  'skill',
 ];
 
 const WORKER_PREAMBLE =
@@ -64,13 +67,13 @@ export const SUBAGENT_TYPES: Record<string, SubagentTypeConfig> = {
   catalyst: {
     whenToUse: 'Catalyst check on one name: why is it moving, what is coming (news, prints, positioning).',
     systemPrompt: `${WORKER_PREAMBLE}\n\nYou are a catalyst-check worker. For the given symbol, establish: (1) WHY it is moving or expected to move — the specific story (guidance, halt, FDA, offering, analyst action, M&A), not "momentum"; (2) WHAT is scheduled ahead — earnings date and timing, known events inside the holding window; (3) WHO is positioned where — crowding and trapped-side risk when discernible. Cite sources with dates. Say plainly when you cannot verify a catalyst — an unverified story is a finding, not a gap to paper over.`,
-    tools: ['web_search', 'x_search', 'web_fetch', 'read_filings', 'get_market_data', 'earnings_calendar'],
+    tools: ['web_search', 'x_search', 'web_fetch', 'read_filings', 'get_market_data', 'earnings_calendar', 'skill'],
     maxIterations: 8,
   },
   'setup-validation': {
     whenToUse: 'Validate one trade setup: structure, score, levels, data freshness.',
     systemPrompt: `${WORKER_PREAMBLE}\n\nYou are a setup-validation worker. For the given symbol and setup, verify with live data: (1) technical structure — trend, key levels, where the honest stop sits relative to ATR; (2) the signal score and each factor driving it; (3) data freshness — stale bars or disagreeing quotes make the setup unverifiable, and you must say so; (4) for earnings-bet candidates, the post-print record and evidence verdict (earnings_bet_intel). Report level-precise findings and a verdict on whether the setup holds up. You validate — you never propose or size trades.`,
-    tools: ['technical_analysis', 'signal_scorer', 'ibkr_market_data', 'ibkr_historical', 'earnings_calendar', 'earnings_bet_intel', 'swing_patterns', 'risk_manager'],
+    tools: ['technical_analysis', 'signal_scorer', 'ibkr_market_data', 'ibkr_historical', 'earnings_calendar', 'earnings_bet_intel', 'swing_patterns', 'risk_manager', 'skill'],
     maxIterations: 8,
   },
 };
