@@ -20,6 +20,7 @@ import { createIbkrMarketData } from '@/tools/ibkr/market-data.js';
 import { logger } from '@/utils';
 import { assertDailyLossOk } from './daily-loss-guard.js';
 import { trackExecutedProposal } from './outcome-tracker.js';
+import { getSectorInfo } from './sector-map.js';
 import { assertProposalRisk, checkPriceRun, plannedWorstLossUsd } from './proposal-risk-gate.js';
 import {
     claimProposalForExecution,
@@ -83,6 +84,24 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         // Risk gate with live account context. Re-runs the static checks too:
         // rules may have been tightened since the proposal was created.
         const exposure = (await listExposure()).filter((t) => t.id !== p.id);
+        const exposureValue = (t: { quantity: number; entryFillPrice: number | null; entry: number | null; entryLimit: number | null }) =>
+            t.quantity * (t.entryFillPrice ?? t.entry ?? t.entryLimit ?? 0);
+
+        // Sector concentration context — best-effort: an unknown sector
+        // (ETF, Nasdaq miss) skips the cap WITH a gate note, and a
+        // resolution error must never block an accept on its own.
+        let sector: string | null = null;
+        let sameSectorExposureUsd: number | undefined;
+        try {
+            sector = (await getSectorInfo(p.symbol))?.sector ?? null;
+            let sum = 0;
+            for (const t of exposure) {
+                if ((await getSectorInfo(t.symbol))?.sector === sector && sector !== null) sum += exposureValue(t);
+            }
+            sameSectorExposureUsd = sum;
+        } catch (err) {
+            logger.warn(`[proposal-executor] ${p.id}: sector resolution failed — sector cap skipped: ${err}`);
+        }
         assertProposalRisk(
             {
                 symbol: p.symbol,
@@ -94,6 +113,7 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 target: p.target,
                 quantity: p.quantity,
                 tradeClass: p.tradeClass,
+                tif: p.tif,
             },
             {
                 netLiquidation: lossStatus.netLiquidation,
@@ -115,6 +135,13 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 openPlannedRiskUsd: exposure
                     .reduce((sum, t) => sum + (plannedWorstLossUsd(t) ?? 0), 0),
                 realizedLossTodayUsd: Math.min(0, await sumRealizedPnlSince(etDayStartMs())),
+                // Overnight book: GTC rows survive the close (incl. 🌙
+                // kept-overnight holds — converted to GTC at the bell).
+                overnightExposureUsd: exposure
+                    .filter((t) => t.tif === 'GTC')
+                    .reduce((sum, t) => sum + exposureValue(t), 0),
+                sector,
+                ...(sameSectorExposureUsd !== undefined ? { sameSectorExposureUsd } : {}),
             },
         );
 

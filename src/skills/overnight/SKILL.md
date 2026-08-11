@@ -99,9 +99,16 @@ For each open position, make a recommendation:
 - Daily loss limit approaching — reduce exposure defensively
 - Major macro event overnight that could dominate price action
 
-Call `risk_manager` to validate overnight exposure:
-- Confirm total overnight exposure stays within `max_overnight_exposure_pct` limit.
-- If exceeded, recommend which positions to trim to bring within limits.
+Overnight caps are enforced DETERMINISTICALLY, not by you:
+- Any GTC proposal you register is refused at acceptance if it exceeds
+  `max_overnight_position_pct` per position or would push the surviving
+  book past `max_overnight_exposure_pct` — do not pre-negotiate with the
+  gate; propose honestly and read the refusal if one comes.
+- The 15:52 EOD triage report states the overnight book's cap usage for
+  positions that convert at the bell. If it flags an overshoot, recommend
+  which positions to trim and why — that judgment is yours.
+- `risk_manager` remains advisory context (per-position overnight check
+  only); never report a cap as "validated" on its say-so.
 
 ## Step 4: Identify Swing Setups for Tomorrow
 

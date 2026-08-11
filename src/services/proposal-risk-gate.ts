@@ -34,6 +34,9 @@ export interface RiskGateProposal {
     /** Trade class; omitted = 'intraday'. Selects the risk budget and the
      *  class-specific checks (swing cap, earnings-bet cap/switch/gap math). */
     tradeClass?: TradeClass;
+    /** Bracket time-in-force. GTC = the position is MEANT to survive the
+     *  close → the overnight caps apply at acceptance. Omitted = DAY. */
+    tif?: 'DAY' | 'GTC';
 }
 
 export interface RiskGateContext {
@@ -76,6 +79,18 @@ export interface RiskGateContext {
      *  inside the check: losses shrink the headroom, wins never expand
      *  the planned-stop budget (conservative by design). */
     realizedLossTodayUsd?: number;
+    /** Notional (USD) already committed to positions that survive the
+     *  close (GTC rows, incl. kept-overnight holds). Enables the
+     *  max_overnight_exposure_pct check for GTC proposals. */
+    overnightExposureUsd?: number;
+    /** The proposal symbol's sector (Nasdaq taxonomy), resolved
+     *  server-side. Null/omitted = unknown or sector-less (ETF) — the
+     *  sector cap is skipped with a note, never guessed. */
+    sector?: string | null;
+    /** Notional (USD) already committed to the SAME sector by
+     *  working/filled proposals. With `sector`, enables the
+     *  max_sector_exposure_pct check. */
+    sameSectorExposureUsd?: number;
 }
 
 /**
@@ -399,6 +414,58 @@ export function checkProposalRisk(
                 `adding $${positionValue.toFixed(0)} totals $${(positionValue + existing).toFixed(0)}, over the ` +
                 `${rules.max_position_pct}% single-symbol cap ($${maxValue.toFixed(0)})`,
             );
+        }
+    }
+
+    // --- Overnight caps (acceptance-time, GTC proposals only) ---
+    // A GTC bracket is a position MEANT to survive the close, so it is
+    // vetted against the overnight limits when the order is accepted —
+    // these two caps were config-declared but enforced nowhere until
+    // 2026-08-11 (skills claimed risk_manager checked them; it did not).
+    // DAY positions that get KEPT at the bell are a different path: the
+    // EOD triage reports their cap usage (no forced trim — operator keep
+    // policy), and the 🌙 conversion already announces the vetting gap.
+    if (p.tif === 'GTC' && ctx.netLiquidation !== undefined && ctx.netLiquidation > 0) {
+        const maxPosition = (rules.max_overnight_position_pct / 100) * ctx.netLiquidation;
+        if (positionValue > maxPosition) {
+            const maxShares = Math.floor(maxPosition / entry);
+            violations.push(
+                `overnight position $${positionValue.toFixed(0)} exceeds ${rules.max_overnight_position_pct}% of ` +
+                `net liquidation ($${maxPosition.toFixed(0)}) — the overnight cap is tighter than the intraday one; ` +
+                `max ${maxShares} shares, or make it a DAY trade`,
+            );
+        }
+        if (ctx.overnightExposureUsd !== undefined) {
+            const maxTotal = (rules.max_overnight_exposure_pct / 100) * ctx.netLiquidation;
+            if (positionValue + ctx.overnightExposureUsd > maxTotal) {
+                violations.push(
+                    `$${ctx.overnightExposureUsd.toFixed(0)} is already committed to positions that survive the close — ` +
+                    `adding $${positionValue.toFixed(0)} totals $${(positionValue + ctx.overnightExposureUsd).toFixed(0)}, over the ` +
+                    `${rules.max_overnight_exposure_pct}% overnight book cap ($${maxTotal.toFixed(0)}). ` +
+                    `Close or trim an overnight hold first, or skip`,
+                );
+            }
+        }
+    }
+
+    // --- Sector concentration (acceptance-time) ---
+    // Breadth days concentrate the book in one theme; the cap bounds how
+    // much of the account one sector's gap can hit. Unknown sector (ETF,
+    // data miss) skips with a note — visible, never guessed.
+    if (ctx.netLiquidation !== undefined && ctx.netLiquidation > 0
+        && ctx.sameSectorExposureUsd !== undefined) {
+        if (ctx.sector) {
+            const maxSector = (rules.max_sector_exposure_pct / 100) * ctx.netLiquidation;
+            if (positionValue + ctx.sameSectorExposureUsd > maxSector) {
+                violations.push(
+                    `$${ctx.sameSectorExposureUsd.toFixed(0)} is already committed to ${ctx.sector} — ` +
+                    `adding $${positionValue.toFixed(0)} totals $${(positionValue + ctx.sameSectorExposureUsd).toFixed(0)}, over the ` +
+                    `${rules.max_sector_exposure_pct}% sector cap ($${maxSector.toFixed(0)}). ` +
+                    `On a sector-wide move prefer the breadth vehicle over one more correlated name`,
+                );
+            }
+        } else {
+            notes.push(`sector cap not evaluated for ${p.symbol}: sector unknown (ETF or data unavailable)`);
         }
     }
 

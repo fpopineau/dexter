@@ -614,3 +614,79 @@ describe('plannedBookWorstCasePct (config coherence)', () => {
         expect(plannedBookWorstCasePct(rules)).toBe(2);
     });
 });
+
+describe('overnight caps (GTC proposals — formerly phantom)', () => {
+    // Paper numbers: overnight position 3%, overnight book 30% of $100k.
+    test('a GTC position above max_overnight_position_pct is refused', () => {
+        // 40 × $100 = $4,000 = 4% > 3% overnight cap (but under the 5% intraday cap).
+        const r = checkProposalRisk(
+            longProposal({ quantity: 40, tif: 'GTC' }),
+            { netLiquidation: 100_000 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('overnight position');
+        expect(r.violations.join(' ')).toContain('max 30 shares');
+    });
+
+    test('the same size passes as a DAY trade — the overnight cap is GTC-only', () => {
+        const r = checkProposalRisk(
+            longProposal({ quantity: 40, tif: 'DAY' }),
+            { netLiquidation: 100_000 },
+            RULES,
+        );
+        expect(r.ok).toBe(true);
+    });
+
+    test('the total overnight book cap refuses stacking past max_overnight_exposure_pct', () => {
+        // $2,500 new + $28,000 already surviving the close > 30% ($30,000).
+        const r = checkProposalRisk(
+            longProposal({ quantity: 25, tif: 'GTC' }),
+            { netLiquidation: 100_000, overnightExposureUsd: 28_000 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('overnight book cap');
+
+        const ok = checkProposalRisk(
+            longProposal({ quantity: 25, tif: 'GTC' }),
+            { netLiquidation: 100_000, overnightExposureUsd: 27_000 },
+            RULES,
+        );
+        expect(ok.ok).toBe(true);
+    });
+});
+
+describe('sector concentration cap (formerly phantom)', () => {
+    test('stacking a fourth correlated name past max_sector_exposure_pct is refused', () => {
+        // $2,500 new + $18,000 already in Technology > 20% of $100k.
+        const r = checkProposalRisk(
+            longProposal({ quantity: 25 }),
+            { netLiquidation: 100_000, sector: 'Technology', sameSectorExposureUsd: 18_000 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('Technology');
+        expect(r.violations.join(' ')).toContain('sector cap');
+        expect(r.violations.join(' ')).toContain('breadth vehicle');
+    });
+
+    test('inside the cap passes; applies to DAY and GTC alike', () => {
+        const r = checkProposalRisk(
+            longProposal({ quantity: 25, tif: 'GTC' }),
+            { netLiquidation: 100_000, sector: 'Technology', sameSectorExposureUsd: 15_000 },
+            RULES,
+        );
+        expect(r.ok).toBe(true);
+    });
+
+    test('unknown sector (ETF, data miss) skips with a visible note, never guesses', () => {
+        const r = checkProposalRisk(
+            longProposal({ quantity: 25 }),
+            { netLiquidation: 100_000, sector: null, sameSectorExposureUsd: 50_000 },
+            RULES,
+        );
+        expect(r.ok).toBe(true);
+        expect(r.notes.join(' ')).toContain('sector cap not evaluated');
+    });
+});

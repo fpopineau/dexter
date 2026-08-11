@@ -149,12 +149,17 @@ Call `risk_manager` for each trade candidate:
 - **Stop price:** From structure as above (typically entry ± 1–1.5× ATR)
 - **Target price:** The real objective (must give ≥ 2:1 vs the stop)
 
-The risk manager validates:
+The risk manager validates (advisory — the deterministic gate at
+creation/acceptance is what actually binds):
 - Position size doesn't exceed max allocation
 - Daily loss limit not breached
-- Sector exposure within limits
 - Risk/reward ratio meets minimum threshold
 - Stop loss is present and reasonable
+
+Sector concentration is NOT a risk_manager check: the acceptance gate
+enforces `max_sector_exposure_pct` itself (Nasdaq sector of the candidate
+vs the book; unknown sectors — ETFs, data misses — skip with a visible
+note). Same for the overnight caps on GTC proposals.
 
 **If risk check fails:** Report the specific violation and suggest adjustments (smaller size, wider stop, etc.).
 

@@ -1,5 +1,35 @@
 import { describe, expect, test } from 'bun:test';
-import { applyEarningsGuard, decideEodAction, decideGtcEarningsGuard, isUpcomingPrint, splitTriageCandidates } from './eod-triage.js';
+import { applyEarningsGuard, decideEodAction, decideGtcEarningsGuard, isUpcomingPrint, overnightCapWarning, splitTriageCandidates } from './eod-triage.js';
+
+describe('overnightCapWarning (cap usage visible, never force-trimmed)', () => {
+    const CAPS = { max_overnight_exposure_pct: 30, max_overnight_position_pct: 3 };
+
+    test('inside both caps → silent', () => {
+        expect(overnightCapWarning(
+            [{ symbol: 'AAPL', valueUsd: 2_500 }, { symbol: 'MU', valueUsd: 2_000 }],
+            100_000,
+            CAPS,
+        )).toBeNull();
+    });
+
+    test('an oversized keep is named against the per-position cap', () => {
+        const line = overnightCapWarning([{ symbol: 'NVDA', valueUsd: 5_000 }], 100_000, CAPS);
+        expect(line).toContain('NVDA is 5.0%');
+        expect(line).toContain('3% per-position');
+    });
+
+    test('a book past the total cap is flagged with its percentage', () => {
+        const holds = Array.from({ length: 11 }, (_, i) => ({ symbol: `S${i}`, valueUsd: 2_900 }));
+        const line = overnightCapWarning(holds, 100_000, CAPS);
+        expect(line).toContain('31.9% of NetLiq');
+        expect(line).toContain('30% cap');
+    });
+
+    test('no NetLiq → honest could-not-verify, never silence with holds on', () => {
+        expect(overnightCapWarning([{ symbol: 'AAPL', valueUsd: 1 }], null, CAPS)).toContain('could NOT be verified');
+        expect(overnightCapWarning([], null, CAPS)).toBeNull();
+    });
+});
 
 describe('splitTriageCandidates (kept-overnight holds re-enter momentum triage)', () => {
     const mk = (tif: 'DAY' | 'GTC', entryFillPrice: number | null, keptOvernightAt: number | null = null) =>

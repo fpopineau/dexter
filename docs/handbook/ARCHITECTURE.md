@@ -120,7 +120,7 @@ scanners surfacing the symbol)`.
 | Trading cron jobs | `src/cron/trading-schedules.ts` | Seeds the 4 daily briefs; prompt changes re-sync to seeded jobs |
 | Trigger alerts | `src/gateway/trigger-alerts.ts` | On engine trigger: isolated agent run (catalyst + risk) → proposal → WhatsApp |
 | Skills | `src/skills/day-trade`, `pre-market`, `overnight` | Workflow definitions the agent follows |
-| Advisory risk tool | `src/tools/ibkr/risk-manager.ts` | PASS/FAIL breakdown the LLM is instructed to consult (sector, overnight, sizing suggestions) |
+| Advisory risk tool | `src/tools/ibkr/risk-manager.ts` | PASS/FAIL breakdown the LLM is instructed to consult (sizing suggestions; per-position overnight). Sector and total-overnight caps are enforced by the deterministic gate, not here |
 
 ### Execution layer (deterministic, human-gated)
 

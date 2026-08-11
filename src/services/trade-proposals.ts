@@ -470,6 +470,7 @@ export async function createProposal(
         target: input.target,
         quantity: input.quantity,
         tradeClass,
+        tif: input.tif === 'GTC' ? 'GTC' : 'DAY',
     }, {
         ...gateContext,
         ...(tradeClass === 'swing' ? { openSwingPositions: await countOpenByClass('swing') } : {}),

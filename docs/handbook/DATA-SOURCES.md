@@ -32,7 +32,7 @@ company-snapshot skill rely on (probed working):
 | `/api/company/{sym}/earnings-surprise` | ~4 verified report dates + EPS surprise % — seeds the post-print reaction record (`earnings_bet_intel`), extended to 8+ prints by gap inference over IBKR daily bars |
 | `/api/quote/{sym}/short-interest` | short interest + days-to-cover trend (snapshot card) |
 | `/api/company/{sym}/insider-trades` | open-market insider buys vs sells, 3/12 months (snapshot card) |
-| `/api/quote/{sym}/summary` | sector, industry, market cap, average volume (snapshot card) |
+| `/api/quote/{sym}/summary` | sector, industry, market cap, average volume (snapshot card) — also feeds the deterministic sector map (`src/services/sector-map.ts`, 30-day cache) behind the gate's `max_sector_exposure_pct` check |
 
 ## Prediction markets — Polymarket Gamma API (FREE, wired 2026-08-11)
 

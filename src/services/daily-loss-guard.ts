@@ -276,6 +276,19 @@ export interface DailyLossStatus {
     limitDollars?: number;
 }
 
+/** Best-effort current NetLiquidation (null when unavailable). For
+ *  REPORTING consumers (EOD triage cap usage) — order paths must keep
+ *  using assertDailyLossOk, which fails safe instead of returning null. */
+export async function getNetLiquidation(): Promise<number | null> {
+    try {
+        const api = await getIBApi();
+        const account = await detectAccount(api);
+        return await fetchNetLiquidation(api, account);
+    } catch {
+        return null;
+    }
+}
+
 /**
  * Check the daily-loss state without throwing.
  * Performs live IBKR queries; on failure returns halted=true (fail-safe).

@@ -43,11 +43,12 @@ import { getIBApi } from '@/tools/ibkr/connection.js';
 import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
 import { logger } from '@/utils';
 import { isMarketHoliday } from '@/utils/market-hours.js';
+import { getNetLiquidation } from './daily-loss-guard.js';
 import { findUpcomingEarnings, type UpcomingEarnings } from './earnings-calendar.js';
 import { getMacroEventsWithin, macroNightWarning } from './event-risk.js';
 import { closePosition, fetchPositions } from './position-actions.js';
 import { listTrackable } from './trade-proposals.js';
-import type { TradeClass } from '@/tools/ibkr/risk-rules.js';
+import { getRiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
 
 const ET = 'America/New_York';
 const TRIAGE_CRON = '52 15 * * 1-5';
@@ -121,6 +122,44 @@ export function splitTriageCandidates<T extends {
         momentum: filled.filter((t) => t.tif === 'DAY' || t.keptOvernightAt != null),
         guardOnly: filled.filter((t) => t.tif === 'GTC' && t.keptOvernightAt == null),
     };
+}
+
+/**
+ * Pure: overnight-cap usage line for the triage report, or null when the
+ * book is inside the caps. REPORTING, not enforcement: the operator's EOD
+ * policy is keep-by-default, so triage never force-trims — but a keep
+ * must never ride past the overnight caps in silence. (The deliberate
+ * GTC path — overnight setups, swings, bets — is hard-enforced by the
+ * acceptance gate; this covers what converts at the bell.)
+ */
+export function overnightCapWarning(
+    holds: Array<{ symbol: string; valueUsd: number }>,
+    netLiq: number | null,
+    rules: { max_overnight_exposure_pct: number; max_overnight_position_pct: number },
+): string | null {
+    if (holds.length === 0) return null;
+    if (netLiq === null || !(netLiq > 0)) {
+        return '⚠ overnight caps could NOT be verified (NetLiq unavailable).';
+    }
+    const totalUsd = holds.reduce((s, h) => s + h.valueUsd, 0);
+    const totalPct = (totalUsd / netLiq) * 100;
+    const oversized = holds
+        .map((h) => ({ ...h, pct: (h.valueUsd / netLiq) * 100 }))
+        .filter((h) => h.pct > rules.max_overnight_position_pct);
+    const parts: string[] = [];
+    if (totalPct > rules.max_overnight_exposure_pct) {
+        parts.push(
+            `book ${totalPct.toFixed(1)}% of NetLiq rides overnight vs the ${rules.max_overnight_exposure_pct}% cap`,
+        );
+    }
+    if (oversized.length) {
+        parts.push(
+            oversized.map((h) => `${h.symbol} is ${h.pct.toFixed(1)}%`).join(', ') +
+            ` vs the ${rules.max_overnight_position_pct}% per-position overnight cap`,
+        );
+    }
+    if (parts.length === 0) return null;
+    return `⚠ overnight caps: ${parts.join('; ')} — trim manually ('close <SYMBOL>') or accept the exposure knowingly.`;
 }
 
 /**
@@ -228,6 +267,7 @@ export async function runEodTriageOnce(): Promise<void> {
     const api = await getIBApi();
     const positions = await fetchPositions(api);
     const lines: string[] = [];
+    const closedSymbols = new Set<string>();
 
     // Earnings guard: one calendar lookup for all candidates. Unavailable
     // days fail OPEN (no forced close on unverifiable data) but are called
@@ -270,6 +310,7 @@ export async function runEodTriageOnce(): Promise<void> {
         logger.info(`[eod-triage] ${t.id} ${t.symbol}: ${decision.action} — ${decision.reason}`);
         if (decision.action === 'close') {
             const outcome = await closePosition(t.symbol, 'EOD triage');
+            if (outcome.ok) closedSymbols.add(t.symbol);
             lines.push(`• ${t.symbol} (${label}): ${decision.reason}. ${outcome.ok ? 'Closed.' : outcome.message}`);
         } else {
             lines.push(`• ${t.symbol} (${label}): ${decision.reason}.`);
@@ -293,8 +334,19 @@ export async function runEodTriageOnce(): Promise<void> {
 
         logger.info(`[eod-triage] ${t.id} ${t.symbol} {${t.tradeClass}, GTC}: ${decision.action} — ${decision.reason}`);
         const outcome = await closePosition(t.symbol, 'EOD triage (earnings guard)');
+        if (outcome.ok) closedSymbols.add(t.symbol);
         lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} GTC): ${decision.reason}. ${outcome.ok ? 'Closed.' : outcome.message}`);
     }
+
+    // Overnight-cap usage (advisory, never trims): everything still open
+    // after the decisions above rides the night — including positions the
+    // caps would have refused as deliberate GTC entries.
+    const holds = positions
+        .filter((pos) => pos.quantity !== 0 && !closedSymbols.has(pos.symbol))
+        .map((pos) => ({ symbol: pos.symbol, valueUsd: Math.abs(pos.quantity) * pos.avgCost }));
+    const capLine = holds.length
+        ? overnightCapWarning(holds, await getNetLiquidation(), getRiskRules())
+        : null;
 
     // Macro-night check (advisory, never closes): the earnings guard covers
     // single-name prints, but a keep on CPI/FOMC-eve rides a macro binary no
@@ -304,11 +356,12 @@ export async function runEodTriageOnce(): Promise<void> {
     const macroEvents = isMacroWarningEnabled() ? await getMacroEventsWithin(1) : [];
     const macroLine = macroNightWarning(macroEvents);
 
-    if (lines.length || (macroLine && macroEvents !== null)) {
+    if (lines.length || (macroLine && macroEvents !== null) || capLine) {
         const footer =
             (earningsUnknownDays.length
                 ? `\n⚠ earnings calendar unavailable (${earningsUnknownDays.join(', ')}) — keeps are NOT verified print-free.`
                 : '') +
+            (capLine ? `\n${capLine}` : '') +
             (macroLine ? `\n${macroLine}` : '');
         const body = lines.length
             ? lines.join('\n')
