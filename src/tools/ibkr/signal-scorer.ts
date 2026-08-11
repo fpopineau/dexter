@@ -55,23 +55,27 @@ function normalizeWeights(w: FactorWeights): FactorWeights {
 }
 
 let weightsOverride: FactorWeights | null = null;
-let fileWeights: FactorWeights | null | undefined; // undefined = not yet loaded
+let fileWeights: { weights: FactorWeights; calibratedAt: string | null } | null | undefined; // undefined = not yet loaded
 
 /** Set (or clear with null) an in-process weights override — calibration use. */
 export function setActiveWeights(w: FactorWeights | null): void {
     weightsOverride = w ? normalizeWeights(w) : null;
 }
 
-function loadFileWeights(): FactorWeights | null {
+function loadFileWeights(): { weights: FactorWeights; calibratedAt: string | null } | null {
     if (fileWeights !== undefined) return fileWeights;
     try {
         const dir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
-        const raw = JSON.parse(readFileSync(join(dir, 'scorer-weights.json'), 'utf-8')) as Partial<FactorWeights>;
+        const raw = JSON.parse(readFileSync(join(dir, 'scorer-weights.json'), 'utf-8')) as
+            Partial<FactorWeights> & { _meta?: { calibratedAt?: string } };
         if (
             typeof raw.momentum === 'number' && typeof raw.meanReversion === 'number' &&
             typeof raw.volume === 'number' && typeof raw.trend === 'number'
         ) {
-            fileWeights = normalizeWeights(raw as FactorWeights);
+            fileWeights = {
+                weights: normalizeWeights(raw as FactorWeights),
+                calibratedAt: typeof raw._meta?.calibratedAt === 'string' ? raw._meta.calibratedAt : null,
+            };
         } else {
             fileWeights = null;
         }
@@ -83,7 +87,34 @@ function loadFileWeights(): FactorWeights | null {
 
 /** Weights in effect right now (override > file > defaults). */
 export function getActiveWeights(): FactorWeights {
-    return weightsOverride ?? loadFileWeights() ?? DEFAULT_WEIGHTS;
+    return weightsOverride ?? loadFileWeights()?.weights ?? DEFAULT_WEIGHTS;
+}
+
+export interface WeightsInfo {
+    weights: FactorWeights;
+    source: 'override' | 'file' | 'defaults';
+    calibratedAt: string | null;
+}
+
+/** Weights + provenance — surfaced in every score so a zeroed or skewed
+ *  factor is never invisible behind a static description. */
+export function getActiveWeightsInfo(): WeightsInfo {
+    if (weightsOverride) return { weights: weightsOverride, source: 'override', calibratedAt: null };
+    const file = loadFileWeights();
+    if (file) return { weights: file.weights, source: 'file', calibratedAt: file.calibratedAt };
+    return { weights: DEFAULT_WEIGHTS, source: 'defaults', calibratedAt: null };
+}
+
+/** Pure: one line of weight provenance for tool results and logs. */
+export function weightsSourceLabel(info: WeightsInfo): string {
+    const zeroed = (['momentum', 'meanReversion', 'volume', 'trend'] as const)
+        .filter((k) => info.weights[k] === 0);
+    const zeroNote = zeroed.length ? ` — ${zeroed.join(', ')} weighted ZERO (contribute nothing)` : '';
+    if (info.source === 'override') return `in-process override (calibration run)${zeroNote}`;
+    if (info.source === 'file') {
+        return `scorer-weights.json${info.calibratedAt ? ` (calibrated ${info.calibratedAt.slice(0, 10)})` : ''}${zeroNote}`;
+    }
+    return `defaults (equal weights)${zeroNote}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -93,10 +124,16 @@ export function getActiveWeights(): FactorWeights {
 export const SIGNAL_SCORER_DESCRIPTION = `
 Multi-factor signal scorer for trade candidates. Takes a ticker and trade
 direction (long/short) and returns a composite score (0–100) broken down by:
-  - Momentum (25%) — MACD histogram slope, RSI direction, price vs EMAs
-  - Mean reversion (25%) — distance from VWAP/Bollinger midline, RSI extremes
-  - Volume (25%) — RVOL strength, volume Z-score confirmation
-  - Trend (25%) — EMA stack alignment, price position in trend structure
+  - Momentum — MACD histogram slope, RSI direction, price vs EMAs
+  - Mean reversion — distance from VWAP/Bollinger midline, RSI extremes
+  - Volume — RVOL strength, volume Z-score confirmation
+  - Trend — EMA stack alignment, price position in trend structure
+
+Factor WEIGHTS are not fixed: they come from the active calibration
+(scorer-weights.json when present, equal weights otherwise) and every
+result reports the weight applied to each factor plus a weightsSource
+provenance line. Read them — a factor weighted 0 contributes NOTHING to
+the composite no matter what its own score says.
 
 Scores ≥ 60 are actionable. Scores ≥ 80 are high-conviction.
 Requires a running TWS or IB Gateway connection for live data.
@@ -734,6 +771,10 @@ export interface SignalResult {
         atr: number | null;
         rvol: number | null;
     };
+    /** Where the factor weights came from (file/defaults/override), with
+     *  zeroed factors called out — the composite is only as honest as its
+     *  weights are visible. */
+    weightsSource: string;
     /** Deterministic staleness assessment of the newest bar. */
     freshness: BarFreshness;
 }
@@ -776,6 +817,9 @@ export function computeSignalScore(
             volume: { score: vol.score, weight: w.volume, weighted: Math.round(vol.score * w.volume), components: vol.components },
             trend: { score: trend.score, weight: w.trend, weighted: Math.round(trend.score * w.trend), components: trend.components },
         },
+        weightsSource: weights
+            ? weightsSourceLabel({ weights: w, source: 'override', calibratedAt: null })
+            : weightsSourceLabel(getActiveWeightsInfo()),
         freshness: assessBarFreshness(n > 0 ? ohlcv.time[n - 1] : undefined),
         snapshot: {
             price: n > 0 ? ohlcv.close[n - 1] : null,

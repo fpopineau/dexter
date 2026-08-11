@@ -3,10 +3,26 @@
  * factor weights (momentum / mean-reversion / volume / trend).
  *
  * For each candidate weight set, runs a walk-forward backtest and ranks by
- * AVERAGE OUT-OF-SAMPLE SHARPE (the honest number), with a penalty for
- * fold sets that barely trade. Read-only by default; --apply writes the
- * winner to .dexter/data/scorer-weights.json, which the LIVE scorer and
- * future backtests then pick up automatically.
+ * average out-of-sample Sharpe, with a penalty for fold sets that barely
+ * trade. Read-only by default; --apply writes the winner to
+ * .dexter/data/scorer-weights.json, which the LIVE scorer and future
+ * backtests then pick up automatically.
+ *
+ * HONESTY WARNING (2026-08-11, learned the hard way): selecting the
+ * winner BY its OOS metric across the whole grid makes that metric an
+ * in-sample quantity — the winner's printed Sharpe is the max of ~35
+ * draws and is upward-biased by construction. The 2026-07-07 run
+ * reported OOS Sharpe 7.96 this way (3 mega-caps, long-only, one 2024
+ * trend regime), zeroed the volume factor on a scanner whose candidates
+ * are DISCOVERED by volume, and went live. Before any --apply:
+ *   1. validate the winner on a THIRD period the grid never touched;
+ *   2. calibrate on names shaped like the live universe (the $1–5B
+ *      movers the scanner actually surfaces), both directions;
+ *   3. treat a zero-weight factor as the grid exploiting one regime
+ *      until proven otherwise (--apply refuses it without
+ *      --allow-zero-factor).
+ * Per the research-memo standard, a factor mix enters live scoring only
+ * behind a pre-registered pass — the grid's own winner metric is not one.
  *
  * Run (requires FirstRate data, FIRSTRATE_DATA_DIR in .env):
  *   bun run scripts/calibrate-scorer.ts AAPL NVDA MSFT 2024-01-02 2024-12-30
@@ -32,6 +48,7 @@ import { join } from 'node:path';
 const args = process.argv.slice(2);
 const apply = args.includes('--apply');
 const fine = args.includes('--fine');
+const allowZeroFactor = args.includes('--allow-zero-factor');
 const tickers = args.filter((a) => /^[A-Za-z.]+$/.test(a) && !a.startsWith('--')).map((t) => t.toUpperCase());
 const dates = args.filter((a) => /^\d{4}-\d{2}-\d{2}$/.test(a));
 
@@ -156,6 +173,12 @@ const baseline = rows.find((r) => JSON.stringify(r.weights) === JSON.stringify(D
 if (baseline) {
     console.log(`\nBaseline (equal weights): OOS Sharpe ${baseline.oosSharpe.toFixed(2)}, ${baseline.oosTrades} trades`);
 }
+console.log(
+    '\n⚠ Selection bias: the winner was CHOSEN by this OOS metric across ' +
+    `${ranked.length} candidates — its printed Sharpe is a max-statistic, not an honest ` +
+    'out-of-sample estimate. Validate the winner on a third, untouched period ' +
+    'and on live-universe names before trusting (or applying) it.',
+);
 
 const best = ranked[0];
 if (!best) {
@@ -172,6 +195,15 @@ if (apply) {
         console.log('\nRefusing --apply: best candidate does not meaningfully beat the equal-weight baseline (Δ ≤ 0.05 Sharpe). Keeping defaults.');
         process.exit(0);
     }
+    const zeroed = (['momentum', 'meanReversion', 'volume', 'trend'] as const).filter((k) => best.weights[k] === 0);
+    if (zeroed.length && !allowZeroFactor) {
+        console.log(
+            `\nRefusing --apply: the winner zeroes ${zeroed.join(', ')} — on a scanner whose candidates are ` +
+            'volume-discovered, a zero-weight factor is usually the grid exploiting one regime ' +
+            '(the 2026-07-07 lesson). Re-run with --allow-zero-factor to override deliberately.',
+        );
+        process.exit(1);
+    }
     const dir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
     mkdirSync(dir, { recursive: true });
     const path = join(dir, 'scorer-weights.json');
@@ -184,6 +216,8 @@ if (apply) {
             oosSharpe: best.oosSharpe,
             oosTrades: best.oosTrades,
             baselineSharpe: baseline?.oosSharpe ?? null,
+            gridSize: ranked.length,
+            selectionNote: 'winner selected ON the OOS metric — Sharpe is a max-statistic; validate on an untouched period',
         },
     }, null, 2));
     console.log(`\nApplied: ${fmtW(best.weights)} written to ${path}`);
