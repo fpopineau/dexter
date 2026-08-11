@@ -1,5 +1,35 @@
 import { describe, expect, test } from 'bun:test';
-import { decideReportedRecently, etDatePlus, parseNasdaqEarnings, previousTradingDate, type EarningsEntry } from './earnings-calendar.js';
+import { decideReportedRecently, etDatePlus, guardDates, nextTradingDates, parseNasdaqEarnings, previousTradingDate, type EarningsEntry } from './earnings-calendar.js';
+
+describe('nextTradingDates (the weekend blind spot fix)', () => {
+    test('a Friday looks across the weekend to Monday', () => {
+        // 2026-08-14 15:52 ET is a Friday.
+        expect(nextTradingDates(1, new Date('2026-08-14T19:52:00Z'))).toEqual(['2026-08-17']);
+    });
+
+    test('midweek is unchanged: Thursday reaches Friday', () => {
+        expect(nextTradingDates(1, new Date('2026-08-13T19:52:00Z'))).toEqual(['2026-08-14']);
+    });
+
+    test('a Friday before a holiday Monday reaches Tuesday (a forward holiday miss is NOT safe)', () => {
+        // 2026-09-07 is Labor Day (market holiday); 2026-09-04 is the Friday before.
+        expect(nextTradingDates(1, new Date('2026-09-04T19:52:00Z'))).toEqual(['2026-09-08']);
+    });
+
+    test('multiple days walk consecutive sessions', () => {
+        expect(nextTradingDates(2, new Date('2026-08-13T19:52:00Z'))).toEqual(['2026-08-14', '2026-08-17']);
+    });
+});
+
+describe('guardDates (what the earnings guard inspects)', () => {
+    test('withinDays 1 on a Friday = Friday AMC + Monday BMO, never Saturday', () => {
+        expect(guardDates(1, new Date('2026-08-14T19:52:00Z'))).toEqual(['2026-08-14', '2026-08-17']);
+    });
+
+    test('withinDays 0 is today only', () => {
+        expect(guardDates(0, new Date('2026-08-14T19:52:00Z'))).toEqual(['2026-08-14']);
+    });
+});
 
 const NASDAQ_FIXTURE = {
     data: {

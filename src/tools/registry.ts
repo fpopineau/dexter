@@ -245,7 +245,7 @@ export function getToolRegistry(model: string): RegisteredTool[] {
         name: 'earnings_calendar',
         tool: createEarningsCalendarTool(),
         description: EARNINGS_CALENDAR_DESCRIPTION,
-        compactDescription: 'US earnings calendar (free): who reports on a date; whether given symbols report within N days.',
+        compactDescription: 'US earnings calendar (free): who reports on a date; whether given symbols report within N trading days (weekends/holidays skipped).',
         concurrencySafe: true,
       },
       {

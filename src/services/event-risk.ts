@@ -320,15 +320,20 @@ export async function getEarningsMarketSignal(symbol: string, now: Date = new Da
 
 /**
  * One-line macro-night warning for the EOD triage report, or null when the
- * horizon is clear. Kept pure for tests; the triage passes tonight+tomorrow
- * events so a keep is never silently exposed to a binary macro print.
+ * horizon is clear. Kept pure for tests. `horizonDays` is CALENDAR days to
+ * the next trading session (1 midweek, 3 across a weekend, more across a
+ * holiday weekend) — a Friday keep rides every night until Monday's open,
+ * so its warning must reach that far (same weekend blind spot as the
+ * earnings guard, audit 2026-08-11).
  */
-export function macroNightWarning(events: MacroEvent[] | null): string | null {
+export function macroNightWarning(events: MacroEvent[] | null, horizonDays = 1): string | null {
     if (events === null) return '⚠ macro event calendar unavailable — keeps are NOT verified macro-quiet.';
-    const near = events.filter((e) => e.daysAway <= 1);
+    const near = events.filter((e) => e.daysAway <= horizonDays);
     if (near.length === 0) return null;
     const parts = near.map((e) => {
-        const when = e.daysAway === 0 ? 'today' : 'tomorrow';
+        const when = e.daysAway === 0 ? 'today'
+            : e.daysAway === 1 ? 'tomorrow'
+                : `on ${e.date} — before the next session closes`;
         const top = e.topOutcome
             ? ` (top outcome ${Math.round(e.topOutcome.probability * 100)}%: ${e.topOutcome.label})`
             : '';

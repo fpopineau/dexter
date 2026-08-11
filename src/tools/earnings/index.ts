@@ -16,11 +16,12 @@ US earnings calendar (free Nasdaq data, cached).
 
 **day** — who reports on an ET date (default today): symbol, pre-market/
   after-hours timing, consensus EPS forecast, market cap.
-**check** — do any of the given symbols report within the next N days
-  (default 2)? THE overnight-risk question: holding through a report is a
-  deliberate decision, never an accident. Days whose data could not be
-  fetched are listed in unknownDays — treat those as "could not verify",
-  NEVER as "no earnings".
+**check** — do any of the given symbols report within the next N TRADING
+  days (default 2; weekends/holidays skipped — on a Friday, "1" reaches
+  Monday's pre-market print)? THE overnight-risk question: holding through
+  a report is a deliberate decision, never an accident. Days whose data
+  could not be fetched are listed in unknownDays — treat those as "could
+  not verify", NEVER as "no earnings".
 
 Use it in every pre-market brief (today + tomorrow: expect gap catalysts)
 and before proposing or keeping any overnight/GTC position.
@@ -37,7 +38,7 @@ const Schema = z.discriminatedUnion('action', [
         symbols: z.union([z.array(z.string()), z.string()])
             .describe("Symbols to check, array or comma-separated string."),
         withinDays: z.coerce.number().int().min(0).max(14).default(2)
-            .describe('Look-ahead window in ET days (default 2).'),
+            .describe('Look-ahead window in TRADING days (default 2) — weekends and market holidays are skipped, so 1 on a Friday reaches Monday.'),
     }),
 ]);
 

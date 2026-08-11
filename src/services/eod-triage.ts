@@ -44,7 +44,7 @@ import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
 import { logger } from '@/utils';
 import { isMarketHoliday } from '@/utils/market-hours.js';
 import { getNetLiquidation } from './daily-loss-guard.js';
-import { findUpcomingEarnings, type UpcomingEarnings } from './earnings-calendar.js';
+import { findUpcomingEarnings, nextTradingDates, type UpcomingEarnings } from './earnings-calendar.js';
 import { getMacroEventsWithin, macroNightWarning } from './event-risk.js';
 import { closePosition, fetchPositions } from './position-actions.js';
 import { listTrackable } from './trade-proposals.js';
@@ -53,8 +53,10 @@ import { getRiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
 const ET = 'America/New_York';
 const TRIAGE_CRON = '52 15 * * 1-5';
 const FADE_LOOKBACK_MIN = 60;
-/** Close before the bell when the symbol reports within this many days
- *  (0 = today's print after the close, 1 = tomorrow pre-market too). */
+/** Close before the bell when the symbol reports within this many TRADING
+ *  days (0 = today's print after the close, 1 = the next session's
+ *  pre-market too — on a Friday that is Monday, or Tuesday after a
+ *  holiday Monday; the calendar walk skips non-trading days). */
 const EARNINGS_GUARD_DAYS = 1;
 
 // ---------------------------------------------------------------------------
@@ -350,11 +352,16 @@ export async function runEodTriageOnce(): Promise<void> {
 
     // Macro-night check (advisory, never closes): the earnings guard covers
     // single-name prints, but a keep on CPI/FOMC-eve rides a macro binary no
-    // stop can protect against — the report must say so. A real event forces
-    // the notification even when no position needed action; the
+    // stop can protect against — the report must say so. The horizon runs to
+    // the NEXT TRADING SESSION in calendar days (1 midweek, 3 across a
+    // weekend): a Friday keep rides every night until Monday's open. A real
+    // event forces the notification even when no position needed action; the
     // data-unavailable caveat rides along only when a report goes out anyway.
-    const macroEvents = isMacroWarningEnabled() ? await getMacroEventsWithin(1) : [];
-    const macroLine = macroNightWarning(macroEvents);
+    const macroHorizonDays = Math.max(1, Math.round(
+        (Date.parse(nextTradingDates(1)[0]) - Date.parse(today)) / 86_400_000,
+    ));
+    const macroEvents = isMacroWarningEnabled() ? await getMacroEventsWithin(macroHorizonDays) : [];
+    const macroLine = macroNightWarning(macroEvents, macroHorizonDays);
 
     if (lines.length || (macroLine && macroEvents !== null) || capLine) {
         const footer =
@@ -381,7 +388,7 @@ export function startEodTriage(): void {
     logger.info(
         '[eod-triage] scheduled 15:52 ET: close losing-and-fading DAY positions; keep the rest for protected overnight' +
         (isEarningsGuardEnabled()
-            ? `; earnings guard ON (flat before any print within ${EARNINGS_GUARD_DAYS}d, DAY and GTC non-bet classes; past BMO prints exempt)`
+            ? `; earnings guard ON (flat before any print within ${EARNINGS_GUARD_DAYS} trading day(s) — Friday reaches Monday; DAY and GTC non-bet classes; past BMO prints exempt)`
             : '; earnings guard OFF'),
     );
 }

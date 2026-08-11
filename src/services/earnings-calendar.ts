@@ -15,6 +15,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { logger } from '@/utils';
+import { isMarketHoliday } from '@/utils/market-hours.js';
 
 const LOOKAHEAD_DAYS = 7;
 const CACHE_TTL_MS = 6 * 3600_000;
@@ -67,6 +68,35 @@ export function etDatePlus(days: number, now: Date = new Date()): string {
     const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
     et.setDate(et.getDate() + days);
     return `${et.getFullYear()}-${String(et.getMonth() + 1).padStart(2, '0')}-${String(et.getDate()).padStart(2, '0')}`;
+}
+
+/**
+ * The next `count` ET TRADING dates strictly after today (weekends and
+ * market holidays skipped). Forward-looking guards must walk trading
+ * days: a Friday check that walks calendar days inspects Saturday and
+ * declares the weekend safe while Monday's pre-market print waits on the
+ * other side — the position rides three nights into it (the weekend
+ * blind spot, audit 2026-08-11). Unlike the backward look, a forward
+ * holiday miss is NOT safe, so holidays are skipped via the exchange
+ * calendar (a Friday before a holiday Monday reaches Tuesday).
+ */
+export function nextTradingDates(count: number, now: Date = new Date()): string[] {
+    const et = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    const out: string[] = [];
+    while (out.length < count) {
+        et.setDate(et.getDate() + 1);
+        if (et.getDay() === 0 || et.getDay() === 6) continue;
+        const iso = `${et.getFullYear()}-${String(et.getMonth() + 1).padStart(2, '0')}-${String(et.getDate()).padStart(2, '0')}`;
+        if (isMarketHoliday(iso)) continue;
+        out.push(iso);
+    }
+    return out;
+}
+
+/** The dates a `withinDays`-deep earnings guard must inspect: today plus
+ *  the next `withinDays` trading days. Pure; exported for tests. */
+export function guardDates(withinDays: number, now: Date = new Date()): string[] {
+    return [etDatePlus(0, now), ...nextTradingDates(withinDays, now)];
 }
 
 /** Previous weekday's ET date (Mon → Fri). Holidays are not modeled: a
@@ -186,7 +216,11 @@ export interface UpcomingEarnings {
 }
 
 /**
- * Which of `symbols` report within the next `withinDays` ET days?
+ * Which of `symbols` report today or within the next `withinDays`
+ * TRADING days? (Since 2026-08-11 the walk skips weekends and holidays —
+ * `withinDays: 1` on a Friday inspects Friday AND Monday, so a keep never
+ * rides the weekend into a Monday pre-market print unseen. `daysAway` is
+ * the trading-day offset; `date` carries the actual calendar date.)
  * Days whose data is unavailable are listed in `unknownDays` — the caller
  * must treat those as "could not verify", never as "no earnings".
  */
@@ -197,8 +231,9 @@ export async function findUpcomingEarnings(
     const wanted = new Set(symbols.map((s) => s.trim().toUpperCase()).filter(Boolean));
     const hits: UpcomingEarnings[] = [];
     const unknownDays: string[] = [];
-    for (let d = 0; d <= withinDays; d++) {
-        const date = etDatePlus(d);
+    const dates = guardDates(withinDays);
+    for (let d = 0; d < dates.length; d++) {
+        const date = dates[d];
         const entries = await getEarningsForDate(date);
         if (entries === null) { unknownDays.push(date); continue; }
         for (const e of entries) {

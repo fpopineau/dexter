@@ -210,6 +210,15 @@ describe('macroNightWarning', () => {
         expect(macroNightWarning([])).toBeNull();
         expect(macroNightWarning(null)).toContain('unavailable');
     });
+
+    test('a Friday horizon reaches a Monday event across the weekend', () => {
+        // Friday triage: next session is Monday, 3 calendar days out.
+        const monday = { ...cpi, date: '2026-08-17', daysAway: 3 };
+        const line = macroNightWarning([monday], 3);
+        expect(line).toContain('on 2026-08-17 — before the next session closes');
+        // The default midweek horizon still excludes it.
+        expect(macroNightWarning([monday])).toBeNull();
+    });
 });
 
 describe('parseGammaEvents', () => {
