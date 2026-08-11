@@ -39,6 +39,7 @@ import type { CommissionReport, Contract, Execution, IBApi } from '@stoqey/ib';
 import { EventName } from '@stoqey/ib';
 import {
     closeProposal,
+    convertToOvernightHold,
     getProposal,
     listTrackable,
     markEntryFilled,
@@ -46,6 +47,7 @@ import {
     type ExitReason,
     type TradeProposal,
 } from './trade-proposals.js';
+import type { PositionActionOutcome } from './position-actions.js';
 
 // ---------------------------------------------------------------------------
 // Pure outcome math (unit-tested)
@@ -72,6 +74,24 @@ const IB_UNSET = 1.7e308;
 
 export function isIbNumber(n: number | undefined | null): n is number {
     return typeof n === 'number' && Number.isFinite(n) && Math.abs(n) < IB_UNSET;
+}
+
+/**
+ * Pure: is this finalize the DAY-bracket-expired-at-the-bell case — entry
+ * filled, no exit fill (expiry never fills anything), tif DAY, at/after the
+ * close? That case is a TRANSITION (keep the proposal alive under the
+ * protect pair), never a terminal close: closing it is what orphaned kept
+ * positions outside the caps, the triage and the ledger.
+ */
+export function decideDayExpiryHold(input: {
+    reason: ExitReason;
+    entryFilled: boolean;
+    exitFillKnown: boolean;
+    tif: 'DAY' | 'GTC' | null;
+    afterBell: boolean;
+}): boolean {
+    return input.reason === 'manual' && input.entryFilled && !input.exitFillKnown
+        && input.tif === 'DAY' && input.afterBell;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,21 +178,79 @@ async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string):
     }
 
     // DAY-bracket expiry at the bell: entry filled, tif DAY, and we are at/
-    // after the close — the exits died of old age, nobody acted. This is a
-    // distinct, well-understood case that deserves ONE clear message (the
-    // 🌙 re-protection notice) instead of a confusing '✋ manual / P&L
-    // unknown' + '🛡️' pair. Gated off in tests (wall-clock dependent).
+    // after the close — the exits died of old age, nobody acted. Gated off
+    // in tests (wall-clock dependent).
     const proposalEarly = await getProposal(trade.proposalId).catch(() => null);
     const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
     const afterBell = etNow.getHours() > 15 || (etNow.getHours() === 15 && etNow.getMinutes() >= 55);
     const dayExpiry =
         process.env.NODE_ENV !== 'test' &&
-        reason === 'manual' && trade.entryAvgPrice != null &&
-        // A known exit fill means a DELIBERATE close (profit-trail / EOD
-        // triage / operator) that happened to land near the bell — expiry
-        // never fills anything.
-        trade.exitAvgPrice == null &&
-        proposalEarly?.tif === 'DAY' && afterBell;
+        decideDayExpiryHold({
+            reason,
+            entryFilled: trade.entryAvgPrice != null,
+            // A known exit fill means a DELIBERATE close (profit-trail / EOD
+            // triage / operator) that happened to land near the bell — expiry
+            // never fills anything.
+            exitFillKnown: trade.exitAvgPrice != null,
+            tif: proposalEarly?.tif ?? null,
+            afterBell,
+        });
+
+    // EOD-KEEP TRANSITION (closes the orphaned-keep hole): protect FIRST,
+    // and when the GTC pair lands, the proposal is NOT closed — it flips to
+    // a kept-overnight hold on the same row and tracking re-points at the
+    // new exits. It stays inside the caps, tomorrow's triage re-checks it,
+    // and the eventual GTC exit fill gives it a real P&L. Only when
+    // protection cannot attach does the old close-as-manual path run.
+    let protectAttempt: PositionActionOutcome | null = null;
+    if (
+        dayExpiry && proposalEarly &&
+        (process.env.AUTO_PROTECT ?? '').trim().toLowerCase() !== 'false'
+    ) {
+        try {
+            const { protectPosition, wasRecentlyClosed } = await import('./position-actions.js');
+            if (wasRecentlyClosed(proposalEarly.symbol)) {
+                logger.info(`[outcome-tracker] ${trade.proposalId} EOD-keep transition skipped — ${proposalEarly.symbol} was deliberately closed just now`);
+            } else {
+                protectAttempt = await protectPosition(proposalEarly.symbol, proposalEarly.stop, proposalEarly.target);
+                const ids = protectAttempt.protectOrderIds;
+                if (protectAttempt.ok && ids) {
+                    const newTargetId = ids.targetOrderId ?? ids.stopOrderId;
+                    const converted = await convertToOvernightHold(trade.proposalId, {
+                        orderIds: [trade.entryOrderId, newTargetId, ids.stopOrderId],
+                        note: 'DAY exits expired at the bell — kept overnight under GTC protection (EOD keep)',
+                    });
+                    if (converted) {
+                        // Re-point tracking at the protect pair; the trade lives on.
+                        byOrderId.delete(trade.takeProfitOrderId);
+                        byOrderId.delete(trade.stopOrderId);
+                        trade.takeProfitOrderId = newTargetId;
+                        trade.stopOrderId = ids.stopOrderId;
+                        byOrderId.set(newTargetId, { trade, role: 'takeProfit' });
+                        byOrderId.set(ids.stopOrderId, { trade, role: 'stop' });
+                        trade.terminalExits.clear();
+                        trade.exitReason = null;
+                        trade.closed = false;
+                        logger.info(`[outcome-tracker] ${trade.proposalId} kept overnight — tracking continues on protect orders ${newTargetId}/${ids.stopOrderId}`);
+                        await notifyAutoProtect(
+                            `🌙 ${trade.proposalId} ${proposalEarly.symbol}: the DAY bracket expired at the close with the position ` +
+                            `still open (${proposalEarly.direction.toUpperCase()} ${proposalEarly.quantity} @ ${trade.entryAvgPrice}) — nothing was closed. ` +
+                            `${protectAttempt.message} ` +
+                            `The proposal STAYS TRACKED as a kept-overnight hold: it still counts against the position caps, ` +
+                            `tomorrow's EOD triage re-checks it, and P&L attributes to ${trade.proposalId} when a GTC exit fills. ` +
+                            `NOTE: it was sized by INTRADAY rules and never passed the overnight vetting (tighter caps, earnings check). ` +
+                            `Reply 'close ${proposalEarly.symbol}' if you'd rather not hold it.`,
+                        );
+                        return;
+                    }
+                    // Conversion refused (raced a concurrent close) — fall
+                    // through to the normal close; protection stands.
+                }
+            }
+        } catch (err) {
+            logger.error(`[outcome-tracker] EOD-keep transition ${trade.proposalId} failed: ${err}`);
+        }
+    }
     if (dayExpiry) {
         note = 'DAY bracket exits expired at the session close with the position still open — GTC re-protection attempted (see auto-protect)';
     }
@@ -211,42 +289,41 @@ async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string):
     // protectPosition itself no-ops when the position is flat and refuses
     // when GTC exits already exist. Opt out with AUTO_PROTECT=false.
     //
-    // For the well-understood DAY-expiry-at-the-bell case, protection runs
-    // FIRST and (when it succeeds) a single 🌙 message replaces the
-    // confusing '✋ manual' + '🛡️' pair.
-    let suppressCloseAlert = false;
+    // The DAY-expiry-at-the-bell case normally never reaches here (the
+    // EOD-keep transition above protects AND keeps the proposal alive);
+    // when it does, the transition already tried protection — never place
+    // a second pair, just surface what happened.
     if (
         reason === 'manual' && trade.entryAvgPrice != null && proposal &&
         process.env.NODE_ENV !== 'test' &&
         (process.env.AUTO_PROTECT ?? '').trim().toLowerCase() !== 'false'
     ) {
         try {
-            const { protectPosition, wasRecentlyClosed } = await import('./position-actions.js');
-            if (wasRecentlyClosed(proposal.symbol)) {
-                logger.info(`[outcome-tracker] auto-protect ${proposal.symbol} skipped — position was deliberately closed just now`);
-            } else {
-                const outcome = await protectPosition(proposal.symbol, proposal.stop, proposal.target);
-                if (outcome.ok && dayExpiry) {
-                    logger.info(`[outcome-tracker] ${trade.proposalId} DAY expiry → re-protected: ${outcome.message}`);
+            if (protectAttempt) {
+                if (protectAttempt.ok) {
                     await notifyAutoProtect(
-                        `🌙 ${trade.proposalId} ${proposal.symbol}: the DAY bracket expired at the close with the position ` +
-                        `still open (${proposal.direction.toUpperCase()} ${proposal.quantity} @ ${trade.entryAvgPrice}) — nothing was closed. ` +
-                        `${outcome.message} ` +
-                        `NOTE: this is now an OVERNIGHT hold that was sized by INTRADAY rules — it never passed the ` +
-                        `overnight vetting (tighter caps, earnings check) the Pre-Close Review applies to deliberate ` +
-                        `holds. Tomorrow's brief reviews it; P&L will realize on the new GTC exits. ` +
-                        `Reply 'close ${proposal.symbol}' if you'd rather not hold it.`,
+                        `🛡️ ${proposal.symbol}: GTC exits re-armed (${protectAttempt.message}) but the ${trade.proposalId} ` +
+                        `row could not be kept alive (a concurrent close won) — it is closed as manual; reconcile with 'positions'.`,
                     );
-                    suppressCloseAlert = true;
-                } else if (outcome.ok) {
-                    logger.info(`[outcome-tracker] auto-protected ${proposal.symbol} after dead exits: ${outcome.message}`);
-                    await notifyAutoProtect(`🛡️ AUTO-PROTECT ${proposal.symbol}: the ${trade.proposalId} bracket exits died with the entry filled. ${outcome.message}`);
+                } else if (!protectAttempt.message.includes('No open position')) {
+                    await notifyAutoProtect(`⚠️ ${proposal.symbol} may be UNPROTECTED (${trade.proposalId} exits died) and auto-protect could not attach exits: ${protectAttempt.message}`);
+                }
+            } else {
+                const { protectPosition, wasRecentlyClosed } = await import('./position-actions.js');
+                if (wasRecentlyClosed(proposal.symbol)) {
+                    logger.info(`[outcome-tracker] auto-protect ${proposal.symbol} skipped — position was deliberately closed just now`);
                 } else {
-                    logger.info(`[outcome-tracker] auto-protect ${proposal.symbol} not applied: ${outcome.message}`);
-                    // "No open position" is the normal case (position really was
-                    // closed outside the bracket) — only surface actionable refusals.
-                    if (!outcome.message.includes('No open position')) {
-                        await notifyAutoProtect(`⚠️ ${proposal.symbol} may be UNPROTECTED (${trade.proposalId} exits died) and auto-protect could not attach exits: ${outcome.message}`);
+                    const outcome = await protectPosition(proposal.symbol, proposal.stop, proposal.target);
+                    if (outcome.ok) {
+                        logger.info(`[outcome-tracker] auto-protected ${proposal.symbol} after dead exits: ${outcome.message}`);
+                        await notifyAutoProtect(`🛡️ AUTO-PROTECT ${proposal.symbol}: the ${trade.proposalId} bracket exits died with the entry filled. ${outcome.message}`);
+                    } else {
+                        logger.info(`[outcome-tracker] auto-protect ${proposal.symbol} not applied: ${outcome.message}`);
+                        // "No open position" is the normal case (position really was
+                        // closed outside the bracket) — only surface actionable refusals.
+                        if (!outcome.message.includes('No open position')) {
+                            await notifyAutoProtect(`⚠️ ${proposal.symbol} may be UNPROTECTED (${trade.proposalId} exits died) and auto-protect could not attach exits: ${outcome.message}`);
+                        }
                     }
                 }
             }
@@ -256,7 +333,7 @@ async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string):
         }
     }
 
-    if (proposal && !suppressCloseAlert) {
+    if (proposal) {
         for (const cb of [...closedCallbacks]) {
             try {
                 await cb(proposal);

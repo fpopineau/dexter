@@ -361,13 +361,22 @@ Exit reasons: `target`, `stop`, `cancelled` (entry never filled),
 `manual` (position closed outside the bracket — P&L unknown, check
 `ibkr_account`), `unknown` (outcome unrecoverable).
 
-**Auto-protect:** when a `manual` close happens because both bracket
-exits died with the entry filled (the DAY-bracket-expired-at-the-bell
-trap), the tracker automatically re-attaches a GTC stop/target OCA pair
-at the proposal's levels and tells you on WhatsApp (`🛡️ AUTO-PROTECT`).
-If the position is genuinely flat it does nothing; if protection cannot
-be attached you get a ⚠️ with the exact `protect` command to send.
-Risk-reducing only; opt out with `AUTO_PROTECT=false`.
+**Auto-protect and the EOD-keep transition:** when a DAY bracket's exits
+expire at the bell with the position still open (an EOD-triage keep, or
+nobody acted), the tracker attaches a GTC stop/target OCA pair at the
+proposal's levels and — instead of closing the proposal as `manual` —
+**keeps the same proposal alive as a kept-overnight hold** (🌙 message):
+it stays `executed`, still counts against `max_open_positions` and the
+per-symbol caps, the next day's EOD triage re-triages its momentum like
+any DAY position, `close SYMBOL` cancels the protect pair with it, and
+the eventual GTC exit fill gives it a real labeled P&L. (Before
+2026-08-11 the proposal was closed at the bell, which orphaned the hold:
+invisible to triage and the caps, P&L forever unlabeled.)
+For a `manual` close at any other time of day, plain auto-protect still
+applies: the tracker re-attaches the GTC pair and tells you on WhatsApp
+(`🛡️ AUTO-PROTECT`). If the position is genuinely flat it does nothing;
+if protection cannot be attached you get a ⚠️ with the exact `protect`
+command to send. Risk-reducing only; opt out with `AUTO_PROTECT=false`.
 
 **Profit trail:** winners protect themselves. During regular hours every
 position is watched against its peak price; once unrealized gain reaches
@@ -700,7 +709,7 @@ P&L math, market-hours. Live-socket behavior is exercised by
 | `[risk-gate] REFUSED …` on create | the proposal's numbers violate risk-rules.yaml — fix R/R / price / quantity, don't loosen rules mid-day |
 | `[risk-gate] REFUSED … exceeds N% of net liquidation` on accept | position too big for the account — recreate with fewer shares |
 | No trigger or close alerts arriving | no WhatsApp session yet — message the bot once; check `[trigger-alerts]`/`[outcome-alerts]` logs for "no delivery target" |
-| Trade closed as `manual`, P&L unknown | position was closed outside the bracket, or the DAY bracket expired at the close — reconcile in TWS/`ibkr_account` |
+| Trade closed as `manual`, P&L unknown | position was closed outside the bracket — reconcile in TWS/`ibkr_account`. (A DAY bracket expiring at the bell no longer closes the proposal: it becomes a 🌙 kept-overnight hold, still tracked) |
 | Proposal `expired` before you replied | expiry is intentional staleness protection — ask for a fresh evaluation |
 | Empty scanner results pre-market | normal before ~08:00 ET or on delayed feeds |
 | Engine does nothing | market closed/holiday (engine idles), or `OPPORTUNITY_ENGINE=false` |

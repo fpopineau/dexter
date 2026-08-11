@@ -25,6 +25,10 @@ import { EventName, OrderAction, OrderType, SecType, TimeInForce } from '@stoqey
 export interface PositionActionOutcome {
     ok: boolean;
     message: string;
+    /** protectPosition only: the GTC exit order ids just placed — the
+     *  outcome tracker adopts them so the protected position stays a
+     *  tracked proposal instead of an orphaned hold. */
+    protectOrderIds?: { stopOrderId: number; targetOrderId?: number };
 }
 
 export interface LivePosition {
@@ -174,7 +178,7 @@ export async function protectPosition(
             : '';
 
         // Locked: the OCA pair assumes contiguous ids stopId/stopId+1.
-        const targetMsg = await withOrderLock(async () => {
+        const placed = await withOrderLock(async () => {
             const stopId = await getNextValidOrderId(api);
             const ocaGroup = `dexter-protect-${symbol}-${stopId}`;
 
@@ -207,9 +211,12 @@ export async function protectPosition(
                     transmit: true,
                 };
                 api.placeOrder(targetId, stockContract(symbol), targetOrder);
-                return `, target ${targetPrice} (orders ${stopId}/${targetId}, OCA ${ocaGroup})`;
+                return {
+                    msg: `, target ${targetPrice} (orders ${stopId}/${targetId}, OCA ${ocaGroup})`,
+                    ids: { stopOrderId: stopId, targetOrderId: targetId },
+                };
             }
-            return ` (order ${stopId})`;
+            return { msg: ` (order ${stopId})`, ids: { stopOrderId: stopId } };
         });
 
         logger.info(`[position-actions] protected ${symbol}: ${exitAction} ${qty} stop ${stopPrice}${targetPrice !== undefined ? ` / target ${targetPrice}` : ''}`);
@@ -217,7 +224,8 @@ export async function protectPosition(
             ok: true,
             message:
                 `🛡️ ${symbol} protected: ${isLong ? 'LONG' : 'SHORT'} ${qty} @ ${pos.avgCost.toFixed(2)} — ` +
-                `GTC stop ${stopPrice}${targetMsg}. These exits survive the close.${dayNote}`,
+                `GTC stop ${stopPrice}${placed.msg}. These exits survive the close.${dayNote}`,
+            protectOrderIds: placed.ids,
         };
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

@@ -10,6 +10,7 @@ process.env.DEXTER_DATA_DIR = dir;
 
 import {
     closeProposal,
+    convertToOvernightHold,
     countExecutedSince,
     countOpenByClass,
     countOpenExecuted,
@@ -137,6 +138,51 @@ describe('proposal store lifecycle', () => {
         // executed-today counter still counts closed trades (max_daily_trades)
         expect(await countExecutedSince(etDayStartMs())).toBe(baseExecuted + 1);
         expect(formatProposalLine(closed!)).toContain('+$100.50');
+    });
+
+    test('EOD-keep transition: a filled DAY position converts instead of closing (orphaned-keep hole)', async () => {
+        const baseOpen = await countOpenExecuted();
+        const p = await createProposal(validInput({ symbol: 'KEEP' }));
+        await setProposalStatus(p.id, 'executed', { orderIds: [301, 302, 303], executedAt: Date.now() });
+        await markEntryFilled(p.id, 100.05);
+
+        expect(await convertToOvernightHold(p.id, { orderIds: [301, 402, 401], note: 'kept overnight (test)' })).toBe(true);
+
+        const kept = await getProposal(p.id);
+        expect(kept?.status).toBe('executed'); // NOT closed — the hold stays a tracked trade
+        expect(kept?.tif).toBe('GTC'); // exits survive the close now
+        expect(kept?.orderIds).toEqual([301, 402, 401]); // protect pair adopted (entry id kept)
+        expect(kept?.keptOvernightAt).not.toBeNull();
+        expect(kept?.note).toContain('kept overnight (test)');
+        expect((await listTrackable()).map((t) => t.id)).toContain(p.id); // next-day triage sees it
+        expect(await countOpenExecuted()).toBe(baseOpen + 1); // caps still count it
+
+        // The eventual GTC exit fill closes it with a REAL labeled outcome.
+        await closeProposal(p.id, { exitReason: 'stop', exitFillPrice: 95, realizedPnl: -50.5 });
+        const closed = await getProposal(p.id);
+        expect(closed?.status).toBe('closed');
+        expect(closed?.realizedPnl).toBe(-50.5);
+        expect(await countOpenExecuted()).toBe(baseOpen);
+    });
+
+    test('EOD-keep transition refuses unfilled entries and rows a concurrent close already won', async () => {
+        // Unfilled entry: there is no position to keep — nothing converts.
+        const unfilled = await createProposal(validInput({ symbol: 'KEEPX' }));
+        await setProposalStatus(unfilled.id, 'executed', { orderIds: [311, 312, 313], executedAt: Date.now() });
+        expect(await convertToOvernightHold(unfilled.id, { orderIds: [311, 412, 411] })).toBe(false);
+        expect((await getProposal(unfilled.id))?.tif).toBe('DAY'); // untouched
+
+        // Already closed: the close wins; the convert must not resurrect it.
+        const gone = await createProposal(validInput({ symbol: 'KEEPY' }));
+        await setProposalStatus(gone.id, 'executed', { orderIds: [321, 322, 323], executedAt: Date.now() });
+        await markEntryFilled(gone.id, 100);
+        await closeProposal(gone.id, { exitReason: 'manual' });
+        expect(await convertToOvernightHold(gone.id, { orderIds: [321, 422, 421] })).toBe(false);
+        const after = await getProposal(gone.id);
+        expect(after?.status).toBe('closed');
+        expect(after?.keptOvernightAt).toBeNull();
+
+        await closeProposal(unfilled.id, { exitReason: 'cancelled' }); // cross-file count hygiene
     });
 
     test('execution claim is atomic: one winner, release restores open', async () => {

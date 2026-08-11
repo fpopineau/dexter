@@ -1,5 +1,38 @@
 import { describe, expect, test } from 'bun:test';
-import { computeRealizedPnl, isIbNumber, selectManualExitTargets } from './outcome-tracker.js';
+import { computeRealizedPnl, decideDayExpiryHold, isIbNumber, selectManualExitTargets } from './outcome-tracker.js';
+
+describe('decideDayExpiryHold (EOD-keep transition trigger)', () => {
+    const base = {
+        reason: 'manual' as const,
+        entryFilled: true,
+        exitFillKnown: false,
+        tif: 'DAY' as const,
+        afterBell: true,
+    };
+
+    test('DAY bracket, entry filled, no exit fill, at/after the bell → keep the proposal alive', () => {
+        expect(decideDayExpiryHold(base)).toBe(true);
+    });
+
+    test('a known exit fill means a deliberate close that landed near the bell — not an expiry', () => {
+        expect(decideDayExpiryHold({ ...base, exitFillKnown: true })).toBe(false);
+    });
+
+    test('GTC brackets never expire at the bell', () => {
+        expect(decideDayExpiryHold({ ...base, tif: 'GTC' })).toBe(false);
+        expect(decideDayExpiryHold({ ...base, tif: null })).toBe(false);
+    });
+
+    test('before the bell it is a mystery manual close, not an expiry', () => {
+        expect(decideDayExpiryHold({ ...base, afterBell: false })).toBe(false);
+    });
+
+    test('unfilled entries and non-manual reasons never hold', () => {
+        expect(decideDayExpiryHold({ ...base, entryFilled: false })).toBe(false);
+        expect(decideDayExpiryHold({ ...base, reason: 'stop' })).toBe(false);
+        expect(decideDayExpiryHold({ ...base, reason: 'cancelled' })).toBe(false);
+    });
+});
 
 describe('computeRealizedPnl', () => {
     test('long win: (exit − entry) × qty', () => {

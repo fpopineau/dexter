@@ -79,6 +79,12 @@ export interface TradeProposal {
     /** Commissions reported by IBKR for the tracked executions. */
     commissions: number | null;
     closedAt: number | null;
+    /** Set when an EOD keep converted this DAY position to a protected
+     *  overnight hold (tif flipped to GTC, exits swapped to the protect
+     *  pair). The proposal stays 'executed': still counted by the caps,
+     *  still triaged daily, and the eventual GTC exit fill attributes its
+     *  P&L here instead of vanishing (the orphaned-keep hole). */
+    keptOvernightAt: number | null;
 }
 
 const DEFAULT_EXPIRY_MIN = 120;
@@ -303,6 +309,7 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     ['claim_token', 'TEXT'],
     ['trade_class', 'TEXT'],
     ['worst_case_gap_pct', 'REAL'],
+    ['kept_overnight_at', 'INTEGER'],
 ];
 
 function migrate(database: SqliteDatabase): void {
@@ -345,6 +352,7 @@ interface Row {
     realized_pnl: number | null;
     commissions: number | null;
     closed_at: number | null;
+    kept_overnight_at: number | null;
 }
 
 function fromRow(r: Row): TradeProposal {
@@ -378,6 +386,7 @@ function fromRow(r: Row): TradeProposal {
         realizedPnl: r.realized_pnl ?? null,
         commissions: r.commissions ?? null,
         closedAt: r.closed_at ?? null,
+        keptOvernightAt: r.kept_overnight_at ?? null,
     };
 }
 
@@ -580,6 +589,41 @@ export async function closeProposal(id: string, input: CloseProposalInput): Prom
         id.trim().toUpperCase(),
     );
     logger.info(`[proposals] closed ${id.toUpperCase()} (${input.exitReason}, pnl ${input.realizedPnl ?? '?'})`);
+}
+
+/**
+ * EOD-keep transition: a DAY bracket's exits expired at the bell with the
+ * position still open, and auto-protect re-armed GTC exits. Instead of
+ * closing the proposal (which orphaned the hold: out of the caps, out of
+ * triage, P&L forever unlabeled — the orphaned-keep hole), the SAME row
+ * carries the position through the night: tif flips to GTC, order_ids
+ * point at the protect pair (entry id kept for the fill record), and
+ * kept_overnight_at marks the conversion for reporting and re-triage.
+ * Guarded on status='executed' so a concurrent close wins over a convert.
+ */
+export async function convertToOvernightHold(
+    id: string,
+    input: { orderIds: number[]; note?: string; at?: number },
+): Promise<boolean> {
+    const database = await getDb();
+    const now = Date.now();
+    database.query<void>(
+        `UPDATE proposals SET tif = 'GTC', order_ids = ?, kept_overnight_at = ?,
+                note = CASE WHEN note IS NULL THEN ? ELSE note || ' — ' || ? END,
+                updated_at = ?
+         WHERE id = ? AND status = 'executed' AND entry_fill_price IS NOT NULL`,
+    ).run(
+        JSON.stringify(input.orderIds),
+        input.at ?? now,
+        input.note ?? 'kept overnight under GTC protection',
+        input.note ?? 'kept overnight under GTC protection',
+        now,
+        id.trim().toUpperCase(),
+    );
+    const after = await getProposal(id);
+    const converted = after?.status === 'executed' && after.keptOvernightAt != null;
+    if (converted) logger.info(`[proposals] ${id.toUpperCase()} kept overnight — tif GTC, exits ${input.orderIds.join('/')}`);
+    return converted;
 }
 
 /**

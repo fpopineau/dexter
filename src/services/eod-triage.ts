@@ -102,6 +102,28 @@ export function decideEodAction(input: {
 }
 
 /**
+ * Pure: split trackable proposals into the two triage lanes.
+ *   - momentum lane: filled DAY brackets (exits die at the bell) AND
+ *     kept-overnight holds (converted DAY keeps — tif is GTC now, but they
+ *     are intraday positions that must re-earn every additional night, not
+ *     thesis-carrying swings);
+ *   - guard-only lane: filled GTC positions entered deliberately (swings,
+ *     overnight setups, earnings bets) — their thesis holds, only an
+ *     imminent print can force them flat.
+ */
+export function splitTriageCandidates<T extends {
+    tif: 'DAY' | 'GTC';
+    entryFillPrice: number | null;
+    keptOvernightAt: number | null;
+}>(trackable: T[]): { momentum: T[]; guardOnly: T[] } {
+    const filled = trackable.filter((t) => t.entryFillPrice != null);
+    return {
+        momentum: filled.filter((t) => t.tif === 'DAY' || t.keptOvernightAt != null),
+        guardOnly: filled.filter((t) => t.tif === 'GTC' && t.keptOvernightAt == null),
+    };
+}
+
+/**
  * Is this calendar hit a print still AHEAD of the 15:52 triage? A report
  * dated today with pre-market timing already happened this morning —
  * closing on it would punish the legitimate post-print reaction trade.
@@ -198,12 +220,9 @@ export async function runEodTriageOnce(): Promise<void> {
     if (isMarketHoliday(today)) return;
 
     const trackable = await listTrackable();
-    // Filled DAY-bracket proposals still working = positions whose exits
-    // die at the bell → full triage (momentum + earnings guard).
-    const dayCandidates = trackable.filter((t) => t.tif === 'DAY' && t.entryFillPrice != null);
-    // Filled GTC positions (swings, overnight setups, earnings bets) →
-    // earnings guard only; their exits survive the close.
-    const gtcCandidates = trackable.filter((t) => t.tif === 'GTC' && t.entryFillPrice != null);
+    // Momentum lane: DAY brackets + kept-overnight holds (full triage);
+    // guard-only lane: deliberate GTC positions (earnings guard only).
+    const { momentum: dayCandidates, guardOnly: gtcCandidates } = splitTriageCandidates(trackable);
     if (dayCandidates.length === 0 && gtcCandidates.length === 0) return;
 
     const api = await getIBApi();
@@ -247,12 +266,13 @@ export async function runEodTriageOnce(): Promise<void> {
             : { action: 'keep' as const, reason: 'price unavailable — keeping (fail-open to hold)' };
         const decision = applyEarningsGuard(base, earningsBySymbol.get(t.symbol) ?? null, today);
 
+        const label = t.keptOvernightAt != null ? `${t.id}, kept-overnight` : t.id;
         logger.info(`[eod-triage] ${t.id} ${t.symbol}: ${decision.action} — ${decision.reason}`);
         if (decision.action === 'close') {
             const outcome = await closePosition(t.symbol, 'EOD triage');
-            lines.push(`• ${t.symbol} (${t.id}): ${decision.reason}. ${outcome.ok ? 'Closed.' : outcome.message}`);
+            lines.push(`• ${t.symbol} (${label}): ${decision.reason}. ${outcome.ok ? 'Closed.' : outcome.message}`);
         } else {
-            lines.push(`• ${t.symbol} (${t.id}): ${decision.reason}.`);
+            lines.push(`• ${t.symbol} (${label}): ${decision.reason}.`);
         }
     }
 

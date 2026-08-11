@@ -1,5 +1,31 @@
 import { describe, expect, test } from 'bun:test';
-import { applyEarningsGuard, decideEodAction, decideGtcEarningsGuard, isUpcomingPrint } from './eod-triage.js';
+import { applyEarningsGuard, decideEodAction, decideGtcEarningsGuard, isUpcomingPrint, splitTriageCandidates } from './eod-triage.js';
+
+describe('splitTriageCandidates (kept-overnight holds re-enter momentum triage)', () => {
+    const mk = (tif: 'DAY' | 'GTC', entryFillPrice: number | null, keptOvernightAt: number | null = null) =>
+        ({ tif, entryFillPrice, keptOvernightAt });
+
+    test('filled DAY brackets → momentum lane; deliberate GTC → guard-only lane', () => {
+        const day = mk('DAY', 100);
+        const swing = mk('GTC', 50);
+        const { momentum, guardOnly } = splitTriageCandidates([day, swing]);
+        expect(momentum).toEqual([day]);
+        expect(guardOnly).toEqual([swing]);
+    });
+
+    test('a kept-overnight hold (GTC via EOD-keep conversion) is momentum-triaged daily — it must re-earn every night', () => {
+        const kept = mk('GTC', 100, Date.now());
+        const { momentum, guardOnly } = splitTriageCandidates([kept]);
+        expect(momentum).toEqual([kept]);
+        expect(guardOnly).toEqual([]);
+    });
+
+    test('unfilled entries are in neither lane', () => {
+        const { momentum, guardOnly } = splitTriageCandidates([mk('DAY', null), mk('GTC', null, Date.now())]);
+        expect(momentum).toEqual([]);
+        expect(guardOnly).toEqual([]);
+    });
+});
 
 const TODAY = '2026-08-05';
 
