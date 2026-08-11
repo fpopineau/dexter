@@ -288,6 +288,29 @@ export function checkProposalRisk(
         violations.push(`entry $${entry} is below the minimum price $${rules.min_price}`);
     }
 
+    // --- Tick alignment: IBKR hard-rejects sub-penny prices on US stocks
+    // ≥ $1 (error 110) — observed live 2026-08-11: ACHR entry 6.845 killed
+    // the bracket AFTER acceptance, leaving an executed proposal with a
+    // dead entry order. A mid-quote is not a placeable price; refuse with
+    // the two valid neighbors instead of letting the broker refuse later.
+    for (const [field, value] of [
+        ['entry', entry],
+        ['entryLimit', p.entryLimit ?? null],
+        ['stop', p.stop],
+        ['target', p.target],
+    ] as const) {
+        if (value == null || !(value >= 1)) continue; // sub-$1 ticks at $0.0001 — min_price refuses those anyway
+        const cents = value * 100;
+        if (Math.abs(cents - Math.round(cents)) > 1e-6) {
+            const below = (Math.floor(cents) / 100).toFixed(2);
+            const above = (Math.ceil(cents) / 100).toFixed(2);
+            violations.push(
+                `${field} $${value} is not on the $0.01 tick grid — use ${below} or ${above} ` +
+                `(IBKR rejects sub-penny prices on stocks ≥ $1; a mid-quote is not a placeable price)`,
+            );
+        }
+    }
+
     // --- Minimum risk/reward ---
     const risk = Math.abs(entry - p.stop);
     const reward = Math.abs(p.target - entry);

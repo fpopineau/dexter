@@ -767,3 +767,32 @@ describe('earnings-bet LIVE-GATE (the evidence bar stops being advisory)', () =>
         expect(r.ok).toBe(true);
     });
 });
+
+describe('tick alignment (the ACHR 6.845 live rejection, 2026-08-11)', () => {
+    test('a sub-penny entry is refused with the two placeable neighbors', () => {
+        const r = checkProposalRisk(longProposal({ entry: 6.845, stop: 6.68, target: 7.18, quantity: 100 }), {}, RULES);
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('entry $6.845 is not on the $0.01 tick grid');
+        expect(r.violations.join(' ')).toContain('use 6.84 or 6.85');
+    });
+
+    test('sub-penny stops, targets and entryLimits are refused too', () => {
+        const r = checkProposalRisk(
+            longProposal({ entryType: 'STP_LMT', entry: 10, entryLimit: 10.025, stop: 9.505, target: 11.005 }),
+            {},
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        const all = r.violations.join(' ');
+        expect(all).toContain('entryLimit $10.025');
+        expect(all).toContain('stop $9.505');
+        expect(all).toContain('target $11.005');
+    });
+
+    test('cent-aligned prices pass untouched (float dust tolerated)', () => {
+        // 6.84 is not exactly representable in binary — the check must not
+        // refuse honest cent prices over float noise.
+        const r = checkProposalRisk(longProposal({ entry: 6.84, stop: 6.67, target: 7.18, quantity: 100 }), {}, RULES);
+        expect(r.violations.join(' ')).not.toContain('tick grid');
+    });
+});
