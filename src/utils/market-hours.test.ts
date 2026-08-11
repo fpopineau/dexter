@@ -58,3 +58,13 @@ describe('calendar predicates', () => {
         expect(isMarketHalfDay('2026-11-24')).toBe(false);
     });
 });
+
+describe('isTradeableSession (the bell-race gate, 2026-08-11)', () => {
+    test('regular and pre-market sessions accept brackets; post-close and closed do not', async () => {
+        const { isTradeableSession, MarketSession } = await import('./market-hours.js');
+        expect(isTradeableSession(MarketSession.REGULAR)).toBe(true);
+        expect(isTradeableSession(MarketSession.PRE_MARKET)).toBe(true);
+        expect(isTradeableSession(MarketSession.AFTER_HOURS)).toBe(false);
+        expect(isTradeableSession(MarketSession.CLOSED)).toBe(false);
+    });
+});

@@ -177,6 +177,17 @@ export function isMarketOpen(date?: Date): boolean {
 }
 
 /**
+ * REGULAR or PRE_MARKET: the sessions where placing an equity DAY bracket
+ * makes sense (pre-open orders legally rest until the open; post-close DAY
+ * orders are guaranteed broker rejections — IBKR error 201 "exchange is
+ * closed", observed live 2026-08-11 when the final pre-bell snapshot kept
+ * dispatching triggers minutes into the closed session).
+ */
+export function isTradeableSession(session: MarketSession): boolean {
+    return session === MarketSession.REGULAR || session === MarketSession.PRE_MARKET;
+}
+
+/**
  * Check if a given date string (YYYY-MM-DD) is a market holiday.
  */
 export function isMarketHoliday(dateStr: string): boolean {

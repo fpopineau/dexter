@@ -18,6 +18,7 @@ import { placeBracketOrder } from '@/tools/ibkr/bracket.js';
 import { assertOrderingAllowed, getIBApi, getManagedAccounts, isLivePort } from '@/tools/ibkr/connection.js';
 import { createIbkrMarketData } from '@/tools/ibkr/market-data.js';
 import { logger } from '@/utils';
+import { getMarketSession, isTradeableSession } from '@/utils/market-hours.js';
 import { assertDailyLossOk } from './daily-loss-guard.js';
 import { trackExecutedProposal } from './outcome-tracker.js';
 import { getSectorInfo } from './sector-map.js';
@@ -79,6 +80,16 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
     // later) must not permanently kill a valid proposal before its expiry.
     try {
         assertOrderingAllowed();
+        // DAY brackets need a session to live in: placed post-close they are
+        // guaranteed broker rejections (IBKR 201 "exchange is closed" —
+        // observed live 2026-08-11, bell-race triggers). GTC brackets rest
+        // legally at any hour; pre-market DAY orders rest until the open.
+        if (p.tif !== 'GTC' && !isTradeableSession(getMarketSession().session)) {
+            throw new Error(
+                '[session-gate] the session is over — a DAY bracket placed now is a guaranteed broker rejection. ' +
+                'Re-propose as a GTC overnight setup if the thesis survives the night, or wait for the next session.',
+            );
+        }
         const lossStatus = await assertDailyLossOk();
 
         // Risk gate with live account context. Re-runs the static checks too:

@@ -21,7 +21,7 @@
 
 import { createSignalScorer, type SignalResult } from '@/tools/ibkr/signal-scorer.js';
 import { logger } from '@/utils';
-import { getMarketSession, MarketSession } from '@/utils/market-hours.js';
+import { getMarketSession, isTradeableSession, MarketSession } from '@/utils/market-hours.js';
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { addSymbol, removeSymbol } from './ibkr-stream.js';
@@ -717,6 +717,16 @@ async function evaluateTriggers(snapshot: OpportunitySnapshot): Promise<void> {
             depth: REACTOR_TRIGGER_DEPTH,
         });
         if (!gate.eligible || opp.compositeRank < gate.effectiveThreshold) continue;
+        // Live session re-check: trigger callbacks are AWAITED, so the loop
+        // can outlive the session that produced the snapshot — on 2026-08-11
+        // the final pre-bell cycle dispatched four triggers into the closed
+        // market, each burning an agent evaluation to place a bracket IBKR
+        // rejects with error 201. The snapshot's marketOpen is cycle-start
+        // truth; this is dispatch-time truth.
+        if (!isTradeableSession(getMarketSession().session)) {
+            logger.info('[opportunity-engine] session closed mid-loop — remaining triggers dropped (post-close DAY brackets are guaranteed rejections)');
+            return;
+        }
         if (triggersToday >= maxTriggers) {
             logger.info(`[opportunity-engine] trigger cap reached for today (${maxTriggers}${capBonus ? ` incl. breadth bonus +${capBonus}` : ''})`);
             return;
