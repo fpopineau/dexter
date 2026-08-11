@@ -52,9 +52,13 @@ Call `web_search`:
 - **Critical:** If ANY open position has earnings tonight, flag prominently — this is the #1 overnight risk factor.
 
 ### 2.2 Macro Events
-Call `web_search`:
-- **Query:** `"economic calendar tomorrow [DATE]"` — Fed meeting, jobs report, CPI, etc.
-- **Query:** `"FOMC Fed speakers tomorrow"` — any policy-sensitive events.
+Call `event_risk` (action `macro`, withinDays 1) FIRST — the deterministic
+calendar of dated macro binaries (CPI, FOMC, jobs, GDP) with the market's
+implied top outcome and an uncertainty grade. A **high-uncertainty** print
+resolving tomorrow is the #2 overnight risk factor after earnings: name it
+in every keep/proposal rationale, and prefer flat on marginal setups.
+Then call `web_search` only for what the calendar cannot know:
+- **Query:** `"FOMC Fed speakers tomorrow"` — unscheduled policy-sensitive events.
 - Flag any high-impact event that could gap the market overnight.
 
 ### 2.3 Sector-Specific Risks

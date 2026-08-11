@@ -20,6 +20,7 @@ import {
     EVIDENCE_MIN_PRINTS,
     EVIDENCE_MIN_CONSISTENCY_PCT,
 } from '@/services/earnings-reactions.js';
+import { getEarningsMarketSignal } from '@/services/event-risk.js';
 import { fetchImpliedMove } from '@/tools/ibkr/implied-move.js';
 
 export const EARNINGS_BET_INTEL_DESCRIPTION = `
@@ -42,8 +43,11 @@ Deterministic evidence for an EARNINGS BET (a deliberate hold through a print).
   and weigh the remaining signals, never treat it as zero.
 
 The verdicts here cover print count and consistency only. The third leg of
-the evidence bar — at least one supporting EXTERNAL signal (beat/guidance
-streak, news, positioning) — is yours to verify before proposing.
+the evidence bar — at least one supporting EXTERNAL signal — is reported as
+externalSignal when the symbol has an open Polymarket "beat quarterly
+earnings?" market (beatProbability = the market's read on the print). A
+null externalSignal means the signal is ABSENT, not negative: verify one
+yourself (beat/guidance streak, news, positioning) before proposing.
 `.trim();
 
 const Schema = z.discriminatedUnion('action', [
@@ -67,9 +71,13 @@ export function createEarningsBetIntelTool() {
         func: async (input) => {
             if (input.action === 'reactions') {
                 try {
-                    const stats = await getEarningsReactions(input.symbol);
+                    const [stats, externalSignal] = await Promise.all([
+                        getEarningsReactions(input.symbol),
+                        getEarningsMarketSignal(input.symbol),
+                    ]);
                     return formatToolResult({
                         ...stats,
+                        externalSignal,
                         note: stats.nVerified < stats.n
                             ? `${stats.n - stats.nVerified} of ${stats.n} prints are inferred from gap structure, not a published calendar — say so when citing the record`
                             : undefined,

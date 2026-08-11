@@ -35,6 +35,7 @@ import { resolveSessionStorePath, upsertSessionMeta } from './sessions/store.js'
 import { startBenchmark, stopBenchmark } from '@/services/benchmark.js';
 import { startDashboard, stopDashboard } from '@/services/dashboard.js';
 import { startEodTriage, stopEodTriage } from '@/services/eod-triage.js';
+import { startNewsPulse, stopNewsPulse } from '@/services/news-pulse.js';
 import { startProfitTrail, stopProfitTrail } from '@/services/profit-trail.js';
 import { catchUpPatternScan } from '@/services/pattern-scanner.js';
 import { startStaleEntrySweeper, stopStaleEntrySweeper } from '@/services/stale-entry-sweeper.js';
@@ -289,6 +290,9 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     // 15:52 ET: close losing-and-fading DAY positions; keep the rest for
     // the protected-overnight conversion at the bell.
     startEodTriage();
+    // ~20-min batched GDELT sweep: news breadth over book + reactors +
+    // candidates, surfaced via the news_pulse tool. Read-only context.
+    startNewsPulse();
     startBenchmark();
     // Swing-pattern snapshot catch-up: the nightly sweep (whose stage 4
     // produces it) is routinely killed by the nightly restart window —
@@ -340,6 +344,7 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
       stopProfitTrail();
       stopStaleEntrySweeper();
       stopEodTriage();
+      stopNewsPulse();
       stopBenchmark();
       stopDashboard();
       await manager.stopAll();

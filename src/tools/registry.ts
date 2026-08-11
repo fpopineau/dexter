@@ -18,6 +18,8 @@ import { createIbkrAccount, createIbkrHistorical, createIbkrMarketData, createIb
 import { MEMORY_GET_DESCRIPTION, MEMORY_SEARCH_DESCRIPTION, MEMORY_UPDATE_DESCRIPTION, memoryGetTool, memorySearchTool, memoryUpdateTool } from './memory/index.js';
 import { createOpportunitiesTool, OPPORTUNITIES_DESCRIPTION } from './opportunities/index.js';
 import { createEarningsCalendarTool, EARNINGS_CALENDAR_DESCRIPTION } from './earnings/index.js';
+import { createEventRiskTool, EVENT_RISK_DESCRIPTION } from './events/index.js';
+import { createNewsPulseTool, NEWS_PULSE_DESCRIPTION } from './news/index.js';
 import { createEarningsBetIntelTool, EARNINGS_BET_INTEL_DESCRIPTION } from './earnings/bet-intel.js';
 import { createSwingPatternsTool, SWING_PATTERNS_DESCRIPTION } from './patterns/index.js';
 import { ACCEPT_PROPOSAL_DESCRIPTION, createAcceptProposalTool, createTradeProposalsTool, TRADE_PROPOSALS_DESCRIPTION } from './proposals/index.js';
@@ -156,6 +158,20 @@ export function getToolRegistry(model: string): RegisteredTool[] {
       description: MEMORY_UPDATE_DESCRIPTION,
       compactDescription: 'Add, edit, or delete persistent memory entries.',
       concurrencySafe: false,
+    },
+    {
+      name: 'event_risk',
+      tool: createEventRiskTool(),
+      description: EVENT_RISK_DESCRIPTION,
+      compactDescription: 'Dated macro binaries (CPI/FOMC/jobs) with market-implied probabilities; per-symbol Polymarket earnings markets (external signal for earnings bets).',
+      concurrencySafe: true,
+    },
+    {
+      name: 'news_pulse',
+      tool: createNewsPulseTool(),
+      description: NEWS_PULSE_DESCRIPTION,
+      compactDescription: 'News breadth (GDELT sweep) for book + reactors + candidates: headline counts, domains, hot flags. Confirmation, not a scoring input.',
+      concurrencySafe: true,
     },
   ];
 

@@ -16,6 +16,7 @@ import {
     type Opportunity,
     type OpportunitySnapshot,
 } from '@/services/opportunity-engine.js';
+import { getLatestNewsPulse } from '@/services/news-pulse.js';
 import { formatToolResult } from '../types.js';
 
 export const OPPORTUNITIES_DESCRIPTION = `
@@ -52,6 +53,10 @@ const OpportunitiesSchema = z.object({
 });
 
 function trim(snapshot: OpportunitySnapshot, limit: number) {
+    // News-pulse annotation (visibility only — never a scoring input): a
+    // fresh-enough sweep marks candidates whose news cycle is broad.
+    const pulse = getLatestNewsPulse();
+    const pulseFresh = pulse && Date.now() - pulse.at < 45 * 60_000 ? pulse : null;
     return {
         timestamp: new Date(snapshot.timestamp).toISOString(),
         ageSeconds: Math.round((Date.now() - snapshot.timestamp) / 1000),
@@ -60,21 +65,27 @@ function trim(snapshot: OpportunitySnapshot, limit: number) {
         marketOpen: snapshot.marketOpen,
         scanned: snapshot.scanned,
         scored: snapshot.scored,
-        opportunities: snapshot.opportunities.slice(0, limit).map((o: Opportunity, i: number) => ({
-            rank: i + 1,
-            symbol: o.symbol,
-            name: o.longName,
-            direction: o.direction,
-            compositeRank: o.compositeRank,
-            signalScore: o.signalScore,
-            rating: o.rating,
-            price: o.price,
-            rvol: o.rvol,
-            atr: o.atr,
-            rsi: o.rsi,
-            vwap: o.vwap,
-            scanners: o.scanSources,
-        })),
+        opportunities: snapshot.opportunities.slice(0, limit).map((o: Opportunity, i: number) => {
+            const p = pulseFresh?.symbols[o.symbol];
+            return {
+                rank: i + 1,
+                symbol: o.symbol,
+                name: o.longName,
+                direction: o.direction,
+                compositeRank: o.compositeRank,
+                signalScore: o.signalScore,
+                rating: o.rating,
+                price: o.price,
+                rvol: o.rvol,
+                atr: o.atr,
+                rsi: o.rsi,
+                vwap: o.vwap,
+                scanners: o.scanSources,
+                newsPulse: p?.hot
+                    ? { hot: true, articles: p.articles, domains: p.domains, topHeadline: p.headlines[0]?.title }
+                    : undefined,
+            };
+        }),
     };
 }
 

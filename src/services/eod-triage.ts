@@ -44,6 +44,7 @@ import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
 import { logger } from '@/utils';
 import { isMarketHoliday } from '@/utils/market-hours.js';
 import { findUpcomingEarnings, type UpcomingEarnings } from './earnings-calendar.js';
+import { getMacroEventsWithin, macroNightWarning } from './event-risk.js';
 import { closePosition, fetchPositions } from './position-actions.js';
 import { listTrackable } from './trade-proposals.js';
 import type { TradeClass } from '@/tools/ibkr/risk-rules.js';
@@ -188,6 +189,10 @@ export function isEarningsGuardEnabled(): boolean {
     return (process.env.EOD_EARNINGS_GUARD ?? 'true').trim().toLowerCase() !== 'false';
 }
 
+export function isMacroWarningEnabled(): boolean {
+    return (process.env.EOD_MACRO_WARNING ?? 'true').trim().toLowerCase() !== 'false';
+}
+
 export async function runEodTriageOnce(): Promise<void> {
     const today = new Date().toLocaleDateString('en-CA', { timeZone: ET });
     if (isMarketHoliday(today)) return;
@@ -271,11 +276,24 @@ export async function runEodTriageOnce(): Promise<void> {
         lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} GTC): ${decision.reason}. ${outcome.ok ? 'Closed.' : outcome.message}`);
     }
 
-    if (lines.length) {
-        const footer = earningsUnknownDays.length
-            ? `\n⚠ earnings calendar unavailable (${earningsUnknownDays.join(', ')}) — keeps are NOT verified print-free.`
-            : '';
-        await notify(`🌇 EOD triage (15:52 ET):\n${lines.join('\n')}${footer}`);
+    // Macro-night check (advisory, never closes): the earnings guard covers
+    // single-name prints, but a keep on CPI/FOMC-eve rides a macro binary no
+    // stop can protect against — the report must say so. A real event forces
+    // the notification even when no position needed action; the
+    // data-unavailable caveat rides along only when a report goes out anyway.
+    const macroEvents = isMacroWarningEnabled() ? await getMacroEventsWithin(1) : [];
+    const macroLine = macroNightWarning(macroEvents);
+
+    if (lines.length || (macroLine && macroEvents !== null)) {
+        const footer =
+            (earningsUnknownDays.length
+                ? `\n⚠ earnings calendar unavailable (${earningsUnknownDays.join(', ')}) — keeps are NOT verified print-free.`
+                : '') +
+            (macroLine ? `\n${macroLine}` : '');
+        const body = lines.length
+            ? lines.join('\n')
+            : `${dayCandidates.length + gtcCandidates.length} tracked position(s), none needed action.`;
+        await notify(`🌇 EOD triage (15:52 ET):\n${body}${footer}`);
     }
 }
 

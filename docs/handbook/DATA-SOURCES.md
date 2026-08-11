@@ -34,6 +34,51 @@ company-snapshot skill rely on (probed working):
 | `/api/company/{sym}/insider-trades` | open-market insider buys vs sells, 3/12 months (snapshot card) |
 | `/api/quote/{sym}/summary` | sector, industry, market cap, average volume (snapshot card) |
 
+## Prediction markets — Polymarket Gamma API (FREE, wired 2026-08-11)
+
+Keyless. Two surfaces in `src/services/event-risk.ts`, per the 2026-08-05
+research memo's verdict (episodic context for the judgment layer, never a
+scoring factor):
+
+- **Dated macro binaries** (CPI, FOMC, jobs, GDP, central banks) with the
+  market-implied top outcome and an uncertainty grade from bracket
+  dispersion. Feeds the `event_risk` tool (macro action), the Pre-Market
+  Brief and Pre-Close Review prompts, the overnight skill's gap-risk step,
+  and an advisory macro-night warning in the EOD triage report
+  (`EOD_MACRO_WARNING=false` disables). Cached 2h in event-risk.json.
+- **Per-symbol "beat quarterly earnings?" markets** — the deterministic
+  external signal for the earnings-bet evidence bar, returned as
+  `externalSignal` by `earnings_bet_intel` (reactions) and by the
+  `event_risk` tool (earnings_market action). Coverage skews to liquid,
+  newsy names; null = signal absent, not negative.
+
+Parsing traps (verified live): `outcomePrices` is a JSON-encoded string
+array; `public-search` fuzzy-matches (q=STUB returns the Finnish election
+via candidate "Stubb") so the matcher requires the exact `(TICKER)` in the
+title; `endDate` midnight-UTC IS the UTC release day — converting to ET
+would shift it a day early.
+
+## News pulse — GDELT DOC 2.0 API (FREE, wired 2026-08-11)
+
+Keyless. `src/services/news-pulse.ts` sweeps ONE batched OR-query every
+~20 min (07:00–16:00 ET weekdays, gateway only) over the open book, the
+earnings-reactor watchlist and the engine's current candidates. Per
+symbol: unique headlines, distinct domains, top headlines, and a **hot**
+flag (both floors met — the story is broad, not one syndicated wire).
+Feeds the `news_pulse` tool, the Pre-Market Brief, and a read-only
+annotation on the opportunities snapshot. Deliberately NOT a scoring
+input (research memo: GDELT stock-level sentiment needs an in-house IC
+pass first — the live-scoring lane stays closed).
+
+Access is defensive by construction: the API allows 1 request / 5 s and
+punishes violations with a multi-minute penalty; the throttle answer is
+plain text over a ~11 s tarpit (axios, not fetch — undici's 10 s connect
+cap turns every throttle into an opaque network error under tsx). A
+degraded sweep keeps the previous snapshot and backs off
+(`NEWS_PULSE_BACKOFF_MIN`, default 30 min); it is never reported as "no
+news". Articles lag ~15–35 min; attribution is company-name-in-title
+(precision over recall). Smoke: `scripts/smoke-external-signals.ts`.
+
 ## 1. Live sources (wired)
 
 ### 1.1 Interactive Brokers (IBKR) — the market backbone
@@ -200,8 +245,11 @@ Target: `src/tools/ibkr/options-flow.ts`.
 
 ### 4.3 Prediction markets — Polymarket, Kalshi
 
-Event probabilities (Fed, CPI, elections) often lead news by hours; free
-APIs. Target: `src/tools/macro/prediction-markets.ts`.
+**Polymarket: DONE 2026-08-11** — landed as `src/services/event-risk.ts`
++ the `event_risk` tool (see the wired section above), not the originally
+planned `src/tools/macro/prediction-markets.ts` path. Kalshi remains
+unintegrated (Polymarket covers the macro calendar; add Kalshi only if a
+needed market is missing).
 
 ### 4.4 Social sentiment — Reddit, StockTwits, X
 
@@ -227,7 +275,7 @@ What covers what — the planned sources are orthogonal, not duplicative:
 | Macro releases | — | — | — | — | FRED, ECB, EIA |
 | Options / volatility | — | ✅ hist. chains | ✅ live chains | — | CBOE VIX/skew |
 | Order flow / L2 | — | — | ✅ live | — | order-flow tool |
-| Prediction markets | — | — | — | — | Polymarket, Kalshi |
+| Prediction markets | — | — | — | ✅ **event_risk** (Polymarket) | Kalshi |
 | Geopolitical events | ✅ CAMEO | — | — | — | ACLED, PortWatch, FIRMS |
 
 ## 6. Local archive audit and gap-filling strategy

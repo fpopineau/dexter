@@ -110,7 +110,8 @@ Create via `trade_proposals` (action `create`):
 - `stop`: real structure for the POST-print session (it manages the
   reaction, not the gap); `target`: an honest objective ≥2× the stop
   distance, informed by `avgAbsMovePct`.
-- `expiresMinutes`: 60 — an unaccepted bet must not survive into the print.
+- `expiresMinutes`: enough to reach 15:55 and no more (25 from the 15:30
+  review) — an unaccepted bet must not survive into the print.
 - `rationale`: one line of record ("7 of 8 up, worst gap −12%, 3 inferred"),
   one line of signal ("beat streak 4Q + implied 6% vs 9% avg").
 
@@ -120,7 +121,10 @@ setup/record, entry/stop/target with size, the ask. Under 10 lines.
 ## Hard Rules
 
 - The evidence bar is not negotiable: no ≥8-print record with ≥75%
-  consistency on your side + ≥1 external signal → no bet.
+  consistency on your side + ≥1 external signal → no bet. The reactions
+  output's `externalSignal` (an open Polymarket beat market with real
+  volume) satisfies the external-signal leg on its own; when it is null,
+  verify one manually (surprise streak, news, positioning).
 - One open earnings bet at a time — the gate refuses the second; do not
   queue another "for after".
 - If the gate or sizer refuses, the refusal stands: fix honestly or skip.

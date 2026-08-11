@@ -40,7 +40,12 @@ Call `web_search` or `get_market_data`:
 - **Query:** `"crude oil gold dollar index today"` — commodity and currency context.
 
 ### 1.3 Overnight News
-Call `get_market_data`:
+Call `event_risk` (action `macro`, withinDays 1): any CPI/FOMC/jobs binary
+resolving today or tomorrow, with the market-implied consensus and its
+uncertainty grade — a high-uncertainty print today reshapes the whole plan.
+Call `news_pulse` (no args): which book/reactor/watchlist names carry a
+broad news cycle right now (hot = many unique headlines across outlets).
+Then call `get_market_data`:
 - **Query:** `"market news today"` — top headlines, macro developments.
 - Look for: Fed commentary, geopolitical events, sector-specific catalysts.
 
