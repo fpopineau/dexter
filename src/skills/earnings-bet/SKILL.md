@@ -120,11 +120,17 @@ setup/record, entry/stop/target with size, the ask. Under 10 lines.
 
 ## Hard Rules
 
-- The evidence bar is not negotiable: no ≥8-print record with ≥75%
-  consistency on your side + ≥1 external signal → no bet. The reactions
-  output's `externalSignal` (an open Polymarket beat market with real
-  volume) satisfies the external-signal leg on its own; when it is null,
-  verify one manually (surprise streak, news, positioning).
+- The evidence bar is not negotiable — and since 2026-08-11 the gate
+  ENFORCES its machine-checkable legs server-side at creation AND
+  acceptance: the print must verify on the calendar (tonight AMC or
+  next-session BMO; an unverifiable date refuses, fail-closed), the
+  record must meet ≥8 prints with ≥75% consistency on your side, and
+  `worstCaseGapPct` must not understate the record's own worst adverse
+  move. Do not argue with these refusals — fix the input or skip. The
+  external-signal leg remains YOURS to verify: the reactions output's
+  `externalSignal` (an open Polymarket beat market with real volume)
+  satisfies it on its own; when it is null, verify one manually
+  (surprise streak, news, positioning).
 - One open earnings bet at a time — the gate refuses the second; do not
   queue another "for after".
 - If the gate or sizer refuses, the refusal stands: fix honestly or skip.

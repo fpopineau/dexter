@@ -150,6 +150,16 @@ export function createTradeProposalsTool() {
                         // Fail-open (nulls skip the checks).
                         const { dailyAtr, ema10, recentEarnings } = await fetchDailyRiskContext(input.symbol);
 
+                        // Earnings bets: server-fetched evidence for the
+                        // LIVE-GATE checks. Fail-CLOSED, unlike the ATR
+                        // context: a data failure arrives as nulls and the
+                        // gate refuses — the evidence bar must not be
+                        // satisfiable by breaking the data source.
+                        const betEvidence = input.tradeClass === 'earnings-bet'
+                            ? await (await import('@/services/earnings-reactions.js'))
+                                .fetchEarningsBetEvidence(input.symbol, input.direction)
+                            : undefined;
+
                         // Auto-sizing: quantity omitted → the deterministic
                         // sizer computes shares from live NetLiq, the score
                         // and the stop distance. Sizing failures return the
@@ -202,6 +212,8 @@ export function createTradeProposalsTool() {
                             // Only a VERIFIED report waives the extension
                             // guard; null (couldn't verify) stays strict.
                             ...(recentEarnings === true ? { recentEarnings: true } : {}),
+                            // worstCaseGapPct reaches the gate via createProposal's own input threading.
+                            ...(betEvidence ? { earningsBetEvidence: betEvidence } : {}),
                         });
 
                         // Paper-only auto-execution (AUTO_EXECUTE_PAPER=true):

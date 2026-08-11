@@ -142,6 +142,15 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                     .reduce((sum, t) => sum + exposureValue(t), 0),
                 sector,
                 ...(sameSectorExposureUsd !== undefined ? { sameSectorExposureUsd } : {}),
+                // Earnings bets: re-verify the evidence at ACCEPTANCE — the
+                // calendar or the record may have shifted since creation,
+                // and this is the last gate before real orders. Fail-closed.
+                ...(p.tradeClass === 'earnings-bet'
+                    ? {
+                        earningsBetEvidence: await (await import('./earnings-reactions.js'))
+                            .fetchEarningsBetEvidence(p.symbol, p.direction),
+                    }
+                    : {}),
             },
         );
 

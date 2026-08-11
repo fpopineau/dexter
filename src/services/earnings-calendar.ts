@@ -146,6 +146,44 @@ export async function reportedRecently(symbol: string, now: Date = new Date()): 
     return decideReportedRecently({ symbol, todayEntries, prevEntries });
 }
 
+/**
+ * Pure core of reportsInBetWindow: does the symbol print inside an
+ * earnings-bet's window — TONIGHT after the close, or the NEXT session's
+ * pre-market? (The bet enters in the final hour before the close that
+ * precedes the print; today's pre-market print is already history and
+ * the next session's after-hours print is a different entry day.)
+ * 'unknown' timing counts on both sides — Nasdaq omits the slot often
+ * enough that excluding it would refuse legitimate bets. Null = the
+ * needed data was unavailable — the LIVE-GATE evidence check FAILS
+ * CLOSED on null: an unconfirmed date kills the bet.
+ */
+export function decideBetPrintWindow(input: {
+    symbol: string;
+    todayEntries: EarningsEntry[] | null;
+    nextEntries: EarningsEntry[] | null;
+}): boolean | null {
+    const sym = input.symbol.trim().toUpperCase();
+    const tonight = input.todayEntries?.some(
+        (e) => e.symbol === sym && (e.time === 'after-hours' || e.time === 'unknown'),
+    );
+    const nextMorning = input.nextEntries?.some(
+        (e) => e.symbol === sym && (e.time === 'pre-market' || e.time === 'unknown'),
+    );
+    if (tonight || nextMorning) return true;
+    if (input.todayEntries === null || input.nextEntries === null) return null;
+    return false;
+}
+
+/** Does `symbol` print inside the earnings-bet window? Null = could not
+ *  verify (callers of the bet gate treat null as a refusal). */
+export async function reportsInBetWindow(symbol: string, now: Date = new Date()): Promise<boolean | null> {
+    const [todayEntries, nextEntries] = await Promise.all([
+        getEarningsForDate(etDatePlus(0, now)),
+        getEarningsForDate(nextTradingDates(1, now)[0]),
+    ]);
+    return decideBetPrintWindow({ symbol, todayEntries, nextEntries });
+}
+
 // ---------------------------------------------------------------------------
 // Fetch + cache
 // ---------------------------------------------------------------------------

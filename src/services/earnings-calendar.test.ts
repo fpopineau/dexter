@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { decideReportedRecently, etDatePlus, guardDates, nextTradingDates, parseNasdaqEarnings, previousTradingDate, type EarningsEntry } from './earnings-calendar.js';
+import { decideBetPrintWindow, decideReportedRecently, etDatePlus, guardDates, nextTradingDates, parseNasdaqEarnings, previousTradingDate, type EarningsEntry } from './earnings-calendar.js';
 
 describe('nextTradingDates (the weekend blind spot fix)', () => {
     test('a Friday looks across the weekend to Monday', () => {
@@ -18,6 +18,27 @@ describe('nextTradingDates (the weekend blind spot fix)', () => {
 
     test('multiple days walk consecutive sessions', () => {
         expect(nextTradingDates(2, new Date('2026-08-13T19:52:00Z'))).toEqual(['2026-08-14', '2026-08-17']);
+    });
+});
+
+describe('decideBetPrintWindow (the LIVE-GATE print check)', () => {
+    const entry = (symbol: string, time: string): EarningsEntry =>
+        ({ symbol, name: '', time, epsForecast: null, marketCap: null });
+
+    test('tonight AMC and next-session BMO both qualify; unknown timing counts', () => {
+        expect(decideBetPrintWindow({ symbol: 'STUB', todayEntries: [entry('STUB', 'after-hours')], nextEntries: [] })).toBe(true);
+        expect(decideBetPrintWindow({ symbol: 'STUB', todayEntries: [], nextEntries: [entry('STUB', 'pre-market')] })).toBe(true);
+        expect(decideBetPrintWindow({ symbol: 'STUB', todayEntries: [entry('STUB', 'unknown')], nextEntries: [] })).toBe(true);
+    });
+
+    test("today's PRE-MARKET print is history and next-session AMC is a different entry day — both refuse", () => {
+        expect(decideBetPrintWindow({ symbol: 'STUB', todayEntries: [entry('STUB', 'pre-market')], nextEntries: [] })).toBe(false);
+        expect(decideBetPrintWindow({ symbol: 'STUB', todayEntries: [], nextEntries: [entry('STUB', 'after-hours')] })).toBe(false);
+    });
+
+    test('unavailable calendar days yield null (the gate fails closed), unless a positive hit exists', () => {
+        expect(decideBetPrintWindow({ symbol: 'STUB', todayEntries: null, nextEntries: [] })).toBeNull();
+        expect(decideBetPrintWindow({ symbol: 'STUB', todayEntries: [entry('STUB', 'after-hours')], nextEntries: null })).toBe(true);
     });
 });
 

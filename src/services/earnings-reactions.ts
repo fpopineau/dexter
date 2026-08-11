@@ -292,3 +292,50 @@ export async function getEarningsReactions(symbol: string): Promise<ReactionStat
     const inferred = inferOlderReportDates(bars, oldest, Math.max(0, EVIDENCE_MIN_PRINTS + 2 - verified.length));
     return computeReactionStats(sym, bars, [...verified, ...inferred]);
 }
+
+// ---------------------------------------------------------------------------
+// LIVE-GATE evidence (consumed by the proposal risk gate)
+// ---------------------------------------------------------------------------
+
+export interface EarningsBetEvidence {
+    /** Does the symbol verifiably print tonight or next-session pre-market?
+     *  Null = the calendar could not be checked — the gate FAILS CLOSED. */
+    reportsWithinWindow: boolean | null;
+    /** The record verdict for the bet's side (print count + consistency).
+     *  Null = no record could be built — no evidence base, no bet. */
+    meetsBar: boolean | null;
+    nPrints: number | null;
+    consistencyPct: number | null;
+    /** The record's worst adverse move for the side (%): the number the
+     *  proposal's worstCaseGapPct must not understate. */
+    recordWorstAdversePct: number | null;
+}
+
+/**
+ * Server-side evidence for the earnings-bet LIVE-GATE checks. Never
+ * throws: a data failure returns nulls, and the gate refuses on null —
+ * the evidence bar must not be satisfiable by breaking the data source.
+ * (The bar's third leg — one supporting EXTERNAL signal — stays with the
+ * judgment layer: signal types beyond the Polymarket market are not
+ * machine-checkable, and "market absent" must never kill a valid bet.)
+ */
+export async function fetchEarningsBetEvidence(
+    symbol: string,
+    direction: 'long' | 'short',
+): Promise<EarningsBetEvidence> {
+    const { reportsInBetWindow } = await import('./earnings-calendar.js');
+    const reportsWithinWindow = await reportsInBetWindow(symbol).catch(() => null);
+    try {
+        const stats = await getEarningsReactions(symbol);
+        return {
+            reportsWithinWindow,
+            meetsBar: direction === 'long' ? stats.meetsBarLong : stats.meetsBarShort,
+            nPrints: stats.n,
+            consistencyPct: direction === 'long' ? stats.upConsistencyPct : stats.downConsistencyPct,
+            recordWorstAdversePct: direction === 'long' ? stats.worstAdverseForLongPct : stats.worstAdverseForShortPct,
+        };
+    } catch (err) {
+        logger.warn(`[earnings-reactions] ${symbol}: no evidence base for the bet gate (${err instanceof Error ? err.message : err})`);
+        return { reportsWithinWindow, meetsBar: null, nPrints: null, consistencyPct: null, recordWorstAdversePct: null };
+    }
+}

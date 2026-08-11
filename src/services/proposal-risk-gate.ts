@@ -17,6 +17,7 @@
 
 import { getRiskRules, type RiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
 import { isValidQuantity, classRiskPct, gapRiskPerShare } from '@/services/position-sizer.js';
+import { EVIDENCE_MIN_PRINTS, EVIDENCE_MIN_CONSISTENCY_PCT, type EarningsBetEvidence } from '@/services/earnings-reactions.js';
 import { logger } from '@/utils';
 
 export interface RiskGateProposal {
@@ -91,6 +92,13 @@ export interface RiskGateContext {
      *  working/filled proposals. With `sector`, enables the
      *  max_sector_exposure_pct check. */
     sameSectorExposureUsd?: number;
+    /** Earnings bets: server-fetched evidence (calendar window + the
+     *  symbol's own post-print record). Enables the LIVE-GATE checks —
+     *  the evidence bar and the gap cross-check stop being advisory.
+     *  Callers on the bet path always supply it; a fetch failure arrives
+     *  as nulls, which REFUSE (fail-closed: the bar must not be
+     *  satisfiable by breaking the data source). */
+    earningsBetEvidence?: EarningsBetEvidence;
 }
 
 /**
@@ -197,6 +205,40 @@ export function checkProposalRisk(
             `${ctx.openSwingPositions} swing positions already open/working — max ${rules.max_swing_positions}; ` +
             'close or cancel one first, or skip',
         );
+    }
+
+    // --- Earnings-bet LIVE-GATE: the evidence bar stops being advisory ---
+    // Until 2026-08-11 the gate took worstCaseGapPct verbatim from the
+    // model and never checked the record or the calendar: a flattering 20%
+    // on a 45%-gap name undersized the bet by >2×, and a mislabeled class
+    // needed no print at all. Flagged [LIVE-GATE] since AUDIT-2026-08-06 —
+    // required before earnings_bet_enabled ever flips on a live profile.
+    // (The bar's external-signal leg stays with the judgment layer: only
+    // the machine-checkable legs are enforced here.)
+    if (tradeClass === 'earnings-bet' && ctx.earningsBetEvidence) {
+        const ev = ctx.earningsBetEvidence;
+        if (ev.reportsWithinWindow !== true) {
+            violations.push(ev.reportsWithinWindow === false
+                ? `${p.symbol} has no verifiable print tonight or next-session pre-market — an earnings bet needs one; check earnings_calendar (a mislabeled class does not dodge the intraday rules)`
+                : 'the print could not be verified (earnings calendar unavailable) — an unconfirmed date kills the bet');
+        }
+        if (ev.meetsBar !== true) {
+            violations.push(ev.meetsBar === false
+                ? `the symbol's own record does not meet the evidence bar for a ${p.direction} bet ` +
+                  `(${ev.nPrints ?? '?'} prints, ${ev.consistencyPct ?? '?'}% consistency; ` +
+                  `need ≥${EVIDENCE_MIN_PRINTS} prints and ≥${EVIDENCE_MIN_CONSISTENCY_PCT}%) — no bet`
+                : 'no post-print record could be built for the symbol — no evidence base, no bet');
+        }
+        if (ev.recordWorstAdversePct !== null && ev.recordWorstAdversePct > 0) {
+            const assumed = Math.max(ctx.worstCaseGapPct ?? 0, rules.earnings_bet_gap_floor_pct);
+            if (assumed < ev.recordWorstAdversePct - 1e-9) {
+                violations.push(
+                    `sized to a ${assumed}% adverse gap, but the symbol's own record has gapped ` +
+                    `${ev.recordWorstAdversePct}% against a ${p.direction} — pass worstCaseGapPct ≥ ` +
+                    `${ev.recordWorstAdversePct} (the record, not the floor, is the worst case)`,
+                );
+            }
+        }
     }
 
     // --- Quantity sanity (whole shares, or IBKR 0.0001 fractions when the

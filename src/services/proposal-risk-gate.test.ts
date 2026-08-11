@@ -690,3 +690,80 @@ describe('sector concentration cap (formerly phantom)', () => {
         expect(r.notes.join(' ')).toContain('sector cap not evaluated');
     });
 });
+
+describe('earnings-bet LIVE-GATE (the evidence bar stops being advisory)', () => {
+    const BET_RULES = { ...DEFAULT_RULES, earnings_bet_enabled: true, earnings_bet_risk_pct: 10 };
+    const goodEvidence = {
+        reportsWithinWindow: true as boolean | null,
+        meetsBar: true as boolean | null,
+        nPrints: 9,
+        consistencyPct: 78,
+        recordWorstAdversePct: 12 as number | null,
+    };
+    const bet = (worstCaseGapPct?: number) => longProposal({ quantity: 5, tradeClass: 'earnings-bet', tif: 'GTC' as const });
+
+    test('a qualifying bet passes: window verified, bar met, gap not understated', () => {
+        const r = checkProposalRisk(bet(), { earningsBetEvidence: goodEvidence, worstCaseGapPct: 20 }, BET_RULES);
+        expect(r.ok).toBe(true);
+    });
+
+    test('no verifiable print → refused (a mislabeled class does not dodge the intraday rules)', () => {
+        const r = checkProposalRisk(bet(), { earningsBetEvidence: { ...goodEvidence, reportsWithinWindow: false } }, BET_RULES);
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('no verifiable print');
+    });
+
+    test('calendar unavailable → refused, fail-closed (an unconfirmed date kills the bet)', () => {
+        const r = checkProposalRisk(bet(), { earningsBetEvidence: { ...goodEvidence, reportsWithinWindow: null } }, BET_RULES);
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('could not be verified');
+    });
+
+    test('a record below the bar is refused with its own numbers', () => {
+        const r = checkProposalRisk(bet(), {
+            earningsBetEvidence: { ...goodEvidence, meetsBar: false, nPrints: 6, consistencyPct: 66 },
+        }, BET_RULES);
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('6 prints, 66% consistency');
+        expect(r.violations.join(' ')).toContain('need ≥8 prints and ≥75%');
+    });
+
+    test('no record at all → refused (no evidence base, no bet)', () => {
+        const r = checkProposalRisk(bet(), {
+            earningsBetEvidence: { reportsWithinWindow: true, meetsBar: null, nPrints: null, consistencyPct: null, recordWorstAdversePct: null },
+        }, BET_RULES);
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('no evidence base');
+    });
+
+    test('a flattering worstCaseGapPct is refused against the record (the 45%-gap undersizing hole)', () => {
+        const r = checkProposalRisk(bet(), {
+            earningsBetEvidence: { ...goodEvidence, recordWorstAdversePct: 45 },
+            worstCaseGapPct: 20,
+        }, BET_RULES);
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('gapped 45%');
+        expect(r.violations.join(' ')).toContain('worstCaseGapPct ≥ 45');
+        // Omitting worstCaseGapPct entirely (floor 20 assumed) is refused the same way.
+        const omitted = checkProposalRisk(bet(), {
+            earningsBetEvidence: { ...goodEvidence, recordWorstAdversePct: 45 },
+        }, BET_RULES);
+        expect(omitted.ok).toBe(false);
+    });
+
+    test('a MORE conservative gap than the record passes; a benign record defers to the floor', () => {
+        const conservative = checkProposalRisk(bet(), {
+            earningsBetEvidence: { ...goodEvidence, recordWorstAdversePct: 45 },
+            worstCaseGapPct: 50,
+        }, { ...BET_RULES, earnings_bet_risk_pct: 15 });
+        expect(conservative.ok).toBe(true);
+        // Record worst 12% < the 20% floor: the floor governs, nothing refused.
+        const benign = checkProposalRisk(bet(), { earningsBetEvidence: goodEvidence }, BET_RULES);
+        expect(benign.ok).toBe(true);
+    });
+
+    test('without evidence context the checks skip — old callers and non-bet classes unaffected', () => {
+        const r = checkProposalRisk(bet(), {}, BET_RULES);
+        expect(r.ok).toBe(true);
+    });
+});
