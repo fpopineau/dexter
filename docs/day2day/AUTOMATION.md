@@ -149,9 +149,12 @@ proposals through the normal gates. Manual run:
 
 ### Position guardians (deterministic, no LLM)
 Three services watch every position the executor creates:
-- **Profit trail** — `src/services/profit-trail.ts`: RTH 60 s poll; once a
-  position's unrealized gain reaches `profit_trail_arm_pct` (risk-rules,
-  5%) it ARMS and tracks the peak; a `profit_trail_pullback_pct` (1.5%)
+- **Profit trail** — `src/services/profit-trail.ts`: RTH 60 s poll over
+  intraday positions (swing/earnings-bet exempt); once a position's
+  unrealized gain reaches `profit_trail_arm_atr_mult` × daily ATR
+  (risk-rules, 2.5×; absolute `profit_trail_arm_pct` 5% when ATR is
+  unavailable) it ARMS and tracks the peak; a
+  `profit_trail_pullback_atr_mult` × ATR (0.75×; fallback 1.5%)
   giveback closes at market via `closePosition` (exits cancelled,
   auto-protect suppressed). Peaks persist across restarts; armed stays
   armed; shorts mirrored. `PROFIT_TRAIL=false` to disable.
@@ -361,7 +364,7 @@ manual acceptance:
 | `AUTO_EXECUTE_MIN_SCORE` | 80 | auto-exec confidence floor (score) |
 | `AUTO_PROTECT` | true | GTC exits auto-reattached when DAY exits die on an open position |
 | `EOD_TRIAGE` | true | 15:52 ET losing-and-fading DAY positions closed; rest kept overnight |
-| `PROFIT_TRAIL` | true | auto-close winners: arm at +`profit_trail_arm_pct`% (5), close on `profit_trail_pullback_pct`% (1) pullback from peak |
+| `PROFIT_TRAIL` | true | auto-close winners: arm at `profit_trail_arm_atr_mult`×ATR (2.5), close on `profit_trail_pullback_atr_mult`×ATR (0.75) pullback from peak; 5%/1.5% absolute fallback when ATR unknown; swing/earnings-bet exempt |
 | `DASHBOARD` / `_PORT` / `_HOST` | true / 8484 / 127.0.0.1 | local charts+book dashboard served by the gateway (no second IBKR session) |
 | `STALE_ENTRY_MAX_DAYS` | 3 | cancel executed-but-unfilled entries after N days (0 = off) |
 | `IBKR_ALLOW_LIVE` | false | manual-acceptance live unlock (never affects auto) |

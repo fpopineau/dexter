@@ -157,7 +157,7 @@ Everything else has sensible defaults:
 | `AUTO_EXECUTE_PAPER` | false | paper-only auto-exec of proposals, all sources (§11) |
 | `AUTO_EXECUTE_MAX_PER_DAY` | 5 | auto-exec daily cap |
 | `AUTO_EXECUTE_MIN_SCORE` | 80 | confidence floor — lower scores stay manual |
-| `PROFIT_TRAIL` | true | auto-close winners: arm at +`profit_trail_arm_pct`%, close on `profit_trail_pullback_pct`% pullback from peak (§9) |
+| `PROFIT_TRAIL` | true | auto-close winners: arm at `profit_trail_arm_atr_mult`×ATR, close on `profit_trail_pullback_atr_mult`×ATR pullback from peak; absolute % fallback when ATR unknown; swing/earnings-bet exempt (§9) |
 | `STALE_ENTRY_MAX_DAYS` | 3 | cancel executed-but-unfilled entries after N days (0 = off) |
 | `AUTO_PROTECT` | true | re-attach GTC exits when DAY exits die on an open position (§9) |
 | `EOD_TRIAGE` | true | 15:52 ET: close losing-and-fading DAY positions; keep the rest overnight |
@@ -260,7 +260,7 @@ All times ET; weekends and NYSE holidays are skipped automatically.
 | 15:00–16:00 | engine pre-close scans (5 min) | |
 | 15:30 | **Pre-Close Review** | hold/trim/close advice, **every position checked for earnings ≤2 days**, expiring DAY exits flagged, ≤2 overnight proposals (45 min expiry) |
 | any time | a candidate enters top-3 with rank ≥ 75 | trigger alert with a proposal, if the evaluation finds a catalyst |
-| RTH, every 60 s | **profit trail** watches each position's peak | 📉➡️💰 auto-close alert when a ≥+5% winner pulls back 1.5% from its peak |
+| RTH, every 60 s | **profit trail** watches each intraday position's peak (swing/earnings-bet exempt) | 📉➡️💰 auto-close alert when a winner ≥2.5×ATR pulls back 0.75×ATR from its peak |
 | 15:52 | **EOD triage** of unresolved DAY positions | 🌇 report: losing-and-fading closed before the bell; the rest keep their overnight chance |
 | hourly | **stale-entry sweeper** | 🚫 close alerts for brackets whose entry never filled in 3 days (slots freed) |
 | on fills | outcome tracker | 🎯/🛑 close alerts with realized P&L; 🛡️ auto-protect if DAY exits died on an open position |
@@ -379,15 +379,24 @@ if protection cannot be attached you get a ⚠️ with the exact `protect`
 command to send. Risk-reducing only; opt out with `AUTO_PROTECT=false`.
 
 **Profit trail:** winners protect themselves. During regular hours every
-position is watched against its peak price; once unrealized gain reaches
-`profit_trail_arm_pct` (default 5%) the trail arms, and a pullback of
-`profit_trail_pullback_pct` (default 1%) from the peak closes the
-position at market — cancelling its bracket exits with it — and reports
-on WhatsApp (`📉➡️💰 PROFIT TRAIL`). Peaks persist across restarts.
+intraday position (including 🌙 kept-overnight holds) is watched against
+its peak price. Thresholds are **ATR-relative** (2026-08-11): the trail
+arms once unrealized gain reaches `profit_trail_arm_atr_mult` × daily ATR
+(default 2.5× ≈ 1.67R against the standard 1.5×ATR stop), and a pullback
+of `profit_trail_pullback_atr_mult` × ATR (default 0.75×, floored at
+0.35%) from the peak closes the position at market — cancelling its
+bracket exits with it — and reports on WhatsApp (`📉➡️💰 PROFIT TRAIL`).
+The geometry is uniform in R-space: worst exit after arming is
+(2.5 − 0.75)×ATR ≈ 1.17R at any volatility, where the old absolute
+5%/1.5% pair never armed on low-ATR mega-caps and flushed high-ATR
+runners at ~0.5–0.8R inside single-bar noise. When ATR is unavailable
+the absolute `profit_trail_arm_pct`/`profit_trail_pullback_pct` pair
+(5%/1.5%) applies as fallback. **Swing and earnings-bet positions are
+never trailed** — a swing lives on daily structure and an earnings bet
+holds through the print by design; positions without a tracked proposal
+keep the trail as a protective default. Peaks persist across restarts.
 Direction-aware (shorts arm on drops, close on bounces). Thresholds live
-in `risk-rules.yaml`; disable with `PROFIT_TRAIL=false`. Note the
-trade-off: a 1% trail is tight — it locks gains early and will sometimes
-exit a runner that would have gone further.
+in `risk-rules.yaml`; disable with `PROFIT_TRAIL=false`.
 
 **Expiry:** default 120 min (90 for intraday brief proposals, 45 for
 overnight ones). Expired proposals cannot be accepted — ask for a fresh
@@ -719,7 +728,7 @@ P&L math, market-hours. Live-socket behavior is exercised by
 | Proposal `failed` with "execution interrupted (crash/restart mid-placement)" | the process died between claim and confirmation — verify at IBKR (`orders` / TWS) whether the bracket exists before acting |
 | URL refused: `only public http(s) destinations are allowed` | SSRF protection on web_fetch/browser — local/private addresses are never fetchable, by design |
 | `[risk-gate] REFUSED … duplicate setup — P-XXXX already has a working bracket` | the same symbol already has a bracket within 2% of that entry — cancel it first or let it work |
-| `📉➡️💰 PROFIT TRAIL` close you didn't ask for | the winner-protection rule (§9): +5% peak then 1.5% pullback → banked automatically |
+| `📉➡️💰 PROFIT TRAIL` close you didn't ask for | the winner-protection rule (§9): peak ≥2.5×ATR then 0.75×ATR pullback → banked automatically (5%/1.5% absolute when ATR unknown) |
 | Proposal closed `cancelled` by the hourly sweep | its entry never filled for `STALE_ENTRY_MAX_DAYS` — the zombie bracket was reclaimed |
 | `Financial Datasets API unavailable (no credits…)` | expected: that provider is prepaid-only and unfunded; the circuit breaker silences it for 1h and the agent uses web_search/earnings_calendar |
 | Dashboard action returns `forbidden — reload the dashboard page` | the CSRF token rotated with a gateway restart — reload the tab |

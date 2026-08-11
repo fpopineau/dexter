@@ -1,9 +1,65 @@
 import { describe, expect, test } from 'bun:test';
-import { observeTrail, type TrailEntry } from './profit-trail.js';
+import { observeTrail, trailExemptClass, trailGeometry, type TrailEntry } from './profit-trail.js';
 
 function long(basis = 100): TrailEntry {
     return { symbol: 'TEST', direction: 'long', basis, quantity: 10, best: basis, armed: false };
 }
+
+describe('trailGeometry (ATR-aware thresholds, uniform in R-space)', () => {
+    const mults = { armAtrMult: 2.5, pullbackAtrMult: 0.75, armPctFallback: 5, pullbackPctFallback: 1.5 };
+
+    test('mega-cap (0.8% ATR): trail arms BELOW the 3×ATR target — no longer inert', () => {
+        const g = trailGeometry({ atrPct: 0.8, ...mults });
+        expect(g.mode).toBe('atr');
+        expect(g.armPct).toBe(2); // 2.5 × 0.8 — the old absolute 5% was never reached before the ~2.4% target
+        expect(g.pullbackPct).toBe(0.6); // 0.75 × 0.8
+        expect(g.armPct).toBeLessThan(3 * 0.8); // arms before the 2:1 target fills
+    });
+
+    test('high-ATR runner (4% ATR): trail distance clears single-bar noise', () => {
+        const g = trailGeometry({ atrPct: 4, ...mults });
+        expect(g.armPct).toBe(10); // 1.67R against a 6% (1.5×ATR) stop
+        expect(g.pullbackPct).toBe(3); // the old absolute 1.5% was inside one bar's range
+        // Worst exit after arming = arm − pullback = 7% = 1.17R — never sub-1R.
+        expect(g.armPct - g.pullbackPct).toBeGreaterThan(1.5 * 4 * (2 / 3) * 0.999);
+    });
+
+    test('spread-noise floor: pullback never tighter than 0.35%', () => {
+        const g = trailGeometry({ atrPct: 0.3, ...mults });
+        expect(g.pullbackPct).toBe(0.35); // 0.75 × 0.3 = 0.225 → floored
+        expect(g.armPct).toBe(0.75); // 2.5 × 0.3, still ≥ 2× pullback
+    });
+
+    test('misconfigured mults: arm is clamped to ≥ 2× pullback', () => {
+        const g = trailGeometry({ atrPct: 2, armAtrMult: 1, pullbackAtrMult: 1.5, armPctFallback: 5, pullbackPctFallback: 1.5 });
+        expect(g.pullbackPct).toBe(3);
+        expect(g.armPct).toBe(6); // 1 × 2 = 2 would arm inside its own trail — clamped
+    });
+
+    test('ATR unavailable → the absolute fallback pair, never no-trail', () => {
+        for (const atrPct of [null, 0, -1]) {
+            const g = trailGeometry({ atrPct, ...mults });
+            expect(g.mode).toBe('absolute');
+            expect(g.armPct).toBe(5);
+            expect(g.pullbackPct).toBe(1.5);
+        }
+    });
+});
+
+describe('trailExemptClass (thesis positions are not trailed)', () => {
+    test('intraday and untracked positions keep the trail', () => {
+        expect(trailExemptClass([])).toBe(false);
+        expect(trailExemptClass(['intraday'])).toBe(false);
+        expect(trailExemptClass(['intraday', 'intraday'])).toBe(false);
+    });
+
+    test('swing and earnings-bet exempt the whole position, even stacked with a scalp', () => {
+        expect(trailExemptClass(['swing'])).toBe(true);
+        expect(trailExemptClass(['earnings-bet'])).toBe(true);
+        expect(trailExemptClass(['intraday', 'swing'])).toBe(true);
+        expect(trailExemptClass(['intraday', 'earnings-bet'])).toBe(true);
+    });
+});
 
 describe('profit trail state machine', () => {
     test('arms at +5% and closes on a 1% pullback from the peak', () => {

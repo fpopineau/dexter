@@ -54,8 +54,21 @@ export interface RiskRules {
     max_risk_per_trade_pct: number;
     min_stop_atr_fraction: number;
     max_extension_atr: number;
+    /** Fallback trail thresholds (absolute %), used only when the symbol's
+     *  daily ATR is unavailable — with ATR known, the *_atr_mult keys below
+     *  define the geometry. */
     profit_trail_arm_pct: number;
     profit_trail_pullback_pct: number;
+    /** ATR-aware trail: arm once unrealized gain ≥ this × daily ATR (as %
+     *  of basis). 2.5×ATR ≈ 1.67R against the standard 1.5×ATR stop — the
+     *  trade has paid for itself before the target leg is released. */
+    profit_trail_arm_atr_mult: number;
+    /** Trail distance = this × daily ATR. With arm at 2.5, the worst exit
+     *  after arming is (2.5 − 0.75)×ATR = 1.75×ATR ≈ 1.17R — arming can
+     *  never turn a winner into a sub-1R exit, at ANY ATR regime (the old
+     *  absolute 5%/1.5% pair was inert below ~1.7% ATR and exited high-ATR
+     *  runners at ~0.5-0.8R after cancelling their 2R target). */
+    profit_trail_pullback_atr_mult: number;
     /** Confidence-weighted sizing: score at/above which a proposal gets the
      *  FULL per-trade risk budget. */
     sizing_full_score: number;
@@ -118,7 +131,11 @@ export const DEFAULT_RULES: RiskRules = {
     min_stop_atr_fraction: 0.4,
     max_extension_atr: 3,
     profit_trail_arm_pct: 5,
-    profit_trail_pullback_pct: 1,
+    // 1.5 matches risk-rules.yaml — this fallback diverging at 1 meant a
+    // YAML load failure silently tightened the trail by 33% (audit 2026-08-11).
+    profit_trail_pullback_pct: 1.5,
+    profit_trail_arm_atr_mult: 2.5,
+    profit_trail_pullback_atr_mult: 0.75,
     sizing_full_score: 80,
     sizing_half_score: 60,
     sizing_half_mult: 0.6,

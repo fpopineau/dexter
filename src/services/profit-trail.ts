@@ -1,13 +1,29 @@
 /**
  * Profit trail — lock in winners automatically.
  *
- * Operator rule (2026-07-23): "any accepted order that reaches ~+5% should
- * be closed automatically on a ~1% pullback." Deterministic watcher, no
- * LLM: during regular hours it polls positions and quotes, tracks each
- * position's best price since watching began, ARMS once unrealized gain
- * reaches `profit_trail_arm_pct`, and market-closes (via closePosition —
- * which also cancels the bracket exits and suppresses auto-protect) when
- * price gives back `profit_trail_pullback_pct` from the peak.
+ * Operator rule (2026-07-23): a winner that has run should be closed
+ * automatically when it starts giving the move back. Deterministic
+ * watcher, no LLM: during regular hours it polls positions and quotes,
+ * tracks each position's best price since watching began, ARMS once
+ * unrealized gain reaches the arm threshold, and market-closes (via
+ * closePosition — which also cancels the bracket exits and suppresses
+ * auto-protect) when price gives back the trail distance from the peak.
+ *
+ * ATR-AWARE (2026-08-11): thresholds scale with the symbol's daily ATR
+ * (arm at `profit_trail_arm_atr_mult` × ATR, trail at
+ * `profit_trail_pullback_atr_mult` × ATR) so the geometry is uniform in
+ * R-space. The old absolute pair never armed below ~1.7% ATR and flushed
+ * high-ATR runners at ~0.5-0.8R inside single-bar noise. The absolute
+ * `profit_trail_arm_pct` / `profit_trail_pullback_pct` remain as the
+ * fallback when ATR is unavailable (fail-open to the old behavior, never
+ * to no-trail).
+ *
+ * CLASS-AWARE (2026-08-11): only intraday positions (including 🌙
+ * kept-overnight holds) are trailed. Swings live on daily structure — a
+ * sub-ATR trail would flush normal pullbacks the pattern plan expects;
+ * earnings bets exist to hold through a binary print the trail would
+ * front-run. Positions with no tracked proposal keep the trail
+ * (protective default for orphans).
  *
  * Direction-aware (short positions arm on drops and close on bounces).
  * High-water marks persist across restarts in profit-trail.json.
@@ -17,15 +33,20 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getIBApi } from '@/tools/ibkr/connection.js';
+import { fetchDailyRiskContext } from '@/tools/ibkr/daily-atr.js';
 import { createIbkrMarketData } from '@/tools/ibkr/market-data.js';
-import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
+import { getRiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
 import { logger } from '@/utils';
 import { getMarketSession, MarketSession } from '@/utils/market-hours.js';
 import { closePosition, fetchOpenOrdersFor, fetchPositions, wasRecentlyClosed } from './position-actions.js';
+import { listTrackable } from './trade-proposals.js';
 import { OrderAction } from '@stoqey/ib';
 
 const POLL_MS = 60_000;
 const QUOTE_PACE_MS = 400;
+/** Never trail tighter than this (%): below it, spread + one quote tick
+ *  reads as a "pullback" on the 60s poll. */
+const PULLBACK_FLOOR_PCT = 0.35;
 
 // ---------------------------------------------------------------------------
 // Pure state machine (unit-tested)
@@ -44,6 +65,53 @@ export interface TrailDecision {
     action: 'close';
     gainAtBestPct: number;
     pullbackPct: number;
+}
+
+export interface TrailGeometry {
+    armPct: number;
+    pullbackPct: number;
+    /** 'atr' when derived from the symbol's daily ATR; 'absolute' when the
+     *  ATR was unavailable and the fallback percentages apply. */
+    mode: 'atr' | 'absolute';
+}
+
+/**
+ * Effective trail thresholds for one position. ATR known → thresholds in
+ * ATR units (uniform R-space geometry across volatility regimes), with a
+ * spread-noise floor on the pullback and arm clamped to ≥ 2× pullback so
+ * a misconfigured pair can never arm inside its own trail distance.
+ * ATR unknown → the absolute fallback pair (old behavior), never no-trail.
+ */
+export function trailGeometry(input: {
+    /** Daily ATR as a % of the position's basis, or null when unavailable. */
+    atrPct: number | null;
+    armAtrMult: number;
+    pullbackAtrMult: number;
+    armPctFallback: number;
+    pullbackPctFallback: number;
+}): TrailGeometry {
+    if (input.atrPct !== null && input.atrPct > 0) {
+        const pullbackPct = Math.max(PULLBACK_FLOOR_PCT, input.pullbackAtrMult * input.atrPct);
+        const armPct = Math.max(2 * pullbackPct, input.armAtrMult * input.atrPct);
+        return {
+            armPct: Math.round(armPct * 100) / 100,
+            pullbackPct: Math.round(pullbackPct * 100) / 100,
+            mode: 'atr',
+        };
+    }
+    return { armPct: input.armPctFallback, pullbackPct: input.pullbackPctFallback, mode: 'absolute' };
+}
+
+/**
+ * Should the trail leave this symbol alone? Any swing or earnings-bet
+ * proposal on the symbol exempts the whole position: a swing lives on
+ * daily structure (a sub-ATR trail flushes the pullbacks its plan
+ * expects), and an earnings bet exists to hold through the print. An
+ * intraday scalp stacked on top does not override that — never flush a
+ * thesis position to protect a scalp.
+ */
+export function trailExemptClass(classes: TradeClass[]): boolean {
+    return classes.some((c) => c === 'swing' || c === 'earnings-bet');
 }
 
 /** Feed one observation; mutates the entry, returns a decision if due. */
@@ -187,8 +255,26 @@ async function runCycle(state: Map<string, TrailEntry>): Promise<void> {
         if (!held.has(sym)) state.delete(sym);
     }
 
+    // Class exemption: swing / earnings-bet positions are not trailed.
+    // Fail-open to trailing (empty map) if the store is unreadable —
+    // protecting an orphan beats exempting a swing.
+    const classesBySymbol = new Map<string, TradeClass[]>();
+    try {
+        for (const t of await listTrackable()) {
+            classesBySymbol.set(t.symbol, [...(classesBySymbol.get(t.symbol) ?? []), t.tradeClass]);
+        }
+    } catch (err) {
+        logger.warn(`[profit-trail] trackable lookup failed (all positions trailed this cycle): ${err}`);
+    }
+
     for (const pos of positions) {
         if (wasRecentlyClosed(pos.symbol)) continue;
+        if (trailExemptClass(classesBySymbol.get(pos.symbol) ?? [])) {
+            // A stale entry must not linger: if the class changes back
+            // (position re-entered intraday), the peak restarts honestly.
+            state.delete(pos.symbol);
+            continue;
+        }
         const direction = pos.quantity > 0 ? 'long' : 'short';
         let entry = state.get(pos.symbol);
         // (Re)seed when new or when the position itself changed (re-entry,
@@ -209,8 +295,19 @@ async function runCycle(state: Map<string, TrailEntry>): Promise<void> {
         await new Promise((r) => setTimeout(r, QUOTE_PACE_MS));
         if (price === null) continue;
 
+        // Daily ATR (10-min cache in daily-atr) → ATR-relative thresholds;
+        // null falls back to the absolute pair.
+        const atr = (await fetchDailyRiskContext(pos.symbol)).dailyAtr;
+        const geometry = trailGeometry({
+            atrPct: atr !== null && entry.basis > 0 ? (atr / entry.basis) * 100 : null,
+            armAtrMult: rules.profit_trail_arm_atr_mult,
+            pullbackAtrMult: rules.profit_trail_pullback_atr_mult,
+            armPctFallback: rules.profit_trail_arm_pct,
+            pullbackPctFallback: rules.profit_trail_pullback_pct,
+        });
+
         const wasArmed = entry.armed;
-        const decision = observeTrail(entry, price, rules.profit_trail_arm_pct, rules.profit_trail_pullback_pct);
+        const decision = observeTrail(entry, price, geometry.armPct, geometry.pullbackPct);
 
         // Arming transition → runner mode (unless the same tick already
         // decided to close, in which case closePosition cancels everything).
@@ -218,9 +315,12 @@ async function runCycle(state: Map<string, TrailEntry>): Promise<void> {
             try {
                 const released = await releaseTargetLeg(api, entry);
                 if (released) {
+                    const how = geometry.mode === 'atr'
+                        ? `${rules.profit_trail_pullback_atr_mult}×ATR = ${geometry.pullbackPct}%`
+                        : `${geometry.pullbackPct}% (absolute fallback — ATR unavailable)`;
                     const msg =
-                        `🏃 RUNNER ${pos.symbol}: trail armed at +${rules.profit_trail_arm_pct}% (best ${entry.best}) — ` +
-                        `target order ${released} released; the exit is now the ${rules.profit_trail_pullback_pct}% trail. The stop stays.`;
+                        `🏃 RUNNER ${pos.symbol}: trail armed at +${geometry.armPct}% (best ${entry.best}) — ` +
+                        `target order ${released} released; the exit is now the ${how} trail. The stop stays.`;
                     for (const cb of [...alertCallbacks]) {
                         try { await cb(msg); } catch (err) {
                             logger.error(`[profit-trail] alert callback failed: ${err}`);
@@ -236,13 +336,14 @@ async function runCycle(state: Map<string, TrailEntry>): Promise<void> {
 
         logger.info(
             `[profit-trail] ${pos.symbol}: peak gain ${decision.gainAtBestPct}% (best ${entry.best}), ` +
-            `pullback ${decision.pullbackPct}% at ${price} — closing`,
+            `pullback ${decision.pullbackPct}% at ${price} (${geometry.mode} thresholds ${geometry.armPct}/${geometry.pullbackPct}) — closing`,
         );
         const outcome = await closePosition(pos.symbol, 'profit-trail');
         state.delete(pos.symbol);
         const message =
             `📉➡️💰 PROFIT TRAIL ${pos.symbol}: peaked +${decision.gainAtBestPct}% (best ${entry.best}, ` +
-            `basis ${entry.basis.toFixed(2)}), pulled back ${decision.pullbackPct}% to ${price}. ${outcome.message}`;
+            `basis ${entry.basis.toFixed(2)}), pulled back ${decision.pullbackPct}% to ${price} ` +
+            `(trail ${geometry.pullbackPct}%${geometry.mode === 'atr' ? `, ${rules.profit_trail_pullback_atr_mult}×ATR` : ''}). ${outcome.message}`;
         for (const cb of [...alertCallbacks]) {
             try { await cb(message); } catch (err) {
                 logger.error(`[profit-trail] alert callback failed: ${err}`);
@@ -275,8 +376,10 @@ export function startProfitTrail(): void {
             .finally(() => { cycleRunning = false; });
     }, POLL_MS);
     logger.info(
-        `[profit-trail] started: arm at +${rules.profit_trail_arm_pct}%, ` +
-        `close on ${rules.profit_trail_pullback_pct}% pullback from the peak (poll ${POLL_MS / 1000}s, RTH only)`,
+        `[profit-trail] started: arm at ${rules.profit_trail_arm_atr_mult}×ATR, ` +
+        `close on ${rules.profit_trail_pullback_atr_mult}×ATR pullback from the peak ` +
+        `(fallback ${rules.profit_trail_arm_pct}%/${rules.profit_trail_pullback_pct}% when ATR unavailable; ` +
+        `swing/earnings-bet exempt; poll ${POLL_MS / 1000}s, RTH only)`,
     );
 }
 

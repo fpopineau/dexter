@@ -35,8 +35,18 @@ max_extension_atr: 3 # Refuse entries further than this × daily ATR beyond the 
 max_risk_per_trade_pct: 0.25 # Max loss if the stop fills (qty × stop distance), as % of net liquidation
 
 # --- Profit Trail (automatic winner protection) ---
-profit_trail_arm_pct: 5 # Arm the trail once unrealized gain reaches this %
-profit_trail_pullback_pct: 1.5 # Close when price gives back this % from the peak
+# ATR-aware geometry (2026-08-11): the trail thresholds scale with the
+# symbol's daily ATR so they are uniform in R-space. The old absolute pair
+# (5% / 1.5%) never armed below ~1.7% ATR (mega-caps hit the 2:1 target
+# first) and flushed 3-5%-ATR runners at ~0.5-0.8R inside one bar's noise —
+# after cancelling the 2R target it was supposed to beat.
+# Geometry with the standard 1.5x ATR stop: arm at 2.5xATR = 1.67R (the
+# trade has paid for itself), trail 0.75xATR, worst exit after arming
+# (2.5-0.75)xATR = 1.17R — arming never turns a winner into sub-1R.
+profit_trail_arm_atr_mult: 2.5 # Arm once unrealized gain >= this x daily ATR (% of basis)
+profit_trail_pullback_atr_mult: 0.75 # Close when price gives back this x daily ATR from the peak
+profit_trail_arm_pct: 5 # FALLBACK (ATR unavailable): arm at this absolute %
+profit_trail_pullback_pct: 1.5 # FALLBACK (ATR unavailable): close on this % pullback
 profit_trail_replaces_target: true # Runner mode: on arming, cancel the fixed target leg — the trail manages the exit (stop stays)
 
 # --- Trade Classes ---
