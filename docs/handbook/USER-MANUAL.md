@@ -451,15 +451,25 @@ accumulate labeled outcomes fast during the paper-validation phase.
 Guarantees, in code, not convention:
 
 - refuses live ports/accounts **regardless of `IBKR_ALLOW_LIVE`** — no
-  configuration can make auto-execution trade live;
-- **confidence floor**: only proposals scoring ≥ `AUTO_EXECUTE_MIN_SCORE`
-  (default 80) execute unattended; lower-scored and unscored proposals
-  stay open for a manual `accept`;
-- capped per day (`AUTO_EXECUTE_MAX_PER_DAY`, default 5);
+  configuration can make auto-execution trade live (live port refused
+  statically, account identity fail-closed, non-paper accounts refused);
+- **confidence floor** (`AUTO_EXECUTE_MIN_SCORE`): only proposals
+  scoring ≥ the floor execute unattended; lower-scored ones stay open
+  for a manual `accept`, and UNSCORED proposals never auto-execute at
+  any floor. Two deliberate postures: **80** (default — selective,
+  high-conviction only) and **1** (burn-in — every gate-passing proposal
+  executes so the benchmark ledger samples every score band without
+  selection bias; the confidence-weighted sizer, not the floor, is the
+  risk control across bands). The burn-in profile runs at 1 — that is a
+  documented sampling decision, not a disabled safety;
+- capped per day (`AUTO_EXECUTE_MAX_PER_DAY`, default 5) — a SEPARATE,
+  stricter budget than `max_daily_trades`: when auto-exec hits its cap,
+  manual accepts still work until the risk-rules cap;
 - every standard gate still applies (kill-switch, risk gate, chase gate,
   expiry);
 - every auto-execution is announced on WhatsApp
-  (`🤖 AUTO-EXECUTE (paper, score S, n/cap)`).
+  (`🤖 AUTO-EXECUTE (paper, score S, n/cap)`), and the gateway logs the
+  effective floor and cap at boot.
 
 ## 12. Performance tracking
 

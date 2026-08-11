@@ -36,6 +36,7 @@ import { startBenchmark, stopBenchmark } from '@/services/benchmark.js';
 import { startDashboard, stopDashboard } from '@/services/dashboard.js';
 import { startEodTriage, stopEodTriage } from '@/services/eod-triage.js';
 import { startNewsPulse, stopNewsPulse } from '@/services/news-pulse.js';
+import { isAutoExecuteEnabled } from '@/services/proposal-executor.js';
 import { plannedBookWorstCasePct } from '@/services/proposal-risk-gate.js';
 import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
 import { startProfitTrail, stopProfitTrail } from '@/services/profit-trail.js';
@@ -320,6 +321,19 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     // Session NetLiq baseline: the kill-switch's P&L fallback references
     // pre-trading equity. Best-effort; retried on the first gate check.
     void captureNetLiqBaseline();
+    // Auto-exec visibility: the score floor and cap silently shape what
+    // trades unattended — AUTO_EXECUTE_MIN_SCORE=1 sat undocumented for a
+    // month reading like a disabled safety (audit 2026-08-11). State the
+    // effective config every boot so it can never be invisible again.
+    if (isAutoExecuteEnabled()) {
+      const floor = Number(process.env.AUTO_EXECUTE_MIN_SCORE) > 0 ? Number(process.env.AUTO_EXECUTE_MIN_SCORE) : 80;
+      const cap = Number(process.env.AUTO_EXECUTE_MAX_PER_DAY) > 0 ? Number(process.env.AUTO_EXECUTE_MAX_PER_DAY) : 5;
+      debugLog(
+        `[gateway] auto-execute ON (paper-only): score floor ${floor}` +
+        (floor <= 40 ? ' (burn-in sampling posture — every gate-passing proposal executes; the sizer de-risks low bands)' : '') +
+        `, cap ${cap}/day (separate from max_daily_trades); unscored proposals never auto-execute.`,
+      );
+    }
     // Config coherence: announce when the caps authorize a book whose
     // planned stop-outs alone would breach the kill-switch — the
     // acceptance-time headroom gate then binds BEFORE the position caps,
