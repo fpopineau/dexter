@@ -10,10 +10,15 @@
  * and as an annotation on the opportunities snapshot — so the judgment
  * layer can chase a catalyst the price/volume scanners surfaced late.
  *
- * GDELT access is deliberately defensive (verified live 2026-08-11):
- *   - ONE batched OR-query per sweep, never per-symbol polling — the API
- *     allows 1 request / 5 s and punishes violations with a multi-MINUTE
- *     penalty window;
+ * GDELT access is deliberately defensive (verified live 2026-08-11/12):
+ *   - SEQUENTIAL MICRO-BATCHES (default 3 names per request, 6 s apart) —
+ *     GDELT's throttle classifier refuses multi-term OR queries as
+ *     "larger queries" regardless of maxrecords (12- and 24-name batches
+ *     throttled every time across two days while 1-2-name queries passed
+ *     seconds later from the same IP). The API also allows only
+ *     1 request / 5 s, so the sweep paces itself and aborts on the first
+ *     throttle, keeping whatever batches already landed as a PARTIAL
+ *     snapshot (unmeasured symbols report as absent, never as quiet);
  *   - a throttled response is plain text, not JSON — it must read as
  *     "data unavailable" (previous snapshot kept, sweep backs off), never
  *     as "no news";
@@ -54,6 +59,15 @@ function minDomains(): number {
 function maxSymbols(): number {
     return Number(process.env.NEWS_PULSE_MAX_SYMBOLS) > 0 ? Number(process.env.NEWS_PULSE_MAX_SYMBOLS) : 24;
 }
+/** Names per GDELT request. 3 sits just above the proven-safe 2; larger
+ *  OR batches are classified as "larger queries" and throttled. */
+function batchSize(): number {
+    return Number(process.env.NEWS_PULSE_BATCH_SIZE) > 0 ? Number(process.env.NEWS_PULSE_BATCH_SIZE) : 3;
+}
+/** Pause between batch requests (the API allows 1 request / 5 s). */
+const BATCH_PACE_MS = 6_000;
+/** Per-batch record cap — 3 names in a 3 h window rarely fill this. */
+const BATCH_MAX_RECORDS = 50;
 function backoffMin(): number {
     return Number(process.env.NEWS_PULSE_BACKOFF_MIN) > 0 ? Number(process.env.NEWS_PULSE_BACKOFF_MIN) : 30;
 }
@@ -273,9 +287,19 @@ export function getLatestNewsPulse(): NewsPulseSnapshot | null {
     }
 }
 
+/** Split the watch set into request-sized name batches. Pure; exported
+ *  for tests. */
+export function chunkWatch<T>(items: T[], size: number): T[][] {
+    const out: T[][] = [];
+    for (let i = 0; i < items.length; i += Math.max(1, size)) {
+        out.push(items.slice(i, i + Math.max(1, size)));
+    }
+    return out;
+}
+
 /**
- * One batched GDELT artlist request for a watch set. Exported for the
- * smoke script — this IS the production request path.
+ * One small GDELT artlist request. Exported for the smoke script — this
+ * IS the production request path.
  * axios, not fetch: GDELT tarpits throttled clients (>10 s to first byte,
  * verified 2026-08-11), which trips undici's hard 10 s connect cap under
  * tsx/Node and turns every throttle into an opaque network error. The 429
@@ -284,10 +308,11 @@ export function getLatestNewsPulse(): NewsPulseSnapshot | null {
 export async function fetchGdeltArticles(
     names: string[],
     windowMinutes: number,
+    maxRecords = BATCH_MAX_RECORDS,
 ): Promise<{ ok: true; articles: GdeltArticle[] } | { ok: false; reason: string }> {
     const url =
         `${GDELT_DOC_API}?query=${encodeURIComponent(buildGdeltQuery(names))}` +
-        `&mode=artlist&maxrecords=250&timespan=${windowMinutes}min&format=json&sort=datedesc`;
+        `&mode=artlist&maxrecords=${maxRecords}&timespan=${windowMinutes}min&format=json&sort=datedesc`;
     let text: string;
     try {
         const res = await axios.get<string>(url, {
@@ -314,18 +339,37 @@ export async function runNewsPulseSweepOnce(): Promise<NewsPulseSnapshot | null>
     const watch = await buildWatchSet();
     if (watch.length === 0) return null;
 
-    const parsed = await fetchGdeltArticles(watch.map((w) => w.name), windowMin());
-    if (!parsed.ok) {
+    // Sequential micro-batches, paced. On the first throttle: back off and
+    // keep whatever already landed — a partial pulse honestly reported
+    // beats no pulse (symbols in unattempted batches are simply absent
+    // from the snapshot, which the tool reports as "unmeasured").
+    const covered: typeof watch = [];
+    const articles: GdeltArticle[] = [];
+    let degraded: string | null = null;
+    for (const [i, batch] of chunkWatch(watch, batchSize()).entries()) {
+        if (i > 0) await new Promise((r) => setTimeout(r, BATCH_PACE_MS));
+        const parsed = await fetchGdeltArticles(batch.map((w) => w.name), windowMin());
+        if (!parsed.ok) {
+            degraded = parsed.reason;
+            break;
+        }
+        covered.push(...batch);
+        articles.push(...parsed.articles);
+    }
+    if (degraded !== null) {
         backoffUntil = Date.now() + backoffMin() * 60_000;
-        logger.warn(`[news-pulse] degraded (${parsed.reason}) — backing off ${backoffMin()} min`);
-        return null;
+        logger.warn(
+            `[news-pulse] degraded after ${covered.length}/${watch.length} symbols (${degraded}) — ` +
+            `backing off ${backoffMin()} min${covered.length ? '; keeping the partial sweep' : ''}`,
+        );
+        if (covered.length === 0) return null;
     }
 
     const snapshot: NewsPulseSnapshot = {
         at: Date.now(),
         windowMin: windowMin(),
-        watched: watch.length,
-        symbols: attributePulse(parsed.articles, watch, { minArticles: minArticles(), minDomains: minDomains() }),
+        watched: covered.length,
+        symbols: attributePulse(articles, covered, { minArticles: minArticles(), minDomains: minDomains() }),
     };
     try {
         writeFileSync(snapshotPath(), JSON.stringify(snapshot));

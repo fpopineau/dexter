@@ -2,10 +2,23 @@ import { describe, expect, test } from 'bun:test';
 import {
     attributePulse,
     buildGdeltQuery,
+    chunkWatch,
     cleanCompanyName,
     parseGdeltResponse,
     type GdeltArticle,
 } from './news-pulse.js';
+
+describe('chunkWatch (micro-batches — GDELT refuses big OR queries)', () => {
+    test('splits into request-sized batches, remainder last', () => {
+        expect(chunkWatch([1, 2, 3, 4, 5, 6, 7], 3)).toEqual([[1, 2, 3], [4, 5, 6], [7]]);
+        expect(chunkWatch([1, 2], 3)).toEqual([[1, 2]]);
+        expect(chunkWatch([], 3)).toEqual([]);
+    });
+
+    test('a degenerate batch size still makes progress', () => {
+        expect(chunkWatch([1, 2, 3], 0)).toEqual([[1], [2], [3]]);
+    });
+});
 
 describe('cleanCompanyName', () => {
     test('strips listing suffixes and legal forms', () => {
