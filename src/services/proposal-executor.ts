@@ -37,11 +37,25 @@ import {
     releaseProposalClaim,
     setProposalStatus,
     sumRealizedPnlSince,
+    type TradeProposal,
 } from './trade-proposals.js';
+import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
 
 export interface ExecutionOutcome {
     ok: boolean;
     message: string;
+    /** Set when the refusal came from the chase gate: 'chasing' = the
+     *  price ran past the entry (the setup may still be alive at fresh
+     *  levels); 'invalidated' = it traded through the stop (dead). */
+    chaseKind?: 'chasing' | 'invalidated';
+}
+
+/** Typed chase refusal so callers can distinguish "price ran" (worth a
+ *  continuation at fresh levels) from "setup dead" (never re-enter). */
+class ChaseRefusalError extends Error {
+    constructor(message: string, public readonly kind: 'chasing' | 'invalidated') {
+        super(message);
+    }
 }
 
 /** Best-effort live last price (null when unavailable). */
@@ -186,7 +200,7 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                     : run.kind === 'chasing'
                         ? 'Ask for re-evaluated levels instead of accepting stale ones.'
                         : 'The setup is dead at these levels — do not re-enter; re-evaluate from scratch if the thesis still stands.';
-                throw new Error(`[chase-gate] ${run.reason}. ${hint}`);
+                throw new ChaseRefusalError(`[chase-gate] ${run.reason}. ${hint}`, run.kind ?? 'chasing');
             }
         } else {
             logger.warn(`[proposal-executor] ${p.id}: live quote unavailable — chase check skipped`);
@@ -201,6 +215,7 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 `⛔ ${p.id} NOT executed — ${msg}\n` +
                 `The proposal remains OPEN (expires ${new Date(p.expiresAt).toISOString()}); ` +
                 `resolve the issue and reply 'accept ${p.id}' to retry.`,
+            ...(err instanceof ChaseRefusalError ? { chaseKind: err.kind } : {}),
         };
     }
 
@@ -342,10 +357,153 @@ export async function autoExecuteProposal(id: string): Promise<ExecutionOutcome>
 
     const outcome = await acceptProposal(id);
     if (outcome.ok) autoExecCount++;
+
+    // The SMCI lesson: a 'chasing' refusal means the THESIS survived but
+    // the price didn't wait — chase-gate correctness must not equal a
+    // missed move. One deterministic STP_LMT continuation at fresh levels,
+    // through every gate again. (proposeChaseContinuation recurses into
+    // this function for the new proposal; the source guard ends the chain.)
+    if (!outcome.ok && outcome.chaseKind === 'chasing') {
+        const cont = await proposeChaseContinuation(p).catch((err) => {
+            logger.warn(`[proposal-executor] chase continuation for ${p.id} failed: ${err}`);
+            return null;
+        });
+        if (cont) {
+            return {
+                ok: outcome.ok,
+                chaseKind: outcome.chaseKind,
+                message: `🤖 AUTO-EXECUTE (paper, score ${p.score}, ${autoExecCount}/${max} today) — ${outcome.message}\n${cont.message}`,
+            };
+        }
+    }
     return {
         ok: outcome.ok,
+        ...(outcome.chaseKind ? { chaseKind: outcome.chaseKind } : {}),
         message: `🤖 AUTO-EXECUTE (paper, score ${p.score}, ${autoExecCount}/${max} today) — ${outcome.message}`,
     };
+}
+
+// ---------------------------------------------------------------------------
+// Chase continuation — the SMCI lesson (2026-08-12)
+//
+// SMCI triggered at rank 83, was proposed at honest 2:1 geometry, and the
+// chase gate refused acceptance 70 seconds later: the price had run +2.3%
+// while the evaluation typed. The refusal message told the model the right
+// re-proposal shape (STP_LMT continuation) — but the evaluation had
+// already ended, nobody acted, and a +19% day went unmonetized. The gate
+// was right to refuse the STALE price; the desk was wrong to stop there.
+//
+// On a 'chasing' auto-exec refusal, ONE continuation proposal is created
+// deterministically: same thesis, STP_LMT trigger just above the market
+// (it fills only if strength continues), the original's stop DISTANCE
+// (the noise-stop calibration is unchanged minutes later), a fresh
+// min_risk_reward target, tick-aligned, auto-sized, short expiry. Every
+// gate re-runs on creation and acceptance. 'invalidated' refusals (traded
+// through the stop) never continue — that setup is dead.
+// ---------------------------------------------------------------------------
+
+export function isChaseContinuationEnabled(): boolean {
+    return (process.env.CHASE_CONTINUATION ?? 'true').trim().toLowerCase() !== 'false';
+}
+
+/** Pure: fresh continuation levels from the live price, preserving the
+ *  original stop distance and re-deriving the target from the ROUNDED
+ *  distance so the prescription passes its own gates. Null = degenerate. */
+export function continuationLevels(
+    p: { direction: 'long' | 'short'; entry: number | null; stop: number },
+    last: number,
+    minRiskReward: number,
+): { entry: number; entryLimit: number; stop: number; target: number } | null {
+    if (p.entry == null || !(p.entry > 0) || !(last > 0)) return null;
+    const stopDist = Math.abs(p.entry - p.stop);
+    if (!(stopDist > 0)) return null;
+    const c2 = (x: number) => Math.ceil(x * 100) / 100;
+    const f2 = (x: number) => Math.floor(x * 100) / 100;
+    if (p.direction === 'long') {
+        const trigger = c2(last * 1.001);
+        const stop = f2(trigger - stopDist);
+        const dist = Math.round((trigger - stop) * 100) / 100;
+        return { entry: trigger, entryLimit: c2(trigger * 1.003), stop, target: c2(trigger + minRiskReward * dist) };
+    }
+    const trigger = f2(last * 0.999);
+    const stop = c2(trigger + stopDist);
+    const dist = Math.round((stop - trigger) * 100) / 100;
+    return { entry: trigger, entryLimit: f2(trigger * 0.997), stop, target: f2(trigger - minRiskReward * dist) };
+}
+
+/** One continuation per original proposal, process-lifetime. */
+const continuedOriginals = new Map<string, string>();
+
+async function proposeChaseContinuation(original: TradeProposal): Promise<ExecutionOutcome | null> {
+    if (!isChaseContinuationEnabled()) return null;
+    // Never chain: a continuation that gets chased again has had its two
+    // honest shots — further pursuit is the chasing the gate exists to stop.
+    if (original.source === 'chase-continuation') return null;
+    if (original.tradeClass !== 'intraday') return null; // swings/bets re-plan, not re-price
+    if (continuedOriginals.has(original.id)) return null;
+
+    const last = await fetchLastPrice(original.symbol);
+    if (last === null) return null;
+    const rules = getRiskRules();
+    const levels = continuationLevels(original, last, rules.min_risk_reward);
+    if (!levels) return null;
+
+    const { getDailyLossStatus } = await import('./daily-loss-guard.js');
+    const { computeQuantity } = await import('./position-sizer.js');
+    const netLiq = (await getDailyLossStatus().catch(() => null))?.netLiquidation;
+    if (netLiq == null || !(netLiq > 0)) return null;
+    const sized = computeQuantity({
+        entry: levels.entry,
+        stop: levels.stop,
+        score: original.score,
+        netLiquidation: netLiq,
+        tradeClass: 'intraday',
+    }, rules);
+    if (sized.quantity === null) {
+        return { ok: false, message: `🏃 chase continuation for ${original.id} not viable: ${sized.reason}` };
+    }
+
+    try {
+        const { fetchDailyRiskContext } = await import('@/tools/ibkr/daily-atr.js');
+        const { dailyAtr, ema10, recentEarnings } = await fetchDailyRiskContext(original.symbol);
+        const { createProposal } = await import('./trade-proposals.js');
+        const cont = await createProposal({
+            symbol: original.symbol,
+            direction: original.direction,
+            entryType: 'STP_LMT',
+            entry: levels.entry,
+            entryLimit: levels.entryLimit,
+            stop: levels.stop,
+            target: levels.target,
+            quantity: sized.quantity,
+            tif: 'DAY',
+            tradeClass: 'intraday',
+            score: original.score ?? undefined,
+            rationale: `chase continuation of ${original.id} (price ran past ${original.entry} before acceptance): ` +
+                `fills only on continued strength through ${levels.entry}`,
+            source: 'chase-continuation',
+            expiresMinutes: 30,
+        }, {
+            ...(dailyAtr != null ? { dailyAtr } : {}),
+            ...(ema10 != null ? { ema10 } : {}),
+            ...(recentEarnings === true ? { recentEarnings: true } : {}),
+        });
+        continuedOriginals.set(original.id, cont.id);
+        logger.info(`[proposal-executor] chase continuation ${cont.id} for ${original.id}: ${original.direction} ${original.symbol} STP_LMT @${levels.entry}`);
+
+        const exec = await autoExecuteProposal(cont.id);
+        return {
+            ok: exec.ok,
+            message:
+                `🏃 CHASE CONTINUATION ${cont.id} (replaces the stale ${original.id} levels): ${original.direction.toUpperCase()} ` +
+                `${original.symbol} STP_LMT trigger ${levels.entry} (limit ${levels.entryLimit}), stop ${levels.stop}, ` +
+                `target ${levels.target}, ${sized.quantity} shares — fills only if strength continues; expires in 30 min. ${exec.message}`,
+        };
+    } catch (err) {
+        // A gate refusal here is a final, honest no — extension/headroom/
+        // caps re-judged the fresh levels and said skip.
+        return { ok: false, message: `🏃 chase continuation for ${original.id} refused: ${err instanceof Error ? err.message : err}` };
+    }
 }
 
 /**
