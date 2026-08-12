@@ -339,30 +339,43 @@ export async function runNewsPulseSweepOnce(): Promise<NewsPulseSnapshot | null>
     const watch = await buildWatchSet();
     if (watch.length === 0) return null;
 
-    // Sequential micro-batches, paced. On the first throttle: back off and
-    // keep whatever already landed — a partial pulse honestly reported
-    // beats no pulse (symbols in unattempted batches are simply absent
-    // from the snapshot, which the tool reports as "unmeasured").
+    // Sequential micro-batches, paced, with one retry per batch: GDELT's
+    // "please limit" answer is LOAD-SHEDDING, not a real rate verdict —
+    // controlled probes (2026-08-12) saw the identical query throttle and
+    // then succeed 8 s later, in both directions. A failed batch is
+    // skipped, not sweep-fatal; the long backoff is reserved for a sweep
+    // where NOTHING landed (the only signature consistent with a genuine
+    // penalty). Unattempted/failed symbols are absent from the snapshot,
+    // which the tool reports as "unmeasured", never as quiet.
     const covered: typeof watch = [];
     const articles: GdeltArticle[] = [];
-    let degraded: string | null = null;
+    let failedBatches = 0;
+    let lastReason = '';
     for (const [i, batch] of chunkWatch(watch, batchSize()).entries()) {
         if (i > 0) await new Promise((r) => setTimeout(r, BATCH_PACE_MS));
-        const parsed = await fetchGdeltArticles(batch.map((w) => w.name), windowMin());
+        let parsed = await fetchGdeltArticles(batch.map((w) => w.name), windowMin());
         if (!parsed.ok) {
-            degraded = parsed.reason;
-            break;
+            await new Promise((r) => setTimeout(r, BATCH_PACE_MS + 2_000));
+            parsed = await fetchGdeltArticles(batch.map((w) => w.name), windowMin());
+        }
+        if (!parsed.ok) {
+            failedBatches++;
+            lastReason = parsed.reason;
+            continue;
         }
         covered.push(...batch);
         articles.push(...parsed.articles);
     }
-    if (degraded !== null) {
+    if (covered.length === 0) {
         backoffUntil = Date.now() + backoffMin() * 60_000;
+        logger.warn(`[news-pulse] every batch failed (${lastReason}) — backing off ${backoffMin()} min`);
+        return null;
+    }
+    if (failedBatches > 0) {
         logger.warn(
-            `[news-pulse] degraded after ${covered.length}/${watch.length} symbols (${degraded}) — ` +
-            `backing off ${backoffMin()} min${covered.length ? '; keeping the partial sweep' : ''}`,
+            `[news-pulse] partial sweep: ${covered.length}/${watch.length} symbols measured ` +
+            `(${failedBatches} batch(es) shed by GDELT after retry) — no backoff, next tick retries fresh`,
         );
-        if (covered.length === 0) return null;
     }
 
     const snapshot: NewsPulseSnapshot = {
