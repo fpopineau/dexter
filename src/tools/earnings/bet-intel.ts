@@ -34,6 +34,12 @@ Deterministic evidence for an EARNINGS BET (a deliberate hold through a print).
   Pass worstAdverseForLongPct (long) or worstAdverseForShortPct (short) as
   worstCaseGapPct when creating the proposal — the sizer assumes the
   position gaps that far against you.
+  Read the ASYMMETRY too: avgUpMovePct vs avgDownMovePct and meanMovePct
+  (the signed per-print mean = the record's expected move for a long).
+  Hit rate alone misleads — 3 up / 7 down with +40% ups and −5% downs is a
+  positive-EV record. NEVER present the consistency split as a probability:
+  at ~10 prints a 3/10 split has a 95% CI of roughly 7–65%. The bar is a
+  deliberately conservative admission policy, not an estimate.
 
 **implied_move** — the ATM straddle expiring just after the print, as a %
   of spot: what the options market has priced in. Compare with the record's

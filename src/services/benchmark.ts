@@ -78,17 +78,45 @@ export function computeDayMetrics(prevClose: number, open: number, high: number,
     };
 }
 
-export interface ReplayBar { high: number; low: number }
+export interface ReplayBar { open: number; high: number; low: number }
 
 export type ReplayOutcome = 'unfilled' | 'target' | 'stop' | 'open';
 
+export interface ReplayResult {
+    outcome: ReplayOutcome;
+    /** STP_LMT only: the trigger was touched (even if the limit never filled).
+     *  Distinguishes "the move ran without us" from "never set up". */
+    triggered: boolean;
+    /** Index of the bar where the entry filled; null = never filled. */
+    fillBar: number | null;
+    /** Max favorable excursion after the fill, % of entry (≥ 0; bar-resolution
+     *  approximation, exit bar included). */
+    mfePct: number | null;
+    /** Max adverse excursion after the fill, % of entry (≥ 0). */
+    maePct: number | null;
+}
+
 /**
  * Replay a refused bracket against bars (chronological, post-refusal).
+ *
  * Entry fill: LMT fills when price trades through the limit (long: low ≤
- * entry); STP_LMT triggers when price reaches the trigger (long: high ≥
- * entry); MKT fills on the first bar. After the fill, the first bar
- * touching stop or target decides; BOTH in one bar → STOP (pessimistic —
- * replays must not flatter the counterfactual).
+ * entry); MKT fills on the first bar. STP_LMT models the LIMIT BAND, not
+ * just the trigger touch — on a violent breakout the stop triggers while
+ * the limit never fills, and a replay that counts that as a fill flatters
+ * exactly the counterfactuals it exists to score (the SMCI critique,
+ * 2026-08-13):
+ *   - bar crosses the trigger from within (long: open < trigger ≤ high):
+ *     price traded THROUGH the band — filled (a single-tick jump over the
+ *     whole band is a halt-reopen case, rare enough to accept);
+ *   - bar opens at/beyond the trigger: the order is working as a pure
+ *     limit from the open — fills only when price trades back into the
+ *     band (long: low ≤ entryLimit), this bar or any later one;
+ *   - no entryLimit recorded → legacy touch-fill.
+ *
+ * After the fill, the first bar touching stop or target decides; BOTH in
+ * one bar → STOP (pessimistic — replays must not flatter). MFE/MAE are
+ * tracked from the fill bar through the exit bar inclusive, referenced to
+ * the entry level (MKT: the first bar's open).
  */
 export function replayBracket(
     bars: ReplayBar[],
@@ -97,24 +125,65 @@ export function replayBracket(
     entry: number,
     stop: number,
     target: number,
-): ReplayOutcome {
-    let filled = entryType === 'MKT';
-    for (const b of bars) {
-        if (!(b.high > 0) || !(b.low > 0)) continue;
+    entryLimit: number | null = null,
+): ReplayResult {
+    const long = direction === 'long';
+    let filled = false;
+    let triggered = false;
+    let fillBar: number | null = null;
+    let ref: number | null = null;     // excursion reference price
+    let bestFav = 0;                    // favorable excursion, price units
+    let bestAdv = 0;                    // adverse excursion, price units
+
+    const finish = (outcome: ReplayOutcome): ReplayResult => ({
+        outcome,
+        triggered,
+        fillBar,
+        mfePct: ref !== null ? Math.round((bestFav / ref) * 10000) / 100 : null,
+        maePct: ref !== null ? Math.round((bestAdv / ref) * 10000) / 100 : null,
+    });
+
+    for (let i = 0; i < bars.length; i++) {
+        const b = bars[i];
+        if (!(b.high > 0) || !(b.low > 0) || !(b.open > 0)) continue;
+
         if (!filled) {
-            const fills = entryType === 'STP_LMT'
-                ? (direction === 'long' ? b.high >= entry : b.low <= entry)
-                : (direction === 'long' ? b.low <= entry : b.high >= entry);
-            if (!fills) continue;
-            filled = true;
+            if (entryType === 'MKT') {
+                filled = true; fillBar = i; ref = b.open;
+            } else if (entryType === 'STP_LMT') {
+                if (!triggered) {
+                    triggered = long ? b.high >= entry : b.low <= entry;
+                    if (triggered) {
+                        const crossedWithin = long ? b.open < entry : b.open > entry;
+                        const bandAtOpen = entryLimit === null
+                            || (long ? b.open <= entryLimit : b.open >= entryLimit);
+                        if (crossedWithin || bandAtOpen) {
+                            filled = true; fillBar = i; ref = entry;
+                        }
+                    }
+                } else if (entryLimit !== null && (long ? b.low <= entryLimit : b.high >= entryLimit)) {
+                    // Resting limit finally trades — filled at the limit.
+                    filled = true; fillBar = i; ref = entryLimit;
+                }
+                if (!filled) continue;
+            } else {
+                const fills = long ? b.low <= entry : b.high >= entry;
+                if (!fills) continue;
+                filled = true; fillBar = i; ref = entry;
+            }
             // The fill bar itself can also resolve the exit — fall through.
         }
-        const hitStop = direction === 'long' ? b.low <= stop : b.high >= stop;
-        const hitTarget = direction === 'long' ? b.high >= target : b.low <= target;
-        if (hitStop) return 'stop';       // pessimistic on stop+target ties
-        if (hitTarget) return 'target';
+
+        if (ref !== null) {
+            bestFav = Math.max(bestFav, long ? b.high - ref : ref - b.low);
+            bestAdv = Math.max(bestAdv, long ? ref - b.low : b.high - ref);
+        }
+        const hitStop = long ? b.low <= stop : b.high >= stop;
+        const hitTarget = long ? b.high >= target : b.low <= target;
+        if (hitStop) return finish('stop');       // pessimistic on stop+target ties
+        if (hitTarget) return finish('target');
     }
-    return filled ? 'open' : 'unfilled';
+    return finish(filled ? 'open' : 'unfilled');
 }
 
 export interface FunnelStage {
@@ -302,19 +371,22 @@ export async function runBenchmarkOnce(): Promise<void> {
             const c = new Date(new Date(r.createdAt).toLocaleString('en-US', { timeZone: ET }));
             const createdEt = Date.UTC(c.getFullYear(), c.getMonth(), c.getDate(), c.getHours(), c.getMinutes(), c.getSeconds());
             const bars = (await fetchBars(r.symbol, BarSizeSetting.MINUTES_ONE, '1 D', true))
-                .filter((b) => b.high != null && b.low != null && b.time != null)
+                .filter((b) => b.open != null && b.high != null && b.low != null && b.time != null)
                 .filter((b) => {
                     const m = /^(\d{4})(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/.exec(b.time!);
                     return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) >= createdEt : false;
                 })
-                .map((b) => ({ high: b.high!, low: b.low! }));
-            const outcome = replayBracket(bars, r.direction, r.entryType, r.entry, r.stop, r.target);
+                .map((b) => ({ open: b.open!, high: b.high!, low: b.low! }));
+            const res = replayBracket(bars, r.direction, r.entryType, r.entry, r.stop, r.target, r.entryLimit);
             const rr = Math.abs(r.target - r.entry) / Math.max(Math.abs(r.entry - r.stop), 1e-9);
-            const note = outcome === 'target' ? `would have WON ~${rr.toFixed(1)}R`
-                : outcome === 'stop' ? 'would have lost 1R'
-                : outcome === 'unfilled' ? 'entry never filled'
-                : 'still open at the close';
-            await setRefusalOutcome(r.id, outcome, note);
+            const excursion = res.mfePct != null && res.maePct != null
+                ? ` (MFE +${res.mfePct}% / MAE -${res.maePct}%)` : '';
+            const note = res.outcome === 'target' ? `would have WON ~${rr.toFixed(1)}R${excursion}`
+                : res.outcome === 'stop' ? `would have lost 1R${excursion}`
+                : res.outcome === 'unfilled'
+                    ? (res.triggered ? 'trigger touched but the limit never filled — the move ran without us' : 'entry never filled')
+                : `still open at the close${excursion}`;
+            await setRefusalOutcome(r.id, res.outcome, note, res.mfePct, res.maePct);
             replayed++;
         } catch (err) {
             logger.warn(`[benchmark] replay ${r.symbol} failed: ${err}`);

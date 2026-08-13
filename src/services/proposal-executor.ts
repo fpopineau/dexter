@@ -34,6 +34,7 @@ import {
     formatProposalLine,
     getProposal,
     listTrackable,
+    recordRefusal,
     releaseProposalClaim,
     setProposalStatus,
     sumRealizedPnlSince,
@@ -92,6 +93,9 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
     // A gate REFUSAL leaves the proposal OPEN: gates re-run on every accept,
     // and transient conditions (P&L verification timeout, a halt cleared
     // later) must not permanently kill a valid proposal before its expiry.
+    // The live quote is hoisted so the refusal ledger can record what the
+    // chase gate actually saw (null when the refusal fired before the fetch).
+    let liveLast: number | null = null;
     try {
         assertOrderingAllowed();
         // DAY brackets need a session to live in: placed post-close they are
@@ -187,6 +191,7 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         // effort — an unavailable quote does not block (the hard gates
         // above already ran), it is only noted.
         const last = await fetchLastPrice(p.symbol);
+        liveLast = last;
         if (last !== null) {
             const run = checkPriceRun(p, last);
             if (!run.ok) {
@@ -209,6 +214,19 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         const msg = err instanceof Error ? err.message : String(err);
         logger.warn(`[proposal-executor] ${p.id} refused by gates (proposal stays open): ${msg}`);
         await releaseProposalClaim(p.id); // refusal → back to open, retryable
+        // Ledger the ACCEPTANCE-time refusal — until 2026-08-13 only
+        // creation-time refusals were recorded, so the chase gate (the SMCI
+        // case itself) was invisible to the nightly counterfactual replay
+        // and the gate scoreboard. proposalAgeSec quantifies how stale the
+        // levels were when the gate fired; each retried accept records its
+        // own event (distinct age/quote — not a duplicate).
+        await recordRefusal({
+            symbol: p.symbol, direction: p.direction, entryType: p.entryType,
+            entry: p.entry, entryLimit: p.entryLimit, stop: p.stop, target: p.target,
+            quantity: p.quantity, score: p.score, reason: msg,
+            proposalAgeSec: Math.round((Date.now() - p.createdAt) / 1000),
+            livePrice: liveLast,
+        }).catch(() => { /* ledger is best-effort — never blocks the refusal path */ });
         return {
             ok: false,
             message:
@@ -406,9 +424,23 @@ export function isChaseContinuationEnabled(): boolean {
     return (process.env.CHASE_CONTINUATION ?? 'true').trim().toLowerCase() !== 'false';
 }
 
+/** Confirmation quantum for the continuation trigger, as a fraction of the
+ *  original stop distance. The chase gate defines "the price moved
+ *  meaningfully" in units of the trade's own geometry (CHASE_FRACTION of
+ *  the edge); a continuation must demand confirmation on the same scale —
+ *  a 0.1%-above-last trigger is microstructure noise that converts
+ *  "don't chase at X" into "chase at X + 4 cents" and pays a full 1R on
+ *  every false breakout of a gap-fill day. The stop distance is the
+ *  proposal's own noise calibration, so a quarter of it is "moved beyond
+ *  noise", scaled per-symbol for free. */
+export const CONTINUATION_CONFIRM_FRACTION = 0.25;
+
 /** Pure: fresh continuation levels from the live price, preserving the
  *  original stop distance and re-deriving the target from the ROUNDED
- *  distance so the prescription passes its own gates. Null = degenerate. */
+ *  distance so the prescription passes its own gates. The trigger sits
+ *  max(0.1%, CONTINUATION_CONFIRM_FRACTION × stop distance) beyond the
+ *  live price — it fills only on continuation beyond noise, not on the
+ *  first uptick. Null = degenerate. */
 export function continuationLevels(
     p: { direction: 'long' | 'short'; entry: number | null; stop: number },
     last: number,
@@ -419,13 +451,15 @@ export function continuationLevels(
     if (!(stopDist > 0)) return null;
     const c2 = (x: number) => Math.ceil(x * 100) / 100;
     const f2 = (x: number) => Math.floor(x * 100) / 100;
+    const confirm = Math.max(0.001 * last, CONTINUATION_CONFIRM_FRACTION * stopDist);
     if (p.direction === 'long') {
-        const trigger = c2(last * 1.001);
+        const trigger = c2(last + confirm);
         const stop = f2(trigger - stopDist);
         const dist = Math.round((trigger - stop) * 100) / 100;
         return { entry: trigger, entryLimit: c2(trigger * 1.003), stop, target: c2(trigger + minRiskReward * dist) };
     }
-    const trigger = f2(last * 0.999);
+    const trigger = f2(last - confirm);
+    if (!(trigger > 0)) return null;
     const stop = c2(trigger + stopDist);
     const dist = Math.round((stop - trigger) * 100) / 100;
     return { entry: trigger, entryLimit: f2(trigger * 0.997), stop, target: f2(trigger - minRiskReward * dist) };

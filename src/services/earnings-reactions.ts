@@ -76,6 +76,20 @@ export interface ReactionStats {
     /** Mean |closeMovePct| — the historical realized print move, the
      *  honest comparator for the options-implied move. */
     avgAbsMovePct: number;
+    /** Mean move of the UP prints only (positive magnitude %; 0 when none).
+     *  With avgDownMovePct this shows the record's ASYMMETRY — hit rate
+     *  alone cannot: 3 up / 7 down with +40% ups and −5% downs is a
+     *  positive-EV record despite the 30% hit rate, and vice versa. */
+    avgUpMovePct: number;
+    /** Mean |move| of the DOWN prints only (positive magnitude %). */
+    avgDownMovePct: number;
+    /** Signed mean closeMovePct across all prints — the record's per-print
+     *  expected move for a LONG holder (negate for a short). CONTEXT ONLY:
+     *  at n≈10 both this and the consistency split carry huge sampling
+     *  error (a 3/10 split has a 95% CI of roughly 7–65%); the bar stays a
+     *  deliberately conservative ADMISSION POLICY, never a probability
+     *  estimate, and this figure must never auto-pass a bet. */
+    meanMovePct: number;
     /** Worst adverse move for a LONG holder, positive magnitude % (the
      *  most negative of gap/close across prints; 0 when none negative).
      *  Feed this to worstCaseGapPct when proposing a long bet. */
@@ -241,6 +255,8 @@ export function computeReactionStats(
     // Adverse per print: the worse of exit-at-open and exit-at-close.
     const adverseLong = prints.map((p) => Math.min(p.gapPct, p.closeMovePct)).filter((v) => v < 0);
     const adverseShort = prints.map((p) => Math.max(p.gapPct, p.closeMovePct)).filter((v) => v > 0);
+    const ups = prints.filter((p) => p.closeMovePct > 0);
+    const downs = prints.filter((p) => p.closeMovePct < 0);
 
     return {
         symbol: symbol.toUpperCase(),
@@ -252,6 +268,9 @@ export function computeReactionStats(
         upConsistencyPct: upPct,
         downConsistencyPct: downPct,
         avgAbsMovePct: n > 0 ? round2(prints.reduce((s, p) => s + Math.abs(p.closeMovePct), 0) / n) : 0,
+        avgUpMovePct: ups.length ? round2(ups.reduce((s, p) => s + p.closeMovePct, 0) / ups.length) : 0,
+        avgDownMovePct: downs.length ? round2(Math.abs(downs.reduce((s, p) => s + p.closeMovePct, 0) / downs.length)) : 0,
+        meanMovePct: n > 0 ? round2(prints.reduce((s, p) => s + p.closeMovePct, 0) / n) : 0,
         worstAdverseForLongPct: adverseLong.length ? round2(Math.abs(Math.min(...adverseLong))) : 0,
         worstAdverseForShortPct: adverseShort.length ? round2(Math.max(...adverseShort)) : 0,
         meetsBarLong: n >= EVIDENCE_MIN_PRINTS && upPct >= EVIDENCE_MIN_CONSISTENCY_PCT,

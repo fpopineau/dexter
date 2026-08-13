@@ -177,7 +177,11 @@ async function getDb(): Promise<SqliteDatabase> {
             reason      TEXT NOT NULL,
             gate        TEXT NOT NULL,
             outcome     TEXT,
-            outcome_note TEXT
+            outcome_note TEXT,
+            mfe_pct     REAL,
+            mae_pct     REAL,
+            proposal_age_sec REAL,
+            live_price  REAL
         );
     `);
     migrate(db);
@@ -207,6 +211,15 @@ export interface RefusalRecord {
      *  'target' | 'stop' | 'unfilled' | 'open' | 'unknown'. */
     outcome: string | null;
     outcomeNote: string | null;
+    /** Replay excursions after the counterfactual fill, % of entry. */
+    mfePct: number | null;
+    maePct: number | null;
+    /** Acceptance-time refusals only: age of the proposal's levels when the
+     *  gate fired (seconds since creation) and the live price the gate saw.
+     *  Together they turn "the quote was 70 seconds stale" from folklore
+     *  into a ledger column. Null on creation-time refusals. */
+    proposalAgeSec: number | null;
+    livePrice: number | null;
 }
 
 /** Keyword classification of a refusal reason into the gate that fired. */
@@ -215,6 +228,10 @@ export function classifyRefusalGate(reason: string): string {
     if (r.includes('duplicate setup')) return 'duplicate';
     if (r.includes('intraday noise')) return 'noise-stop';
     if (r.includes('chasing an extended move')) return 'extension';
+    // Acceptance-time chase gate (checkPriceRun): "price has run: last …"
+    // vs "setup invalidated: last … is at/through the stop".
+    if (r.includes('price has run')) return 'chase';
+    if (r.includes('setup invalidated')) return 'invalidated';
     if (r.includes('risk/reward')) return 'risk-reward';
     if (r.includes('risk budget') && r.includes('stop-out')) return 'risk-budget';
     if (r.includes('cannot afford') || r.includes('position cap')) return 'unaffordable';
@@ -237,15 +254,20 @@ export async function recordRefusal(input: {
     quantity?: number | null;
     score?: number | null;
     reason: string;
+    /** Acceptance-time refusals: seconds between proposal creation and the
+     *  gate check, and the live price the gate compared against. */
+    proposalAgeSec?: number | null;
+    livePrice?: number | null;
 }): Promise<void> {
     const database = await getDb();
     database.query<void>(
-        `INSERT INTO refusals (created_at, symbol, direction, entry_type, entry, entry_limit, stop, target, quantity, score, reason, gate)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO refusals (created_at, symbol, direction, entry_type, entry, entry_limit, stop, target, quantity, score, reason, gate, proposal_age_sec, live_price)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
         Date.now(), input.symbol.trim().toUpperCase(), input.direction, input.entryType,
         input.entry ?? null, input.entryLimit ?? null, input.stop ?? null, input.target ?? null,
         input.quantity ?? null, input.score ?? null, input.reason.slice(0, 600), classifyRefusalGate(input.reason),
+        input.proposalAgeSec ?? null, input.livePrice ?? null,
     );
 }
 
@@ -254,6 +276,8 @@ interface RefusalRow {
     entry: number | null; entry_limit: number | null; stop: number | null; target: number | null;
     quantity: number | null; score: number | null; reason: string; gate: string;
     outcome: string | null; outcome_note: string | null;
+    mfe_pct: number | null; mae_pct: number | null;
+    proposal_age_sec: number | null; live_price: number | null;
 }
 
 export async function listRefusalsSince(sinceMs: number): Promise<RefusalRecord[]> {
@@ -266,14 +290,22 @@ export async function listRefusalsSince(sinceMs: number): Promise<RefusalRecord[
         entry: r.entry, entryLimit: r.entry_limit, stop: r.stop, target: r.target,
         quantity: r.quantity, score: r.score, reason: r.reason, gate: r.gate,
         outcome: r.outcome, outcomeNote: r.outcome_note,
+        mfePct: r.mfe_pct ?? null, maePct: r.mae_pct ?? null,
+        proposalAgeSec: r.proposal_age_sec ?? null, livePrice: r.live_price ?? null,
     }));
 }
 
-export async function setRefusalOutcome(id: number, outcome: string, note?: string): Promise<void> {
+export async function setRefusalOutcome(
+    id: number,
+    outcome: string,
+    note?: string,
+    mfePct?: number | null,
+    maePct?: number | null,
+): Promise<void> {
     const database = await getDb();
     database.query<void>(
-        `UPDATE refusals SET outcome = ?, outcome_note = ? WHERE id = ?`,
-    ).run(outcome, note ?? null, id);
+        `UPDATE refusals SET outcome = ?, outcome_note = ?, mfe_pct = ?, mae_pct = ? WHERE id = ?`,
+    ).run(outcome, note ?? null, mfePct ?? null, maePct ?? null, id);
 }
 
 /** Cumulative per-gate counterfactual scoreboard (evaluated refusals only). */
@@ -312,10 +344,25 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     ['kept_overnight_at', 'INTEGER'],
 ];
 
+/** Replay/instrumentation columns added after the refusals-table release. */
+const REFUSAL_COLUMNS: Array<[string, string]> = [
+    ['mfe_pct', 'REAL'],
+    ['mae_pct', 'REAL'],
+    ['proposal_age_sec', 'REAL'],
+    ['live_price', 'REAL'],
+];
+
 function migrate(database: SqliteDatabase): void {
     for (const [name, type] of OUTCOME_COLUMNS) {
         try {
             database.exec(`ALTER TABLE proposals ADD COLUMN ${name} ${type}`);
+        } catch {
+            // column already exists
+        }
+    }
+    for (const [name, type] of REFUSAL_COLUMNS) {
+        try {
+            database.exec(`ALTER TABLE refusals ADD COLUMN ${name} ${type}`);
         } catch {
             // column already exists
         }

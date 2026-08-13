@@ -117,6 +117,31 @@ describe('computeReactionStats', () => {
         expect(stats.worstAdverseForLongPct).toBeCloseTo(12, 1);
         expect(stats.worstAdverseForShortPct).toBeCloseTo(9, 1);
         expect(stats.avgAbsMovePct).toBeCloseTo((2 + 6 + 9) / 3, 1);
+        // Asymmetry stats: ups {+9}, downs {−2, −6}, signed mean +0.33.
+        expect(stats.avgUpMovePct).toBeCloseTo(9, 1);
+        expect(stats.avgDownMovePct).toBeCloseTo(4, 1);
+        expect(stats.meanMovePct).toBeCloseTo(1 / 3, 1);
+    });
+
+    test('asymmetry beats hit rate: 1 up / 2 down can still be a positive-EV record', () => {
+        // The SMCI-critique example shape: rare but huge up prints, frequent
+        // small down prints. Consistency says "avoid long" (33%), the signed
+        // mean says the record pays a long holder — both must be visible so
+        // neither is mistaken for the whole story.
+        const bars = flatBars(200);
+        inject(bars, 20, 30, 40);   // one +40% print
+        inject(bars, 70, -2, -3);   // two small negatives
+        inject(bars, 120, -3, -5);
+        const stats = computeReactionStats('TEST', bars, [
+            { date: bars[20].date, verified: true },
+            { date: bars[70].date, verified: true },
+            { date: bars[120].date, verified: true },
+        ]);
+        expect(stats.upConsistencyPct).toBeCloseTo(33.33, 1);
+        expect(stats.meanMovePct).toBeCloseTo((40 - 3 - 5) / 3, 1); // +10.67 per print
+        expect(stats.avgUpMovePct).toBeCloseTo(40, 1);
+        expect(stats.avgDownMovePct).toBeCloseTo(4, 1);
+        expect(stats.meetsBarLong).toBe(false); // the admission bar still refuses — policy, not EV
     });
 
     test('duplicate report dates and unmatchable dates are dropped', () => {
