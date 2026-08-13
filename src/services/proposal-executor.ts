@@ -68,8 +68,12 @@ async function fetchLastPrice(symbol: string): Promise<number | null> {
         // unentitled instrument degrades to ~15-min-delayed ticks, and for
         // the chase/invalidation check a stale price treated as live would
         // be exactly the failure the gate exists to catch. No quote → the
-        // check is skipped honestly.
-        if (data?.delayed) return null;
+        // check is skipped honestly (and loudly — this should never happen
+        // for US equities while the account's live entitlement holds).
+        if (data?.delayed) {
+            logger.warn(`[proposal-executor] ${symbol}: quote is DELAYED (entitlement regression?) — chase check will be skipped`);
+            return null;
+        }
         if (data?.last && Number.isFinite(data.last) && data.last > 0) return data.last;
         if (data?.bid && data?.ask && data.bid > 0 && data.ask > 0) return (data.bid + data.ask) / 2;
         return null;

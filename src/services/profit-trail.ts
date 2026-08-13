@@ -207,8 +207,12 @@ async function fetchLast(symbol: string): Promise<number | null> {
         // A delayed quote must never drive a trail decision (peak tracking
         // and pullback closes assume the price is NOW) — skip the cycle
         // for this symbol instead. Only matters if an instrument loses its
-        // live entitlement under IBKR_MARKET_DATA_TYPE=3.
-        if (data?.delayed) return null;
+        // live entitlement under IBKR_MARKET_DATA_TYPE=3. Loud on purpose:
+        // a silent skip every cycle would blind the trail invisibly.
+        if (data?.delayed) {
+            logger.warn(`[profit-trail] ${symbol}: quote is DELAYED (entitlement regression?) — trail cannot observe this symbol`);
+            return null;
+        }
         if (data?.last && Number.isFinite(data.last) && data.last > 0) return data.last;
         if (data?.bid && data?.ask && data.bid > 0 && data.ask > 0) return (data.bid + data.ask) / 2;
         return null;

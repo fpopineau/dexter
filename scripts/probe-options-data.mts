@@ -25,10 +25,21 @@ import 'dotenv/config';
 import { EventName, OptionType, SecType, type Contract } from '@stoqey/ib';
 import { allocReqId, getIBApi } from '../src/tools/ibkr/connection.js';
 import { fetchImpliedMove } from '../src/tools/ibkr/implied-move.js';
+import { createIbkrMarketData } from '../src/tools/ibkr/market-data.js';
 
 const sym = (process.argv[2] ?? 'SMCI').toUpperCase();
 
-console.log(`[probe] ${sym} — client id ${process.env.IBKR_CLIENT_ID ?? '(default 0 — WARNING: may collide with the gateway)'}`);
+console.log(`[probe] ${sym} — client id ${process.env.IBKR_CLIENT_ID ?? '(default 0 — WARNING: may collide with the gateway)'}; IBKR_MARKET_DATA_TYPE=${process.env.IBKR_MARKET_DATA_TYPE ?? '(unset)'}`);
+
+// 0. THE STOCK ITSELF — the question that decides whether type 3 is safe
+// globally: does the EQUITY snapshot stay live (delayed:false, live tick
+// ids) under the configured market data type, or does the whole account
+// degrade to delayed? The chase gate and profit trail refuse delayed
+// quotes, so a delayed-stock regime would blind them.
+const stockRaw = await createIbkrMarketData().invoke({ ticker: sym, exchange: 'SMART', currency: 'USD' });
+const stock = (JSON.parse(String(stockRaw)) as { data?: Record<string, unknown> }).data;
+console.log('[probe] STOCK snapshot:', JSON.stringify(stock));
+console.log(`[probe] STOCK verdict: ${stock?.delayed ? '⚠ DELAYED — do NOT run the gateway on this market data type' : 'live fields — safe'}`);
 
 // A + B: the full existing path (chain → ATM strike → live snapshots).
 const res = await fetchImpliedMove(sym);
