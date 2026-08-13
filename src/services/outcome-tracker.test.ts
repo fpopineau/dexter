@@ -1,5 +1,39 @@
 import { describe, expect, test } from 'bun:test';
-import { computeRealizedPnl, decideDayExpiryHold, isIbNumber, selectManualExitTargets } from './outcome-tracker.js';
+import { assessStopExitFill, computeRealizedPnl, decideDayExpiryHold, isIbNumber, selectManualExitTargets, SUSPECT_FILL_STOP_MULT } from './outcome-tracker.js';
+
+describe('assessStopExitFill (SECZ phantom-fill lesson, 2026-08-13)', () => {
+    test('the live case: 6.43 buy-stop filled at 11.918 while the tape traded 5.78 → SUSPECT at ~15.8R through', () => {
+        const r = assessStopExitFill('short', 6.083161, 6.43, 11.918442);
+        expect(r.suspect).toBe(true);
+        expect(r.beyondStopR).toBeCloseTo(15.8, 1);
+    });
+
+    test('ordinary stop slippage is not suspect', () => {
+        // Long from 10, stop 9.50, filled 9.46 — 8% of the stop distance through.
+        const r = assessStopExitFill('long', 10, 9.5, 9.46);
+        expect(r.suspect).toBe(false);
+        expect(r.beyondStopR).toBeCloseTo(0.1, 1);
+    });
+
+    test('price-improved fills (better than the level) are negative and never suspect', () => {
+        const r = assessStopExitFill('long', 10, 9.5, 9.55);
+        expect(r.suspect).toBe(false);
+        expect(r.beyondStopR).toBeLessThan(0);
+    });
+
+    test('an honest overnight gap 3R+ through the stop IS flagged — that is review-worthy, not a false positive', () => {
+        // Long from 10, stop 9.80 (0.20 dist), gaps to open 9.00: 4R through.
+        const r = assessStopExitFill('long', 10, 9.8, 9.0);
+        expect(r.suspect).toBe(true);
+        expect(r.beyondStopR).toBeCloseTo(4, 1);
+        expect(r.beyondStopR).toBeGreaterThan(SUSPECT_FILL_STOP_MULT);
+    });
+
+    test('degenerate geometry (zero stop distance, junk fill) never flags', () => {
+        expect(assessStopExitFill('long', 10, 10, 5).suspect).toBe(false);
+        expect(assessStopExitFill('short', 6, 6.4, 0).suspect).toBe(false);
+    });
+});
 
 describe('decideDayExpiryHold (EOD-keep transition trigger)', () => {
     const base = {

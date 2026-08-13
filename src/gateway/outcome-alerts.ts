@@ -46,6 +46,10 @@ function formatCloseMessage(p: TradeProposal): string {
     // reason, e.g. IBKR 201 trading-permission refusals).
     if ((p.exitReason === 'cancelled' || p.exitReason === 'manual') && p.note) {
         lines.push(`Reason: ${p.note.slice(0, 220)}`);
+    } else if (p.note?.includes('SUSPECT FILL')) {
+        // A stop fill far through its own level (SECZ 2026-08-13: paper-sim
+        // phantom at 2× the tape) must reach the operator, not just the log.
+        lines.push(p.note.slice(p.note.indexOf('⚠ SUSPECT FILL'), p.note.indexOf('⚠ SUSPECT FILL') + 300));
     }
     lines.push("Send 'performance' for the running summary.");
     return lines.join('\n');

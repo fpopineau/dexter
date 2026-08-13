@@ -43,6 +43,8 @@
 
 import { BarSizeSetting } from '@stoqey/ib';
 import { Cron } from 'croner';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { getIBApi } from '@/tools/ibkr/connection.js';
 import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
 import { logger } from '@/utils';
@@ -291,6 +293,9 @@ export function isMacroWarningEnabled(): boolean {
 export async function runEodTriageOnce(): Promise<void> {
     const today = new Date().toLocaleDateString('en-CA', { timeZone: ET });
     if (isMarketHoliday(today)) return;
+    // Stamp at the START of the run: the boot-time catch-up must never
+    // double-run behind a cron firing that is already in flight.
+    markTriageRun(today, 'ran');
 
     const trackable = await listTrackable();
     // Momentum lane: DAY brackets + kept-overnight holds (full triage);
@@ -430,6 +435,80 @@ export async function runEodTriageOnce(): Promise<void> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Missed-run catch-up — SECZ post-mortem 2026-08-13: a gateway restart
+// window (process down 15:50→16:00 ET) swallowed the 15:52 cron slot, and
+// croner does not backfill missed firings. Five open positions reached the
+// bell untriaged — no losing-and-fading close, no earnings-guard flatten.
+// The run stamps a per-day marker; on boot, a missing stamp either runs the
+// triage late (still before the bell — decisions are still actionable at
+// RTH prices) or alerts loudly (after the bell — closing now would execute
+// at tomorrow's open, a different decision that stays with the operator).
+// ---------------------------------------------------------------------------
+
+/** Must match TRIAGE_CRON. */
+const TRIAGE_MINUTES_ET = 15 * 60 + 52;
+const BELL_MINUTES_ET = 16 * 60;
+
+export type TriageCatchUp = 'none' | 'run-late' | 'alert-missed';
+
+/** Pure: what a boot at `minutesEt` (minutes since ET midnight) should do
+ *  about today's triage slot. */
+export function triageCatchUpAction(minutesEt: number, ranToday: boolean, isTradingDay: boolean): TriageCatchUp {
+    if (!isTradingDay || ranToday) return 'none';
+    if (minutesEt >= TRIAGE_MINUTES_ET && minutesEt < BELL_MINUTES_ET) return 'run-late';
+    if (minutesEt >= BELL_MINUTES_ET) return 'alert-missed';
+    return 'none'; // before the slot — the cron will fire normally
+}
+
+interface TriageRunStamp { date: string; status: 'ran' | 'missed-alerted'; at: number }
+
+function stampPath(): string {
+    return join(process.env.DEXTER_DATA_DIR || join('.dexter', 'data'), 'eod-triage-run.json');
+}
+
+function readTriageStamp(): TriageRunStamp | null {
+    try {
+        return JSON.parse(readFileSync(stampPath(), 'utf-8')) as TriageRunStamp;
+    } catch {
+        return null;
+    }
+}
+
+function markTriageRun(date: string, status: TriageRunStamp['status']): void {
+    try {
+        writeFileSync(stampPath(), JSON.stringify({ date, status, at: Date.now() } satisfies TriageRunStamp));
+    } catch (err) {
+        logger.warn(`[eod-triage] run stamp persist failed: ${err}`);
+    }
+}
+
+async function checkMissedTriage(): Promise<void> {
+    const now = new Date();
+    const todayIso = now.toLocaleDateString('en-CA', { timeZone: ET });
+    const et = new Date(now.toLocaleString('en-US', { timeZone: ET }));
+    const weekday = et.getDay(); // 0=Sun .. 6=Sat, in ET
+    const isTradingDay = weekday >= 1 && weekday <= 5 && !isMarketHoliday(todayIso);
+    const stamp = readTriageStamp();
+    const action = triageCatchUpAction(
+        et.getHours() * 60 + et.getMinutes(),
+        stamp?.date === todayIso,
+        isTradingDay,
+    );
+    if (action === 'run-late') {
+        logger.warn('[eod-triage] today\'s 15:52 ET slot was missed (gateway was down) — running catch-up triage now');
+        await runEodTriageOnce();
+    } else if (action === 'alert-missed') {
+        markTriageRun(todayIso, 'missed-alerted'); // once per day, across restarts
+        logger.warn('[eod-triage] today\'s 15:52 ET slot was missed and the bell has rung — positions went untriaged');
+        await notify(
+            '⚠️ EOD TRIAGE MISSED today: the gateway was down at 15:52 ET and came back after the bell. ' +
+            'Open positions reached the close untriaged — no losing-and-fading close, no earnings-guard flatten. ' +
+            'The 🌙 conversion still protects expired DAY brackets; review \'positions\' and close anything you would not hold.',
+        );
+    }
+}
+
 let job: Cron | null = null;
 
 /** Start the 15:52 ET triage (idempotent; no-op when disabled). */
@@ -444,6 +523,14 @@ export function startEodTriage(): void {
             ? `; earnings guard ON (flat before any print within ${EARNINGS_GUARD_DAYS} trading day(s) — Friday reaches Monday; DAY and GTC non-bet classes; past BMO prints exempt)`
             : '; earnings guard OFF'),
     );
+    // Boot-time catch-up, delayed so the IBKR connection and the WhatsApp
+    // alert bridge finish wiring first. Wall-clock dependent — gated off in
+    // tests like the other session-time logic (the pure decision is tested).
+    if (process.env.NODE_ENV !== 'test') {
+        setTimeout(() => {
+            checkMissedTriage().catch((err) => logger.error(`[eod-triage] catch-up check failed: ${err}`));
+        }, 15_000);
+    }
 }
 
 export function stopEodTriage(): void {

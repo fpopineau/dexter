@@ -69,6 +69,38 @@ export function computeRealizedPnl(
     return Math.round(perShare * quantity * 100) / 100;
 }
 
+/** Flag a stop exit whose fill landed more than this many stop-distances
+ *  BEYOND the stop level itself. Honest gap-throughs exist (an overnight
+ *  earnings gap can blow 2-3R past a stop), so those get flagged for
+ *  review too — that is intended, not a false positive. */
+export const SUSPECT_FILL_STOP_MULT = 3;
+
+/**
+ * Sanity-check a stop-exit fill against the trade's own geometry — the
+ * SECZ lesson (2026-08-13): IBKR's paper simulator filled a 6.43 buy-stop
+ * at 11.92, outside RTH, against a real tape trading 5.78 — a −16.7R
+ * phantom loss booked as a routine 'stop'. A fill this far through its own
+ * level is, on paper, almost certainly a simulator artifact (stops match
+ * stray quotes at full size, no depth); live, it is a catastrophic fill
+ * that deserves eyeballs either way. FLAG-ONLY: attribution and P&L are
+ * recorded unchanged — the operator decides what the number means.
+ */
+export function assessStopExitFill(
+    direction: 'long' | 'short',
+    entryFill: number,
+    stop: number,
+    exitFill: number,
+): { suspect: boolean; beyondStopR: number } {
+    const stopDist = Math.abs(entryFill - stop);
+    if (!(stopDist > 0) || !(exitFill > 0)) return { suspect: false, beyondStopR: 0 };
+    // Adverse distance PAST the stop: a long stops out below its stop, a
+    // short above. Ordinary slippage is a small positive fraction; negative
+    // means the fill was better than the level (price-improved).
+    const beyond = direction === 'long' ? stop - exitFill : exitFill - stop;
+    const beyondStopR = Math.round((beyond / stopDist) * 10) / 10;
+    return { suspect: beyondStopR > SUSPECT_FILL_STOP_MULT, beyondStopR };
+}
+
 /** IBKR sends this sentinel for "no value" numeric fields. */
 const IB_UNSET = 1.7e308;
 
@@ -253,6 +285,25 @@ async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string):
     }
     if (dayExpiry) {
         note = 'DAY bracket exits expired at the session close with the position still open — GTC re-protection attempted (see auto-protect)';
+    }
+
+    // Fill sanity on stop exits — the stop LEVEL lives on the proposal row
+    // (the trade object only tracks order ids), so fetch it pre-close; the
+    // post-close fetch below re-reads the row with its outcome fields.
+    if (reason === 'stop' && trade.entryAvgPrice != null && trade.exitAvgPrice != null) {
+        const levels = await getProposal(trade.proposalId).catch(() => null);
+        if (levels?.stop != null) {
+            const fill = assessStopExitFill(trade.direction, trade.entryAvgPrice, levels.stop, trade.exitAvgPrice);
+            if (fill.suspect) {
+                const warnText =
+                    `⚠ SUSPECT FILL: stop ${levels.stop} filled at ${trade.exitAvgPrice} — ` +
+                    `${fill.beyondStopR}× the stop distance through the level. Verify against the tape ` +
+                    `before trusting this P&L: paper-sim artifacts fill at phantom prices (SECZ 2026-08-13), ` +
+                    `and a real fill this bad deserves review either way.`;
+                note = note ? `${note} ${warnText}` : warnText;
+                logger.warn(`[outcome-tracker] ${trade.proposalId} ${trade.symbol}: ${warnText}`);
+            }
+        }
     }
 
     const realizedPnl =

@@ -1,5 +1,34 @@
 import { describe, expect, test } from 'bun:test';
-import { applyEarningsGuard, decideEodAction, decideGtcEarningsGuard, decideUnfilledEntryGuard, isUpcomingPrint, overnightCapWarning, splitTriageCandidates } from './eod-triage.js';
+import { applyEarningsGuard, decideEodAction, decideGtcEarningsGuard, decideUnfilledEntryGuard, isUpcomingPrint, overnightCapWarning, splitTriageCandidates, triageCatchUpAction } from './eod-triage.js';
+
+describe('triageCatchUpAction (missed 15:52 slot — SECZ post-mortem 2026-08-13)', () => {
+    const min = (h: number, m: number) => h * 60 + m;
+
+    test('boot before the slot: the cron will fire — do nothing', () => {
+        expect(triageCatchUpAction(min(9, 40), false, true)).toBe('none');
+        expect(triageCatchUpAction(min(15, 51), false, true)).toBe('none');
+    });
+
+    test('boot in the missed window before the bell: run late (decisions still actionable at RTH prices)', () => {
+        expect(triageCatchUpAction(min(15, 52), false, true)).toBe('run-late');
+        expect(triageCatchUpAction(min(15, 59), false, true)).toBe('run-late');
+    });
+
+    test('the SECZ case: boot at 16:00 with the slot missed → loud alert, never a silent skip', () => {
+        expect(triageCatchUpAction(min(16, 0), false, true)).toBe('alert-missed');
+        expect(triageCatchUpAction(min(20, 30), false, true)).toBe('alert-missed');
+    });
+
+    test('already ran today: nothing, at any hour', () => {
+        expect(triageCatchUpAction(min(15, 55), true, true)).toBe('none');
+        expect(triageCatchUpAction(min(18, 0), true, true)).toBe('none');
+    });
+
+    test('weekends and holidays: nothing', () => {
+        expect(triageCatchUpAction(min(15, 55), false, false)).toBe('none');
+        expect(triageCatchUpAction(min(17, 0), false, false)).toBe('none');
+    });
+});
 
 describe('decideUnfilledEntryGuard (entry-side accidental earnings bets)', () => {
     const TODAY_ISO = '2026-08-11';
