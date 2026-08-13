@@ -249,9 +249,14 @@ function renderOverview(o){
   el('proposals').innerHTML = props || '<tr><td class="dim">none</td></tr>';
 
   var tr = (o.trail||[]).map(function(t){
-    var gain = t.direction==='long' ? (t.best-t.basis)/t.basis*100 : (t.basis-t.best)/t.basis*100;
+    // Headline % = INSTANT gain (last vs basis). The peak %, dimmed next to
+    // the peak price, is what the trail arms on — best only ratchets up, so
+    // it must not read as live P&L.
+    var peakGain = t.direction==='long' ? (t.best-t.basis)/t.basis*100 : (t.basis-t.best)/t.basis*100;
+    var nowGain = t.last ? (t.direction==='long' ? (t.last-t.basis)/t.basis*100 : (t.basis-t.last)/t.basis*100) : null;
     return '<tr class="row" data-sym="'+t.symbol+'"><td><b>'+t.symbol+'</b></td>'+
-      '<td class="r">peak '+fmt(t.best)+'</td><td class="r '+(gain>=0?'g':'b')+'">'+fmt(gain,1)+'%</td>'+
+      '<td class="r">peak '+fmt(t.best)+' <span class="dim">+'+fmt(peakGain,1)+'%</span></td>'+
+      '<td class="r '+(nowGain==null?'dim':(nowGain>=0?'g':'b'))+'">'+(nowGain==null?'—':fmt(nowGain,1)+'%')+'</td>'+
       '<td class="chip">'+(t.armed?'ARMED':'watching')+'</td></tr>'; }).join('');
   el('trail').innerHTML = tr || '<tr><td class="dim">no positions watched</td></tr>';
 

@@ -112,6 +112,22 @@ describe('profit trail state machine', () => {
         expect(observeTrail(e, 0, 5, 1)).toBeNull();
         expect(observeTrail(e, NaN, 5, 1)).toBeNull();
     });
+
+    test('records the live mark: last follows every observation, best only ratchets', () => {
+        const e = long(100);
+        observeTrail(e, 106, 5, 10);                     // arm, peak 106 (wide 10% trail — stays open)
+        expect(observeTrail(e, 100.4, 5, 10)).toBeNull(); // round-trips almost to entry, still watched
+        expect(e.best).toBe(106);                        // peak gain would still read +6%
+        expect(e.last).toBe(100.4);                      // instant gain is +0.4% — what the dashboard shows
+    });
+
+    test('bad inputs do not clobber the recorded mark', () => {
+        const e = long(100);
+        observeTrail(e, 103, 5, 1);
+        observeTrail(e, NaN, 5, 1);
+        observeTrail(e, 0, 5, 1);
+        expect(e.last).toBe(103);
+    });
 });
 
 describe('runner mode direction mapping (shorts covered)', () => {

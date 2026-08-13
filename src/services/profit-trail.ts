@@ -59,6 +59,12 @@ export interface TrailEntry {
     quantity: number;   // absolute
     best: number;       // best price seen for the position's direction
     armed: boolean;
+    /** Last observed price (refreshed each RTH cycle). The dashboard derives
+     *  the position's INSTANT gain from this — `best` only ratchets, so a
+     *  peak-based percentage would keep reading like profit after the price
+     *  gave it all back. Optional: absent on entries persisted before the
+     *  field existed, until their first observation. */
+    last?: number;
 }
 
 export interface TrailDecision {
@@ -122,6 +128,10 @@ export function observeTrail(
     pullbackPct: number,
 ): TrailDecision | null {
     if (!(price > 0) || !(e.basis > 0)) return null;
+
+    // Record the observation itself — consumers (dashboard) need the live
+    // mark, not just the ratcheting peak.
+    e.last = price;
 
     // Track the best price in the profitable direction.
     if (e.direction === 'long' ? price > e.best : price < e.best) e.best = price;
