@@ -14,6 +14,12 @@ export class TokenCounter {
     this.usage.inputTokens += usage.inputTokens;
     this.usage.outputTokens += usage.outputTokens;
     this.usage.totalTokens += usage.totalTokens;
+    if (usage.cacheReadTokens) {
+      this.usage.cacheReadTokens = (this.usage.cacheReadTokens ?? 0) + usage.cacheReadTokens;
+    }
+    if (usage.cacheCreationTokens) {
+      this.usage.cacheCreationTokens = (this.usage.cacheCreationTokens ?? 0) + usage.cacheCreationTokens;
+    }
   }
 
   /**

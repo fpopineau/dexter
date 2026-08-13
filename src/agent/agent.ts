@@ -44,6 +44,16 @@ export class Agent {
   private readonly signal?: AbortSignal;
   private readonly memoryEnabled: boolean;
   private readonly messageQueue?: MessageQueue;
+  /**
+   * Anthropic prompt caching is a strict prefix match: rewriting ANY earlier
+   * message invalidates the cache for everything after it. stripOldThinking
+   * blanks the AIMessage two turns back on EVERY iteration, so with caching on
+   * it forces a cache miss over the trailing rounds each call — the stripped
+   * text would have cost ~0.1x cached, the miss re-bills far more at full
+   * price plus the write premium. So for Anthropic we keep old reasoning text
+   * and let the cache absorb it; other providers keep the stripping behavior.
+   */
+  private readonly preserveHistoryForCache: boolean;
   private compactionFailures: number = 0;
 
   private constructor(
@@ -67,6 +77,7 @@ export class Agent {
     this.signal = config.signal;
     this.memoryEnabled = config.memoryEnabled ?? true;
     this.messageQueue = config.messageQueue;
+    this.preserveHistoryForCache = resolveProvider(this.model).id === 'anthropic';
   }
 
   static async create(config: AgentConfig = {}): Promise<Agent> {
@@ -145,8 +156,12 @@ export class Agent {
         yield { type: 'microcompact', cleared: mcResult.cleared, tokensSaved: mcResult.estimatedTokensSaved } as MicrocompactEvent;
       }
 
-      // Strip old reasoning from AIMessages (keep last 2 for continuity)
-      this.stripOldThinking(messages, 2);
+      // Strip old reasoning from AIMessages (keep last 2 for continuity).
+      // Skipped for Anthropic: the mid-history rewrite would invalidate the
+      // incremental prompt cache every iteration (see preserveHistoryForCache).
+      if (!this.preserveHistoryForCache) {
+        this.stripOldThinking(messages, 2);
+      }
 
       let response: AIMessage;
       let usage: TokenUsage | undefined;
@@ -338,11 +353,14 @@ export class Agent {
       yield { type: 'stream_progress', charDelta: 0, mode: 'tool-use' };
     }
 
+    const cacheDetails = accumulated.usage_metadata?.input_token_details;
     const usage = accumulated.usage_metadata
       ? {
           inputTokens: accumulated.usage_metadata.input_tokens ?? 0,
           outputTokens: accumulated.usage_metadata.output_tokens ?? 0,
           totalTokens: accumulated.usage_metadata.total_tokens ?? 0,
+          ...(typeof cacheDetails?.cache_read === 'number' ? { cacheReadTokens: cacheDetails.cache_read } : {}),
+          ...(typeof cacheDetails?.cache_creation === 'number' ? { cacheCreationTokens: cacheDetails.cache_creation } : {}),
         }
       : undefined;
 

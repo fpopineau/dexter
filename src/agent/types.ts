@@ -227,6 +227,10 @@ export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  /** Input tokens served from the provider's prompt cache (subset of inputTokens; ~0.1x price). */
+  cacheReadTokens?: number;
+  /** Input tokens written to the provider's prompt cache this call (subset of inputTokens; ~1.25x price). */
+  cacheCreationTokens?: number;
 }
 
 /**

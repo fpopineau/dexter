@@ -253,7 +253,18 @@ function extractUsage(result: unknown): TokenUsage | undefined {
     const input = typeof u.input_tokens === 'number' ? u.input_tokens : 0;
     const output = typeof u.output_tokens === 'number' ? u.output_tokens : 0;
     const total = typeof u.total_tokens === 'number' ? u.total_tokens : input + output;
-    return { inputTokens: input, outputTokens: output, totalTokens: total };
+    // Anthropic (via LangChain) reports the cached/uncached split here;
+    // input_tokens above is already the sum of all three buckets.
+    const details = u.input_token_details as Record<string, unknown> | undefined;
+    const cacheRead = details && typeof details.cache_read === 'number' ? details.cache_read : undefined;
+    const cacheCreation = details && typeof details.cache_creation === 'number' ? details.cache_creation : undefined;
+    return {
+      inputTokens: input,
+      outputTokens: output,
+      totalTokens: total,
+      ...(cacheRead !== undefined ? { cacheReadTokens: cacheRead } : {}),
+      ...(cacheCreation !== undefined ? { cacheCreationTokens: cacheCreation } : {}),
+    };
   }
 
   const responseMetadata = msg.response_metadata;
@@ -371,6 +382,27 @@ interface CallLlmWithMessagesOptions {
 }
 
 /**
+ * Second Anthropic cache breakpoint: the adapter applies this call option to
+ * the LAST content block of the LAST message at its final formatting layer
+ * (after ToolMessages become tool_result blocks). Together with the
+ * system-prompt breakpoint this caches the conversation incrementally —
+ * iteration N+1 of the agent loop reads back everything iteration N sent.
+ * Without it only tools+system cache, and the growing history re-bills at
+ * full input price on every iteration, which is why the org-wide cache hit
+ * rate sat low despite the system breakpoint.
+ */
+const ANTHROPIC_TAIL_CACHE = { type: 'ephemeral' as const };
+
+/** Log the cached/uncached input split so cache regressions are visible in gateway logs. */
+function logAnthropicCacheStats(usage: TokenUsage | undefined): void {
+  if (!usage) return;
+  const read = usage.cacheReadTokens ?? 0;
+  const wrote = usage.cacheCreationTokens ?? 0;
+  const uncached = usage.inputTokens - read - wrote;
+  logger.debug(`[Anthropic cache] read=${read} wrote=${wrote} uncached=${uncached} (input total ${usage.inputTokens})`);
+}
+
+/**
  * Call an LLM with a full message array (multi-turn tool-calling).
  *
  * Unlike callLlm() which takes a single prompt string, this function accepts
@@ -396,13 +428,15 @@ export async function callLlmWithMessages(
     runnable = llm.bindTools(tools);
   }
 
-  const invokeOpts = signal ? { signal } : undefined;
   const provider = resolveProvider(model);
+  const isAnthropic = provider.id === 'anthropic';
 
-  // For Anthropic: annotate SystemMessage with cache_control for prompt caching
-  const finalMessages = provider.id === 'anthropic'
-    ? annotateSystemMessageForCaching(messages)
-    : messages;
+  // Anthropic: system-prompt breakpoint (tools+system entry) plus the tail
+  // breakpoint via call option (incremental conversation caching).
+  const finalMessages = isAnthropic ? annotateSystemMessageForCaching(messages) : messages;
+  const invokeOpts = isAnthropic
+    ? { ...(signal ? { signal } : {}), cache_control: ANTHROPIC_TAIL_CACHE }
+    : signal ? { signal } : undefined;
 
   const result = await withRetry(
     () => runnable.invoke(finalMessages, invokeOpts),
@@ -410,6 +444,7 @@ export async function callLlmWithMessages(
   );
 
   const usage = extractUsage(result);
+  if (isAnthropic) logAnthropicCacheStats(usage);
   return { response: result as AIMessage, usage };
 }
 
@@ -439,16 +474,25 @@ export async function* streamLlmWithMessages(
     runnable = llm.bindTools(tools);
   }
 
-  const invokeOpts = signal ? { signal } : undefined;
   const provider = resolveProvider(model);
+  const isAnthropic = provider.id === 'anthropic';
 
-  const finalMessages = provider.id === 'anthropic'
-    ? annotateSystemMessageForCaching(messages)
-    : messages;
+  const finalMessages = isAnthropic ? annotateSystemMessageForCaching(messages) : messages;
+  const invokeOpts = isAnthropic
+    ? { ...(signal ? { signal } : {}), cache_control: ANTHROPIC_TAIL_CACHE }
+    : signal ? { signal } : undefined;
 
   const stream = await runnable.stream(finalMessages, invokeOpts);
 
+  // The message_start chunk carries the input-token split; log it once so the
+  // cache hit rate is observable on the (default) streaming path too.
+  let cacheLogged = false;
   for await (const chunk of stream) {
-    yield chunk as AIMessageChunk;
+    const c = chunk as AIMessageChunk;
+    if (isAnthropic && !cacheLogged && c.usage_metadata && c.usage_metadata.input_tokens > 0) {
+      logAnthropicCacheStats(extractUsage(c));
+      cacheLogged = true;
+    }
+    yield c;
   }
 }
