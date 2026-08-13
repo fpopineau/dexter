@@ -203,7 +203,12 @@ export function isProfitTrailEnabled(): boolean {
 async function fetchLast(symbol: string): Promise<number | null> {
     try {
         const raw = await createIbkrMarketData().invoke({ ticker: symbol, exchange: 'SMART', currency: 'USD' });
-        const data = (JSON.parse(String(raw)) as { data?: { last?: number; bid?: number; ask?: number } }).data;
+        const data = (JSON.parse(String(raw)) as { data?: { last?: number; bid?: number; ask?: number; delayed?: boolean } }).data;
+        // A delayed quote must never drive a trail decision (peak tracking
+        // and pullback closes assume the price is NOW) — skip the cycle
+        // for this symbol instead. Only matters if an instrument loses its
+        // live entitlement under IBKR_MARKET_DATA_TYPE=3.
+        if (data?.delayed) return null;
         if (data?.last && Number.isFinite(data.last) && data.last > 0) return data.last;
         if (data?.bid && data?.ask && data.bid > 0 && data.ask > 0) return (data.bid + data.ask) / 2;
         return null;

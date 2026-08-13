@@ -63,7 +63,13 @@ class ChaseRefusalError extends Error {
 async function fetchLastPrice(symbol: string): Promise<number | null> {
     try {
         const raw = await createIbkrMarketData().invoke({ ticker: symbol, exchange: 'SMART', currency: 'USD' });
-        const data = (JSON.parse(String(raw)) as { data?: { last?: number; bid?: number; ask?: number } }).data;
+        const data = (JSON.parse(String(raw)) as { data?: { last?: number; bid?: number; ask?: number; delayed?: boolean } }).data;
+        // Never gate on a delayed quote: with IBKR_MARKET_DATA_TYPE=3 an
+        // unentitled instrument degrades to ~15-min-delayed ticks, and for
+        // the chase/invalidation check a stale price treated as live would
+        // be exactly the failure the gate exists to catch. No quote → the
+        // check is skipped honestly.
+        if (data?.delayed) return null;
         if (data?.last && Number.isFinite(data.last) && data.last > 0) return data.last;
         if (data?.bid && data?.ask && data.bid > 0 && data.ask > 0) return (data.bid + data.ask) / 2;
         return null;

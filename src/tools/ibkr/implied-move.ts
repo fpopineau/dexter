@@ -55,6 +55,25 @@ export function nearestStrike(strikes: number[], spot: number): number | null {
     return best;
 }
 
+/** Fold one tickPrice event into the quote accumulator, accepting BOTH the
+ *  live tick ids and their delayed (~15 min) equivalents. The paper account
+ *  has no OPRA subscription — probe-verified 2026-08-13: live option
+ *  snapshots return nothing (error 10167), while with market data type 3
+ *  the same contracts tick delayed fields 66/67/68/75. The delay is
+ *  immaterial here: the implied move is read at evening triage, never
+ *  inside an execution path. */
+export function applyOptionTick(
+    t: { bid?: number; ask?: number; last?: number; close?: number },
+    field: number,
+    price: number,
+): void {
+    if (!(price > 0)) return;
+    if (field === 1 || field === 66) t.bid = price;
+    else if (field === 2 || field === 67) t.ask = price;
+    else if (field === 4 || field === 68) t.last = price;
+    else if (field === 9 || field === 75) t.close = price;
+}
+
 /** Usable option price from a snapshot: bid/ask mid when both sides exist,
  *  else last, else close. Null when nothing usable ticked. */
 export function midPrice(t: { bid?: number; ask?: number; last?: number; close?: number }): number | null {
@@ -177,11 +196,8 @@ async function fetchOptionMid(
         return await withTimeout(new Promise<number | null>((resolve, reject) => {
             const ticks: { bid?: number; ask?: number; last?: number; close?: number } = {};
             const onTick = (id: number, field: number, price: number) => {
-                if (id !== reqId || !(price > 0)) return;
-                if (field === 1) ticks.bid = price;
-                else if (field === 2) ticks.ask = price;
-                else if (field === 4) ticks.last = price;
-                else if (field === 9) ticks.close = price;
+                if (id !== reqId) return;
+                applyOptionTick(ticks, field, price);
                 // Both sides of the book are enough — settle immediately.
                 if (ticks.bid != null && ticks.ask != null) settle();
             };
@@ -254,8 +270,8 @@ export async function fetchImpliedMove(symbol: string, reactionDateIso?: string)
             return {
                 symbol: sym, impliedMovePct: null, expiration, strike,
                 callMid, putMid, spot,
-                note: 'option quotes unavailable — likely missing OPRA entitlement on this account; ' +
-                    'treat the implied move as unknown, not zero',
+                note: 'option quotes unavailable even via delayed ticks — check IBKR_MARKET_DATA_TYPE=3 ' +
+                    'is set (live-when-entitled, delayed otherwise); treat the implied move as unknown, not zero',
             };
         }
         return {
