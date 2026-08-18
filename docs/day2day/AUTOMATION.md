@@ -95,6 +95,12 @@ advisory; this gate is mandatory):
   2026-08-18 found ratio-manufactured targets reached 10% of the time;
   swing/earnings-bet and post-print repricing days exempt; executed trades
   now record their held MFE/MAE so the cap can be tuned from evidence),
+  the **buy-now entry-pricing filter** (intraday entries must rest a
+  pullback LMT at least max(0.1%, 0.25× the stop distance) beyond the live
+  price, or trigger a STP_LMT the same margin past it — 72/79 executed
+  entries were limits at the quote, median 47s to fill, 12% wins; each
+  proposal also records its entry context: extension ×ATR, VWAP distance,
+  day move, minutes since open),
   and the **duplicate-setup guard** (entry within 2% of an existing
   working bracket on the same symbol) — violating proposals are never
   persisted. ATR/EMA references use **completed daily bars only**, so a

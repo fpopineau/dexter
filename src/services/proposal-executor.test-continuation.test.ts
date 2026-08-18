@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { CONTINUATION_CONFIRM_FRACTION, continuationLevels } from './proposal-executor.js';
+import { continuationLevels } from './proposal-executor.js';
+import { ENTRY_CONFIRM_FRACTION } from './proposal-risk-gate.js';
 
 describe('continuationLevels (the SMCI chase-refusal fix, 2026-08-12)', () => {
     test('long: trigger a QUARTER-STOP above the live price, stop distance preserved, fresh 2:1, tick-aligned', () => {
@@ -8,7 +9,7 @@ describe('continuationLevels (the SMCI chase-refusal fix, 2026-08-12)', () => {
         const l = continuationLevels({ direction: 'long', entry: 35.91, stop: 35.21 }, 36.75, 2);
         expect(l).not.toBeNull();
         expect(l!.entry).toBeCloseTo(36.93, 2); // ceil(36.75 + 0.175)
-        expect(l!.entry - 36.75).toBeGreaterThanOrEqual(CONTINUATION_CONFIRM_FRACTION * 0.70 - 1e-9);
+        expect(l!.entry - 36.75).toBeGreaterThanOrEqual(ENTRY_CONFIRM_FRACTION * 0.70 - 1e-9);
         expect(l!.stop).toBeCloseTo(36.23, 2); // 0.70 stop distance preserved
         const dist = l!.entry - l!.stop;
         expect(l!.target - l!.entry).toBeGreaterThanOrEqual(2 * dist - 0.011); // 2:1 from ROUNDED distance
@@ -37,7 +38,7 @@ describe('continuationLevels (the SMCI chase-refusal fix, 2026-08-12)', () => {
     test('short: mirrored below the market with the same confirmation quantum', () => {
         const l = continuationLevels({ direction: 'short', entry: 40, stop: 41 }, 38.5, 2);
         expect(l).not.toBeNull();
-        expect(38.5 - l!.entry).toBeGreaterThanOrEqual(CONTINUATION_CONFIRM_FRACTION * 1.0 - 0.011);
+        expect(38.5 - l!.entry).toBeGreaterThanOrEqual(ENTRY_CONFIRM_FRACTION * 1.0 - 0.011);
         expect(l!.stop).toBeGreaterThan(l!.entry);
         expect(l!.target).toBeLessThan(l!.entry);
         expect(l!.entryLimit).toBeLessThan(l!.entry);

@@ -21,12 +21,16 @@ export interface DailyRiskContext {
     /** Reported earnings within the last session (earnings-gap exception
      *  for the extension guard). Null = could not verify → guard stays strict. */
     recentEarnings: boolean | null;
+    /** Prior COMPLETED session's close — the day-move reference for the
+     *  entry-context instrumentation (same completed-bars discipline as
+     *  ATR: today's in-progress bar never references itself). */
+    prevClose: number | null;
 }
 
 const TTL_MS = 10 * 60_000;
 const cache = new Map<string, { value: DailyRiskContext; at: number }>();
 
-const NONE: DailyRiskContext = { dailyAtr: null, ema10: null, recentEarnings: null };
+const NONE: DailyRiskContext = { dailyAtr: null, ema10: null, recentEarnings: null, prevClose: null };
 
 function lastValid(series: number[]): number | null {
     for (let i = series.length - 1; i >= 0; i--) {
@@ -67,6 +71,7 @@ export async function fetchDailyRiskContext(symbol: string): Promise<DailyRiskCo
             dailyAtr: lastValid(atr(highs, lows, closes, 14).atr),
             ema10: lastValid(ema(closes, 10)),
             recentEarnings: null,
+            prevClose: lastValid(closes),
         };
     } catch (err) {
         logger.warn(`[daily-risk-context] ${sym}: ${err instanceof Error ? err.message : String(err)} — ATR/extension checks skipped`);

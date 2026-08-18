@@ -84,6 +84,11 @@ export interface RiskGateContext {
      *  close (GTC rows, incl. kept-overnight holds). Enables the
      *  max_overnight_exposure_pct check for GTC proposals. */
     overnightExposureUsd?: number;
+    /** Live last price at CREATION, fetched server-side (delayed quotes
+     *  refused upstream — a stale price treated as live is the exact
+     *  failure this exists to catch). Enables the buy-now entry-pricing
+     *  check. Omitted = no live quote → the check skips honestly. */
+    lastPrice?: number;
     /** The proposal symbol's sector (Nasdaq taxonomy), resolved
      *  server-side. Null/omitted = unknown or sector-less (ETF) — the
      *  sector cap is skipped with a note, never guessed. */
@@ -318,6 +323,60 @@ export function checkProposalRisk(
     const rrFailed = riskReward !== null && riskReward < rules.min_risk_reward;
     if (rrFailed) {
         violations.push(`risk/reward ${riskReward}:1 is below the minimum ${rules.min_risk_reward}:1`);
+    }
+
+    // --- Entry pricing vs the live tape (buy-now chase filter) ---
+    // 72 of 79 executed entries were plain limits at the current quote,
+    // median 47 seconds from placement to fill, 12% wins (2026-08-18 entry
+    // audit): the proposal price WAS the chase — discovery scans only see
+    // stocks that already moved, and pricing the entry at the quote buys
+    // the top of the discovery move. An intraday entry must either REST
+    // beyond the market on the pullback side (the market comes to us) or
+    // DEMAND continuation via a STP_LMT trigger beyond noise. Same margin
+    // both ways: max(0.1%, ENTRY_CONFIRM_FRACTION × stop distance) — the
+    // chase-continuation trigger's own confirm arithmetic. Swing and
+    // earnings-bet entries follow different doctrines (multi-day structure,
+    // pre-print timing) and are exempt. Creation-time only: a resting
+    // pullback limit that the market later reaches is the plan WORKING,
+    // so the acceptance-time re-check must not see this. No live quote →
+    // skipped honestly (delayed quotes are refused upstream).
+    if (tradeClass === 'intraday' && ctx.lastPrice !== undefined && ctx.lastPrice > 0 && risk > 0) {
+        const last = ctx.lastPrice;
+        const margin = Math.max(0.001 * last, ENTRY_CONFIRM_FRACTION * risk);
+        const pullbackBound = p.direction === 'long'
+            ? Math.floor((last - margin) * 100) / 100
+            : Math.ceil((last + margin) * 100) / 100;
+        const triggerBound = p.direction === 'long'
+            ? Math.ceil((last + margin) * 100) / 100
+            : Math.floor((last - margin) * 100) / 100;
+        const alternatives =
+            `either rest a pullback LMT ${p.direction === 'long' ? 'at/below' : 'at/above'} ` +
+            `$${pullbackBound.toFixed(2)}, or demand continuation with a STP_LMT triggered ` +
+            `${p.direction === 'long' ? 'at/beyond' : 'at/below'} $${triggerBound.toFixed(2)} ` +
+            `moving the WHOLE bracket with it (same stop distance, target re-derived), or skip`;
+        if (p.entryType === 'MKT') {
+            violations.push(
+                `MKT is a buy-now entry with the market at ${last} — buying the discovery move at its top ` +
+                `is the record's losing pattern; ${alternatives}`,
+            );
+        } else if (p.entryType === 'LMT') {
+            const restsAway = p.direction === 'long' ? entry <= last - margin + 1e-9 : entry >= last + margin - 1e-9;
+            if (!restsAway) {
+                violations.push(
+                    `LMT ${entry} with the market at ${last} is a buy-now entry (fills on the next tick — the ` +
+                    `record's losing pattern: 72/79 entries, 12% wins); ${alternatives}`,
+                );
+            }
+        } else if (p.entryType === 'STP_LMT') {
+            const confirms = p.direction === 'long' ? entry >= last + margin - 1e-9 : entry <= last - margin + 1e-9;
+            if (!confirms) {
+                violations.push(
+                    `STP_LMT trigger ${entry} sits inside noise of the market at ${last} — a first-uptick fill, ` +
+                    `not continuation confirmation; trigger ${p.direction === 'long' ? 'at/beyond' : 'at/below'} ` +
+                    `$${triggerBound.toFixed(2)} moving the WHOLE bracket with it (same stop distance), or skip`,
+                );
+            }
+        }
     }
 
     // --- Stop distance vs daily ATR (noise-stop filter) ---
@@ -615,6 +674,16 @@ export function checkProposalRisk(
 /** Fraction of the entry→target distance the price may consume before an
  *  accept counts as chasing. */
 export const CHASE_FRACTION = 0.25;
+
+/** Confirmation margin, as a fraction of the stop distance: an entry must
+ *  sit at least max(0.1%, this × stop distance) away from the live price —
+ *  resting below it (pullback) or triggering beyond it (continuation).
+ *  Shared by the creation-time buy-now check and the chase-continuation
+ *  trigger (formerly CONTINUATION_CONFIRM_FRACTION there): "beyond noise"
+ *  is calibrated by the proposal's own stop, per-symbol for free. A flat
+ *  4-cent margin turned "don't chase at X" into "chase at X + 4 cents" and
+ *  paid a full 1R on every false breakout of a gap-fill day. */
+export const ENTRY_CONFIRM_FRACTION = 0.25;
 
 export interface PriceRunResult {
     ok: boolean;

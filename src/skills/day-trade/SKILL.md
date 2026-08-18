@@ -125,6 +125,18 @@ The signal scorer combines:
   the opening range to form and entering on its break or on the first
   pullback that holds.
 
+**Entry pricing is structural, never "buy now"** (gate-enforced since
+2026-08-18: 72 of 79 executed entries were limits at the current quote,
+median 47s to fill, 12% wins — the proposal price WAS the chase):
+- **Pullback LMT**: rest the limit at real structure BELOW the market for
+  longs (VWAP, opening-range retest, breakout level) — at least
+  max(0.1%, 0.25× the stop distance) away. The market must come to us.
+- **Confirmation STP_LMT**: trigger at least the same margin ABOVE the
+  market for longs — the trade exists only if the move continues.
+- Plain MKT / LMT at the quote is refused for intraday proposals whenever
+  a live price is available. Pick which side of the market the entry
+  belongs on from the setup, not from impatience.
+
 **Set the levels from structure, in this order — never backwards from the
 R/R requirement:**
 

@@ -92,6 +92,16 @@ export interface TradeProposal {
     mfePct: number | null;
     /** Max adverse excursion while held, % of the entry fill (≥ 0). */
     maePct: number | null;
+    // --- Entry context at creation (entry-context.ts; null = unmeasured) ---
+    /** Market extension at creation, × daily ATR beyond EMA10, signed in
+     *  the trade direction (positive = the chase side). */
+    extensionAtr: number | null;
+    /** Distance from session VWAP at creation, %, trade-direction signed. */
+    vwapDistPct: number | null;
+    /** Day move vs prior close at creation, %, trade-direction signed. */
+    dayMovePct: number | null;
+    /** Minutes since 09:30 ET at creation (negative = pre-market). */
+    minutesSinceOpen: number | null;
 }
 
 const DEFAULT_EXPIRY_MIN = 120;
@@ -243,6 +253,8 @@ export function classifyRefusalGate(reason: string): string {
     // GEOMETRY prescription mentions the reachability cap on every banded
     // refusal, which would swallow noise-stop/R:R refusals into this bucket.
     if (r.includes('does not travel that far')) return 'target-cap';
+    // Creation-time buy-now filter (LMT/MKT at the quote, STP_LMT inside noise).
+    if (r.includes('buy-now') || r.includes('first-uptick')) return 'entry-pricing';
     if (r.includes('risk/reward')) return 'risk-reward';
     if (r.includes('risk budget') && r.includes('stop-out')) return 'risk-budget';
     if (r.includes('cannot afford') || r.includes('position cap')) return 'unaffordable';
@@ -359,6 +371,14 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     // trades did not, so the reachability cap had no empirical basis).
     ['mfe_pct', 'REAL'],
     ['mae_pct', 'REAL'],
+    // Entry context at creation (2026-08-18 entry audit): the market state
+    // when the proposal was priced — extension, VWAP distance, day move,
+    // minutes since open, all signed in the trade direction. The evidence
+    // base for tuning the entry gates (extension guard, buy-now filter).
+    ['extension_atr', 'REAL'],
+    ['vwap_dist_pct', 'REAL'],
+    ['day_move_pct', 'REAL'],
+    ['minutes_since_open', 'REAL'],
 ];
 
 /** Replay/instrumentation columns added after the refusals-table release. */
@@ -419,6 +439,10 @@ interface Row {
     kept_overnight_at: number | null;
     mfe_pct: number | null;
     mae_pct: number | null;
+    extension_atr: number | null;
+    vwap_dist_pct: number | null;
+    day_move_pct: number | null;
+    minutes_since_open: number | null;
 }
 
 function fromRow(r: Row): TradeProposal {
@@ -455,6 +479,10 @@ function fromRow(r: Row): TradeProposal {
         keptOvernightAt: r.kept_overnight_at ?? null,
         mfePct: r.mfe_pct ?? null,
         maePct: r.mae_pct ?? null,
+        extensionAtr: r.extension_atr ?? null,
+        vwapDistPct: r.vwap_dist_pct ?? null,
+        dayMovePct: r.day_move_pct ?? null,
+        minutesSinceOpen: r.minutes_since_open ?? null,
     };
 }
 
@@ -482,6 +510,15 @@ export interface CreateProposalInput {
     rationale: string;
     source: string;
     expiresMinutes?: number;
+    /** Market state at creation (entry-context.ts), computed server-side
+     *  by the caller when the data is in hand. Instrumentation only —
+     *  never gates; missing fields stay null. */
+    entryContext?: {
+        extensionAtr?: number | null;
+        vwapDistPct?: number | null;
+        dayMovePct?: number | null;
+        minutesSinceOpen?: number | null;
+    };
 }
 
 /** Entries within this fraction of an existing working bracket's entry on
@@ -563,8 +600,9 @@ export async function createProposal(
         `INSERT INTO proposals
          (id, created_at, expires_at, updated_at, status, symbol, direction, entry_type,
           entry, entry_limit, stop, target, quantity, tif, trade_class, worst_case_gap_pct,
-          score, rationale, source, order_ids, note)
-         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)`,
+          score, rationale, source, order_ids, note,
+          extension_atr, vwap_dist_pct, day_move_pct, minutes_since_open)
+         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
     ).run(
         id, now, expiry, now,
         input.symbol.trim().toUpperCase(), input.direction, input.entryType,
@@ -572,6 +610,8 @@ export async function createProposal(
         input.tif === 'GTC' ? 'GTC' : 'DAY',
         tradeClass, input.worstCaseGapPct ?? null,
         input.score ?? null, input.rationale, input.source,
+        input.entryContext?.extensionAtr ?? null, input.entryContext?.vwapDistPct ?? null,
+        input.entryContext?.dayMovePct ?? null, input.entryContext?.minutesSinceOpen ?? null,
     );
 
     logger.info(`[proposals] created ${id}: ${input.direction} ${input.quantity} ${input.symbol} (source: ${input.source})`);

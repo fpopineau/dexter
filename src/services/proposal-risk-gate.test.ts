@@ -178,6 +178,85 @@ describe('noise-stop filter (daily ATR)', () => {
     });
 });
 
+describe('buy-now entry-pricing filter (2026-08-18 entry audit)', () => {
+    // Fixture geometry: stop distance 3 → margin = max(0.1% of last, 0.25×3) = 0.75.
+    // The record this kills: 72/79 executed entries were LMT at the quote,
+    // median 47s from placement to fill, 12% wins.
+    test('LMT at the quote is refused with both structural alternatives priced', () => {
+        const r = checkProposalRisk(longProposal({ stop: 97, target: 106 }), { lastPrice: 100 }, RULES);
+        expect(r.ok).toBe(false);
+        const all = r.violations.join(' ');
+        expect(all).toContain('buy-now');
+        expect(all).toContain('$99.25');  // pullback bound: floor(100 − 0.75)
+        expect(all).toContain('$100.75'); // trigger bound: ceil(100 + 0.75)
+    });
+
+    test('a marketable LMT (limit above the market for a long) is refused too', () => {
+        expect(checkProposalRisk(
+            longProposal({ entry: 100, stop: 97, target: 106 }),
+            { lastPrice: 99.5 },
+            RULES,
+        ).ok).toBe(false);
+    });
+
+    test('a pullback LMT resting a full margin below the market passes', () => {
+        const r = checkProposalRisk(longProposal({ stop: 97, target: 106 }), { lastPrice: 100.75 }, RULES);
+        expect(r.ok).toBe(true);
+        expect(r.violations).toEqual([]);
+    });
+
+    test('STP_LMT trigger inside the margin is a first-uptick fill — refused; at the margin passes', () => {
+        const refused = checkProposalRisk(
+            longProposal({ entryType: 'STP_LMT', entry: 100.3, entryLimit: 100.6, stop: 97.3, target: 106.3 }),
+            { lastPrice: 100 },
+            RULES,
+        );
+        expect(refused.ok).toBe(false);
+        expect(refused.violations.join(' ')).toContain('first-uptick');
+        const ok = checkProposalRisk(
+            longProposal({ entryType: 'STP_LMT', entry: 100.75, entryLimit: 101.05, stop: 97.75, target: 106.75 }),
+            { lastPrice: 100 },
+            RULES,
+        );
+        expect(ok.ok).toBe(true);
+    });
+
+    test('short mirrors: the pullback LMT rests ABOVE the market', () => {
+        const refused = checkProposalRisk(
+            longProposal({ direction: 'short', entry: 100, stop: 103, target: 94 }),
+            { lastPrice: 100 },
+            RULES,
+        );
+        expect(refused.ok).toBe(false);
+        expect(refused.violations.join(' ')).toContain('buy-now');
+        const ok = checkProposalRisk(
+            longProposal({ direction: 'short', entry: 100.75, stop: 103.75, target: 94.75 }),
+            { lastPrice: 100 },
+            RULES,
+        );
+        expect(ok.ok).toBe(true);
+    });
+
+    test('MKT with a live quote is refused for intraday', () => {
+        const r = checkProposalRisk(
+            longProposal({ entryType: 'MKT', stop: 97, target: 106 }),
+            { lastPrice: 100 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('MKT is a buy-now entry');
+    });
+
+    test('swing class is exempt; no live quote skips the check (fail-open)', () => {
+        expect(checkProposalRisk(
+            longProposal({ stop: 97, target: 106, tradeClass: 'swing' }),
+            { lastPrice: 100 },
+            RULES,
+        ).ok).toBe(true);
+        expect(checkProposalRisk(longProposal({ stop: 97, target: 106 }), {}, RULES).ok).toBe(true);
+    });
+});
+
 describe('target reachability cap (fantasy-target filter, 2026-08-18 audit)', () => {
     // The record this kills: 81% of 80 executed trades had planned R:R
     // pinned at ~2:1 with targets a median 6% away — manufactured from the

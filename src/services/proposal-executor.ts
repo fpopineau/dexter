@@ -22,7 +22,7 @@ import { getMarketSession, isTradeableSession } from '@/utils/market-hours.js';
 import { assertDailyLossOk } from './daily-loss-guard.js';
 import { trackExecutedProposal } from './outcome-tracker.js';
 import { getSectorInfo } from './sector-map.js';
-import { assertProposalRisk, checkPriceRun, plannedWorstLossUsd } from './proposal-risk-gate.js';
+import { assertProposalRisk, checkPriceRun, ENTRY_CONFIRM_FRACTION, plannedWorstLossUsd } from './proposal-risk-gate.js';
 import {
     claimProposalForExecution,
     countExecutedSince,
@@ -59,8 +59,10 @@ class ChaseRefusalError extends Error {
     }
 }
 
-/** Best-effort live last price (null when unavailable). */
-async function fetchLastPrice(symbol: string): Promise<number | null> {
+/** Best-effort live last price (null when unavailable). Exported for the
+ *  creation-time buy-now check and entry-context capture — same live-only
+ *  discipline everywhere (delayed quotes refused, never silently used). */
+export async function fetchLastPrice(symbol: string): Promise<number | null> {
     try {
         const raw = await createIbkrMarketData().invoke({ ticker: symbol, exchange: 'SMART', currency: 'USD' });
         const data = (JSON.parse(String(raw)) as { data?: { last?: number; bid?: number; ask?: number; delayed?: boolean } }).data;
@@ -440,15 +442,15 @@ export function isChaseContinuationEnabled(): boolean {
  *  the edge); a continuation must demand confirmation on the same scale —
  *  a 0.1%-above-last trigger is microstructure noise that converts
  *  "don't chase at X" into "chase at X + 4 cents" and pays a full 1R on
- *  every false breakout of a gap-fill day. The stop distance is the
- *  proposal's own noise calibration, so a quarter of it is "moved beyond
- *  noise", scaled per-symbol for free. */
-export const CONTINUATION_CONFIRM_FRACTION = 0.25;
+ *  every false breakout of a gap-fill day. The margin arithmetic lives in
+ *  the risk gate (ENTRY_CONFIRM_FRACTION) since 2026-08-18 — the same
+ *  "beyond noise" definition now also gates creation-time entry pricing,
+ *  and the two must never drift apart. */
 
 /** Pure: fresh continuation levels from the live price, preserving the
  *  original stop distance and re-deriving the target from the ROUNDED
  *  distance so the prescription passes its own gates. The trigger sits
- *  max(0.1%, CONTINUATION_CONFIRM_FRACTION × stop distance) beyond the
+ *  max(0.1%, ENTRY_CONFIRM_FRACTION × stop distance) beyond the
  *  live price — it fills only on continuation beyond noise, not on the
  *  first uptick. Null = degenerate. */
 export function continuationLevels(
@@ -461,7 +463,7 @@ export function continuationLevels(
     if (!(stopDist > 0)) return null;
     const c2 = (x: number) => Math.ceil(x * 100) / 100;
     const f2 = (x: number) => Math.floor(x * 100) / 100;
-    const confirm = Math.max(0.001 * last, CONTINUATION_CONFIRM_FRACTION * stopDist);
+    const confirm = Math.max(0.001 * last, ENTRY_CONFIRM_FRACTION * stopDist);
     if (p.direction === 'long') {
         const trigger = c2(last + confirm);
         const stop = f2(trigger - stopDist);

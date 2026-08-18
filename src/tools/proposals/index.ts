@@ -66,9 +66,9 @@ const CreateSchema = z.object({
     symbol: z.string().describe("US equity ticker, e.g. 'AAPL'."),
     direction: z.enum(['long', 'short']),
     entryType: z.enum(['LMT', 'MKT', 'STP_LMT']).default('LMT')
-        .describe('LMT: limit entry (mean-reversion — waits for a pullback). MKT: enter at market. STP_LMT: MOMENTUM entry — triggers at `entry` and fills up to `entryLimit`; use for continuation setups on fast movers, where a below-market limit would never fill.'),
+        .describe('LMT: PULLBACK entry — must REST away from the current price (long: below it) by at least max(0.1%, 0.25× the stop distance); the gate refuses limits at/near the quote (a buy-now order that fills on the next tick is the record\'s losing pattern). STP_LMT: CONFIRMATION entry — triggers at `entry` and fills up to `entryLimit`; the trigger must sit at least the same margin BEYOND the current price (long: above), so the trade only exists if the move continues. MKT: refused for intraday proposals when a live quote exists — buying the discovery move at its top.'),
     entry: z.coerce.number().positive()
-        .describe('Entry price. LMT: the limit. MKT: current price (indicative, risk validation). STP_LMT: the TRIGGER price (above market for longs).'),
+        .describe('Entry price. LMT: the limit — rest it at real structure BELOW the market for longs (VWAP, breakout retest), not at the quote. MKT: current price (indicative, risk validation). STP_LMT: the TRIGGER price (above market for longs, beyond the confirmation margin).'),
     entryLimit: z.coerce.number().positive().optional()
         .describe('STP_LMT only: the limit cap for the triggered entry (slightly beyond the trigger, e.g. trigger +0.3–0.6%).'),
     stop: z.coerce.number().positive()
@@ -148,7 +148,28 @@ export function createTradeProposalsTool() {
                         // Server-side daily ATR + EMA10 for the noise-stop
                         // and extension checks — never taken from the model.
                         // Fail-open (nulls skip the checks).
-                        const { dailyAtr, ema10, recentEarnings } = await fetchDailyRiskContext(input.symbol);
+                        const { dailyAtr, ema10, recentEarnings, prevClose } = await fetchDailyRiskContext(input.symbol);
+
+                        // Live last price (never delayed) for the buy-now
+                        // entry-pricing check, plus session VWAP — both
+                        // server-side, both fail-open. Skipped in tests
+                        // (IBKR-dependent, same as the daily context).
+                        const lastPrice = process.env.NODE_ENV === 'test'
+                            ? null
+                            : await import('@/services/proposal-executor.js')
+                                .then((m) => m.fetchLastPrice(input.symbol)).catch(() => null);
+                        const { buildEntryContext, fetchSessionVwap, minutesSinceOpenEt } =
+                            await import('@/services/entry-context.js');
+                        const vwap = await fetchSessionVwap(input.symbol).catch(() => null);
+                        // Context is measured at the LIVE price when we have
+                        // one (the market state at proposal time); the
+                        // proposed entry stands in otherwise.
+                        const entryContext = buildEntryContext({
+                            direction: input.direction,
+                            ref: lastPrice ?? input.entry,
+                            dailyAtr, ema10, prevClose, vwap,
+                            minutesSinceOpen: minutesSinceOpenEt(),
+                        });
 
                         // Earnings bets: server-fetched evidence for the
                         // LIVE-GATE checks. Fail-CLOSED, unlike the ATR
@@ -206,9 +227,15 @@ export function createTradeProposalsTool() {
                             rationale: input.rationale,
                             source: 'agent',
                             expiresMinutes: input.expiresMinutes,
+                            entryContext,
                         }, {
                             ...(dailyAtr != null ? { dailyAtr } : {}),
                             ...(ema10 != null ? { ema10 } : {}),
+                            // Live-only quote: enables the buy-now entry-
+                            // pricing check (intraday LMT must rest away
+                            // from the market; STP_LMT must trigger beyond
+                            // noise). Null → check skips honestly.
+                            ...(lastPrice != null ? { lastPrice } : {}),
                             // Only a VERIFIED report waives the extension
                             // guard; null (couldn't verify) stays strict.
                             ...(recentEarnings === true ? { recentEarnings: true } : {}),

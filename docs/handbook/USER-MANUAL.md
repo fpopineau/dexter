@@ -326,7 +326,10 @@ R/R < `min_risk_reward`, entry < `min_price`, an incoherent stop/target, a
 stop closer than `min_stop_atr_fraction` × the daily ATR (noise-stop filter),
 an intraday target further than `max_target_atr` × ATR from entry
 (reachability cap — swing/earnings-bet classes and post-print repricing
-days exempt), an entry more than `max_extension_atr` × ATR beyond the
+days exempt), an intraday entry priced AT the market (buy-now filter —
+a LMT must rest a pullback at least max(0.1%, 0.25× the stop distance)
+away from the live price, a STP_LMT must trigger the same margin beyond
+it), an entry more than `max_extension_atr` × ATR beyond the
 10-day EMA (extension guard — no chasing), an entry within 2% of an
 existing working bracket on the same symbol (duplicate-setup guard — the
 daily brief re-proposing yesterday's trigger), or a fractional quantity is
