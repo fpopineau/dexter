@@ -337,13 +337,47 @@ export function checkProposalRisk(
         }
     }
 
-    // --- Prescriptive geometry on stop/R:R refusals ---
+    // --- Target reachability (fantasy-target filter, intraday class only) ---
+    // The mirror of the noise-stop check. 82-trade audit (2026-08-18): 81%
+    // of planned R:R sat pinned at ~2:1 with targets a median 6% from entry
+    // — manufactured from the ratio, not read from structure — and only 10%
+    // were ever reached (33% is breakeven at 2:1). A DAY trade's target must
+    // sit where price can actually travel in a fraction of one session.
+    // Swing (multi-day) and earnings-bet (gap-sized) classes legitimately
+    // target further; a post-print repricing day gets the same waiver as the
+    // extension guard (the pre-gap ATR is the wrong yardstick there too).
+    let targetCapFailed = false;
+    const targetCapEligible = tradeClass === 'intraday'
+        && ctx.dailyAtr !== undefined && ctx.dailyAtr > 0 && rules.max_target_atr > 0;
+    const targetCapActive = targetCapEligible && ctx.recentEarnings !== true;
+    if (targetCapEligible && ctx.dailyAtr !== undefined && reward > rules.max_target_atr * ctx.dailyAtr + 1e-9) {
+        if (!targetCapActive) {
+            notes.push(
+                `target-reachability check waived for ${p.symbol}: target ${(reward / ctx.dailyAtr).toFixed(1)}× daily ATR ` +
+                `from entry, but the symbol reported earnings within the last session (repricing day)`,
+            );
+        } else {
+            targetCapFailed = true;
+            violations.push(
+                `target ${p.target} is $${reward.toFixed(2)} from entry — ${(reward / ctx.dailyAtr).toFixed(1)}× the daily ` +
+                `ATR ($${ctx.dailyAtr.toFixed(2)}) on an intraday trade (max ${rules.max_target_atr}×). Price does not ` +
+                `travel that far in a fraction of one session: pick a nearer HONEST objective and tighten the stop to ` +
+                `keep ${rules.min_risk_reward}:1 (or make it a swing with swing-class vetting), or skip`,
+            );
+        }
+    }
+
+    // --- Prescriptive geometry on stop/R:R/target refusals ---
     // Live failure (Jul 30, MU +18%): each refusal message described only its
     // own constraint, so the model fixed the stop and broke R/R, then fixed
     // R/R and broke the stop — three incompatible retries, then surrender,
     // while the jointly-valid trade existed (and its target was hit). Hand
-    // over the solved system: the tightest geometry satisfying BOTH rules.
-    if ((noiseStopFailed || rrFailed) && ctx.dailyAtr !== undefined && ctx.dailyAtr > 0) {
+    // over the solved system — and lead with the SKIP branch: the old
+    // one-sided "target at/beyond $X" prescription is how 81% of the
+    // executed record ended up with ratio-manufactured targets (2026-08-18
+    // audit). The honest-objective question comes first; the numbers only
+    // matter if the answer is yes.
+    if ((noiseStopFailed || rrFailed || targetCapFailed) && ctx.dailyAtr !== undefined && ctx.dailyAtr > 0) {
         const minStop = rules.min_stop_atr_fraction * ctx.dailyAtr;
         // Bounds rounded AWAY from entry, and the target derived from the
         // ROUNDED stop distance — following the prescription verbatim must
@@ -357,12 +391,38 @@ export function checkProposalRisk(
         const targetBound = p.direction === 'long'
             ? Math.ceil((entry + rules.min_risk_reward * stopDist) * 100) / 100
             : Math.floor((entry - rules.min_risk_reward * stopDist) * 100) / 100;
-        violations.push(
-            `VIABLE GEOMETRY for ${p.direction} ${p.symbol} at $${entry}: stop at/beyond ` +
-            `$${stopBound.toFixed(2)} AND target at/beyond $${targetBound.toFixed(2)} — both together ` +
-            `(a wider stop needs a proportionally farther target for ${rules.min_risk_reward}:1). ` +
-            `If that target is not honestly reachable, SKIP the symbol instead of shrinking the stop`,
-        );
+        if (targetCapActive && ctx.dailyAtr !== undefined) {
+            // Both-bounded band: the reachability cap bounds the target from
+            // above, which bounds the stop distance at cap/min_rr from below
+            // (inner-rounded so obeying the band verbatim passes both ends).
+            const maxReward = rules.max_target_atr * ctx.dailyAtr;
+            const targetCap = p.direction === 'long'
+                ? Math.floor((entry + maxReward) * 100) / 100
+                : Math.ceil((entry - maxReward) * 100) / 100;
+            const maxStop = maxReward / rules.min_risk_reward;
+            const stopFarBound = p.direction === 'long'
+                ? Math.ceil((entry - maxStop) * 100) / 100
+                : Math.floor((entry + maxStop) * 100) / 100;
+            violations.push(
+                `VIABLE GEOMETRY for ${p.direction} ${p.symbol} at $${entry}: FIRST — does an honest objective ` +
+                `(prior high/low, measured move, gap fill) sit between $${targetBound.toFixed(2)} and ` +
+                `$${targetCap.toFixed(2)}? If not, SKIP the symbol; never stretch the target to manufacture ` +
+                `${rules.min_risk_reward}:1. If yes: stop at real structure between $${stopFarBound.toFixed(2)} and ` +
+                `$${stopBound.toFixed(2)}, target at/beyond ${rules.min_risk_reward}× the stop distance and never ` +
+                `past $${targetCap.toFixed(2)} (${rules.max_target_atr}× daily ATR — the reachability cap). ` +
+                `E.g. stop $${stopBound.toFixed(2)} → target $${targetBound.toFixed(2)}`,
+            );
+        } else {
+            // No reachability cap for this class (swing / earnings-bet) or
+            // day (post-print repricing): one-sided bounds, still skip-first.
+            violations.push(
+                `VIABLE GEOMETRY for ${p.direction} ${p.symbol} at $${entry}: FIRST — is there an honest objective ` +
+                `at/beyond $${targetBound.toFixed(2)}? If not, SKIP the symbol; never stretch the target to ` +
+                `manufacture ${rules.min_risk_reward}:1. If yes: stop at/beyond $${stopBound.toFixed(2)} AND target ` +
+                `at/beyond $${targetBound.toFixed(2)} — both together (a wider stop needs a proportionally farther ` +
+                `target for ${rules.min_risk_reward}:1)`,
+            );
+        }
     }
 
     // --- Extension guard (chasing filter) ---

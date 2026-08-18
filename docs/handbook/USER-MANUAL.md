@@ -181,6 +181,7 @@ max_open_positions: 10       # hard-enforced at acceptance
 min_risk_reward: 2.0         # hard-enforced at creation
 min_stop_atr_fraction: 0.4   # stop must be ≥ 0.4 × daily ATR from entry (noise filter)
 max_extension_atr: 3         # refuse entries > 3 × ATR beyond the 10-day EMA (chasing)
+max_target_atr: 1.5          # refuse intraday targets > 1.5 × ATR from entry (reachability cap)
 max_risk_per_trade_pct: 0.25 # max loss-if-stopped per trade, % of NetLiq
 min_price: 5.0               # hard-enforced at creation
 # sector/overnight limits: advisory (risk_manager tool in prompts)
@@ -323,11 +324,13 @@ see the per-class lines in `performance` reports for that ledger.
 **The risk gate at creation** silently protects you: any proposal with
 R/R < `min_risk_reward`, entry < `min_price`, an incoherent stop/target, a
 stop closer than `min_stop_atr_fraction` × the daily ATR (noise-stop filter),
-an entry more than `max_extension_atr` × ATR beyond the 10-day EMA (extension
-guard — no chasing), an entry within 2% of an existing working bracket on
-the same symbol (duplicate-setup guard — the daily brief re-proposing
-yesterday's trigger), or a fractional quantity is refused before it is
-stored. The agent sees the violation list and must fix the numbers. The
+an intraday target further than `max_target_atr` × ATR from entry
+(reachability cap — swing/earnings-bet classes and post-print repricing
+days exempt), an entry more than `max_extension_atr` × ATR beyond the
+10-day EMA (extension guard — no chasing), an entry within 2% of an
+existing working bracket on the same symbol (duplicate-setup guard — the
+daily brief re-proposing yesterday's trigger), or a fractional quantity is
+refused before it is stored. The agent sees the violation list and must fix the numbers. The
 ATR and EMA references are computed from **completed daily bars only** —
 on a gap day the in-progress bar would inflate ATR and let the gap grant
 itself permission to be chased.

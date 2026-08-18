@@ -34,9 +34,10 @@
  */
 
 import { allocReqId, getIBApi, isNonFatalIbkrError, onReconnect } from '@/tools/ibkr/connection.js';
+import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
 import { logger } from '@/utils';
 import type { CommissionReport, Contract, Execution, IBApi } from '@stoqey/ib';
-import { EventName } from '@stoqey/ib';
+import { BarSizeSetting, EventName } from '@stoqey/ib';
 import {
     closeProposal,
     convertToOvernightHold,
@@ -44,6 +45,7 @@ import {
     listTrackable,
     markEntryFilled,
     recordLateExitFill,
+    recordTradeExcursion,
     type ExitReason,
     type TradeProposal,
 } from './trade-proposals.js';
@@ -99,6 +101,54 @@ export function assessStopExitFill(
     const beyond = direction === 'long' ? stop - exitFill : exitFill - stop;
     const beyondStopR = Math.round((beyond / stopDist) * 10) / 10;
     return { suspect: beyondStopR > SUSPECT_FILL_STOP_MULT, beyondStopR };
+}
+
+/**
+ * Max favorable/adverse excursion of a held position across its bars, % of
+ * the entry fill (both ≥ 0, 2 decimals) — the executed-trade counterpart of
+ * replayBracket's MFE/MAE, same convention. This is the empirical answer to
+ * "how far did price actually go while we held?" and the tuning input for
+ * max_target_atr: targets belong where the excursion record says price
+ * demonstrably goes, not where the R/R ratio needs them to be (2026-08-18
+ * audit: ratio-manufactured targets were reached 10% of the time).
+ * Bar-resolution approximation: the first bar may include pre-fill range.
+ * Null when no usable bars.
+ */
+export function computeTradeExcursion(
+    direction: 'long' | 'short',
+    entryFill: number,
+    bars: Array<{ high?: number; low?: number }>,
+): { mfePct: number | null; maePct: number | null } {
+    if (!(entryFill > 0)) return { mfePct: null, maePct: null };
+    let fav = 0;
+    let adv = 0;
+    let seen = false;
+    for (const b of bars) {
+        if (typeof b.high !== 'number' || typeof b.low !== 'number' || !(b.high > 0) || !(b.low > 0)) continue;
+        seen = true;
+        fav = Math.max(fav, direction === 'long' ? b.high - entryFill : entryFill - b.low);
+        adv = Math.max(adv, direction === 'long' ? entryFill - b.low : b.high - entryFill);
+    }
+    if (!seen) return { mfePct: null, maePct: null };
+    return {
+        mfePct: Math.round((fav / entryFill) * 10000) / 100,
+        maePct: Math.round((adv / entryFill) * 10000) / 100,
+    };
+}
+
+/** IBKR intraday bar time ('yyyymmdd  HH:MM:SS', ET components) → ms in a
+ *  fictional UTC-from-ET frame. Daily bars (date only) → null. */
+export function barTimeFrameMs(barTime: string | undefined): number | null {
+    const m = /^(\d{4})(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/.exec((barTime ?? '').trim());
+    if (!m) return null;
+    return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+}
+
+/** Epoch ms → the same fictional UTC-from-ET frame, so epoch timestamps and
+ *  bar times compare directly and DST-correctly (assessBarFreshness pattern). */
+export function etFrameMs(epochMs: number): number {
+    const et = new Date(new Date(epochMs).toLocaleString('en-US', { timeZone: 'America/New_York' }));
+    return Date.UTC(et.getFullYear(), et.getMonth(), et.getDate(), et.getHours(), et.getMinutes(), et.getSeconds());
 }
 
 /** IBKR sends this sentinel for "no value" numeric fields. */
@@ -195,6 +245,40 @@ function unregister(trade: TrackedTrade): void {
     byOrderId.delete(trade.stopOrderId);
     for (const execId of trade.execIds) byExecId.delete(execId);
     if (trade.finalizeTimer) clearTimeout(trade.finalizeTimer);
+}
+
+/**
+ * Fetch the hold window's bars and persist the trade's MFE/MAE. Called
+ * fire-and-forget after a close: seconds of latency and any failure must
+ * never touch the close path — unmeasured stays null, never guessed.
+ */
+async function captureTradeExcursion(proposalId: string): Promise<void> {
+    const p = await getProposal(proposalId);
+    if (!p || p.entryFillPrice == null || p.entryFilledAt == null) return;
+    const holdDays = Math.max(1, Math.ceil((Date.now() - p.entryFilledAt) / 86_400_000));
+    // max(high)/min(low) over the hold is bar-size invariant, so coarser
+    // bars on longer holds lose nothing except fill-boundary precision.
+    const barSize = holdDays <= 2 ? BarSizeSetting.MINUTES_ONE
+        : holdDays <= 7 ? BarSizeSetting.MINUTES_FIVE
+        : BarSizeSetting.MINUTES_FIFTEEN;
+    const barMs = barSize === BarSizeSetting.MINUTES_ONE ? 60_000
+        : barSize === BarSizeSetting.MINUTES_FIVE ? 300_000 : 900_000;
+    // Extended hours included: for kept-overnight holds the gap IS the
+    // excursion (RUM 2026-08-12 banked its target on the open gap).
+    const bars = await fetchBars(p.symbol, barSize, `${Math.min(holdDays + 1, 30)} D`, false);
+    const fillFrameMs = etFrameMs(p.entryFilledAt);
+    // Keep bars overlapping the hold: from the bar containing the fill on.
+    const held = bars.filter((b) => {
+        const t = barTimeFrameMs(b.time);
+        return t !== null && t >= fillFrameMs - barMs;
+    });
+    const { mfePct, maePct } = computeTradeExcursion(p.direction, p.entryFillPrice, held);
+    if (mfePct === null || maePct === null) {
+        logger.warn(`[outcome-tracker] ${proposalId} ${p.symbol}: no usable bars for excursion (${bars.length} fetched)`);
+        return;
+    }
+    await recordTradeExcursion(proposalId, mfePct, maePct);
+    logger.info(`[outcome-tracker] ${proposalId} ${p.symbol} held-trade excursion: MFE ${mfePct}% MAE ${maePct}% (${held.length} bars)`);
 }
 
 async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string): Promise<void> {
@@ -330,6 +414,14 @@ async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string):
         (realizedPnl !== undefined ? ` pnl ${realizedPnl}` : '') +
         (trade.commissions ? ` (commissions ${trade.commissions.toFixed(2)})` : ''),
     );
+
+    // Held-trade MFE/MAE — where price actually went while we held, the
+    // empirical basis for tuning max_target_atr. Fire-and-forget (bars take
+    // seconds; a failure leaves honest nulls). Test-gated: IBKR-dependent.
+    if (process.env.NODE_ENV !== 'test' && reason !== 'cancelled' && trade.entryAvgPrice != null) {
+        void captureTradeExcursion(trade.proposalId).catch((err) =>
+            logger.warn(`[outcome-tracker] ${trade.proposalId} excursion capture failed: ${err}`));
+    }
 
     const proposal = await getProposal(trade.proposalId).catch(() => null);
 

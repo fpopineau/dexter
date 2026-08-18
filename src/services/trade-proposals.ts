@@ -85,6 +85,13 @@ export interface TradeProposal {
      *  still triaged daily, and the eventual GTC exit fill attributes its
      *  P&L here instead of vanishing (the orphaned-keep hole). */
     keptOvernightAt: number | null;
+    /** Max favorable excursion while held, % of the entry fill (≥ 0).
+     *  Written post-close by the outcome tracker from historical bars
+     *  (bar-resolution approximation, extended hours included). Null =
+     *  not measured (bars unavailable, entry never filled). */
+    mfePct: number | null;
+    /** Max adverse excursion while held, % of the entry fill (≥ 0). */
+    maePct: number | null;
 }
 
 const DEFAULT_EXPIRY_MIN = 120;
@@ -232,6 +239,10 @@ export function classifyRefusalGate(reason: string): string {
     // vs "setup invalidated: last … is at/through the stop".
     if (r.includes('price has run')) return 'chase';
     if (r.includes('setup invalidated')) return 'invalidated';
+    // Match the cap's own violation text, NOT 'reachability' — the VIABLE
+    // GEOMETRY prescription mentions the reachability cap on every banded
+    // refusal, which would swallow noise-stop/R:R refusals into this bucket.
+    if (r.includes('does not travel that far')) return 'target-cap';
     if (r.includes('risk/reward')) return 'risk-reward';
     if (r.includes('risk budget') && r.includes('stop-out')) return 'risk-budget';
     if (r.includes('cannot afford') || r.includes('position cap')) return 'unaffordable';
@@ -342,6 +353,12 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     ['trade_class', 'TEXT'],
     ['worst_case_gap_pct', 'REAL'],
     ['kept_overnight_at', 'INTEGER'],
+    // Held-trade excursions (2026-08-18): how far price actually went
+    // for/against the position while held — the tuning data for
+    // max_target_atr (refusals already carry replay MFE/MAE; executed
+    // trades did not, so the reachability cap had no empirical basis).
+    ['mfe_pct', 'REAL'],
+    ['mae_pct', 'REAL'],
 ];
 
 /** Replay/instrumentation columns added after the refusals-table release. */
@@ -400,6 +417,8 @@ interface Row {
     commissions: number | null;
     closed_at: number | null;
     kept_overnight_at: number | null;
+    mfe_pct: number | null;
+    mae_pct: number | null;
 }
 
 function fromRow(r: Row): TradeProposal {
@@ -434,6 +453,8 @@ function fromRow(r: Row): TradeProposal {
         commissions: r.commissions ?? null,
         closedAt: r.closed_at ?? null,
         keptOvernightAt: r.kept_overnight_at ?? null,
+        mfePct: r.mfe_pct ?? null,
+        maePct: r.mae_pct ?? null,
     };
 }
 
@@ -702,6 +723,19 @@ export async function recordLateExitFill(
         id.trim().toUpperCase(),
     );
     logger.info(`[proposals] late exit fill recorded for ${id.toUpperCase()} (pnl ${input.realizedPnl})`);
+}
+
+/**
+ * Held-trade excursion (MFE/MAE, % of entry fill) — written by the outcome
+ * tracker after the close, from historical bars over the hold window. Kept
+ * separate from closeProposal: the bars fetch takes seconds and must never
+ * delay or block the close path (nulls stay honest when it fails).
+ */
+export async function recordTradeExcursion(id: string, mfePct: number, maePct: number): Promise<void> {
+    const database = await getDb();
+    database.query<void>(
+        `UPDATE proposals SET mfe_pct = ?, mae_pct = ?, updated_at = ? WHERE id = ?`,
+    ).run(mfePct, maePct, Date.now(), id.trim().toUpperCase());
 }
 
 /** Executed proposals that have not been closed — what the tracker watches. */

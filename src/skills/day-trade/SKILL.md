@@ -132,11 +132,16 @@ R/R requirement:**
    breakout base, or VWAP — the price where the setup is objectively wrong.
    It must be at least **0.4× the daily ATR** away from entry (the proposal
    gate enforces this): a tighter stop sits inside ordinary intraday noise
-   and fills on randomness even when the idea is right. Sanity band:
-   0.4–1.5× daily ATR.
+   and fills on randomness even when the idea is right. And no wider than
+   **0.75× the daily ATR** for an intraday trade — the 2:1 target on a wider
+   stop lands beyond the reachability cap below. Structure that only exists
+   further away means the trade is a swing (swing-class vetting) or no trade.
 2. **Target at a real objective**: prior high/low, measured move, gap fill.
    If the honest objective is closer than 2× the stop distance, there is no
    trade — do NOT stretch the target or tighten the stop to manufacture 2:1.
+   The gate also refuses intraday targets further than **1.5× the daily ATR**
+   from entry (max_target_atr): price does not travel 2-3 ATRs in a fraction
+   of one session — the 82-trade record hit such targets 10% of the time.
 3. **Size from the risk budget**: `shares = floor(per-trade risk budget /
    (entry − stop))`, where the budget is `max_risk_per_trade_pct` of NetLiq
    FROM THE ACTIVE PROFILE (0.25% paper, 1.0% live — never hardcode either
@@ -148,8 +153,8 @@ Call `risk_manager` for each trade candidate:
 - **Ticker:** The candidate
 - **Direction:** long/short
 - **Entry price:** Current price from TA data
-- **Stop price:** From structure as above (typically entry ± 1–1.5× ATR)
-- **Target price:** The real objective (must give ≥ 2:1 vs the stop)
+- **Stop price:** From structure as above (intraday: 0.4–0.75× daily ATR)
+- **Target price:** The real objective (≥ 2:1 vs the stop, ≤ 1.5× daily ATR away)
 - **Score / tradeClass:** pass them — the suggestion then previews the
   exact size the executor's sizer will compute at acceptance
 

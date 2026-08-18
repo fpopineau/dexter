@@ -178,6 +178,79 @@ describe('noise-stop filter (daily ATR)', () => {
     });
 });
 
+describe('target reachability cap (fantasy-target filter, 2026-08-18 audit)', () => {
+    // The record this kills: 81% of 80 executed trades had planned R:R
+    // pinned at ~2:1 with targets a median 6% away — manufactured from the
+    // ratio — and only 10% were ever reached (33% is breakeven at 2:1).
+    test('an intraday target beyond 1.5× daily ATR is refused, with the multiple named', () => {
+        // Fixture geometry: stop dist 3 (0.6× ATR, fine), target 12 away = 2.4× ATR.
+        const r = checkProposalRisk(
+            longProposal({ stop: 97, target: 112 }),
+            { dailyAtr: 5 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        const all = r.violations.join(' ');
+        expect(all).toContain('2.4× the daily ATR');
+        expect(all).toContain('max 1.5×');
+        expect(all).toContain('VIABLE GEOMETRY'); // the solved band comes along
+    });
+
+    test('short mirror: target 2.4× ATR below entry is refused', () => {
+        const r = checkProposalRisk(
+            longProposal({ direction: 'short', entry: 100, stop: 103, target: 88 }),
+            { dailyAtr: 5 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('2.4× the daily ATR');
+    });
+
+    test('a target exactly at the cap passes (0.75× ATR stop, 2:1)', () => {
+        const r = checkProposalRisk(
+            longProposal({ stop: 96.25, target: 107.5 }),
+            { dailyAtr: 5 },
+            RULES,
+        );
+        expect(r.ok).toBe(true);
+        expect(r.violations).toEqual([]);
+    });
+
+    test('swing and earnings-bet classes are exempt — multi-day/gap-sized targets are legitimate', () => {
+        const swing = checkProposalRisk(
+            longProposal({ stop: 97, target: 112, tradeClass: 'swing' }),
+            { dailyAtr: 5 },
+            RULES,
+        );
+        expect(swing.ok).toBe(true);
+        const bet = checkProposalRisk(
+            longProposal({ stop: 97, target: 112, tradeClass: 'earnings-bet' }),
+            { dailyAtr: 5 },
+            { ...RULES, earnings_bet_enabled: true },
+        );
+        expect(bet.ok).toBe(true);
+    });
+
+    test('a post-print repricing day waives the cap with a visible note (extension-guard parity)', () => {
+        const r = checkProposalRisk(
+            longProposal({ stop: 97, target: 112 }),
+            { dailyAtr: 5, recentEarnings: true },
+            RULES,
+        );
+        expect(r.ok).toBe(true);
+        expect(r.notes.join(' ')).toContain('target-reachability check waived');
+    });
+
+    test('no ATR skips the check; max_target_atr 0 disables it', () => {
+        expect(checkProposalRisk(longProposal({ stop: 97, target: 112 }), {}, RULES).ok).toBe(true);
+        expect(checkProposalRisk(
+            longProposal({ stop: 97, target: 112 }),
+            { dailyAtr: 5 },
+            { ...RULES, max_target_atr: 0 },
+        ).ok).toBe(true);
+    });
+});
+
 describe('extension guard (chasing filter)', () => {
     test('long entry far above the 10-day EMA is refused', () => {
         // The live pattern this kills: AEHR bought at 101.87 after doubling —
@@ -203,16 +276,19 @@ describe('extension guard (chasing filter)', () => {
     });
 
     test('modest extension passes; missing context skips the check', () => {
-        // 2 ATR above the mean — within the 3× allowance
-        const ok = checkProposalRisk(longProposal(), { dailyAtr: 5, ema10: 90 }, RULES);
+        // 2 ATR above the mean — within the 3× allowance. Stop/target kept
+        // inside the ATR-5 geometry band (the fixture's 95/110 pair is a
+        // 2×ATR target — a reachability refusal, tested in its own suite).
+        const inBand = { stop: 97, target: 106 };
+        const ok = checkProposalRisk(longProposal(inBand), { dailyAtr: 5, ema10: 90 }, RULES);
         expect(ok.ok).toBe(true);
         // ATR present but no EMA → check skipped (fail-open)
-        const skipped = checkProposalRisk(longProposal(), { dailyAtr: 5 }, RULES);
+        const skipped = checkProposalRisk(longProposal(inBand), { dailyAtr: 5 }, RULES);
         expect(skipped.ok).toBe(true);
     });
 
     test('a pullback entry BELOW the mean is never "extended" for a long', () => {
-        const r = checkProposalRisk(longProposal(), { dailyAtr: 5, ema10: 120 }, RULES);
+        const r = checkProposalRisk(longProposal({ stop: 97, target: 106 }), { dailyAtr: 5, ema10: 120 }, RULES);
         expect(r.ok).toBe(true); // entry 100 under EMA 120 → negative extension
     });
 });
@@ -343,6 +419,31 @@ describe('prescriptive refusal geometry (Jul 30 MU failure)', () => {
         expect(all).toContain('$755.66'); // 790 − 0.4×85.85
         expect(all).toContain('$858.68'); // 790 + 2×0.4×85.85
         expect(all).toContain('SKIP');
+    });
+
+    test('the intraday prescription is a BAND, skip-first: reachability cap and widest stop included', () => {
+        const r = checkProposalRisk(
+            longProposal({ entry: 790, stop: 784, target: 825, quantity: 1 }),
+            { dailyAtr: 85.85 },
+            RULES,
+        );
+        const all = r.violations.join(' ');
+        // The honest-objective question leads; the numbers follow.
+        expect(all).toContain('FIRST');
+        expect(all).toContain('$918.77'); // target cap: 790 + 1.5×85.85, floor
+        expect(all).toContain('$725.62'); // widest stop: 790 − 1.5×85.85/2, ceil
+    });
+
+    test('obeying the band edges verbatim passes (widest stop + its 2× target)', () => {
+        // Stop at the far edge $725.62 (dist 64.38), target 2× that = $918.76
+        // — inside the $918.77 cap. Inner rounding must make this pass.
+        const r = checkProposalRisk(
+            longProposal({ entry: 790, stop: 725.62, target: 918.76, quantity: 1 }),
+            { dailyAtr: 85.85 },
+            RULES,
+        );
+        expect(r.ok).toBe(true);
+        expect(r.violations).toEqual([]);
     });
 
     test('R/R-only refusal also gets the solved geometry when ATR is known', () => {

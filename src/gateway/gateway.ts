@@ -349,6 +349,19 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
           `Align max_daily_loss_pct with the class budgets (risk-rules yaml) or accept the tighter effective book.`,
         );
       }
+      // Empty intraday geometry band: the tightest legal stop already
+      // demands a target past the reachability cap — every ATR-checked
+      // intraday proposal would be refused, which looks like a dead pipeline
+      // rather than a config contradiction.
+      if (rules.max_target_atr > 0
+        && rules.min_stop_atr_fraction * rules.min_risk_reward > rules.max_target_atr) {
+        debugLog(
+          `[gateway] RISK-CONFIG WARNING: min_stop_atr_fraction (${rules.min_stop_atr_fraction}) × ` +
+          `min_risk_reward (${rules.min_risk_reward}) exceeds max_target_atr (${rules.max_target_atr}) — ` +
+          `the intraday stop/target band is EMPTY and every proposal with ATR context will be refused. ` +
+          `Raise max_target_atr or lower the other two (risk-rules yaml).`,
+        );
+      }
     }
     if (isOpportunityEngineEnabled()) {
       registerTriggerAlerts();

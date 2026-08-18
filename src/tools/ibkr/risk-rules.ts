@@ -54,6 +54,14 @@ export interface RiskRules {
     max_risk_per_trade_pct: number;
     min_stop_atr_fraction: number;
     max_extension_atr: number;
+    /** Reachability cap: refuse intraday-class targets further than this ×
+     *  daily ATR from entry. The mirror of min_stop_atr_fraction — that one
+     *  stops the stop from sitting inside noise, this one stops the target
+     *  from sitting where price does not go in a fraction of one session
+     *  (82-trade audit 2026-08-18: ratio-manufactured targets at 2-3× ATR
+     *  were hit 10% of the time vs the 33% breakeven at 2:1). Swing and
+     *  earnings-bet classes are exempt; 0 disables. */
+    max_target_atr: number;
     /** Fallback trail thresholds (absolute %), used only when the symbol's
      *  daily ATR is unavailable — with ATR known, the *_atr_mult keys below
      *  define the geometry. */
@@ -130,6 +138,7 @@ export const DEFAULT_RULES: RiskRules = {
     max_risk_per_trade_pct: 0.25,
     min_stop_atr_fraction: 0.4,
     max_extension_atr: 3,
+    max_target_atr: 1.5,
     profit_trail_arm_pct: 5,
     // 1.5 matches risk-rules.yaml — this fallback diverging at 1 meant a
     // YAML load failure silently tightened the trail by 33% (audit 2026-08-11).

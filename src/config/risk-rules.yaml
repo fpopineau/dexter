@@ -30,6 +30,16 @@ min_avg_volume: 500000 # Minimum average daily volume
 stop_atr_multiplier: 1.5 # Default stop = entry ± 1.5 × ATR
 min_stop_atr_fraction: 0.4 # Refuse stops closer than this × daily ATR(14) — inside intraday noise
 max_extension_atr: 3 # Refuse entries further than this × daily ATR beyond the 10-day EMA (chasing)
+# Refuse INTRADAY-class targets further than this × daily ATR from entry — the
+# reachability cap. 82-trade audit (2026-08-18): 81% of planned R:R sat pinned at
+# ~2:1 with targets a median 6% from entry (manufactured from the ratio, not read
+# from structure) and only 10% were ever reached — 33% is breakeven at 2:1. A DAY
+# trade cannot expect 2-3 daily ATRs of travel in a fraction of one session.
+# Implies intraday stops live in [min_stop_atr_fraction, max_target_atr/min_risk_reward]
+# × ATR (0.4-0.75 at defaults). Swing/earnings-bet classes and post-earnings
+# repricing days are exempt. 0 disables. Tune from executed-trade MFE once
+# a few weeks of excursion data accumulate.
+max_target_atr: 1.5
 
 # --- Per-Trade Risk Budget ---
 max_risk_per_trade_pct: 0.25 # Max loss if the stop fills (qty × stop distance), as % of net liquidation

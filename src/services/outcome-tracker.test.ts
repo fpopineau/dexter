@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { assessStopExitFill, computeRealizedPnl, decideDayExpiryHold, isIbNumber, selectManualExitTargets, SUSPECT_FILL_STOP_MULT } from './outcome-tracker.js';
+import { assessStopExitFill, barTimeFrameMs, computeRealizedPnl, computeTradeExcursion, decideDayExpiryHold, etFrameMs, isIbNumber, selectManualExitTargets, SUSPECT_FILL_STOP_MULT } from './outcome-tracker.js';
 
 describe('assessStopExitFill (SECZ phantom-fill lesson, 2026-08-13)', () => {
     test('the live case: 6.43 buy-stop filled at 11.918 while the tape traded 5.78 → SUSPECT at ~15.8R through', () => {
@@ -32,6 +32,66 @@ describe('assessStopExitFill (SECZ phantom-fill lesson, 2026-08-13)', () => {
     test('degenerate geometry (zero stop distance, junk fill) never flags', () => {
         expect(assessStopExitFill('long', 10, 10, 5).suspect).toBe(false);
         expect(assessStopExitFill('short', 6, 6.4, 0).suspect).toBe(false);
+    });
+});
+
+describe('computeTradeExcursion (held-trade MFE/MAE — max_target_atr tuning data)', () => {
+    const bars = [
+        { high: 103, low: 99 },
+        { high: 105, low: 98.5 },
+        { high: 101, low: 96 },
+    ];
+
+    test('long: MFE = best high above fill, MAE = worst low below, both % of fill', () => {
+        const r = computeTradeExcursion('long', 100, bars);
+        expect(r.mfePct).toBe(5);  // high 105
+        expect(r.maePct).toBe(4);  // low 96
+    });
+
+    test('short mirrors: lows are favorable, highs adverse', () => {
+        const r = computeTradeExcursion('short', 100, bars);
+        expect(r.mfePct).toBe(4);
+        expect(r.maePct).toBe(5);
+    });
+
+    test('a trade that never went favorable has MFE 0, never negative', () => {
+        const r = computeTradeExcursion('long', 100, [{ high: 99.5, low: 97 }]);
+        expect(r.mfePct).toBe(0);
+        expect(r.maePct).toBe(3);
+    });
+
+    test('junk bars are skipped; no usable bars → honest nulls', () => {
+        expect(computeTradeExcursion('long', 100, [{ high: undefined, low: 97 }, {}]))
+            .toEqual({ mfePct: null, maePct: null });
+        expect(computeTradeExcursion('long', 100, [])).toEqual({ mfePct: null, maePct: null });
+        expect(computeTradeExcursion('long', 0, bars)).toEqual({ mfePct: null, maePct: null });
+    });
+
+    test('percentages round to 2 decimals', () => {
+        const r = computeTradeExcursion('long', 3, [{ high: 3.01, low: 2.99 }]);
+        expect(r.mfePct).toBe(0.33);
+        expect(r.maePct).toBe(0.33);
+    });
+});
+
+describe('bar/epoch time frame helpers (hold-window slicing)', () => {
+    test('intraday bar times parse into the ET-components frame (double space tolerated)', () => {
+        const expected = Date.UTC(2026, 7, 5, 7, 40, 0);
+        expect(barTimeFrameMs('20260805 07:40:00')).toBe(expected);
+        expect(barTimeFrameMs('20260805  07:40:00')).toBe(expected);
+    });
+
+    test('daily bars (date only) and garbage → null', () => {
+        expect(barTimeFrameMs('20260805')).toBe(null);
+        expect(barTimeFrameMs('finished-20260805')).toBe(null);
+        expect(barTimeFrameMs(undefined)).toBe(null);
+    });
+
+    test('an epoch timestamp lands on the same frame value as its ET bar time', () => {
+        // 2026-08-05 11:40 UTC = 07:40 ET (EDT) — the exact equivalence the
+        // hold-window filter relies on, independent of the host timezone.
+        const epoch = Date.UTC(2026, 7, 5, 11, 40, 0);
+        expect(barTimeFrameMs('20260805 07:40:00')).toBe(etFrameMs(epoch));
     });
 });
 

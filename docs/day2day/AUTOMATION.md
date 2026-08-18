@@ -90,6 +90,11 @@ advisory; this gate is mandatory):
   randomness), the **extension guard** (entry further than
   `max_extension_atr` × daily ATR beyond the 10-day EMA is chasing a move
   that mean-reverts — the first live week lost on exactly this pattern),
+  the **target-reachability cap** (intraday targets further than
+  `max_target_atr` × daily ATR from entry are fantasy — the 82-trade audit
+  2026-08-18 found ratio-manufactured targets reached 10% of the time;
+  swing/earnings-bet and post-print repricing days exempt; executed trades
+  now record their held MFE/MAE so the cap can be tuned from evidence),
   and the **duplicate-setup guard** (entry within 2% of an existing
   working bracket on the same symbol) — violating proposals are never
   persisted. ATR/EMA references use **completed daily bars only**, so a
