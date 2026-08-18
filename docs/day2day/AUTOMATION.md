@@ -81,6 +81,21 @@ Starts/stops with the gateway when IBKR is configured; opt-out with
   **auto-denied in headless runs** (cron, gateway, triggers).
 
 ### Risk gate — `src/services/proposal-risk-gate.ts`
+## Market regime (deterministic tape context)
+
+`market-regime.ts` classifies the tape from four ETF proxies vs the prior
+close (QQQ direction, SPY confirmation, SMH for semis, TLT for rates —
+plain stocks, entitled pre-market from 04:00): `risk-off` / `risk-on` /
+`neutral` / `unknown`, with `semis-led` and `yield-driven` flavors. Cached
+5 min; transitions logged. Consumers: on risk-off the single-name trigger
+bar rises `REGIME_LONG_PENALTY` for longs and drops `REGIME_SHORT_RELIEF`
+for shorts; every trigger/breadth evaluation prompt carries the TAPE line;
+and a semis-led risk-off tape pre-arms the breadth SHORT-vehicle
+evaluation at the open (shared cap/cooldown, but the full breadth-day
+state — cap bonus, threshold relief — stays scan-earned). `unknown`
+(quotes unavailable) applies zero tilt everywhere. Prices are the signal;
+headlines remain visibility-only.
+
 Deterministic enforcement of `risk-rules.yaml` (the `risk_manager` tool is
 advisory; this gate is mandatory):
 - at **creation** (`createProposal`): coherent stop/target, min price,

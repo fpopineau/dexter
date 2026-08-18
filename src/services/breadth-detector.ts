@@ -115,9 +115,31 @@ export function detectBreadth(
 
     const semis = movers.filter((m) => SEMI_SYMBOLS.has(m));
     // Majority semis → the semis vehicle expresses the move with less dilution.
-    const vehicle = semis.length * 2 >= movers.length
-        ? (process.env.OPP_BREADTH_VEHICLE_SEMI ?? '').trim().toUpperCase() || 'SOXL'
-        : (process.env.OPP_BREADTH_VEHICLE_BROAD ?? '').trim().toUpperCase() || 'QQQ';
+    const vehicle = semis.length * 2 >= movers.length ? semiVehicle() : broadVehicle();
 
     return { direction, movers, semis, vehicle };
+}
+
+export function semiVehicle(): string {
+    return (process.env.OPP_BREADTH_VEHICLE_SEMI ?? '').trim().toUpperCase() || 'SOXL';
+}
+
+export function broadVehicle(): string {
+    return (process.env.OPP_BREADTH_VEHICLE_BROAD ?? '').trim().toUpperCase() || 'QQQ';
+}
+
+/**
+ * Regime pre-arm (2026-08-18): a semis-led risk-off tape IS the breadth
+ * event — QQQ down with confirmation and SMH underperforming says the chip
+ * complex is selling off together — but scan-driven detection needs RTH
+ * cycles to accumulate movers, so it wakes ~09:35+ on knowledge the ETF
+ * proxies printed at 08:00. Synthesize the short-vehicle evaluation
+ * directly from the regime. Movers list is empty by construction (no scan
+ * evidence yet — the prompt says so); the caller's cap/cooldown machinery
+ * still applies, and this NEVER declares a full breadth day (cap bonus and
+ * threshold relief stay scan-earned).
+ */
+export function regimeBreadthEvent(regime: { tag: string; semisLed: boolean }): BreadthEvent | null {
+    if (regime.tag !== 'risk-off' || !regime.semisLed) return null;
+    return { direction: 'short', movers: [], semis: [], vehicle: semiVehicle() };
 }

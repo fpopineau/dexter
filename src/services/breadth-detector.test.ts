@@ -1,5 +1,22 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { breadthThresholdRelief, breadthWatchlist, detectBreadth } from './breadth-detector.js';
+import { breadthThresholdRelief, breadthWatchlist, detectBreadth, regimeBreadthEvent } from './breadth-detector.js';
+
+describe('regimeBreadthEvent (tape pre-arm of the short vehicle, 2026-08-18)', () => {
+    test('a semis-led risk-off tape synthesizes the short-vehicle evaluation with no scan movers', () => {
+        const e = regimeBreadthEvent({ tag: 'risk-off', semisLed: true });
+        expect(e).toEqual({ direction: 'short', movers: [], semis: [], vehicle: 'SOXL' });
+    });
+
+    test('risk-off without semis leadership stays with the single-name pipeline', () => {
+        expect(regimeBreadthEvent({ tag: 'risk-off', semisLed: false })).toBeNull();
+    });
+
+    test('any other tape never pre-arms — even with a stray semisLed flag', () => {
+        expect(regimeBreadthEvent({ tag: 'neutral', semisLed: true })).toBeNull();
+        expect(regimeBreadthEvent({ tag: 'risk-on', semisLed: true })).toBeNull();
+        expect(regimeBreadthEvent({ tag: 'unknown', semisLed: false })).toBeNull();
+    });
+});
 
 const WATCH = new Set(['MU', 'MSFT', 'AMD', 'INTC', 'DELL', 'TSM', 'ARM', 'ASML', 'SMCI', 'WMT', 'BAC']);
 

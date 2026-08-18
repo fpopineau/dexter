@@ -35,7 +35,7 @@ function findTargetSession(): SessionEntry | null {
     return entries[0];
 }
 
-function buildPrompt(opp: Opportunity): string {
+function buildPrompt(opp: Opportunity, tapeLine: string): string {
     return [
         `[OPPORTUNITY TRIGGER] ${opp.symbol} just ranked top-3 in the live scanner.`,
         '',
@@ -43,6 +43,9 @@ function buildPrompt(opp: Opportunity): string {
         `compositeRank ${opp.compositeRank}, signalScore ${opp.signalScore} (${opp.rating}), ` +
         `price ${opp.price}, RVOL ${opp.rvol}, ATR ${opp.atr}, RSI ${opp.rsi}, VWAP ${opp.vwap}, ` +
         `scanners: ${opp.scanSources.join(', ')}.`,
+        tapeLine,
+        'Weigh the candidate AGAINST the tape: a momentum LONG in a risk-off tape needs an',
+        'idiosyncratic catalyst (its own news), not sector beta — counter-tape beta is the losing pattern.',
         '',
         'Evaluate this candidate NOW for an intraday trade:',
         '1. Check for a news catalyst (web_search). A move without a catalyst is suspect.',
@@ -57,12 +60,17 @@ function buildPrompt(opp: Opportunity): string {
     ].join('\n');
 }
 
-function buildBreadthPrompt(event: BreadthEvent): string {
+function buildBreadthPrompt(event: BreadthEvent, tapeLine: string): string {
     const up = event.direction === 'long';
     return [
-        `[BREADTH TRIGGER] Sector-wide move: ${event.movers.length} watchlist names are ` +
-        `${up ? 'ripping' : 'selling off'} together ` +
-        `(${event.movers.join(', ')}${event.semis.length ? `; semis: ${event.semis.join(', ')}` : ''}).`,
+        event.movers.length
+            ? `[BREADTH TRIGGER] Sector-wide move: ${event.movers.length} watchlist names are ` +
+              `${up ? 'ripping' : 'selling off'} together ` +
+              `(${event.movers.join(', ')}${event.semis.length ? `; semis: ${event.semis.join(', ')}` : ''}).`
+            : `[BREADTH TRIGGER] Pre-armed by the tape regime — the index proxies say the chip complex is ` +
+              `selling off together, before the intraday scans have accumulated movers. Confirm on the tape, ` +
+              `not on scan ranks.`,
+        tapeLine,
         '',
         `On a correlated move the single-name pipeline bottlenecks (extension guard, trigger cap) — ` +
         `the whole move is expressed in ONE liquid vehicle instead: ${event.vehicle}.`,
@@ -154,14 +162,18 @@ export function registerTriggerAlerts(): void {
     registered = true;
 
     onOpportunityTrigger(async (opp) => {
-        await evaluateAndDeliver(`trigger:${opp.symbol}`, opp.symbol, buildPrompt(opp));
+        const { getMarketRegime } = await import('@/services/market-regime.js');
+        const tape = (await getMarketRegime().catch(() => null))?.line ?? 'TAPE unknown (regime unavailable)';
+        await evaluateAndDeliver(`trigger:${opp.symbol}`, opp.symbol, buildPrompt(opp, tape));
     });
 
     // Sector-wide melt-ups → one evaluation of the sector vehicle, outside
     // the single-name trigger cap (Jul 30: nine correlated movers, cap
     // exhausted by midday, AMD/INTC/DELL/TSM/ARM never evaluated).
     onBreadthTrigger(async (event) => {
-        await evaluateAndDeliver(`breadth:${event.vehicle}:${event.direction}`, event.vehicle, buildBreadthPrompt(event));
+        const { getMarketRegime } = await import('@/services/market-regime.js');
+        const tape = (await getMarketRegime().catch(() => null))?.line ?? 'TAPE unknown (regime unavailable)';
+        await evaluateAndDeliver(`breadth:${event.vehicle}:${event.direction}`, event.vehicle, buildBreadthPrompt(event, tape));
     });
 
     logger.info('[trigger-alerts] registered');

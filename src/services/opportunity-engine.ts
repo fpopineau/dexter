@@ -25,7 +25,8 @@ import { getMarketSession, isTradeableSession, MarketSession } from '@/utils/mar
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { addSymbol, removeSymbol } from './ibkr-stream.js';
-import { breadthThresholdRelief, breadthWatchlist, detectBreadth, type BreadthEvent } from './breadth-detector.js';
+import { breadthThresholdRelief, breadthWatchlist, detectBreadth, regimeBreadthEvent, type BreadthEvent } from './breadth-detector.js';
+import { getMarketRegime, regimeThresholdAdjust } from './market-regime.js';
 import { runScan, type ScanCode, type ScanResult } from './scanner-loop.js';
 import { etDatePlus, getEarningsForDate, previousTradingDate } from './earnings-calendar.js';
 
@@ -635,17 +636,26 @@ async function evaluateBreadth(snapshot: OpportunitySnapshot): Promise<void> {
         lastBreadthVehicleAt.clear();
     }
 
-    const event = detectBreadth(lastSurfaced);
-    if (!event) return;
+    const scanEvent = detectBreadth(lastSurfaced);
 
-    if (breadthActiveDate !== today) {
+    // The FULL breadth-day state (cap bonus + threshold relief) stays
+    // scan-earned: only real movers in the ranks justify loosening the
+    // single-name pipeline. The regime pre-arm below borrows just the
+    // vehicle-evaluation machinery.
+    if (scanEvent && breadthActiveDate !== today) {
         breadthActiveDate = today;
         logger.info(
-            `[opportunity-engine] BREADTH day (${event.direction}): ${event.movers.length} watchlist movers in ` +
-            `${event.direction === 'long' ? 'gainer' : 'loser'} scans (${event.movers.join(' ')}) — ` +
-            `single-name trigger cap +${breadthCapBonus()}, vehicle ${event.vehicle}`,
+            `[opportunity-engine] BREADTH day (${scanEvent.direction}): ${scanEvent.movers.length} watchlist movers in ` +
+            `${scanEvent.direction === 'long' ? 'gainer' : 'loser'} scans (${scanEvent.movers.join(' ')}) — ` +
+            `single-name trigger cap +${breadthCapBonus()}, vehicle ${scanEvent.vehicle}`,
         );
     }
+
+    // Semis-led risk-off tape with no scan evidence yet → pre-arm the
+    // short-vehicle evaluation from the ETF proxies (2026-08-18: the chip
+    // selloff was knowable at 08:00; scan accumulation wakes at ~09:35).
+    const event = scanEvent ?? regimeBreadthEvent(await getMarketRegime());
+    if (!event) return;
 
     if (breadthCallbacks.size === 0) return;
     if (breadthVehicleTriggersToday >= breadthMaxPerDay()) return;
@@ -658,7 +668,10 @@ async function evaluateBreadth(snapshot: OpportunitySnapshot): Promise<void> {
 
     lastBreadthVehicleAt.set(cooldownKey, now);
     breadthVehicleTriggersToday++;
-    logger.info(`[opportunity-engine] BREADTH TRIGGER ${event.vehicle} ${event.direction.toUpperCase()} (movers: ${event.movers.join(' ')})`);
+    logger.info(
+        `[opportunity-engine] BREADTH TRIGGER ${event.vehicle} ${event.direction.toUpperCase()} ` +
+        `(${event.movers.length ? `movers: ${event.movers.join(' ')}` : 'pre-armed by tape regime'})`,
+    );
     for (const cb of [...breadthCallbacks]) {
         try {
             await cb(event, snapshot);
@@ -703,14 +716,22 @@ async function evaluateTriggers(snapshot: OpportunitySnapshot): Promise<void> {
     const watch = breadthDay ? breadthWatchlist() : null;
     const relief = breadthDay ? breadthThresholdRelief() : 0;
 
+    // Regime tilt (2026-08-18): on a risk-off tape the bar RISES for longs
+    // and DROPS for shorts — the chased-long loss pattern clusters exactly
+    // on mornings whose direction the ETF proxies printed before the open.
+    // 'unknown'/'neutral'/'risk-on' → zero tilt (defense only; no evidence
+    // yet for penalizing shorts on up tapes).
+    const regime = await getMarketRegime();
+
     const reactors = await reactorWatchlist();
     for (const [idx, opp] of snapshot.opportunities.slice(0, REACTOR_TRIGGER_DEPTH).entries()) {
         const isReactor = reactors.has(opp.symbol.toUpperCase());
+        const regimeAdj = regimeThresholdAdjust(regime.tag, opp.direction);
         const gate = triggerEligibility({
             idx,
             isReactor,
             onBreadthWatchlist: watch?.has(opp.symbol.toUpperCase()) ?? false,
-            threshold,
+            threshold: threshold + regimeAdj,
             breadthRelief: relief,
             reactorReliefPts: reactorRelief(),
             deepMargin: deepTriggerMargin(),
@@ -739,6 +760,7 @@ async function evaluateTriggers(snapshot: OpportunitySnapshot): Promise<void> {
         logger.info(
             `[opportunity-engine] TRIGGER ${opp.symbol} (${opp.direction}, rank ${opp.compositeRank}` +
             `${opp.compositeRank < threshold ? `, breadth relief −${relief}` : ''}` +
+            `${regimeAdj !== 0 ? `, regime tilt ${regimeAdj > 0 ? '+' : ''}${regimeAdj}` : ''}` +
             `${!isReactor && idx >= 3 ? `, deep window pos ${idx + 1} at bar ${gate.effectiveThreshold}` : ''})`,
         );
         for (const cb of [...triggerCallbacks]) {
