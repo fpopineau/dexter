@@ -143,3 +143,37 @@ export function regimeBreadthEvent(regime: { tag: string; semisLed: boolean }): 
     if (regime.tag !== 'risk-off' || !regime.semisLed) return null;
     return { direction: 'short', movers: [], semis: [], vehicle: semiVehicle() };
 }
+
+/**
+ * May a breadth-vehicle evaluation fire now? Pure decision over the two
+ * firing kinds (2026-08-18 lesson: one shared cooldown let the 08:12
+ * pre-market pre-arm push the scan-CONFIRMED 09:42 evaluation to 10:15 —
+ * past the 09:45-09:55 breakdown window that paid):
+ *
+ *   'scan'    — real movers in the ranks. Respects only the last SCAN
+ *               firing: a tape-only pre-arm look must never delay
+ *               scan-confirmed evidence.
+ *   'pre-arm' — tape regime only. Shorter cooldown, own daily cap, and it
+ *               respects BOTH stamps (a fresh scan evaluation makes a
+ *               tape-only repeat redundant).
+ */
+export function breadthFireAllowed(input: {
+    kind: 'scan' | 'pre-arm';
+    now: number;
+    /** Last firing timestamps for this vehicle+direction; 0 = never. */
+    lastScanAt: number;
+    lastPreArmAt: number;
+    scanFiresToday: number;
+    preArmsToday: number;
+    scanCooldownMs: number;
+    preArmCooldownMs: number;
+    scanMaxPerDay: number;
+    preArmMaxPerDay: number;
+}): boolean {
+    if (input.kind === 'scan') {
+        if (input.scanFiresToday >= input.scanMaxPerDay) return false;
+        return input.now - input.lastScanAt >= input.scanCooldownMs;
+    }
+    if (input.preArmsToday >= input.preArmMaxPerDay) return false;
+    return input.now - Math.max(input.lastScanAt, input.lastPreArmAt) >= input.preArmCooldownMs;
+}

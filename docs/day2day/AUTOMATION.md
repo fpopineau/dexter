@@ -91,10 +91,17 @@ plain stocks, entitled pre-market from 04:00): `risk-off` / `risk-on` /
 bar rises `REGIME_LONG_PENALTY` for longs and drops `REGIME_SHORT_RELIEF`
 for shorts; every trigger/breadth evaluation prompt carries the TAPE line;
 and a semis-led risk-off tape pre-arms the breadth SHORT-vehicle
-evaluation at the open (shared cap/cooldown, but the full breadth-day
-state — cap bonus, threshold relief — stays scan-earned). `unknown`
-(quotes unavailable) applies zero tilt everywhere. Prices are the signal;
-headlines remain visibility-only.
+evaluation — pre-market included (the tape prints from 04:00; the
+evaluation prompt teaches the GTC STP_LMT-below-the-pre-market-low
+pattern). Pre-arm firings carry their own cooldown and daily cap
+(`REGIME_PREARM_*`), and scan-confirmed breadth fires ignore pre-arm
+stamps entirely — a tape-only look never delays scan evidence. The full
+breadth-day state (cap bonus, threshold relief) stays scan-earned.
+`unknown` (quotes unavailable) applies zero tilt everywhere. Prices are
+the signal; headlines remain visibility-only. Suppressed trigger/breadth
+evaluations ledger their one-line decline reason as `judgment`-gate
+refusal rows, so the nightly replay scores the judgment layer the same
+way it scores the deterministic gates.
 
 Deterministic enforcement of `risk-rules.yaml` (the `risk_manager` tool is
 advisory; this gate is mandatory):

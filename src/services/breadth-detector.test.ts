@@ -1,5 +1,59 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { breadthThresholdRelief, breadthWatchlist, detectBreadth, regimeBreadthEvent } from './breadth-detector.js';
+import { breadthFireAllowed, breadthThresholdRelief, breadthWatchlist, detectBreadth, regimeBreadthEvent } from './breadth-detector.js';
+
+describe('breadthFireAllowed (2026-08-18 timeline: pre-arm must not delay scan evidence)', () => {
+    const MIN = 60_000;
+    const caps = { scanCooldownMs: 120 * MIN, preArmCooldownMs: 60 * MIN, scanMaxPerDay: 2, preArmMaxPerDay: 2 };
+    // ET-morning clock as epoch-like offsets (base far from the 0 = "never"
+    // sentinel): 08:12 pre-arm, 09:42 scan, 10:00 pre-arm retry.
+    const BASE = 1_000_000 * MIN;
+    const t0812 = BASE;
+    const t0942 = BASE + 90 * MIN;
+    const t1000 = BASE + 108 * MIN;
+    const t1045 = BASE + 153 * MIN;
+
+    test('the live case: the 09:42 scan-confirmed fire is NOT blocked by the 08:12 pre-arm stamp', () => {
+        expect(breadthFireAllowed({
+            kind: 'scan', now: t0942, lastScanAt: 0, lastPreArmAt: t0812,
+            scanFiresToday: 0, preArmsToday: 1, ...caps,
+        })).toBe(true);
+    });
+
+    test('scan fires respect their own cooldown against prior scan fires', () => {
+        expect(breadthFireAllowed({
+            kind: 'scan', now: t0942 + 30 * MIN, lastScanAt: t0942, lastPreArmAt: 0,
+            scanFiresToday: 1, preArmsToday: 0, ...caps,
+        })).toBe(false);
+    });
+
+    test('a pre-arm retry is blocked by a FRESH scan fire (tape-only repeat is redundant)', () => {
+        expect(breadthFireAllowed({
+            kind: 'pre-arm', now: t1000, lastScanAt: t0942, lastPreArmAt: t0812,
+            scanFiresToday: 1, preArmsToday: 1, ...caps,
+        })).toBe(false);
+        // …and allowed again once the pre-arm cooldown clears both stamps.
+        expect(breadthFireAllowed({
+            kind: 'pre-arm', now: t1045, lastScanAt: t0942, lastPreArmAt: t0812,
+            scanFiresToday: 1, preArmsToday: 1, ...caps,
+        })).toBe(true);
+    });
+
+    test('each kind has its own daily cap', () => {
+        expect(breadthFireAllowed({
+            kind: 'pre-arm', now: t1045, lastScanAt: 0, lastPreArmAt: 0,
+            scanFiresToday: 0, preArmsToday: 2, ...caps,
+        })).toBe(false);
+        expect(breadthFireAllowed({
+            kind: 'scan', now: t1045, lastScanAt: 0, lastPreArmAt: 0,
+            scanFiresToday: 2, preArmsToday: 0, ...caps,
+        })).toBe(false);
+        // Pre-arms exhausted never blocks scan evidence.
+        expect(breadthFireAllowed({
+            kind: 'scan', now: t1045, lastScanAt: 0, lastPreArmAt: t1000,
+            scanFiresToday: 0, preArmsToday: 2, ...caps,
+        })).toBe(true);
+    });
+});
 
 describe('regimeBreadthEvent (tape pre-arm of the short vehicle, 2026-08-18)', () => {
     test('a semis-led risk-off tape synthesizes the short-vehicle evaluation with no scan movers', () => {

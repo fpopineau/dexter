@@ -51,7 +51,9 @@ function buildPrompt(opp: Opportunity, tapeLine: string): string {
         '1. Check for a news catalyst (web_search). A move without a catalyst is suspect.',
         '2. Validate entry/stop/target and position size with risk_manager (stop from ATR).',
         '3. Decision:',
-        `   - NOT actionable → respond with exactly: ${HEARTBEAT_OK_TOKEN}`,
+        `   - NOT actionable → reply ${HEARTBEAT_OK_TOKEN} plus ONE line naming the decisive reason ` +
+        '(no catalyst / geometry impossible / spread / tape). The reason is LEDGERED and scored against ' +
+        "the day's tape by the nightly replay — a decline is a recorded decision, never a free pass.",
         '   - Actionable → register it with trade_proposals (action create, source rationale included;',
         '     OMIT quantity — the position sizer computes it from the score and account equity).',
         '     trade_proposals is the ONLY tool that registers proposals — opportunities is read-only.',
@@ -81,8 +83,14 @@ function buildBreadthPrompt(event: BreadthEvent, tapeLine: string): string {
         up
             ? '   Prefer a pullback entry (VWAP / prior high) over hitting the offer at the high of day.'
             : '   Prefer a bounce entry (VWAP retest / broken support from below) over hitting bids at the low of day.',
+        '   PRE-MARKET is actionable: a DAY bracket cannot rest before the open, so use tif GTC with a',
+        `   STP_LMT trigger just ${up ? 'above the pre-market high' : 'below the pre-market low'} (entryLimit ~0.3% beyond,`,
+        '   stop at prior-session structure 0.4-0.75x the daily ATR away, target <= 1.5x ATR) — it arms at',
+        '   the open and fills only on continuation. "It is pre-market" is NOT a decline reason.',
         '3. Decision:',
-        `   - NOT actionable → respond with exactly: ${HEARTBEAT_OK_TOKEN}`,
+        `   - NOT actionable → reply ${HEARTBEAT_OK_TOKEN} plus ONE line naming the decisive reason. ` +
+        "The reason is LEDGERED and scored against the day's tape — a decline is a recorded decision, " +
+        'never a free pass (2026-08-18: the vehicle was declined twice on a −4.7% semis day, reasons lost).',
         '   - Actionable → register it with trade_proposals (action create, breadth rationale included;',
         '     OMIT quantity — the position sizer computes it from the score and account equity).',
         '     trade_proposals is the ONLY tool that registers proposals — opportunities is read-only.',
@@ -97,7 +105,17 @@ function buildBreadthPrompt(event: BreadthEvent, tapeLine: string): string {
  * proposal the evaluation just registered. Shared by single-name and
  * breadth triggers.
  */
-async function evaluateAndDeliver(sessionKey: string, symbol: string, prompt: string): Promise<void> {
+async function evaluateAndDeliver(
+    sessionKey: string,
+    symbol: string,
+    prompt: string,
+    /** Context for the judgment-decline ledger: what was being evaluated,
+     *  so a suppressed answer leaves an auditable refusal row instead of
+     *  vanishing (2026-08-18: eight declines on a −4.7% semis day, zero
+     *  recorded reasons — the layer that cost the most was the only one
+     *  the nightly replay could not see). */
+    declineCtx: { direction: 'long' | 'short'; price?: number | null; score?: number | null },
+): Promise<void> {
     const session = findTargetSession();
     if (!session?.lastTo || !session?.lastAccountId) {
         logger.warn('[trigger-alerts] no WhatsApp delivery target, skipping alert');
@@ -124,7 +142,25 @@ async function evaluateAndDeliver(sessionKey: string, symbol: string, prompt: st
     });
 
     if (!answer.trim() || answer.toUpperCase().includes(HEARTBEAT_OK_TOKEN)) {
-        logger.info(`[trigger-alerts] ${symbol}: evaluation not actionable, suppressed`);
+        // Ledger the decline WITH the model's reason (the prompt asks for
+        // one line after the token). The row carries the trigger price as
+        // the entry so the replay can ask "what did the symbol do after we
+        // said no" — stop/target stay null, nothing is fabricated.
+        const reason = answer
+            .replace(new RegExp(HEARTBEAT_OK_TOKEN.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 300) || 'no reason given';
+        logger.info(`[trigger-alerts] ${symbol}: evaluation not actionable, suppressed (${reason.slice(0, 120)})`);
+        const { recordRefusal } = await import('@/services/trade-proposals.js');
+        await recordRefusal({
+            symbol,
+            direction: declineCtx.direction,
+            entryType: 'EVAL',
+            entry: declineCtx.price ?? null,
+            score: declineCtx.score ?? null,
+            reason: `evaluation declined: ${reason}`,
+        }).catch(() => { /* ledger is best-effort */ });
         return;
     }
 
@@ -164,7 +200,8 @@ export function registerTriggerAlerts(): void {
     onOpportunityTrigger(async (opp) => {
         const { getMarketRegime } = await import('@/services/market-regime.js');
         const tape = (await getMarketRegime().catch(() => null))?.line ?? 'TAPE unknown (regime unavailable)';
-        await evaluateAndDeliver(`trigger:${opp.symbol}`, opp.symbol, buildPrompt(opp, tape));
+        await evaluateAndDeliver(`trigger:${opp.symbol}`, opp.symbol, buildPrompt(opp, tape),
+            { direction: opp.direction, price: opp.price, score: opp.signalScore });
     });
 
     // Sector-wide melt-ups → one evaluation of the sector vehicle, outside
@@ -173,7 +210,8 @@ export function registerTriggerAlerts(): void {
     onBreadthTrigger(async (event) => {
         const { getMarketRegime } = await import('@/services/market-regime.js');
         const tape = (await getMarketRegime().catch(() => null))?.line ?? 'TAPE unknown (regime unavailable)';
-        await evaluateAndDeliver(`breadth:${event.vehicle}:${event.direction}`, event.vehicle, buildBreadthPrompt(event, tape));
+        await evaluateAndDeliver(`breadth:${event.vehicle}:${event.direction}`, event.vehicle,
+            buildBreadthPrompt(event, tape), { direction: event.direction });
     });
 
     logger.info('[trigger-alerts] registered');

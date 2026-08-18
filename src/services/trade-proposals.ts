@@ -242,6 +242,10 @@ export interface RefusalRecord {
 /** Keyword classification of a refusal reason into the gate that fired. */
 export function classifyRefusalGate(reason: string): string {
     const r = reason.toLowerCase();
+    // FIRST: judgment declines carry the model's free-text reason, which can
+    // legitimately mention any other gate's keywords ("stop would sit inside
+    // intraday noise") — the prefix, not the content, decides the bucket.
+    if (r.startsWith('evaluation declined')) return 'judgment';
     if (r.includes('duplicate setup')) return 'duplicate';
     if (r.includes('intraday noise')) return 'noise-stop';
     if (r.includes('chasing an extended move')) return 'extension';

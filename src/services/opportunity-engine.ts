@@ -25,7 +25,7 @@ import { getMarketSession, isTradeableSession, MarketSession } from '@/utils/mar
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { addSymbol, removeSymbol } from './ibkr-stream.js';
-import { breadthThresholdRelief, breadthWatchlist, detectBreadth, regimeBreadthEvent, type BreadthEvent } from './breadth-detector.js';
+import { breadthFireAllowed, breadthThresholdRelief, breadthWatchlist, detectBreadth, regimeBreadthEvent, type BreadthEvent } from './breadth-detector.js';
 import { getMarketRegime, regimeThresholdAdjust } from './market-regime.js';
 import { runScan, type ScanCode, type ScanResult } from './scanner-loop.js';
 import { etDatePlus, getEarningsForDate, previousTradingDate } from './earnings-calendar.js';
@@ -599,7 +599,11 @@ let triggersDate = '';
 export type BreadthCallback = (event: BreadthEvent, snapshot: OpportunitySnapshot) => void | Promise<void>;
 const breadthCallbacks = new Set<BreadthCallback>();
 const lastBreadthVehicleAt = new Map<string, number>();
+/** Regime pre-arm firings tracked separately: a tape-only look must never
+ *  consume the scan-driven budget or delay scan-confirmed evidence. */
+const lastPreArmVehicleAt = new Map<string, number>();
 let breadthVehicleTriggersToday = 0;
+let preArmsToday = 0;
 let breadthDate = '';
 /** ET date on which breadth was last detected — grants the single-name
  *  trigger-cap bonus for the rest of that day. */
@@ -620,6 +624,20 @@ function breadthCapBonus(): number {
     return Number.isFinite(n) && n >= 0 ? n : 5;
 }
 
+/** Pre-arm cooldown — shorter than the scan cooldown so a pre-market tape
+ *  look does not push the post-open confirmation window past its payoff
+ *  (2026-08-18: 08:12 pre-arm + 120-min cooldown = 10:15 re-look, after
+ *  the 09:45-09:55 breakdown had already run). */
+function preArmCooldownMs(): number {
+    const n = Number(process.env.REGIME_PREARM_COOLDOWN_MIN);
+    return (Number.isFinite(n) && n > 0 ? n : 60) * 60_000;
+}
+
+function preArmMaxPerDay(): number {
+    const n = Number(process.env.REGIME_PREARM_MAX_PER_DAY);
+    return Number.isFinite(n) && n >= 0 ? n : 2;
+}
+
 /** Register a callback fired on a breadth event (sector-vehicle evaluation). */
 export function onBreadthTrigger(cb: BreadthCallback): () => void {
     breadthCallbacks.add(cb);
@@ -633,7 +651,9 @@ async function evaluateBreadth(snapshot: OpportunitySnapshot): Promise<void> {
     if (today !== breadthDate) {
         breadthDate = today;
         breadthVehicleTriggersToday = 0;
+        preArmsToday = 0;
         lastBreadthVehicleAt.clear();
+        lastPreArmVehicleAt.clear();
     }
 
     const scanEvent = detectBreadth(lastSurfaced);
@@ -658,16 +678,33 @@ async function evaluateBreadth(snapshot: OpportunitySnapshot): Promise<void> {
     if (!event) return;
 
     if (breadthCallbacks.size === 0) return;
-    if (breadthVehicleTriggersToday >= breadthMaxPerDay()) return;
-    // Cooldown per vehicle+direction: a violent reversal day may fairly
-    // evaluate the same vehicle short after the morning's long.
+    // Cooldown/cap per firing KIND (key stays vehicle+direction: a violent
+    // reversal day may fairly evaluate the same vehicle short after the
+    // morning's long). Scan-confirmed fires ignore pre-arm stamps entirely.
+    const kind: 'scan' | 'pre-arm' = event.movers.length ? 'scan' : 'pre-arm';
     const cooldownKey = `${event.vehicle}:${event.direction}`;
-    const last = lastBreadthVehicleAt.get(cooldownKey) ?? 0;
     const now = Date.now();
-    if (now - last < breadthCooldownMs()) return;
+    const allowed = breadthFireAllowed({
+        kind,
+        now,
+        lastScanAt: lastBreadthVehicleAt.get(cooldownKey) ?? 0,
+        lastPreArmAt: lastPreArmVehicleAt.get(cooldownKey) ?? 0,
+        scanFiresToday: breadthVehicleTriggersToday,
+        preArmsToday,
+        scanCooldownMs: breadthCooldownMs(),
+        preArmCooldownMs: preArmCooldownMs(),
+        scanMaxPerDay: breadthMaxPerDay(),
+        preArmMaxPerDay: preArmMaxPerDay(),
+    });
+    if (!allowed) return;
 
-    lastBreadthVehicleAt.set(cooldownKey, now);
-    breadthVehicleTriggersToday++;
+    if (kind === 'scan') {
+        lastBreadthVehicleAt.set(cooldownKey, now);
+        breadthVehicleTriggersToday++;
+    } else {
+        lastPreArmVehicleAt.set(cooldownKey, now);
+        preArmsToday++;
+    }
     logger.info(
         `[opportunity-engine] BREADTH TRIGGER ${event.vehicle} ${event.direction.toUpperCase()} ` +
         `(${event.movers.length ? `movers: ${event.movers.join(' ')}` : 'pre-armed by tape regime'})`,
