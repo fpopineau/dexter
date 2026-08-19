@@ -81,6 +81,20 @@ Starts/stops with the gateway when IBKR is configured; opt-out with
   **auto-denied in headless runs** (cron, gateway, triggers).
 
 ### Risk gate — `src/services/proposal-risk-gate.ts`
+## Dawn watch + pre-market mover alerts
+
+The engine's pre-open phase starts at `OPP_DAWN_START_ET` (default 04:00
+ET, was 08:00 — MRNA 2026-08-19 ran +110% at 06:45–07:50 inside the old
+blind window) at a slow cadence (`OPP_DAWN_CADENCE_MIN`, default 15). A
+directionally-scanned candidate whose aligned day move reaches
+`OPP_MOVER_ALERT_PCT` (default 15%) with real volume fires ONE
+deterministic WhatsApp line per symbol per day — no LLM, no gates, no
+orders; notification is deliberately decoupled from tradability. The
+same day-move feeds the **event-mover boost**: +1 compositeRank point
+per aligned % from `OPP_EVENT_BOOST_MIN_PCT` (10%), capped at +25, so a
+multi-sigma mover cannot rank below an index ETF while the proper
+scorer recalibration waits for archive depth.
+
 ## Market regime (deterministic tape context)
 
 `market-regime.ts` classifies the tape from four ETF proxies vs the prior

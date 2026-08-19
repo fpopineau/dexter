@@ -25,8 +25,10 @@ import { getMarketSession, isTradeableSession, MarketSession } from '@/utils/mar
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { addSymbol, removeSymbol } from './ibkr-stream.js';
-import { breadthFireAllowed, breadthThresholdRelief, breadthWatchlist, detectBreadth, regimeBreadthEvent, type BreadthEvent } from './breadth-detector.js';
+import { breadthFireAllowed, breadthThresholdRelief, breadthWatchlist, detectBreadth, GAINER_SCANS, LOSER_SCANS, regimeBreadthEvent, type BreadthEvent } from './breadth-detector.js';
 import { getMarketRegime, regimeThresholdAdjust } from './market-regime.js';
+import { eventMoverBoost, moverAlertEligible } from './event-mover.js';
+import { fetchDailyRiskContext } from '@/tools/ibkr/daily-atr.js';
 import { runScan, type ScanCode, type ScanResult } from './scanner-loop.js';
 import { etDatePlus, getEarningsForDate, previousTradingDate } from './earnings-calendar.js';
 
@@ -136,6 +138,12 @@ export interface Opportunity {
     vwap: number | null;
     /** Which scanners surfaced this symbol. */
     scanSources: string[];
+    /** Day move vs the prior completed close, %, SIGNED TOWARD `direction`
+     *  (a short candidate down 40% carries +40). Computed only for
+     *  directionally-scanned candidates; null = not measured. Feeds the
+     *  event-mover boost and the pre-market mover alert (MRNA 2026-08-19:
+     *  +110% invisible to a composite with no day-move term). */
+    dayMovePct: number | null;
 }
 
 export interface OpportunitySnapshot {
@@ -219,14 +227,32 @@ function etMinutes(currentTimeET: string): number {
     return Number(m[1]) * 60 + Number(m[2]);
 }
 
+/** Dawn-watch start (minutes since ET midnight). The MRNA lesson
+ *  (2026-08-19): +110% at 06:45-07:50 while the engine idled until its
+ *  08:00 pre-open start — a self-imposed blind window; IBKR scanners work
+ *  from 04:00. Format 'HH:MM' ET; set 08:00 to restore the old behavior. */
+function dawnStartMinutes(): number {
+    const m = /^(\d{1,2}):(\d{2})$/.exec((process.env.OPP_DAWN_START_ET ?? '').trim());
+    if (m) return Number(m[1]) * 60 + Number(m[2]);
+    return 4 * 60;
+}
+
+function dawnCadenceMs(): number {
+    const n = Number(process.env.OPP_DAWN_CADENCE_MIN);
+    return (Number.isFinite(n) && n > 0 ? n : 15) * 60_000;
+}
+
 export function planForNow(date?: Date): PhasePlan {
     const info = getMarketSession(date);
     const mins = etMinutes(info.currentTimeET);
 
-    if (info.session === MarketSession.PRE_MARKET && mins >= 8 * 60) {
+    if (info.session === MarketSession.PRE_MARKET && mins >= dawnStartMinutes()) {
+        // One phase, two cadences: the dawn watch (04:00+) runs the same
+        // gap/mover scans slowly — its job is noticing an MRNA at 06:50,
+        // not trading cadence; from 08:00 the historical 5-min rhythm.
         return {
             phase: 'pre-open',
-            cadenceMs: 5 * 60_000,
+            cadenceMs: mins >= 8 * 60 ? 5 * 60_000 : dawnCadenceMs(),
             scans: [
                 { code: 'HIGH_OPEN_GAP', direction: 'long' },
                 { code: 'TOP_OPEN_PERC_GAIN', direction: 'long' },
@@ -480,11 +506,33 @@ export async function runCycleOnce(forcePhase?: EnginePhase): Promise<Opportunit
             const signal = await scoreSymbol(symbol, meta.direction);
             if (signal) {
                 const rvol = signal.snapshot.rvol;
+                // Day move (direction-signed) for directionally-scanned
+                // candidates: the TA factors punish verticals (mean-
+                // reversion reads "overbought"), so the composite needs
+                // the move itself as a term — MRNA 2026-08-19 ranked
+                // below index ETFs at +110%. prevClose comes from the
+                // cached daily-risk context (completed bars only).
+                let dayMovePct: number | null = null;
+                if (meta.sources.some((s) => GAINER_SCANS.has(s) || LOSER_SCANS.has(s))) {
+                    const ctx = await fetchDailyRiskContext(symbol).catch(() => null);
+                    const price = signal.snapshot.price;
+                    if (ctx?.prevClose != null && ctx.prevClose > 0 && price != null && price > 0) {
+                        const raw = ((price - ctx.prevClose) / ctx.prevClose) * 100;
+                        dayMovePct = Math.round((meta.direction === 'long' ? raw : -raw) * 10) / 10;
+                    }
+                }
+                const boost = eventMoverBoost(dayMovePct);
                 const compositeRank = Math.round(
                     signal.compositeScore
                     + Math.min(10, (rvol ?? 0) * 2)
-                    + 3 * (meta.sources.length - 1),
+                    + 3 * (meta.sources.length - 1)
+                    + boost,
                 );
+                const boostKey = `${etDateString()}:${symbol}`;
+                if (boost > 0 && !boostLoggedToday.has(boostKey)) {
+                    boostLoggedToday.add(boostKey);
+                    logger.info(`[opportunity-engine] event-mover boost ${symbol} +${boost} (day ${dayMovePct}% toward ${meta.direction})`);
+                }
                 opportunities.push({
                     symbol,
                     longName: meta.result.longName,
@@ -498,6 +546,7 @@ export async function runCycleOnce(forcePhase?: EnginePhase): Promise<Opportunit
                     rsi: signal.snapshot.rsi,
                     vwap: signal.snapshot.vwap,
                     scanSources: meta.sources,
+                    dayMovePct,
                 });
             }
             await sleep(SCORE_PACING_MS);
@@ -588,6 +637,50 @@ const triggerCallbacks = new Set<TriggerCallback>();
 const lastTriggerAt = new Map<string, number>();
 let triggersToday = 0;
 let triggersDate = '';
+
+// --- Pre-market mover alerts (deterministic, no LLM) -----------------------
+// The MRNA channel: a directionally-scanned candidate with an outsized
+// aligned day move fires ONE WhatsApp line per symbol per day, straight
+// from scan+quote facts. Notification is decoupled from evaluation — the
+// alert goes out even when every gate would refuse the trade.
+export type MoverCallback = (opp: Opportunity) => void | Promise<void>;
+const moverCallbacks = new Set<MoverCallback>();
+const moverAlertedToday = new Set<string>();
+let moverDate = '';
+/** Event-boost log dedup, date-keyed so no reset is needed. */
+const boostLoggedToday = new Set<string>();
+
+/** Register a callback for deterministic pre-market mover alerts. */
+export function onPreMarketMover(cb: MoverCallback): () => void {
+    moverCallbacks.add(cb);
+    return () => moverCallbacks.delete(cb);
+}
+
+async function emitMoverAlerts(snapshot: OpportunitySnapshot): Promise<void> {
+    if (moverCallbacks.size === 0) return;
+    const today = etDateString();
+    if (today !== moverDate) {
+        moverDate = today;
+        moverAlertedToday.clear();
+    }
+    for (const opp of snapshot.opportunities) {
+        if (!moverAlertEligible({
+            dayMovePct: opp.dayMovePct,
+            rvol: opp.rvol,
+            phase: snapshot.phase,
+            alreadyAlerted: moverAlertedToday.has(opp.symbol),
+        })) continue;
+        moverAlertedToday.add(opp.symbol);
+        logger.info(`[opportunity-engine] PRE-MARKET MOVER ${opp.symbol} ${opp.dayMovePct}% toward ${opp.direction} (rank ${opp.compositeRank})`);
+        for (const cb of [...moverCallbacks]) {
+            try {
+                await cb(opp);
+            } catch (err) {
+                logger.error(`[opportunity-engine] mover callback failed: ${err}`);
+            }
+        }
+    }
+}
 
 // --- Breadth events (sector-wide melt-ups; see breadth-detector.ts) ---
 // Separate pipeline from single-name triggers: its own small daily cap and
@@ -828,8 +921,10 @@ function scheduleNext(): void {
         if (current.phase !== 'idle') {
             try {
                 const snapshot = await runCycleOnce();
-                // Breadth first: a detected regime day relieves the
-                // single-name cap for the trigger pass of the SAME cycle.
+                // Movers first (fastest channel, no LLM), then breadth (a
+                // detected regime day relieves the single-name cap for the
+                // trigger pass of the SAME cycle), then triggers.
+                await emitMoverAlerts(snapshot);
                 await evaluateBreadth(snapshot);
                 await evaluateTriggers(snapshot);
             } catch (err) {
@@ -849,6 +944,7 @@ export function startOpportunityEngine(): void {
     if (plan.phase !== 'idle') {
         void runCycleOnce()
             .then(async (snapshot) => {
+                await emitMoverAlerts(snapshot);
                 await evaluateBreadth(snapshot);
                 await evaluateTriggers(snapshot);
             })

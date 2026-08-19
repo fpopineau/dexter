@@ -28,12 +28,14 @@
  */
 
 /** Scan codes that imply "up big today" — presence in these is a directional
- *  fact; MOST_ACTIVE / HOT_BY_VOLUME / TOP_TRADE_RATE are direction-blind. */
-const GAINER_SCANS = new Set(['TOP_PERC_GAIN', 'TOP_OPEN_PERC_GAIN', 'HIGH_OPEN_GAP']);
+ *  fact; MOST_ACTIVE / HOT_BY_VOLUME / TOP_TRADE_RATE are direction-blind.
+ *  Exported since 2026-08-19: the event-mover boost and pre-market alert
+ *  compute day moves only for directionally-scanned candidates. */
+export const GAINER_SCANS = new Set(['TOP_PERC_GAIN', 'TOP_OPEN_PERC_GAIN', 'HIGH_OPEN_GAP']);
 
 /** Mirror for "down big today" — a correlated selloff is a breadth event
  *  too, expressed by SHORTING the sector vehicle. */
-const LOSER_SCANS = new Set(['TOP_PERC_LOSE', 'TOP_OPEN_PERC_LOSE']);
+export const LOSER_SCANS = new Set(['TOP_PERC_LOSE', 'TOP_OPEN_PERC_LOSE']);
 
 /** Semiconductor complex — routes a semis-dominated breadth day to the
  *  semis vehicle instead of the broad one. Static by design: this is a

@@ -44,6 +44,7 @@ import { catchUpPatternScan } from '@/services/pattern-scanner.js';
 import { startStaleEntrySweeper, stopStaleEntrySweeper } from '@/services/stale-entry-sweeper.js';
 import { registerScanHealthAlerts } from './health-alerts.js';
 import { registerTriggerAlerts } from './trigger-alerts.js';
+import { registerMoverAlerts } from './mover-alerts.js';
 import { cleanMarkdownForWhatsApp } from './utils.js';
 
 const LOG_PATH = dexterPath('gateway-debug.log');
@@ -366,6 +367,7 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     if (isOpportunityEngineEnabled()) {
       registerTriggerAlerts();
       registerScanHealthAlerts();
+      registerMoverAlerts();
       startOpportunityEngine();
     }
     if (isArchiveSchedulerEnabled()) {
