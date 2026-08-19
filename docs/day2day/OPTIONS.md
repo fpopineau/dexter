@@ -5,6 +5,30 @@ why it is not being built now and what would change that. Move an entry
 out of this file when it is either built (link the commit) or rejected
 for good (say why).
 
+## Wider discovery mouth: 50-row scans + phase-aware scoring caps
+
+**Idea** (funnel review, 2026-08-19): two knobs, one cheap and one
+costed. (a) Scan windows `numberOfRows` 25 → 50 (IBKR's max) — same
+subscription, near-zero cost; closes the residual blind spot of
+non-watchlist names at ranks 26–50 on wild days (the sentinel already
+covers watchlist names). (b) Scoring cap `OPP_MAX_CANDIDATES` 20 → 30,
+**phase-aware only**: midday/pre-open have ~8 min of cycle slack;
+open-drive is already saturated (~3.5-min cycles vs 2-min cadence) and
+must STAY at 20 — a blanket raise would slow discovery at the open and
+crowd IBKR historical pacing (which now also feeds the sentinel sweep,
+regime proxies, and excursion capture).
+
+**Why parked** (operator, 2026-08-19): wait for evidence. The nightly
+capture report's funnel separates NEVER-SEEN (scan-window failure) from
+seen-never-triggered (scoring/threshold failure) — a week of reports on
+the current settings shows whether the mouth is actually clipping, and
+by how much, before spending cycle time on it.
+
+**Revisit when**: capture reports show recurring NEVER-SEEN movers that
+50-row windows would have caught, or seen-but-cut names (union rank
+21–40) that went on to be top movers. Both are direct queries against
+the benchmark ledger.
+
 ## FDA / trial-readout calendar watchlist
 
 **Idea** (MRNA post-mortem, 2026-08-19): the only news-watching approach
