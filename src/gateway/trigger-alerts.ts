@@ -69,9 +69,9 @@ function buildBreadthPrompt(event: BreadthEvent, tapeLine: string): string {
             ? `[BREADTH TRIGGER] Sector-wide move: ${event.movers.length} watchlist names are ` +
               `${up ? 'ripping' : 'selling off'} together ` +
               `(${event.movers.join(', ')}${event.semis.length ? `; semis: ${event.semis.join(', ')}` : ''}).`
-            : `[BREADTH TRIGGER] Pre-armed by the tape regime — the index proxies say the chip complex is ` +
-              `selling off together, before the intraday scans have accumulated movers. Confirm on the tape, ` +
-              `not on scan ranks.`,
+            : `[BREADTH TRIGGER] Pre-armed by the tape regime — the ETF proxies say a correlated ` +
+              `${up ? 'rally' : 'selloff'} is underway in the ${event.vehicle} cluster, before the intraday ` +
+              `scans have accumulated movers. Confirm on the tape, not on scan ranks.`,
         tapeLine,
         '',
         `On a correlated move the single-name pipeline bottlenecks (extension guard, trigger cap) — ` +

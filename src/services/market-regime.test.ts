@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test';
 import { classifyRegime, regimeThresholdAdjust, type RegimeInputs, type RegimeThresholds } from './market-regime.js';
 
-const T: RegimeThresholds = { qqqSoloPct: 1.2, qqqPct: 0.75, tltPct: 0.4, spyPct: 0.6, semisSpreadPct: 0.5 };
+const T: RegimeThresholds = { qqqSoloPct: 1.2, qqqPct: 0.75, tltPct: 0.4, spyPct: 0.6, semisSpreadPct: 0.5, cryptoPct: 3, cryptoSpreadPct: 2 };
 
-const inputs = (qqq: number | null, spy: number | null, smh: number | null, tlt: number | null): RegimeInputs =>
-    ({ qqqPct: qqq, spyPct: spy, smhPct: smh, tltPct: tlt });
+const inputs = (qqq: number | null, spy: number | null, smh: number | null, tlt: number | null, ibit: number | null = null): RegimeInputs =>
+    ({ qqqPct: qqq, spyPct: spy, smhPct: smh, tltPct: tlt, ibitPct: ibit });
 
 describe('classifyRegime (the "yields drive chip selloff" morning, 2026-08-18)', () => {
     test('the headline tape: QQQ down with TLT confirming, SMH lagging → risk-off, semis-led, yield-driven', () => {
@@ -44,6 +44,31 @@ describe('classifyRegime (the "yields drive chip selloff" morning, 2026-08-18)',
         expect(r.tag).toBe('risk-off');
         expect(r.semisLed).toBe(false);
         expect(r.yieldDriven).toBe(false);
+    });
+});
+
+describe('crypto-led flavor (the COIN/MSTR morning, 2026-08-19)', () => {
+    test('IBIT ripping while QQQ drifts → crypto-led rally, on any tag', () => {
+        const r = classifyRegime(inputs(0.2, 0.1, 0, 0, 4.1), T);
+        expect(r.tag).toBe('neutral');
+        expect(r.cryptoLed).toBe(true);
+        expect(r.line).toContain('crypto-led rally');
+        expect(r.line).toContain('IBIT +4.1%');
+    });
+
+    test('a crypto rout flags with its direction', () => {
+        const r = classifyRegime(inputs(-0.3, -0.2, 0, 0, -5.2), T);
+        expect(r.cryptoLed).toBe(true);
+        expect(r.line).toContain('crypto-led rout');
+    });
+
+    test('IBIT moving WITH the index is beta, not a crypto event', () => {
+        expect(classifyRegime(inputs(3.5, 3.0, 0, 0, 4.0), T).cryptoLed).toBe(false); // spread 0.5 < 2
+    });
+
+    test('missing IBIT or missing QQQ → no crypto flavor from half-blind inputs', () => {
+        expect(classifyRegime(inputs(0.2, 0, 0, 0, null), T).cryptoLed).toBe(false);
+        expect(classifyRegime(inputs(null, 0, 0, 0, 6), T).cryptoLed).toBe(false);
     });
 });
 

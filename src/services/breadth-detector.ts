@@ -46,12 +46,21 @@ const SEMI_SYMBOLS = new Set([
     'GFS', 'COHR', 'WDC', 'STX', 'SNDK', 'TER', 'ENTG', 'MCHP', 'SWKS', 'QRVO',
 ]);
 
+/** Crypto proxy complex — a correlated move here is a crypto regime event,
+ *  expressed via the crypto vehicle (2026-08-19: COIN +10% / MSTR +12% on a
+ *  BTC rally, invisible to scans and unroutable by breadth: two names could
+ *  never reach the 4-mover bar, and no crypto vehicle existed). */
+export const CRYPTO_SYMBOLS = new Set([
+    'COIN', 'MSTR', 'HOOD', 'RIOT', 'MARA', 'CLSK', 'BITF', 'HUT', 'CORZ', 'IREN',
+]);
+
 /** Names watched even without UNIVERSE_EXTRA_SYMBOLS — the liquid mega-caps
  *  whose correlated move IS the market. */
 const CORE_WATCHLIST = new Set([
     'AAPL', 'MSFT', 'GOOG', 'GOOGL', 'AMZN', 'META', 'TSLA', 'NFLX', 'DELL',
-    'ORCL', 'CRM', 'IBM', 'HPQ', 'HPE', 'ANET', 'PLTR', 'COIN', 'MSTR',
+    'ORCL', 'CRM', 'IBM', 'HPQ', 'HPE', 'ANET', 'PLTR',
     ...SEMI_SYMBOLS,
+    ...CRYPTO_SYMBOLS,
 ]);
 
 export interface BreadthEvent {
@@ -116,8 +125,11 @@ export function detectBreadth(
     if (movers.length < minMovers) return null;
 
     const semis = movers.filter((m) => SEMI_SYMBOLS.has(m));
-    // Majority semis → the semis vehicle expresses the move with less dilution.
-    const vehicle = semis.length * 2 >= movers.length ? semiVehicle() : broadVehicle();
+    const crypto = movers.filter((m) => CRYPTO_SYMBOLS.has(m));
+    // Majority cluster → its vehicle expresses the move with less dilution.
+    const vehicle = semis.length * 2 >= movers.length ? semiVehicle()
+        : crypto.length * 2 >= movers.length ? cryptoVehicle()
+        : broadVehicle();
 
     return { direction, movers, semis, vehicle };
 }
@@ -128,6 +140,28 @@ export function semiVehicle(): string {
 
 export function broadVehicle(): string {
     return (process.env.OPP_BREADTH_VEHICLE_BROAD ?? '').trim().toUpperCase() || 'QQQ';
+}
+
+export function cryptoVehicle(): string {
+    return (process.env.OPP_BREADTH_VEHICLE_CRYPTO ?? '').trim().toUpperCase() || 'IBIT';
+}
+
+/**
+ * Crypto pre-arm (2026-08-19): a crypto-led tape (IBIT moving hard and
+ * DIVERGING from QQQ — its own event, not index beta) is a breadth event
+ * the scans cannot assemble: the crypto cluster rarely lands 4 names in
+ * one scan window. Direction follows the IBIT sign — a crypto-led rally
+ * pre-arms the vehicle LONG, a crypto rout pre-arms it SHORT. Same
+ * pre-arm cap/cooldown machinery as the semis short.
+ */
+export function cryptoBreadthEvent(regime: { cryptoLed: boolean; inputs: { ibitPct: number | null } }): BreadthEvent | null {
+    if (!regime.cryptoLed || regime.inputs.ibitPct == null) return null;
+    return {
+        direction: regime.inputs.ibitPct > 0 ? 'long' : 'short',
+        movers: [],
+        semis: [],
+        vehicle: cryptoVehicle(),
+    };
 }
 
 /**

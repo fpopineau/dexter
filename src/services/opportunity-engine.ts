@@ -25,10 +25,11 @@ import { getMarketSession, isTradeableSession, MarketSession } from '@/utils/mar
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { addSymbol, removeSymbol } from './ibkr-stream.js';
-import { breadthFireAllowed, breadthThresholdRelief, breadthWatchlist, detectBreadth, GAINER_SCANS, LOSER_SCANS, regimeBreadthEvent, type BreadthEvent } from './breadth-detector.js';
+import { breadthFireAllowed, breadthThresholdRelief, breadthWatchlist, cryptoBreadthEvent, detectBreadth, GAINER_SCANS, LOSER_SCANS, regimeBreadthEvent, type BreadthEvent } from './breadth-detector.js';
 import { getMarketRegime, regimeThresholdAdjust } from './market-regime.js';
-import { eventMoverBoost, moverAlertEligible } from './event-mover.js';
+import { eventMoverBoost, moverAlertEligible, SENTINEL_SOURCE, sentinelDirection } from './event-mover.js';
 import { fetchDailyRiskContext } from '@/tools/ibkr/daily-atr.js';
+import { fetchLastPrice } from './proposal-executor.js';
 import { runScan, type ScanCode, type ScanResult } from './scanner-loop.js';
 import { etDatePlus, getEarningsForDate, previousTradingDate } from './earnings-calendar.js';
 
@@ -488,6 +489,14 @@ export async function runCycleOnce(forcePhase?: EnginePhase): Promise<Opportunit
             }
         }));
 
+        // 1b. Watchlist sentinel — admission for declared names the scans
+        // ignored (2026-08-19: COIN +10% / MSTR +12% on a BTC rally never
+        // cracked a 25-row scan window on a biotech-explosion day, and
+        // watchlist membership granted zero admission). Slow-cadence
+        // price-vs-prevClose sweep; aligned movers join `found` as full
+        // candidates and flow through scoring/boost/triggers/alerts.
+        await sweepSentinels(found);
+
         lastSurfaced = [...found.entries()].map(([symbol, meta]) => ({ symbol, sources: [...meta.sources] }));
 
         // 2. Pick candidates: reactors first (fresh prints must never lose
@@ -499,6 +508,17 @@ export async function runCycleOnce(forcePhase?: EnginePhase): Promise<Opportunit
                 || (b[1].sources.length - a[1].sources.length)
                 || (a[1].result.rank - b[1].result.rank))
             .slice(0, maxCandidates());
+
+        // Sentinel admissions are guaranteed a scoring slot: getting crowded
+        // out by the busy-day candidate cut is the exact failure the lane
+        // exists to fix. Bounded: sentinels are rare (≥5% movers not already
+        // in scans, from a ~60-name watchlist).
+        const admitted = new Set(candidates.map(([s]) => s));
+        for (const entry of found.entries()) {
+            if (entry[1].sources.includes(SENTINEL_SOURCE) && !admitted.has(entry[0])) {
+                candidates.push(entry);
+            }
+        }
 
         // 3. Score sequentially (IBKR historical-data pacing)
         const opportunities: Opportunity[] = [];
@@ -513,7 +533,7 @@ export async function runCycleOnce(forcePhase?: EnginePhase): Promise<Opportunit
                 // below index ETFs at +110%. prevClose comes from the
                 // cached daily-risk context (completed bars only).
                 let dayMovePct: number | null = null;
-                if (meta.sources.some((s) => GAINER_SCANS.has(s) || LOSER_SCANS.has(s))) {
+                if (meta.sources.some((s) => GAINER_SCANS.has(s) || LOSER_SCANS.has(s) || s === SENTINEL_SOURCE)) {
                     const ctx = await fetchDailyRiskContext(symbol).catch(() => null);
                     const price = signal.snapshot.price;
                     if (ctx?.prevClose != null && ctx.prevClose > 0 && price != null && price > 0) {
@@ -717,6 +737,65 @@ function breadthCapBonus(): number {
     return Number.isFinite(n) && n >= 0 ? n : 5;
 }
 
+// --- Watchlist sentinel (the COIN/MSTR admission lane, 2026-08-19) --------
+
+function sentinelEnabled(): boolean {
+    return (process.env.OPP_SENTINEL ?? '').trim().toLowerCase() !== 'false';
+}
+
+function sentinelCadenceMs(): number {
+    const n = Number(process.env.OPP_SENTINEL_CADENCE_MIN);
+    return (Number.isFinite(n) && n > 0 ? n : 10) * 60_000;
+}
+
+let lastSentinelSweepAt = 0;
+
+/**
+ * Check watchlist names ABSENT from this cycle's scans against their prior
+ * close; an aligned move past the sentinel bar injects them into `found`
+ * as full candidates (source WATCHLIST_SENTINEL, rank 0 so they sort ahead
+ * of same-source-count scan names). Chunked and cadence-limited: ~60 names
+ * every 10 minutes, 5-wide — prevClose rides the daily-context cache.
+ * Best-effort per name; a data failure admits nothing, never guesses.
+ */
+async function sweepSentinels(
+    found: Map<string, { result: ScanResult; direction: 'long' | 'short'; sources: string[] }>,
+): Promise<void> {
+    if (!sentinelEnabled() || process.env.NODE_ENV === 'test') return;
+    const now = Date.now();
+    if (now - lastSentinelSweepAt < sentinelCadenceMs()) return;
+    lastSentinelSweepAt = now;
+
+    const names = [...breadthWatchlist()].filter((s) => !found.has(s));
+    const hits: string[] = [];
+    for (let i = 0; i < names.length; i += 5) {
+        await Promise.all(names.slice(i, i + 5).map(async (sym) => {
+            try {
+                const [ctx, last] = await Promise.all([
+                    fetchDailyRiskContext(sym),
+                    fetchLastPrice(sym),
+                ]);
+                if (ctx?.prevClose == null || !(ctx.prevClose > 0) || last == null) return;
+                const movePct = Math.round(((last - ctx.prevClose) / ctx.prevClose) * 1000) / 10;
+                const direction = sentinelDirection(movePct);
+                if (!direction) return;
+                found.set(sym, {
+                    result: {
+                        rank: 0, symbol: sym, secType: 'STK', exchange: 'SMART', currency: 'USD',
+                        longName: sym, distance: '', benchmark: '', projection: '',
+                    },
+                    direction,
+                    sources: [SENTINEL_SOURCE],
+                });
+                hits.push(`${sym} ${movePct > 0 ? '+' : ''}${movePct}%`);
+            } catch { /* best-effort per name */ }
+        }));
+    }
+    if (hits.length) {
+        logger.info(`[opportunity-engine] SENTINEL admitted ${hits.join(', ')} (watchlist move, absent from scans)`);
+    }
+}
+
 /** Pre-arm cooldown — shorter than the scan cooldown so a pre-market tape
  *  look does not push the post-open confirmation window past its payoff
  *  (2026-08-18: 08:12 pre-arm + 120-min cooldown = 10:15 re-look, after
@@ -764,10 +843,16 @@ async function evaluateBreadth(snapshot: OpportunitySnapshot): Promise<void> {
         );
     }
 
-    // Semis-led risk-off tape with no scan evidence yet → pre-arm the
-    // short-vehicle evaluation from the ETF proxies (2026-08-18: the chip
-    // selloff was knowable at 08:00; scan accumulation wakes at ~09:35).
-    const event = scanEvent ?? regimeBreadthEvent(await getMarketRegime());
+    // No scan evidence yet → pre-arm from the ETF proxies: a semis-led
+    // risk-off tape arms the semis SHORT (2026-08-18: the chip selloff was
+    // knowable at 08:00), a crypto-led tape arms the crypto vehicle in the
+    // IBIT direction (2026-08-19: COIN/MSTR ran +10-12% on a BTC rally the
+    // scans never assembled — two names cannot reach the 4-mover bar).
+    let event = scanEvent;
+    if (!event) {
+        const regime = await getMarketRegime();
+        event = regimeBreadthEvent(regime) ?? cryptoBreadthEvent(regime);
+    }
     if (!event) return;
 
     if (breadthCallbacks.size === 0) return;

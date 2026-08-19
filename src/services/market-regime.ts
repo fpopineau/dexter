@@ -42,6 +42,8 @@ export interface RegimeInputs {
     spyPct: number | null;
     smhPct: number | null;
     tltPct: number | null;
+    /** IBIT (spot-bitcoin ETF) — the crypto tape as a plain STK proxy. */
+    ibitPct: number | null;
 }
 
 export interface MarketRegime {
@@ -51,6 +53,11 @@ export interface MarketRegime {
     semisLed: boolean;
     /** TLT confirming (bonds down = yields up) on a risk-off tape. */
     yieldDriven: boolean;
+    /** IBIT moving hard AND diverging from QQQ — a crypto event, not index
+     *  beta (2026-08-19: COIN +10%, MSTR +12% on a BTC rally the regime
+     *  could not see). Independent of the risk tag: crypto can lead in
+     *  either direction on any tape; sign lives in inputs.ibitPct. */
+    cryptoLed: boolean;
     inputs: RegimeInputs;
     /** One-line summary for prompts and logs. */
     line: string;
@@ -62,6 +69,10 @@ export interface RegimeThresholds {
     tltPct: number;
     spyPct: number;
     semisSpreadPct: number;
+    /** |IBIT| move that makes the tape crypto-led… */
+    cryptoPct: number;
+    /** …provided it diverges from QQQ by at least this (else it is beta). */
+    cryptoSpreadPct: number;
 }
 
 function envNum(name: string, fallback: number): number {
@@ -76,6 +87,8 @@ export function regimeThresholds(): RegimeThresholds {
         tltPct: envNum('REGIME_TLT_PCT', 0.4),
         spyPct: envNum('REGIME_SPY_PCT', 0.6),
         semisSpreadPct: envNum('REGIME_SEMIS_SPREAD_PCT', 0.5),
+        cryptoPct: envNum('REGIME_CRYPTO_PCT', 3),
+        cryptoSpreadPct: envNum('REGIME_CRYPTO_SPREAD_PCT', 2),
     };
 }
 
@@ -98,7 +111,7 @@ const fmt = (x: number | null) => (x === null ? '?' : `${x >= 0 ? '+' : ''}${x.t
 /** Pure classification. QQQ is the anchor: without it the tape is unknown
  *  (never guessed from the others alone). */
 export function classifyRegime(inputs: RegimeInputs, t: RegimeThresholds = regimeThresholds()): MarketRegime {
-    const { qqqPct: qqq, spyPct: spy, smhPct: smh, tltPct: tlt } = inputs;
+    const { qqqPct: qqq, spyPct: spy, smhPct: smh, tltPct: tlt, ibitPct: ibit } = inputs;
     let tag: RegimeTag = 'unknown';
     if (qqq !== null) {
         const confirmedOff = qqq <= -t.qqqPct && ((tlt !== null && tlt <= -t.tltPct) || (spy !== null && spy <= -t.spyPct));
@@ -109,11 +122,20 @@ export function classifyRegime(inputs: RegimeInputs, t: RegimeThresholds = regim
     }
     const semisLed = tag === 'risk-off' && smh !== null && qqq !== null && smh - qqq <= -t.semisSpreadPct;
     const yieldDriven = tag === 'risk-off' && tlt !== null && tlt <= -t.tltPct;
-    const flavor = [semisLed ? 'semis-led' : null, yieldDriven ? 'yield-driven' : null].filter(Boolean).join(', ');
+    // Crypto leads on its own clock: big IBIT move that DIVERGES from QQQ
+    // (pure index beta is not a crypto event). Unknown QQQ blocks the
+    // divergence test → no flavor from half-blind inputs.
+    const cryptoLed = ibit !== null && qqq !== null
+        && Math.abs(ibit) >= t.cryptoPct && Math.abs(ibit - qqq) >= t.cryptoSpreadPct;
+    const flavor = [
+        semisLed ? 'semis-led' : null,
+        yieldDriven ? 'yield-driven' : null,
+        cryptoLed ? `crypto-led ${ibit! > 0 ? 'rally' : 'rout'}` : null,
+    ].filter(Boolean).join(', ');
     const line = tag === 'unknown'
         ? 'TAPE unknown (index quotes unavailable)'
-        : `TAPE ${tag}${flavor ? ` (${flavor})` : ''}: QQQ ${fmt(qqq)}, SPY ${fmt(spy)}, SMH ${fmt(smh)}, TLT ${fmt(tlt)}`;
-    return { tag, semisLed, yieldDriven, inputs, line };
+        : `TAPE ${tag}${flavor ? ` (${flavor})` : ''}: QQQ ${fmt(qqq)}, SPY ${fmt(spy)}, SMH ${fmt(smh)}, TLT ${fmt(tlt)}, IBIT ${fmt(ibit)}`;
+    return { tag, semisLed, yieldDriven, cryptoLed, inputs, line };
 }
 
 /**
@@ -135,10 +157,10 @@ export function regimeThresholdAdjust(
 // Snapshot fetch (cached)
 // ---------------------------------------------------------------------------
 
-const PROXIES = { qqq: 'QQQ', spy: 'SPY', smh: 'SMH', tlt: 'TLT' } as const;
+const PROXIES = { qqq: 'QQQ', spy: 'SPY', smh: 'SMH', tlt: 'TLT', ibit: 'IBIT' } as const;
 const TTL_MS = 5 * 60_000;
 
-const UNKNOWN: MarketRegime = classifyRegime({ qqqPct: null, spyPct: null, smhPct: null, tltPct: null });
+const UNKNOWN: MarketRegime = classifyRegime({ qqqPct: null, spyPct: null, smhPct: null, tltPct: null, ibitPct: null });
 
 let cached: { value: MarketRegime; at: number } | null = null;
 let lastLoggedLine = '';
@@ -176,13 +198,14 @@ async function pctVsPrevClose(symbol: string): Promise<number | null> {
 export async function getMarketRegime(): Promise<MarketRegime> {
     if (process.env.NODE_ENV === 'test') return UNKNOWN;
     if (cached && Date.now() - cached.at < TTL_MS) return cached.value;
-    const [qqqPct, spyPct, smhPct, tltPct] = await Promise.all([
+    const [qqqPct, spyPct, smhPct, tltPct, ibitPct] = await Promise.all([
         pctVsPrevClose(PROXIES.qqq),
         pctVsPrevClose(PROXIES.spy),
         pctVsPrevClose(PROXIES.smh),
         pctVsPrevClose(PROXIES.tlt),
+        pctVsPrevClose(PROXIES.ibit),
     ]);
-    const regime = classifyRegime({ qqqPct, spyPct, smhPct, tltPct });
+    const regime = classifyRegime({ qqqPct, spyPct, smhPct, tltPct, ibitPct });
     cached = { value: regime, at: Date.now() };
     // Log transitions, not every 5-minute refresh — the tape line should be
     // findable in the day's log exactly when it changed.

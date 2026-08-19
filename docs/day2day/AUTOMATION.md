@@ -83,6 +83,19 @@ Starts/stops with the gateway when IBKR is configured; opt-out with
 ### Risk gate — `src/services/proposal-risk-gate.ts`
 ## Dawn watch + pre-market mover alerts
 
+**Watchlist sentinel** (2026-08-19): watchlist names ABSENT from the
+scans get a price-vs-prior-close check every `OPP_SENTINEL_CADENCE_MIN`
+(10); an aligned move ≥ `OPP_SENTINEL_MOVE_PCT` (5%) admits them into
+the candidate pool with a guaranteed scoring slot — declared names can
+no longer be invisible just because small caps out-percented them
+(COIN +10%/MSTR +12% on a BTC rally never cracked a 25-row scan
+window). The regime snapshot also watches IBIT: a move ≥
+`REGIME_CRYPTO_PCT` diverging from QQQ by `REGIME_CRYPTO_SPREAD_PCT`
+flags the tape `crypto-led` and pre-arms the crypto vehicle
+(`OPP_BREADTH_VEHICLE_CRYPTO`, IBIT) long or short by the IBIT sign,
+through the same pre-arm cap/cooldown; scan-driven breadth days with a
+crypto-majority mover set route to the same vehicle.
+
 The engine's pre-open phase starts at `OPP_DAWN_START_ET` (default 04:00
 ET, was 08:00 — MRNA 2026-08-19 ran +110% at 06:45–07:50 inside the old
 blind window) at a slow cadence (`OPP_DAWN_CADENCE_MIN`, default 15). A

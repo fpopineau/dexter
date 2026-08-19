@@ -44,6 +44,26 @@ export function eventMoverBoost(dayMovePct: number | null, minPct: number = even
     return Math.min(25, Math.round(dayMovePct));
 }
 
+/** Scan-source tag for sentinel-admitted candidates — the watchlist lane
+ *  (COIN +10% / MSTR +12% on 2026-08-19 never cracked a 25-row scan on a
+ *  biotech-explosion day; watchlist membership granted zero admission). */
+export const SENTINEL_SOURCE = 'WATCHLIST_SENTINEL';
+
+export function sentinelMinPct(): number {
+    const n = Number(process.env.OPP_SENTINEL_MOVE_PCT);
+    return Number.isFinite(n) && n > 0 ? n : 5;
+}
+
+/**
+ * Sentinel admission decision: RAW signed day move (not direction-signed —
+ * the direction is the OUTPUT). Watchlist names are liquid mega/large caps,
+ * so ±5% is already a declared-name event; null = no data, no admission.
+ */
+export function sentinelDirection(rawMovePct: number | null, minPct: number = sentinelMinPct()): 'long' | 'short' | null {
+    if (rawMovePct == null || Math.abs(rawMovePct) < minPct) return null;
+    return rawMovePct > 0 ? 'long' : 'short';
+}
+
 /**
  * Should this candidate fire the one-per-day deterministic mover alert?
  * Aligned move ≥ minPct, with an RVOL floor when RVOL is known (the

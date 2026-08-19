@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { eventMoverBoost, moverAlertEligible } from './event-mover.js';
+import { eventMoverBoost, moverAlertEligible, sentinelDirection } from './event-mover.js';
 
 describe('eventMoverBoost (MRNA 2026-08-19: +110% ranked below index ETFs)', () => {
     test('the MRNA case: a huge aligned move gets the full +25 — top-3 becomes unavoidable', () => {
@@ -16,6 +16,20 @@ describe('eventMoverBoost (MRNA 2026-08-19: +110% ranked below index ETFs)', () 
         expect(eventMoverBoost(9.9, 10)).toBe(0);
         expect(eventMoverBoost(-40, 10)).toBe(0); // moved AGAINST the candidate's direction
         expect(eventMoverBoost(null, 10)).toBe(0);
+    });
+});
+
+describe('sentinelDirection (watchlist admission lane, 2026-08-19)', () => {
+    test('the live case: COIN +10.2% / MSTR +12.1% admit as longs at the 5% bar', () => {
+        expect(sentinelDirection(10.2, 5)).toBe('long');
+        expect(sentinelDirection(12.1, 5)).toBe('long');
+    });
+
+    test('drops admit as shorts; small moves and missing data admit nothing', () => {
+        expect(sentinelDirection(-7.4, 5)).toBe('short');
+        expect(sentinelDirection(4.9, 5)).toBeNull();
+        expect(sentinelDirection(-4.9, 5)).toBeNull();
+        expect(sentinelDirection(null, 5)).toBeNull();
     });
 });
 

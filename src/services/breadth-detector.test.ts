@@ -1,5 +1,19 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { breadthFireAllowed, breadthThresholdRelief, breadthWatchlist, detectBreadth, regimeBreadthEvent } from './breadth-detector.js';
+import { breadthFireAllowed, breadthThresholdRelief, breadthWatchlist, cryptoBreadthEvent, detectBreadth, regimeBreadthEvent } from './breadth-detector.js';
+
+describe('cryptoBreadthEvent (the COIN/MSTR gap, 2026-08-19)', () => {
+    test('a crypto-led rally pre-arms the crypto vehicle LONG; a rout pre-arms it SHORT', () => {
+        expect(cryptoBreadthEvent({ cryptoLed: true, inputs: { ibitPct: 4.1 } }))
+            .toEqual({ direction: 'long', movers: [], semis: [], vehicle: 'IBIT' });
+        expect(cryptoBreadthEvent({ cryptoLed: true, inputs: { ibitPct: -5.2 } }))
+            .toEqual({ direction: 'short', movers: [], semis: [], vehicle: 'IBIT' });
+    });
+
+    test('no crypto flavor (or no IBIT reading) → no event', () => {
+        expect(cryptoBreadthEvent({ cryptoLed: false, inputs: { ibitPct: 6 } })).toBeNull();
+        expect(cryptoBreadthEvent({ cryptoLed: true, inputs: { ibitPct: null } })).toBeNull();
+    });
+});
 
 describe('breadthFireAllowed (2026-08-18 timeline: pre-arm must not delay scan evidence)', () => {
     const MIN = 60_000;
@@ -80,7 +94,7 @@ function surfaced(symbol: string, ...sources: string[]) {
 
 // detectBreadth reads vehicle envs — pin them so a user .env (bun auto-loads
 // it into tests) can never steer assertions.
-const ENV_KEYS = ['OPP_BREADTH_VEHICLE_SEMI', 'OPP_BREADTH_VEHICLE_BROAD', 'OPP_BREADTH_MIN_WATCHED', 'OPP_BREADTH_THRESHOLD_RELIEF', 'UNIVERSE_EXTRA_SYMBOLS'];
+const ENV_KEYS = ['OPP_BREADTH_VEHICLE_SEMI', 'OPP_BREADTH_VEHICLE_BROAD', 'OPP_BREADTH_VEHICLE_CRYPTO', 'OPP_BREADTH_MIN_WATCHED', 'OPP_BREADTH_THRESHOLD_RELIEF', 'UNIVERSE_EXTRA_SYMBOLS'];
 const saved: Record<string, string | undefined> = {};
 beforeEach(() => {
     for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
@@ -111,6 +125,20 @@ describe('detectBreadth (Jul 30 melt-up shape)', () => {
         // 7 of 9 movers are semis → SOXL
         expect(event!.semis).toEqual(['MU', 'AMD', 'INTC', 'TSM', 'ARM', 'ASML', 'SMCI']);
         expect(event!.vehicle).toBe('SOXL');
+    });
+
+    test('a crypto-majority breadth day routes to the crypto vehicle', () => {
+        const crypto = new Set(['COIN', 'MSTR', 'HOOD', 'RIOT', 'MSFT']);
+        const event = detectBreadth([
+            surfaced('COIN', 'TOP_PERC_GAIN'),
+            surfaced('MSTR', 'TOP_PERC_GAIN'),
+            surfaced('HOOD', 'TOP_PERC_GAIN'),
+            surfaced('RIOT', 'TOP_OPEN_PERC_GAIN'),
+            surfaced('MSFT', 'TOP_PERC_GAIN'),
+        ], crypto, 4);
+        expect(event).not.toBeNull();
+        expect(event!.vehicle).toBe('IBIT'); // 4 of 5 movers are crypto complex
+        expect(event!.direction).toBe('long');
     });
 
     test('broad (non-semi) breadth routes to QQQ', () => {
