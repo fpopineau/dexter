@@ -848,6 +848,23 @@ export async function sumRealizedPnlSince(sinceMs: number): Promise<number> {
     return Math.round((rows[0]?.n ?? 0) * 100) / 100;
 }
 
+/** Closed, entry-filled rows still missing MFE/MAE — the excursion
+ *  sweeper's work list (WP0.9). Zero-fill cancels are excluded: no held
+ *  window exists to measure. Oldest first so history backfills before the
+ *  IBKR bar horizon moves past it. */
+export async function listClosedMissingExcursion(limit: number): Promise<TradeProposal[]> {
+    const database = await getDb();
+    const rows = database.query<Row>(
+        `SELECT * FROM proposals
+         WHERE status = 'closed' AND mfe_pct IS NULL
+           AND entry_fill_price IS NOT NULL AND entry_filled_at IS NOT NULL
+           AND closed_at IS NOT NULL
+           AND (exit_reason IS NULL OR exit_reason != 'cancelled')
+         ORDER BY closed_at ASC LIMIT ?`,
+    ).all(limit);
+    return rows.map(fromRow);
+}
+
 /** Start of the current America/New_York day in epoch ms. */
 export function etDayStartMs(now = Date.now()): number {
     const et = new Date(new Date(now).toLocaleString('en-US', { timeZone: 'America/New_York' }));

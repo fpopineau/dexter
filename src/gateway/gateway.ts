@@ -41,6 +41,7 @@ import { plannedBookWorstCasePct } from '@/services/proposal-risk-gate.js';
 import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
 import { startProfitTrail, stopProfitTrail } from '@/services/profit-trail.js';
 import { catchUpPatternScan } from '@/services/pattern-scanner.js';
+import { startExcursionSweeper, stopExcursionSweeper } from '@/services/excursion-sweeper.js';
 import { startStaleEntrySweeper, stopStaleEntrySweeper } from '@/services/stale-entry-sweeper.js';
 import { makeDebugLog } from './debug-log.js';
 import { registerScanHealthAlerts } from './health-alerts.js';
@@ -308,6 +309,9 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     startProfitTrail();
     // Reclaim position slots from brackets whose entry never filled.
     startStaleEntrySweeper();
+    // Nightly MFE/MAE backfill on closed rows (WP0.9): target-reachability
+    // tuning reads excursion data — without this it tunes on ~4 rows.
+    startExcursionSweeper();
     // 15:52 ET: close losing-and-fading DAY positions; keep the rest for
     // the protected-overnight conversion at the bell.
     startEodTriage();
@@ -407,6 +411,7 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
       // profit-trail and EOD triage can place market orders post-stop.
       stopProfitTrail();
       stopStaleEntrySweeper();
+      stopExcursionSweeper();
       stopEodTriage();
       stopNewsPulse();
       stopBenchmark();

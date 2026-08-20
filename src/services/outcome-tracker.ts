@@ -271,7 +271,10 @@ async function captureTradeExcursion(proposalId: string): Promise<void> {
     // Keep bars overlapping the hold: from the bar containing the fill on.
     const held = bars.filter((b) => {
         const t = barTimeFrameMs(b.time);
-        return t !== null && t >= fillFrameMs - barMs;
+        // Strict bound, matching the sweeper's barsWithinHold: inclusive
+        // admitted one full PRE-fill bar on boundary fills, inflating
+        // MFE/MAE with range the trade never held (WP0.9).
+        return t !== null && t > fillFrameMs - barMs;
     });
     const { mfePct, maePct } = computeTradeExcursion(p.direction, p.entryFillPrice, held);
     if (mfePct === null || maePct === null) {

@@ -1,0 +1,118 @@
+/**
+ * Excursion sweeper (WP0.9, REMEDIATION-2026-08-20).
+ *
+ * The live capture in the outcome tracker only fires inside `finalize`,
+ * post-fill, tracker-attached, non-test — which left 4 of 112 closed rows
+ * with MFE/MAE. This sweep runs nightly (and once after boot) over closed
+ * rows still missing excursion data and fills them from historical bars.
+ * Target-reachability tuning (max_target_atr) reads exactly this data —
+ * without the backfill it tunes on a 4-row sample.
+ *
+ * Unlike the live capture, the window is CLOSED on both ends: bars after
+ * the exit must not count, or every row's MFE inflates with price action
+ * the trade never held through.
+ */
+
+import { Cron } from 'croner';
+import { BarSizeSetting, type Bar } from '@stoqey/ib';
+import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
+import { logger } from '@/utils';
+import { barTimeFrameMs, computeTradeExcursion, etFrameMs } from './outcome-tracker.js';
+import { listClosedMissingExcursion, recordTradeExcursion } from './trade-proposals.js';
+
+const ET = 'America/New_York';
+/** 02:17 ET nightly — dead air, after the archive/benchmark windows. */
+const SWEEP_CRON = '17 2 * * 2-6';
+/** Rows per run: bounds IBKR historical pacing; the backlog drains over
+ *  a few nights instead of hammering the farm in one. */
+const BATCH_LIMIT = 20;
+/** IBKR intraday-bar horizon we rely on (30 D of 15-min is safely served).
+ *  Fills older than this are skipped permanently — honest nulls. */
+const MAX_LOOKBACK_DAYS = 29;
+const PACING_DELAY_MS = 2_000;
+
+/** Pure: bars overlapping [fillFrameMs, closeFrameMs], both ends inclusive
+ *  of the bar containing the boundary. */
+export function barsWithinHold(
+    bars: Bar[],
+    fillFrameMs: number,
+    closeFrameMs: number,
+    barMs: number,
+): Bar[] {
+    return bars.filter((b) => {
+        const t = barTimeFrameMs(b.time);
+        // Strict lower bound: a bar at exactly fill−barMs spans [t, fill)
+        // and ends AT the fill instant — a boundary fill belongs to the
+        // bar stamped with its own time, not the one before.
+        return t !== null && t > fillFrameMs - barMs && t <= closeFrameMs;
+    });
+}
+
+/** One sweep pass. Returns counts for logging/tests. */
+export async function sweepExcursionsOnce(): Promise<{ filled: number; skipped: number; failed: number }> {
+    const rows = await listClosedMissingExcursion(BATCH_LIMIT);
+    let filled = 0, skipped = 0, failed = 0;
+    for (const p of rows) {
+        if (p.entryFillPrice == null || p.entryFilledAt == null || p.closedAt == null) { skipped++; continue; }
+        const ageDays = Math.ceil((Date.now() - p.entryFilledAt) / 86_400_000);
+        if (ageDays > MAX_LOOKBACK_DAYS) {
+            // Beyond the reliable bar horizon: mark 0/0? No — nulls stay
+            // honest, and the ORDER BY oldest-first would re-select the row
+            // forever, so record a sentinel note-free skip via log only.
+            skipped++;
+            logger.info(`[excursion-sweeper] ${p.id} ${p.symbol}: fill ${ageDays}d old, past the bar horizon — leaving nulls`);
+            continue;
+        }
+        const holdDays = Math.max(1, Math.ceil((p.closedAt - p.entryFilledAt) / 86_400_000));
+        const barSize = ageDays <= 2 ? BarSizeSetting.MINUTES_ONE
+            : ageDays <= 7 ? BarSizeSetting.MINUTES_FIVE
+            : BarSizeSetting.MINUTES_FIFTEEN;
+        const barMs = barSize === BarSizeSetting.MINUTES_ONE ? 60_000
+            : barSize === BarSizeSetting.MINUTES_FIVE ? 300_000 : 900_000;
+        try {
+            // Duration must reach back from NOW to the fill (fetch window
+            // ends now); extended hours included — for overnight holds the
+            // gap IS the excursion.
+            const bars = await fetchBars(p.symbol, barSize, `${Math.min(ageDays + 1, 30)} D`, false);
+            const held = barsWithinHold(bars, etFrameMs(p.entryFilledAt), etFrameMs(p.closedAt), barMs);
+            const { mfePct, maePct } = computeTradeExcursion(p.direction, p.entryFillPrice, held);
+            if (mfePct === null || maePct === null) {
+                skipped++;
+                logger.warn(`[excursion-sweeper] ${p.id} ${p.symbol}: no usable bars in hold window (${bars.length} fetched, hold ${holdDays}d)`);
+            } else {
+                await recordTradeExcursion(p.id, mfePct, maePct);
+                filled++;
+                logger.info(`[excursion-sweeper] ${p.id} ${p.symbol}: backfilled MFE ${mfePct}% MAE ${maePct}% (${held.length} bars)`);
+            }
+        } catch (err) {
+            failed++;
+            logger.warn(`[excursion-sweeper] ${p.id} ${p.symbol}: bar fetch failed — ${err}`);
+        }
+        await new Promise((r) => setTimeout(r, PACING_DELAY_MS));
+    }
+    if (rows.length > 0) {
+        logger.info(`[excursion-sweeper] pass done: ${filled} backfilled, ${skipped} skipped, ${failed} failed of ${rows.length}`);
+    }
+    return { filled, skipped, failed };
+}
+
+let job: Cron | null = null;
+
+/** Start the nightly sweep + a delayed boot catch-up (idempotent). */
+export function startExcursionSweeper(): void {
+    if (job) return;
+    job = new Cron(SWEEP_CRON, { timezone: ET }, () => {
+        sweepExcursionsOnce().catch((err) => logger.error(`[excursion-sweeper] run failed: ${err}`));
+    });
+    logger.info('[excursion-sweeper] scheduled 02:17 ET: backfill MFE/MAE on closed rows missing excursion data');
+    if (process.env.NODE_ENV !== 'test') {
+        // Boot catch-up, delayed so the IBKR connection settles first.
+        setTimeout(() => {
+            sweepExcursionsOnce().catch((err) => logger.error(`[excursion-sweeper] boot catch-up failed: ${err}`));
+        }, 45_000);
+    }
+}
+
+export function stopExcursionSweeper(): void {
+    if (job) { job.stop(); job = null; }
+}
