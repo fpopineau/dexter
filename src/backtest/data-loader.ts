@@ -167,7 +167,12 @@ export async function loadArchive(
     }
     if (options.endDate) {
         sql += ` AND time <= ?`;
-        params.push(options.endDate);
+        // WP9: bar times are 'YYYY-MM-DD HH:MM:SS' — a bare 'YYYY-MM-DD'
+        // bound compared lexicographically BEFORE every intraday bar of
+        // that day, silently dropping the entire final session (the CSV
+        // path already appended the day-end; the two sources disagreed on
+        // every window and shifted every walk-forward fold boundary).
+        params.push(options.endDate.length === 10 ? `${options.endDate} 23:59:59` : options.endDate);
     }
     sql += ` ORDER BY time ASC`;
 

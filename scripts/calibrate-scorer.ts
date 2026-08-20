@@ -32,7 +32,13 @@
 
 import 'dotenv/config';
 
-import { runBacktest } from '@/backtest/engine';
+// WP9 version guard: this script's protocol was written against the
+// honest-replay engine — running it over an older engine (same-bar
+// look-ahead, first-ticker multi-symbol pricing) manufactures Sharpe.
+// Bump BOTH constants together, deliberately.
+const REQUIRED_ENGINE = 'wp9-honest-replay-1';
+
+import { ENGINE_VERSION, runBacktest } from '@/backtest/engine';
 import {
     DEFAULT_WEIGHTS,
     setActiveWeights,
@@ -102,6 +108,11 @@ console.log(`\n=== Scorer calibration (walk-forward grid search) ===`);
 console.log(`Tickers : ${TICKERS.join(', ')}   period ${START} → ${END}`);
 console.log(`Grid    : ${grid.length} weight sets (${fine ? 'fine 0.10' : 'coarse 0.25'})`);
 console.log(`Metric  : average out-of-sample Sharpe across folds (min ${MIN_OOS_TRADES} OOS trades)\n`);
+
+if (ENGINE_VERSION !== REQUIRED_ENGINE) {
+    console.error(`REFUSED: engine is '${ENGINE_VERSION}', this protocol requires '${REQUIRED_ENGINE}' — recalibrating on a mismatched engine manufactures Sharpe.`);
+    process.exit(1);
+}
 
 const rows: Row[] = [];
 const t0 = Date.now();

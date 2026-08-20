@@ -16,6 +16,13 @@ import { computeMetrics, type BacktestMetrics, type EquityPoint, type Trade } fr
 import { aggregateDaily, loadSentiment, type DailySentiment } from './sentiment-loader.js';
 import { Simulator, type OrderRequest, type SimulatorConfig } from './simulator.js';
 
+/** Engine contract version (WP9, REMEDIATION-2026-08-20). Bump on any
+ *  change to fill timing, advance semantics, or sizing — calibrate-scorer
+ *  refuses to run against an engine older than what it was written for.
+ *  'wp9-honest-replay-1': next-bar fills, per-symbol advance, gap-aware
+ *  exits, warm-up preload, risk-based sizing, 2R defaults. */
+export const ENGINE_VERSION = 'wp9-honest-replay-1';
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -53,12 +60,21 @@ export interface EngineConfig {
     maxBarsHeld?: number;
 
     // Sentiment
-    /** Enable GDELT sentiment overlay. */
+    /** Enable GDELT sentiment overlay. WP9: requires allowSentimentLookahead
+     *  — the overlay keys on the CALENDAR DAY's aggregate, so a 09:35 bar
+     *  sees 15:50 news. Disabled with a warning unless explicitly allowed. */
     useSentiment?: boolean;
+    /** Explicit opt-in to the sentiment overlay's day-level look-ahead. */
+    allowSentimentLookahead?: boolean;
     /** GDELT data directory override. */
     gdeltDir?: string;
     /** Sentiment score boost/penalty range (added to signal score). Default 10. */
     sentimentWeight?: number;
+
+    /** Test/strategy hook (WP9): when set, replaces the scorer entirely —
+     *  called once per (ticker, completed bar) with the lookback window;
+     *  return an order to submit or null. */
+    signalOverride?: (ticker: string, window: OHLCV, bar: Bar) => OrderRequest | null;
 
     // Walk-forward
     /** Enable walk-forward validation. */
@@ -82,11 +98,14 @@ export interface BacktestResult {
 
 export interface WalkForwardFold {
     foldIndex: number;
+    /** Train range kept for a FUTURE fitting step. WP9 deleted the inert
+     *  train simulation: it fitted nothing, selected nothing, and doubled
+     *  runtime for a display-only number that dressed segmented replay up
+     *  as walk-forward validation. */
     trainStart: string;
     trainEnd: string;
     testStart: string;
     testEnd: string;
-    trainMetrics: BacktestMetrics;
     testMetrics: BacktestMetrics;
 }
 
@@ -98,6 +117,34 @@ function addDays(dateStr: string, days: number): string {
     const d = new Date(dateStr);
     d.setDate(d.getDate() + days);
     return d.toISOString().substring(0, 10);
+}
+
+/** WP9: the sentiment overlay keys on the calendar DAY's aggregate — a
+ *  09:35 bar sees 15:50 news. Usable only with the look-ahead explicitly
+ *  owned; otherwise disabled loudly. */
+function resolveSentimentUse(config: EngineConfig): boolean {
+    if (!config.useSentiment) return false;
+    if (config.allowSentimentLookahead) return true;
+    logger.warn(
+        '[engine] useSentiment DISABLED: the day-level GDELT overlay applies the whole day\'s news to every ' +
+        'intraday bar (look-ahead). Pass allowSentimentLookahead: true to own that bias explicitly.',
+    );
+    return false;
+}
+
+/** Per-symbol realized equity curve: starting capital stepped by each
+ *  trade's net P&L at its exit time. Realized-only (no intrabar marks),
+ *  but honestly PER-SYMBOL. */
+function buildRealizedCurve(trades: Trade[], startingCapital: number): EquityPoint[] {
+    const sorted = [...trades].sort((a, b) => a.exitTime.localeCompare(b.exitTime));
+    let equity = startingCapital;
+    let peak = startingCapital;
+    return sorted.map((t) => {
+        equity += t.pnl;
+        if (equity > peak) peak = equity;
+        const dd = peak - equity;
+        return { time: t.exitTime, equity, drawdown: dd, drawdownPct: peak > 0 ? dd / peak : 0 };
+    });
 }
 
 /** Get the last N values from a OHLCV, including current bar. */
@@ -144,10 +191,10 @@ export async function runBacktest(config: EngineConfig): Promise<BacktestResult>
     }
 
     // Single-pass backtest
-    logger.info(`[engine] Starting backtest: ${tickers.join(',')} ${startDate} → ${endDate}`);
+    logger.info(`[engine] Starting backtest (${ENGINE_VERSION}): ${tickers.join(',')} ${startDate} → ${endDate}`);
 
     const allBars = await loadAllBars(config);
-    const sentiment = config.useSentiment
+    const sentiment = resolveSentimentUse(config)
         ? await loadSentimentData(config)
         : new Map<string, DailySentiment[]>();
 
@@ -156,14 +203,20 @@ export async function runBacktest(config: EngineConfig): Promise<BacktestResult>
 
     const metrics = computeMetrics(trades, equityCurve, sim.config.startingCapital);
 
-    // Per-symbol metrics
+    // Per-symbol metrics from PER-SYMBOL realized curves (WP9): the old
+    // code passed the PORTFOLIO curve, so every curve-derived field
+    // (Sharpe, drawdown, returns) was identical across symbols.
     let perSymbol: Record<string, BacktestMetrics> | undefined;
     if (tickers.length > 1) {
         perSymbol = {};
         for (const ticker of tickers) {
             const symbolTrades = trades.filter((t) => t.symbol === ticker);
             if (symbolTrades.length > 0) {
-                perSymbol[ticker] = computeMetrics(symbolTrades, equityCurve, sim.config.startingCapital);
+                perSymbol[ticker] = computeMetrics(
+                    symbolTrades,
+                    buildRealizedCurve(symbolTrades, sim.config.startingCapital),
+                    sim.config.startingCapital,
+                );
             }
         }
     }
@@ -209,22 +262,16 @@ async function runWalkForward(
         if (testStart >= endDate) break;
         const effectiveTestEnd = testEnd > endDate ? endDate : testEnd;
 
-        logger.info(`[engine] Walk-forward fold ${foldIdx}: train ${trainStart}→${trainEnd}, test ${testStart}→${effectiveTestEnd}`);
+        logger.info(`[engine] Walk-forward fold ${foldIdx}: train ${trainStart}→${trainEnd} (reserved), test ${testStart}→${effectiveTestEnd}`);
 
-        // Train fold
-        const trainConfig = { ...config, startDate: trainStart, endDate: trainEnd, walkForward: false };
-        const trainBars = await loadAllBars(trainConfig);
-        const trainSentiment = config.useSentiment
-            ? await loadSentimentData(trainConfig)
-            : new Map<string, DailySentiment[]>();
-        const trainSim = new Simulator(config.simulator);
-        const trainResult = runSimulation(trainConfig, trainBars, trainSentiment, trainSim);
-        const trainMetrics = computeMetrics(trainResult.trades, trainResult.equityCurve, trainSim.config.startingCapital);
-
-        // Test fold (out-of-sample)
+        // WP9: NO train simulation — there is no fitting step, so running
+        // the strategy over the train window fitted nothing, selected
+        // nothing, and doubled runtime for a display-only number. The
+        // train range is preserved on the fold for the day a fitting step
+        // exists; until then this is honestly labeled segmented replay.
         const testConfig = { ...config, startDate: testStart, endDate: effectiveTestEnd, walkForward: false };
         const testBars = await loadAllBars(testConfig);
-        const testSentiment = config.useSentiment
+        const testSentiment = resolveSentimentUse(config)
             ? await loadSentimentData(testConfig)
             : new Map<string, DailySentiment[]>();
         const testSim = new Simulator(config.simulator);
@@ -237,7 +284,6 @@ async function runWalkForward(
             trainEnd,
             testStart,
             testEnd: effectiveTestEnd,
-            trainMetrics,
             testMetrics,
         });
 
@@ -271,10 +317,25 @@ async function runWalkForward(
 // Data loading
 // ---------------------------------------------------------------------------
 
+/** Approximate RTH bars per session per timeframe — sizes the warm-up. */
+const BARS_PER_DAY: Record<string, number> = { '1m': 390, '5m': 78, '15m': 26, '1h': 7, '1d': 1 };
+
+/** WP9: indicators need `lookback` bars BEFORE the first tradable bar —
+ *  the old loader started at startDate, so every window (and every
+ *  walk-forward test fold) burned its first ~lookback bars producing
+ *  nothing. Load from earlier; runSimulation gates signals and the equity
+ *  curve to startDate. */
+function warmupStartDate(config: EngineConfig): string {
+    const perDay = BARS_PER_DAY[config.timeframe ?? '5m'] ?? 78;
+    const tradingDays = Math.ceil((config.lookbackBars ?? 200) / perDay);
+    const calendarDays = Math.ceil(tradingDays * 1.5) + 3; // weekends/holidays buffer
+    return addDays(config.startDate, -calendarDays);
+}
+
 async function loadAllBars(config: EngineConfig): Promise<Map<string, Bar[]>> {
     const result = new Map<string, Bar[]>();
     const loadOpts: LoadOptions = {
-        startDate: config.startDate,
+        startDate: warmupStartDate(config),
         endDate: config.endDate,
         timeframe: config.timeframe ?? '5m',
     };
@@ -319,7 +380,17 @@ async function loadSentimentData(config: EngineConfig): Promise<Map<string, Dail
 // Core simulation loop
 // ---------------------------------------------------------------------------
 
-function runSimulation(
+/**
+ * The replay loop (WP9). Exported for the engine harness — fully
+ * injectable: bars in, trades out, no I/O.
+ *
+ * ORDERING CONTRACT (the anchor): each timestamp ADVANCES the simulator
+ * FIRST (pending orders fill at this bar's open), then generates signals
+ * from this completed bar (their orders fill at the NEXT bar's open). The
+ * old code inverted this — an order decided on bar i's close filled at
+ * bar i's open, harvesting each bar's own body on entry.
+ */
+export function runSimulation(
     config: EngineConfig,
     allBars: Map<string, Bar[]>,
     sentiment: Map<string, DailySentiment[]>,
@@ -329,7 +400,7 @@ function runSimulation(
     const minScore = config.minSignalScore ?? 60;
     const direction = config.direction ?? 'long';
     const stopAtr = config.stopAtrMultiple ?? 2.0;
-    const targetAtr = config.targetAtrMultiple ?? 3.0;
+    const targetAtr = config.targetAtrMultiple ?? 4.0;
     const maxBarsHeld = config.maxBarsHeld ?? 0;
     const sentimentWeight = config.sentimentWeight ?? 10;
     const barSize = config.barSize ?? '5 mins';
@@ -342,78 +413,41 @@ function runSimulation(
         sentimentLookup.set(ticker, byDate);
     }
 
-    // For single-ticker backtests, we iterate bar-by-bar.
-    // For multi-ticker, we merge bars by time and iterate chronologically.
-    if (allBars.size === 1) {
-        const [ticker, bars] = [...allBars.entries()][0];
-        const ohlcv = barsToOHLCV(bars);
-        runSingleSymbol(ticker, bars, ohlcv, lookback, minScore, direction, stopAtr, targetAtr, maxBarsHeld, sentimentWeight, barSize, sentimentLookup, sim);
-    } else {
-        // Multi-symbol: merge bars into a timeline sorted by time
-        const timeline = buildTimeline(allBars);
-        for (const { time, barsByTicker } of timeline) {
-            // Process simulator for each ticker's bar
-            for (const [ticker, bar] of barsByTicker) {
-                // We need the full OHLCV history up to this point for TA
-                const tickerBars = allBars.get(ticker)!;
-                const idx = tickerBars.findIndex((b) => b.time === time);
-                if (idx < lookback) continue; // not enough history yet
+    // Per-ticker OHLCV and time→index maps built ONCE — the old loop did a
+    // findIndex per (timestamp × ticker), O(N²) with an array copy per bar.
+    const ohlcvByTicker = new Map<string, OHLCV>();
+    const indexByTicker = new Map<string, Map<string, number>>();
+    for (const [ticker, bars] of allBars) {
+        ohlcvByTicker.set(ticker, barsToOHLCV(bars));
+        const idx = new Map<string, number>();
+        bars.forEach((b, i) => idx.set(b.time, i));
+        indexByTicker.set(ticker, idx);
+    }
 
-                const ohlcvSlice = barsToOHLCV(tickerBars.slice(Math.max(0, idx - lookback), idx + 1));
-                generateSignal(ticker, bar, ohlcvSlice, minScore, direction, stopAtr, targetAtr, maxBarsHeld, sentimentWeight, barSize, sentimentLookup, sim);
+    const timeline = buildTimeline(allBars);
+    for (const { time, barsByTicker } of timeline) {
+        // Warm-up bars (before startDate) feed indicators only: no orders
+        // exist yet, and a flat warm-up equity curve would dilute Sharpe.
+        const live = time >= config.startDate;
+        if (live) sim.processBars(time, barsByTicker);
+
+        for (const [ticker, bar] of barsByTicker) {
+            const idx = indexByTicker.get(ticker)!.get(time)!;
+            if (idx < lookback || !live) continue;
+            const window = sliceOHLCV(ohlcvByTicker.get(ticker)!, idx, lookback);
+            if (config.signalOverride) {
+                const order = config.signalOverride(ticker, window, bar);
+                if (order) sim.submitOrder(order);
+                continue;
             }
-
-            // Process simulator bar — use first available bar for equity tracking
-            const firstBar = [...barsByTicker.values()][0];
-            if (firstBar) sim.processBar(firstBar);
+            generateSignal(ticker, bar, window, minScore, direction, stopAtr, targetAtr, maxBarsHeld, sentimentWeight, barSize, sentimentLookup, sim);
         }
     }
 
-    // Close remaining positions at last available bar
-    for (const [, bars] of allBars) {
-        if (bars.length > 0) {
-            sim.closeAll(bars[bars.length - 1], 'end_of_backtest');
-            break;
-        }
-    }
+    // Close remaining positions, each at its own symbol's last close.
+    sim.closeAll('end_of_backtest');
 
     return { trades: sim.trades, equityCurve: sim.equityCurve };
-}
-
-// ---------------------------------------------------------------------------
-// Single-symbol fast path
-// ---------------------------------------------------------------------------
-
-function runSingleSymbol(
-    ticker: string,
-    bars: Bar[],
-    ohlcv: OHLCV,
-    lookback: number,
-    minScore: number,
-    direction: 'long' | 'short' | 'both',
-    stopAtr: number,
-    targetAtr: number,
-    maxBarsHeld: number,
-    sentimentWeight: number,
-    barSize: string,
-    sentimentLookup: Map<string, Map<string, DailySentiment>>,
-    sim: Simulator,
-): void {
-    for (let i = lookback; i < bars.length; i++) {
-        const bar = bars[i];
-
-        // Compute TA indicators on the lookback window
-        const window = sliceOHLCV(ohlcv, i, lookback);
-
-        generateSignal(
-            ticker, bar, window, minScore, direction,
-            stopAtr, targetAtr, maxBarsHeld, sentimentWeight,
-            barSize, sentimentLookup, sim,
-        );
-
-        // Advance simulator
-        sim.processBar(bar);
-    }
 }
 
 // ---------------------------------------------------------------------------

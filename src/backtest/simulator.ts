@@ -42,10 +42,17 @@ export interface SimulatorConfig {
     /** Maximum position size as fraction of equity (default 0.05 = 5%). */
     maxPositionPct: number;
 
+    /** Max loss-if-stopped per auto-sized trade, as fraction of equity
+     *  (default 0.0025 = 0.25%, matching the live sizer). WP9: the old
+     *  auto-size was the live sizer's notional-cap branch with the risk
+     *  branch deleted — always max size, ATR-floating risk. */
+    maxRiskPerTradePct: number;
+
     /** Maximum number of concurrent open positions (default 10). */
     maxOpenPositions: number;
 
-    /** Maximum daily loss as fraction of starting capital (default 0.02 = 2%). */
+    /** Maximum daily loss as fraction of the DAY-START equity (default
+     *  0.02 = 2%). WP9: was anchored to starting capital forever. */
     maxDailyLossPct: number;
 }
 
@@ -94,6 +101,7 @@ export const DEFAULT_SIM_CONFIG: SimulatorConfig = {
     slippageFixed: 0.01,
     slippageBps: 5,
     maxPositionPct: 0.05,
+    maxRiskPerTradePct: 0.0025,
     maxOpenPositions: 10,
     maxDailyLossPct: 0.02,
 };
@@ -113,81 +121,106 @@ export class Simulator {
 
     /** Completed trades. */
     readonly trades: Trade[] = [];
-    /** Equity curve (one point per bar). */
+    /** Equity curve (one point per timestamp). */
     readonly equityCurve: EquityPoint[] = [];
-    /** Pending orders waiting to be filled on the next bar. */
-    private pendingOrders: OrderRequest[] = [];
+    /** Pending orders waiting for their symbol's next bar. */
+    private pendingOrders: Array<OrderRequest & { age: number }> = [];
     /** Whether trading is halted for the day due to daily loss limit. */
     private dailyHalted = false;
+    /** Last seen close per symbol — marks positions whose symbol has no
+     *  bar this timestamp, and prices terminal closes (WP9). */
+    private lastCloseBySymbol = new Map<string, number>();
+    private lastTime = '';
+    /** Marked (cash + positions) equity as of the last processed tick —
+     *  the sizing base (cash alone shrinks with every open position). */
+    private lastMarkedEquity: number;
+    /** Equity at the start of the current ET day — the daily-loss anchor. */
+    private dayStartEquity: number;
+
+    /** Ticks a pending order survives without its symbol printing a bar
+     *  before it is dropped (data gap ≠ resting forever). */
+    private static readonly MAX_PENDING_AGE = 3;
 
     constructor(config: Partial<SimulatorConfig> = {}) {
         this.config = { ...DEFAULT_SIM_CONFIG, ...config };
         this.equity = this.config.startingCapital;
         this.peak = this.equity;
+        this.lastMarkedEquity = this.equity;
+        this.dayStartEquity = this.equity;
     }
 
     // -----------------------------------------------------------------------
     // Public API
     // -----------------------------------------------------------------------
 
-    /** Submit an order to be filled on the next bar. */
+    /** Submit an order to be filled on its symbol's NEXT bar. */
     submitOrder(order: OrderRequest): void {
         if (this.dailyHalted) return;
         if (this.positions.size >= this.config.maxOpenPositions) return;
-        this.pendingOrders.push(order);
+        this.pendingOrders.push({ ...order, age: 0 });
     }
 
     /**
-     * Process one bar of data. Called by the engine for each bar in sequence.
+     * Advance one timestamp with every symbol's bar for that instant (WP9
+     * — the single-bar advance priced every symbol off the first ticker).
      *
      * Order of operations:
-     * 1. Reset daily state if new day
-     * 2. Fill pending orders at this bar's open
-     * 3. Check stops/targets against this bar's high/low
-     * 4. Increment bars-held counters
-     * 5. Record equity point
+     * 1. Day rollover (daily-loss anchor re-bases to current equity)
+     * 2. Fill pending orders, each at ITS OWN symbol's open
+     * 3. Check stops/targets, each against ITS OWN symbol's bar
+     * 4. Increment bars-held; record marked equity
      */
-    processBar(bar: Bar): void {
-        const date = bar.time.substring(0, 10);
-
-        // New trading day — reset daily counters
+    processBars(time: string, barsBySymbol: Map<string, Bar>): void {
+        const date = time.substring(0, 10);
         if (date !== this.currentDate) {
             this.currentDate = date;
             this.dailyPnl = 0;
             this.dailyHalted = false;
+            this.dayStartEquity = this.lastMarkedEquity;
         }
 
-        // Fill pending orders
-        this.fillPendingOrders(bar);
+        this.fillPendingOrders(time, barsBySymbol);
+        this.checkExits(time, barsBySymbol);
 
-        // Check stops and targets on open positions
-        this.checkExits(bar);
-
-        // Increment bars held
+        for (const [symbol, bar] of barsBySymbol) {
+            this.lastCloseBySymbol.set(symbol, bar.close);
+        }
         for (const pos of this.positions.values()) {
-            pos.barsHeld++;
+            if (barsBySymbol.has(pos.symbol)) pos.barsHeld++;
         }
 
-        // Record equity (mark-to-market)
-        const mtm = this.markToMarket(bar);
-        const totalEquity = this.equity + mtm;
+        const totalEquity = this.equity + this.markToMarket();
+        this.lastMarkedEquity = totalEquity;
+        this.lastTime = time;
         if (totalEquity > this.peak) this.peak = totalEquity;
         const dd = this.peak - totalEquity;
-        const ddPct = this.peak > 0 ? dd / this.peak : 0;
-
         this.equityCurve.push({
-            time: bar.time,
+            time,
             equity: totalEquity,
             drawdown: dd,
-            drawdownPct: ddPct,
+            drawdownPct: this.peak > 0 ? dd / this.peak : 0,
         });
     }
 
-    /** Force-close all open positions at the given bar's close. */
-    closeAll(bar: Bar, reason = 'end_of_backtest'): void {
+    /** Force-close every open position at its own symbol's last close, and
+     *  land the result on the equity curve (WP9 — the old closeAll priced
+     *  everything off one symbol and bypassed the curve, so the headline
+     *  return and the trade sum disagreed by construction). */
+    closeAll(reason = 'end_of_backtest'): void {
         for (const pos of [...this.positions.values()]) {
-            this.closePosition(pos, bar.close, bar.time, reason);
+            const px = this.lastCloseBySymbol.get(pos.symbol) ?? pos.entryPrice;
+            this.closePosition(pos, px, this.lastTime || pos.entryTime, reason);
         }
+        const totalEquity = this.equity;
+        this.lastMarkedEquity = totalEquity;
+        if (totalEquity > this.peak) this.peak = totalEquity;
+        const dd = this.peak - totalEquity;
+        this.equityCurve.push({
+            time: this.lastTime || 'end',
+            equity: totalEquity,
+            drawdown: dd,
+            drawdownPct: this.peak > 0 ? dd / this.peak : 0,
+        });
     }
 
     /** Get current equity (cash only, no unrealized). */
@@ -214,13 +247,23 @@ export class Simulator {
     // Internal — order filling
     // -----------------------------------------------------------------------
 
-    private fillPendingOrders(bar: Bar): void {
+    private fillPendingOrders(time: string, barsBySymbol: Map<string, Bar>): void {
         const orders = this.pendingOrders;
         this.pendingOrders = [];
 
         for (const order of orders) {
-            if (this.dailyHalted) break;
-            if (this.positions.size >= this.config.maxOpenPositions) break;
+            if (this.dailyHalted) continue;
+            if (this.positions.size >= this.config.maxOpenPositions) continue;
+
+            const bar = barsBySymbol.get(order.symbol);
+            if (!bar) {
+                // The symbol did not print this timestamp — the order waits
+                // for its own bar, bounded so a data gap cannot rest forever.
+                if (order.age < Simulator.MAX_PENDING_AGE) {
+                    this.pendingOrders.push({ ...order, age: order.age + 1 });
+                }
+                continue;
+            }
 
             // Check if we already have a position in this symbol
             const existing = this.getPositionsForSymbol(order.symbol);
@@ -246,11 +289,19 @@ export class Simulator {
                 fillPrice -= slip;
             }
 
-            // Auto-size if quantity is 0
+            // Auto-size (WP9): min(risk budget / stop distance, notional
+            // cap) on MARKED equity — the live sizer's shape. The old code
+            // was the cap branch alone on post-debit cash: always max size,
+            // shrinking with each open position.
             let qty = order.quantity;
             if (qty <= 0) {
-                const maxNotional = this.equity * this.config.maxPositionPct;
-                qty = Math.floor(maxNotional / fillPrice);
+                const base = this.lastMarkedEquity;
+                const stopDist = Math.abs(fillPrice - order.stopLoss);
+                const byCap = Math.floor((base * this.config.maxPositionPct) / fillPrice);
+                const byRisk = stopDist > 0
+                    ? Math.floor((base * this.config.maxRiskPerTradePct) / stopDist)
+                    : 0;
+                qty = Math.min(byCap, byRisk);
                 if (qty <= 0) continue;
             }
 
@@ -278,36 +329,50 @@ export class Simulator {
             this.equity -= cost;
             this.positions.set(pos.id, pos);
         }
+        void time;
     }
 
     // -----------------------------------------------------------------------
     // Internal — exit checks
     // -----------------------------------------------------------------------
 
-    private checkExits(bar: Bar): void {
+    private checkExits(time: string, barsBySymbol: Map<string, Bar>): void {
         for (const pos of [...this.positions.values()]) {
+            const bar = barsBySymbol.get(pos.symbol);
+            if (!bar) continue; // no print for this symbol this timestamp
+
             let exitPrice: number | null = null;
             let exitReason = '';
 
+            // Gap-aware fills (WP9): a bar that OPENS through the level
+            // fills at the open — the honest gap loss (or the better price
+            // a resting limit actually gets), never the level itself.
+            // Same-bar stop+target still resolves stop-first (conservative).
             if (pos.direction === 'long') {
-                // Stop loss hit?
-                if (bar.low <= pos.stopLoss) {
+                if (bar.open <= pos.stopLoss) {
+                    exitPrice = bar.open;
+                    exitReason = 'stop_loss';
+                } else if (bar.low <= pos.stopLoss) {
                     exitPrice = pos.stopLoss;
                     exitReason = 'stop_loss';
-                }
-                // Take profit hit?
-                else if (bar.high >= pos.takeProfit) {
+                } else if (bar.open >= pos.takeProfit) {
+                    exitPrice = bar.open;
+                    exitReason = 'take_profit';
+                } else if (bar.high >= pos.takeProfit) {
                     exitPrice = pos.takeProfit;
                     exitReason = 'take_profit';
                 }
             } else {
-                // Short stop loss (price rises)
-                if (bar.high >= pos.stopLoss) {
+                if (bar.open >= pos.stopLoss) {
+                    exitPrice = bar.open;
+                    exitReason = 'stop_loss';
+                } else if (bar.high >= pos.stopLoss) {
                     exitPrice = pos.stopLoss;
                     exitReason = 'stop_loss';
-                }
-                // Short take profit (price drops)
-                else if (bar.low <= pos.takeProfit) {
+                } else if (bar.open <= pos.takeProfit) {
+                    exitPrice = bar.open;
+                    exitReason = 'take_profit';
+                } else if (bar.low <= pos.takeProfit) {
                     exitPrice = pos.takeProfit;
                     exitReason = 'take_profit';
                 }
@@ -324,7 +389,7 @@ export class Simulator {
             }
 
             if (exitPrice != null) {
-                this.closePosition(pos, exitPrice, bar.time, exitReason);
+                this.closePosition(pos, exitPrice, time, exitReason);
             }
         }
     }
@@ -381,9 +446,11 @@ export class Simulator {
         this.trades.push(trade);
         this.positions.delete(pos.id);
 
-        // Daily P&L tracking
+        // Daily P&L tracking — anchored to the DAY-START equity (WP9): the
+        // old starting-capital anchor made the halt looser as equity grew
+        // and tighter as it shrank, in the wrong direction both times.
         this.dailyPnl += netPnl;
-        const dailyLossLimit = this.config.startingCapital * this.config.maxDailyLossPct;
+        const dailyLossLimit = this.dayStartEquity * this.config.maxDailyLossPct;
         if (this.dailyPnl <= -dailyLossLimit) {
             this.dailyHalted = true;
         }
@@ -409,24 +476,23 @@ export class Simulator {
     // Internal — mark-to-market
     // -----------------------------------------------------------------------
 
-    /** Unrealized P&L across all open positions at the given bar's close. */
     /**
      * Current VALUE of open positions (not just unrealized P&L): entry
      * debits cash by the full notional, so the equity curve needs the
      * notional back plus the unrealized move — otherwise every open
      * position punches a hole of one position size into the curve.
+     * WP9: each position marks at ITS OWN symbol's last close.
      */
-    private markToMarket(bar: Bar): number {
+    private markToMarket(): number {
         let value = 0;
         for (const pos of this.positions.values()) {
-            // In single-symbol backtests, bar.close is the current price.
-            // For multi-symbol, we'd need a price lookup — the engine handles this.
+            const close = this.lastCloseBySymbol.get(pos.symbol) ?? pos.entryPrice;
             if (pos.direction === 'long') {
-                value += bar.close * pos.quantity;
+                value += close * pos.quantity;
             } else {
                 // Shorts also debit entry×qty at entry (as margin):
                 // value = margin + unrealized = (2×entry − close) × qty.
-                value += (2 * pos.entryPrice - bar.close) * pos.quantity;
+                value += (2 * pos.entryPrice - close) * pos.quantity;
             }
         }
         return value;

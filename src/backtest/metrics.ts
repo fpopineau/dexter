@@ -200,7 +200,9 @@ export function cagr(startEquity: number, endEquity: number, years: number): num
 
 export function computeTradeStats(trades: Trade[]) {
     const wins = trades.filter((t) => t.pnl > 0);
-    const losses = trades.filter((t) => t.pnl <= 0);
+    // WP9: strict — an exact-breakeven trade is neither a win nor a loss
+    // (the old `<= 0` counted scratches as losses, deflating win rate).
+    const losses = trades.filter((t) => t.pnl < 0);
     const totalPnl = trades.reduce((a, t) => a + t.pnl, 0);
     const grossProfit = wins.reduce((a, t) => a + t.pnl, 0);
     const grossLoss = Math.abs(losses.reduce((a, t) => a + t.pnl, 0));
@@ -298,6 +300,21 @@ export function computeMetrics(
     const bestDay = dailyPnl.length > 0 ? Math.max(...dailyPnl) : 0;
     const worstDay = dailyPnl.length > 0 ? Math.min(...dailyPnl) : 0;
 
+    // Monthly returns from the equity curve (WP9 — were hardcoded 0):
+    // fraction per calendar month, first-to-last equity within the month.
+    const byMonth = new Map<string, { first: number; last: number }>();
+    for (const pt of equity) {
+        const month = pt.time.substring(0, 7);
+        const m = byMonth.get(month);
+        if (!m) byMonth.set(month, { first: pt.equity, last: pt.equity });
+        else m.last = pt.equity;
+    }
+    const monthlyReturns = [...byMonth.values()]
+        .filter((m) => m.first > 0)
+        .map((m) => m.last / m.first - 1);
+    const bestMonth = monthlyReturns.length > 0 ? Math.max(...monthlyReturns) : 0;
+    const worstMonth = monthlyReturns.length > 0 ? Math.min(...monthlyReturns) : 0;
+
     return {
         startDate,
         endDate,
@@ -321,7 +338,7 @@ export function computeMetrics(
 
         bestDay,
         worstDay,
-        bestMonth: 0, // needs monthly grouping — placeholder
-        worstMonth: 0,
+        bestMonth,
+        worstMonth,
     };
 }

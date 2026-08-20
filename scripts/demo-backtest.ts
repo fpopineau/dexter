@@ -72,7 +72,7 @@ if (result.folds?.length) {
     for (const f of result.folds) {
         console.log(
             `#${f.foldIndex} test ${f.testStart}→${f.testEnd}  ` +
-            `train Sharpe ${f.trainMetrics.sharpeRatio.toFixed(2)} / test Sharpe ${f.testMetrics.sharpeRatio.toFixed(2)}  ` +
+            `test Sharpe ${f.testMetrics.sharpeRatio.toFixed(2)}  ` +
             `test return ${pct(f.testMetrics.totalReturnPct)}`,
         );
     }
