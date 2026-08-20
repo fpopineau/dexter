@@ -183,8 +183,10 @@ export async function captureNetLiqBaseline(): Promise<void> {
     try {
         const api = await getIBApi();
         const account = await detectAccount(api);
-        const netLiq = await fetchNetLiquidation(api, account);
-        writeNetLiqBaselineIfAbsent(netLiq);
+        // Baseline stays BASE currency (WP8): the P&L proxy subtracts it
+        // from base NetLiq — mixing units here would fabricate daily P&L.
+        const { value } = await fetchNetLiquidation(api, account);
+        writeNetLiqBaselineIfAbsent(value);
     } catch (err) {
         logger.warn(`[daily-loss-guard] baseline capture failed (will retry on first gate check): ${err}`);
     }
@@ -256,20 +258,29 @@ function fetchDailyPnl(api: import('@stoqey/ib').IBApi, account: string): Promis
     });
 }
 
-function fetchNetLiquidation(api: import('@stoqey/ib').IBApi, account: string): Promise<number> {
+/** Base-currency NetLiquidation WITH its currency tag (WP8 — the tag was
+ *  discarded before, which is how EUR ran through USD cap math). */
+function fetchNetLiquidation(
+    api: import('@stoqey/ib').IBApi,
+    account: string,
+): Promise<{ value: number; currency: string }> {
     const reqId = allocReqId();
-    return new Promise<number>((resolve, reject) => {
+    return new Promise<{ value: number; currency: string }>((resolve, reject) => {
         let value: number | null = null;
+        let currency = 'USD';
         const timeout = setTimeout(() => {
             finish();
         }, PNL_TIMEOUT_MS);
-        const onSummary = (id: number, acct: string, tag: string, val: string) => {
+        const onSummary = (id: number, acct: string, tag: string, val: string, cur?: string) => {
             if (id !== reqId) return;
             if (tag === 'NetLiquidation' && (!account || acct === account)) {
                 const n = Number(val);
                 // Finite is not enough: the IBKR error sentinel is finite and
                 // would turn every %-of-NetLiq cap into a no-op downstream.
-                if (Number.isFinite(n) && n > 0 && n < 1e12) value = n;
+                if (Number.isFinite(n) && n > 0 && n < 1e12) {
+                    value = n;
+                    if (typeof cur === 'string' && cur.trim()) currency = cur.trim().toUpperCase();
+                }
             }
         };
         const onEnd = (id: number) => {
@@ -280,7 +291,7 @@ function fetchNetLiquidation(api: import('@stoqey/ib').IBApi, account: string): 
         function finish() {
             try { api.cancelAccountSummary(reqId); } catch { /* ignore */ }
             cleanup();
-            if (value !== null) resolve(value);
+            if (value !== null) resolve({ value, currency });
             else reject(new Error('[daily-loss-guard] NetLiquidation unavailable'));
         }
         function cleanup() {
@@ -317,7 +328,11 @@ export async function getNetLiquidation(): Promise<number | null> {
     try {
         const api = await getIBApi();
         const account = await detectAccount(api);
-        return await fetchNetLiquidation(api, account);
+        const { value, currency } = await fetchNetLiquidation(api, account);
+        // WP8: consumers of this number do USD arithmetic — convert at the
+        // boundary. Unavailable rate → null (reporting callers warn loudly).
+        const { convertToUsd } = await import('@/tools/ibkr/fx.js');
+        return await convertToUsd(value, currency);
     } catch {
         return null;
     }
@@ -345,13 +360,18 @@ export async function getDailyLossStatus(): Promise<DailyLossStatus> {
 
     // NetLiquidation is the load-bearing quantity: the limit derives from
     // it, and it doubles as the P&L fallback. If IT is unavailable, refuse.
+    // WP8: the internal halt math stays in BASE currency (reqPnL and the
+    // session baseline are base too — internally consistent); only the
+    // EXPORTED netLiquidation converts to USD below, because it feeds the
+    // gate caps and the position sizer, which are USD arithmetic.
     let netLiq: number;
+    let netLiqCurrency: string;
     let api: import('@stoqey/ib').IBApi;
     let account: string;
     try {
         api = await getIBApi();
         account = await detectAccount(api);
-        netLiq = await fetchNetLiquidation(api, account);
+        ({ value: netLiq, currency: netLiqCurrency } = await fetchNetLiquidation(api, account));
     } catch (err) {
         // Fail-safe: cannot verify anything → do not allow new risk.
         const reason = `daily P&L could not be verified (${err instanceof Error ? err.message : err})`;
@@ -397,7 +417,21 @@ export async function getDailyLossStatus(): Promise<DailyLossStatus> {
         return { halted: true, latched: true, reason: rec.reason, dailyPnL, netLiquidation: netLiq, limitPct, limitDollars };
     }
 
-    return { halted: false, dailyPnL, netLiquidation: netLiq, limitPct, limitDollars };
+    // WP8: the exported figure is USD — this is what the gate caps, the
+    // position sizer and the headroom math consume. A non-USD base with no
+    // FX rate refuses fail-safe: a cap computed in the wrong currency is
+    // worse than a refused accept (transient — retries when FX is back).
+    let netLiqUsd: number;
+    try {
+        const { convertToUsd } = await import('@/tools/ibkr/fx.js');
+        netLiqUsd = await convertToUsd(netLiq, netLiqCurrency);
+    } catch (err) {
+        const reason = `NetLiquidation is in ${netLiqCurrency} and the FX rate is unavailable (${err instanceof Error ? err.message : err})`;
+        logger.error(`[daily-loss-guard] ${reason} — refusing new orders`);
+        return { halted: true, latched: false, reason, limitPct };
+    }
+
+    return { halted: false, dailyPnL, netLiquidation: netLiqUsd, limitPct, limitDollars };
 }
 
 /**

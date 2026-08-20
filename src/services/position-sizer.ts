@@ -24,10 +24,10 @@
  * silently shrunk below viability: min_risk_budget_usd stops trades whose
  * weighted budget is so small that commissions and spread eat the edge.
  *
- * NOTE on currency: netLiquidation is in the account's base currency (EUR
- * for this account) while US prices are USD. The ~5-10% EUR/USD deviation
- * is well inside the sizing bands' tolerance; a precise FX conversion can
- * be added when it matters.
+ * Currency (WP8, remediation 2026-08-20): netLiquidation arrives in USD —
+ * the daily-loss guard converts the account's base currency at the
+ * boundary (IDEALPRO midpoint, 1h cache) and REFUSES orders when the rate
+ * is unavailable for a non-USD base. Every figure in this module is USD.
  */
 
 import { getRiskRules, type RiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
