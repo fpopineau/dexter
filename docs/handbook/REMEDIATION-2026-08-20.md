@@ -91,8 +91,20 @@ Entry recorded on first partial; terminal partial → quantity downgrade
 (planned_quantity preserved) + resized GTC OCA pair replacing the
 full-size exits (re-point before cancel); manual-exit fills allocated by
 the close order's shares — starved rows get P&L unknown, never invented.
-HTH/BBT ledger rows annotated untrustworthy. WP3 (reverse
-reconciliation) is next.
+HTH/BBT ledger rows annotated untrustworthy.
+
+**STATUS: WP3 LANDED 2026-08-21** (commit 3ce7fac; suite 611 green).
+Reverse sweep at attach + every 15 min: orderRef-matched orders re-attach
+to their proposal legs; unknown verified-account positions become
+'adopted' rows (synthetic labeled levels, cap-visible, triage-excluded,
+never managed); orphans and foreign-account positions flagged once.
+
+**STATUS: WP4 LANDED 2026-08-21 — PHASE 1 COMPLETE** (commit ab8e0b6;
+suite 616 green). Acceptance caps take max(DB, broker snapshot) per
+symbol, fail closed on snapshot failure. Planned-risk headroom stays
+DB-side (broker-only positions have no stop until adoption prices them —
+recorded design note). Next: Phase 2 (WP5 overnight vetting) and/or
+Phase 3 (WP9 backtester, WP10 scorer) — Phase 3 can run parallel.
 
 - **WP1 Acknowledged placement + identity** (crit. 6)
   Files: `bracket.ts`, `orders.ts`, new `src/tools/ibkr/order-ack.ts`,
