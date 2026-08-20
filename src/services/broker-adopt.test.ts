@@ -1,0 +1,106 @@
+import { afterAll, describe, expect, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const dir = mkdtempSync(join(tmpdir(), 'dexter-adopt-'));
+const prevDataDir = process.env.DEXTER_DATA_DIR;
+process.env.DEXTER_DATA_DIR ??= dir;
+
+import { decideAdoptions, type BrokerOrderSnap, type BrokerPositionSnap } from './broker-adopt.js';
+import { countOpenExecuted, createAdoptedPosition, getProposal } from './trade-proposals.js';
+
+// WP3 (REMEDIATION-2026-08-20): reconciliation used to run strictly DB →
+// broker — unknown broker orders were discarded and unknown positions
+// granted free cap headroom. The decision core is pure: fake snapshots in,
+// an adoption plan out; the applier never places or cancels anything.
+
+const ACCT = 'DU7777777';
+const order = (o: Partial<BrokerOrderSnap>): BrokerOrderSnap =>
+    ({ orderId: 1, symbol: 'NVDA', orderRef: null, account: ACCT, ...o });
+const position = (p: Partial<BrokerPositionSnap>): BrokerPositionSnap =>
+    ({ account: ACCT, symbol: 'NVDA', quantity: 10, avgCost: 100, ...p });
+
+const TRACKED = [{ proposalId: 'P-AB12', symbol: 'NVDA', orderIds: [11, 12, 13] }];
+
+function decide(orders: BrokerOrderSnap[], positions: BrokerPositionSnap[], tracked = TRACKED) {
+    return decideAdoptions({ orders, positions, tracked, verifiedAccount: ACCT });
+}
+
+describe('decideAdoptions — orders', () => {
+    test('an orderRef naming OUR proposal with an untracked id is adopted into its leg', () => {
+        const plan = decide([order({ orderId: 99, orderRef: 'P-AB12:stop' })], []);
+        expect(plan.orderAdoptions).toEqual([{ proposalId: 'P-AB12', leg: 'stop', orderId: 99 }]);
+        expect(plan.orphanOrders).toEqual([]);
+    });
+
+    test('resized-leg refs (stop2/tp2) map to their base legs', () => {
+        const plan = decide([order({ orderId: 98, orderRef: 'P-AB12:tp2' })], []);
+        expect(plan.orderAdoptions).toEqual([{ proposalId: 'P-AB12', leg: 'tp', orderId: 98 }]);
+    });
+
+    test('already-tracked ids and recognized non-bracket refs are not orphans', () => {
+        const plan = decide([
+            order({ orderId: 12, orderRef: 'P-AB12:tp' }),          // already tracked
+            order({ orderId: 40, orderRef: 'protect-NVDA:stop' }),  // position-actions order
+            order({ orderId: 41, orderRef: 'close-NVDA' }),
+        ], []);
+        expect(plan.orderAdoptions).toEqual([]);
+        expect(plan.orphanOrders).toEqual([]);
+    });
+
+    test('an unknown order with no recognizable ref is flagged, never touched', () => {
+        const plan = decide([order({ orderId: 77, symbol: 'TSLA', orderRef: 'manual TWS entry' })], []);
+        expect(plan.orphanOrders.map((o) => o.orderId)).toEqual([77]);
+        expect(plan.orderAdoptions).toEqual([]);
+    });
+
+    test('a ref naming a proposal we are NOT tracking is an orphan (row already closed)', () => {
+        const plan = decide([order({ orderId: 66, orderRef: 'P-DEAD:stop' })], []);
+        expect(plan.orphanOrders.map((o) => o.orderId)).toEqual([66]);
+    });
+});
+
+describe('decideAdoptions — positions', () => {
+    test('a position with no executed row on the symbol is adopted (caps must see it)', () => {
+        const plan = decide([], [position({ symbol: 'TSLA', quantity: -20, avgCost: 250 })]);
+        expect(plan.positionAdoptions.length).toBe(1);
+        expect(plan.positionAdoptions[0].symbol).toBe('TSLA');
+    });
+
+    test('a position matching a tracked symbol is already accounted — nothing to do', () => {
+        const plan = decide([], [position({ symbol: 'NVDA' })]);
+        expect(plan.positionAdoptions).toEqual([]);
+        expect(plan.foreignPositions).toEqual([]);
+    });
+
+    test('a position in a FOREIGN account is flagged, never adopted into our book', () => {
+        const plan = decide([], [position({ symbol: 'TSLA', account: 'U0000001' })]);
+        expect(plan.positionAdoptions).toEqual([]);
+        expect(plan.foreignPositions.map((p) => p.account)).toEqual(['U0000001']);
+    });
+});
+
+describe('createAdoptedPosition (store)', () => {
+    test('adopted row is executed, source=adopted, counted by the caps, levels labeled synthetic', async () => {
+        const before = await countOpenExecuted();
+        const row = await createAdoptedPosition({
+            symbol: 'ADPT', direction: 'short', quantity: 20, avgCost: 250, account: ACCT,
+        });
+        expect(row.status).toBe('executed');
+        expect(row.source).toBe('adopted');
+        expect(row.entryFillPrice).toBe(250);
+        expect(row.quantity).toBe(20);
+        // Synthetic protection levels: coherent for the direction, labeled.
+        expect(row.stop).toBeGreaterThan(250); // short: stop above basis
+        expect(row.note ?? '').toContain('synthetic');
+        expect(await countOpenExecuted()).toBe(before + 1);
+        expect((await getProposal(row.id))?.tif).toBe('GTC');
+    });
+});
+
+afterAll(() => {
+    if (prevDataDir === undefined) delete process.env.DEXTER_DATA_DIR;
+    else process.env.DEXTER_DATA_DIR = prevDataDir;
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* held by sqlite */ }
+});

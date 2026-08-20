@@ -303,7 +303,11 @@ export async function runEodTriageOnce(): Promise<void> {
     // double-run behind a cron firing that is already in flight.
     markTriageRun(today, 'ran');
 
-    const trackable = await listTrackable();
+    // Adopted rows (WP3) are broker positions Dexter did not open and does
+    // not manage — they exist so the caps see them. Triage closing one
+    // would be adoption placing orders, which the adoption contract
+    // forbids; the operator manages them ('close SYMBOL' still works).
+    const trackable = (await listTrackable()).filter((t) => t.source !== 'adopted');
     // Momentum lane: DAY brackets + kept-overnight holds (full triage);
     // guard-only lane: deliberate GTC positions (earnings guard only);
     // unfilled-GTC lane: resting entries that would survive the close.

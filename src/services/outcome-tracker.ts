@@ -55,6 +55,7 @@ import {
     type TradeProposal,
 } from './trade-proposals.js';
 import type { PositionActionOutcome } from './position-actions.js';
+import { runBrokerAdoption, type AdoptLeg } from './broker-adopt.js';
 
 // ---------------------------------------------------------------------------
 // Pure outcome math (unit-tested)
@@ -1040,7 +1041,28 @@ async function attach(): Promise<void> {
         await replayExecutions(api);
         await reconcileAgainstOpenOrders(api);
     }
+    // WP3: the reverse direction — adopt broker orders carrying our
+    // orderRef, record unknown positions as capped rows, flag orphans.
+    // Best-effort: the periodic sweep reruns it.
+    void runAdoptionSweep(api);
     logger.info(`[outcome-tracker] attached (${byProposalId.size} trade(s) tracked)`);
+}
+
+/** Reverse-reconciliation sweep (WP3), also on a 15-min interval. */
+const ADOPTION_SWEEP_INTERVAL_MS = 15 * 60_000;
+let adoptionTimer: ReturnType<typeof setInterval> | null = null;
+
+async function runAdoptionSweep(api: IBApi): Promise<void> {
+    try {
+        const { getVerifiedSingleAccount: verified } = await import('@/tools/ibkr/connection.js');
+        await runBrokerAdoption(api, {
+            repointOrder: adoptTrackedOrderId,
+            notify: notifyAutoProtect,
+            verifiedAccount: verified,
+        });
+    } catch (err) {
+        logger.warn(`[outcome-tracker] adoption sweep failed: ${err}`);
+    }
 }
 
 function attachWithRetry(): void {
@@ -1055,10 +1077,40 @@ function attachWithRetry(): void {
 }
 
 /**
+ * WP3: re-point one leg of a tracked trade at a broker order id (adoption
+ * by orderRef after a reconnect or a missed resize). Updates the tracker
+ * maps and the proposal's order_ids; places and cancels nothing.
+ */
+export async function adoptTrackedOrderId(proposalId: string, leg: AdoptLeg, orderId: number): Promise<void> {
+    const p = await getProposal(proposalId);
+    if (!p || p.status !== 'executed') return;
+    const ids: number[] = p.orderIds && p.orderIds.length >= 3 ? [...p.orderIds] : [0, 0, 0];
+    const index = leg === 'entry' ? 0 : leg === 'tp' ? 1 : 2;
+    if (ids[index] === orderId) return;
+    ids[index] = orderId;
+    await setProposalStatus(proposalId, 'executed', { orderIds: ids });
+
+    const trade = byProposalId.get(proposalId);
+    if (trade) {
+        const old = leg === 'entry' ? trade.entryOrderId : leg === 'tp' ? trade.takeProfitOrderId : trade.stopOrderId;
+        byOrderId.delete(old);
+        if (leg === 'entry') trade.entryOrderId = orderId;
+        else if (leg === 'tp') trade.takeProfitOrderId = orderId;
+        else trade.stopOrderId = orderId;
+        byOrderId.set(orderId, { trade, role: leg === 'entry' ? 'entry' : leg === 'tp' ? 'takeProfit' : 'stop' });
+        trade.terminalExits.delete(old);
+    }
+    logger.info(`[outcome-tracker] ${proposalId}: ${leg} re-pointed at broker order ${orderId} (adoption)`);
+}
+
+/**
  * Track a just-executed proposal (called by the executor right after the
  * bracket is placed). Safe to call before startOutcomeTracker.
  */
 export function trackExecutedProposal(p: TradeProposal): void {
+    // Adopted rows are POSITION records, not brackets — no Dexter orders
+    // exist for them, so there is nothing to event-track (WP3).
+    if (p.source === 'adopted') return;
     if (!p.orderIds || p.orderIds.length < 3) {
         logger.warn(`[outcome-tracker] ${p.id} has no bracket order ids — cannot track`);
         return;
@@ -1127,6 +1179,14 @@ export async function startOutcomeTracker(): Promise<void> {
 
     unregisterReconnect = onReconnect(() => attachWithRetry());
     attachWithRetry();
+
+    // Periodic reverse reconciliation (WP3): a manual TWS trade placed
+    // mid-session must not stay cap-invisible until the next restart.
+    if (process.env.NODE_ENV !== 'test' && !adoptionTimer) {
+        adoptionTimer = setInterval(() => {
+            if (attachedApi) void runAdoptionSweep(attachedApi);
+        }, ADOPTION_SWEEP_INTERVAL_MS);
+    }
 }
 
 /** Stop tracking (gateway shutdown). Tracked state stays in the DB. */
@@ -1135,6 +1195,10 @@ export function stopOutcomeTracker(): void {
     if (retryTimer) {
         clearTimeout(retryTimer);
         retryTimer = null;
+    }
+    if (adoptionTimer) {
+        clearInterval(adoptionTimer);
+        adoptionTimer = null;
     }
     if (unregisterReconnect) {
         unregisterReconnect();

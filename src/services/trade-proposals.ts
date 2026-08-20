@@ -648,6 +648,57 @@ export async function getProposal(id: string): Promise<TradeProposal | null> {
     return rows.length ? fromRow(rows[0]) : null;
 }
 
+/**
+ * WP3: record a broker position Dexter did not open, so every exposure cap
+ * sees it. Bypasses the creation risk gate ON PURPOSE — the position
+ * already exists; refusing to record it is how it stayed invisible. The
+ * stop/target are SYNTHETIC (±5%/±10% of basis, labeled in the note): they
+ * price a conservative planned risk for the headroom gate and are never
+ * used to place orders — Dexter does not manage adopted positions.
+ */
+export async function createAdoptedPosition(input: {
+    symbol: string;
+    direction: 'long' | 'short';
+    quantity: number;
+    avgCost: number;
+    account: string;
+}): Promise<TradeProposal> {
+    const database = await getDb();
+    const now = Date.now();
+    let id = '';
+    for (let attempt = 0; attempt < 5; attempt++) {
+        id = `P-${randomBytes(2).toString('hex').toUpperCase()}`;
+        const clash = database.query<Row>(`SELECT id FROM proposals WHERE id = ?`).all(id);
+        if (clash.length === 0) break;
+        id = '';
+    }
+    if (!id) throw new Error('[proposals] could not allocate a unique id');
+
+    const long = input.direction === 'long';
+    const stop = Math.round(input.avgCost * (long ? 0.95 : 1.05) * 100) / 100;
+    const target = Math.round(input.avgCost * (long ? 1.10 : 0.90) * 100) / 100;
+    const qty = Math.max(1, Math.round(input.quantity));
+    database.query<void>(
+        `INSERT INTO proposals
+         (id, created_at, expires_at, updated_at, status, symbol, direction, entry_type,
+          entry, stop, target, quantity, tif, trade_class,
+          rationale, source, order_ids, note,
+          executed_at, entry_fill_price, entry_filled_at)
+         VALUES (?, ?, ?, ?, 'executed', ?, ?, 'MKT', ?, ?, ?, ?, 'GTC', 'intraday', ?, 'adopted', NULL, ?, ?, ?, ?)`,
+    ).run(
+        id, now, now, now,
+        input.symbol.trim().toUpperCase(), input.direction,
+        input.avgCost, stop, target, qty,
+        `adopted from broker reconciliation: position existed in ${input.account} with no proposal row`,
+        `adopted 'as found' — stop/target are synthetic bookkeeping levels (±5%/±10% of basis), no Dexter orders exist for this row`,
+        now, input.avgCost, now,
+    );
+    logger.warn(`[proposals] ${id}: ADOPTED broker position ${input.direction} ${qty} ${input.symbol} @ ${input.avgCost} (${input.account})`);
+    const created = await getProposal(id);
+    if (!created) throw new Error(`[proposals] just-created ${id} not found`);
+    return created;
+}
+
 export async function listProposals(status?: ProposalStatus, limit = 20): Promise<TradeProposal[]> {
     const database = await getDb();
     await expireStale();
