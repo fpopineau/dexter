@@ -23,6 +23,7 @@ import { assertDailyLossOk } from './daily-loss-guard.js';
 import { trackExecutedProposal } from './outcome-tracker.js';
 import { getSectorInfo } from './sector-map.js';
 import { assertProposalRisk, checkPriceRun, ENTRY_CONFIRM_FRACTION, plannedWorstLossUsd } from './proposal-risk-gate.js';
+import { fetchBrokerExposure, unionExposure } from './exposure-snapshot.js';
 import {
     claimProposalForExecution,
     countExecutedSince,
@@ -131,6 +132,22 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         const exposureValue = (t: { quantity: number; entryFillPrice: number | null; entry: number | null; entryLimit: number | null }) =>
             t.quantity * (t.entryFillPrice ?? t.entry ?? t.entryLimit ?? 0);
 
+        // WP4: the broker book is canonical — the caps see the MAX of what
+        // the DB believes and what the broker actually holds. FAIL CLOSED:
+        // a fetch failure refuses the accept (proposal stays open, retry
+        // when the snapshot is back) — unknown exposure never passes.
+        // Planned-RISK headroom stays DB-side (a broker-only position has
+        // no stop to price); WP3 adoption rows close that gap within a
+        // sweep cycle, this union backstops the counts and notionals.
+        const brokerBook = await fetchBrokerExposure();
+        const union = unionExposure(
+            exposure.map((t) => ({ symbol: t.symbol, quantity: t.quantity, valueUsd: exposureValue(t) })),
+            brokerBook,
+        );
+        if (union.brokerOnlySymbols.length > 0) {
+            logger.warn(`[proposal-executor] ${p.id}: broker holds cap-relevant positions with no DB row yet: ${union.brokerOnlySymbols.join(', ')} (adoption sweep pending)`);
+        }
+
         // Sector concentration context — best-effort: an unknown sector
         // (ETF, Nasdaq miss) skips the cap WITH a gate note, and a
         // resolution error must never block an accept on its own.
@@ -165,7 +182,10 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 // 'executing' — otherwise the proposal consumes its own
                 // position slot and daily-trade slot and the practical caps
                 // sit one below the configured ones (audit 2026-08-20).
-                openPositions: await countOpenExecuted(p.id),
+                // WP4: the DB count (per-proposal, sees stacking) and the
+                // union count (per-symbol, sees broker-only positions)
+                // guard different drifts — the larger one binds.
+                openPositions: Math.max(await countOpenExecuted(p.id), union.distinctSymbols),
                 executedToday: await countExecutedSince(etDayStartMs(), p.id),
                 // Class caps re-checked with live counts (this proposal
                 // excluded) — two accepts cannot both pass a full book.
@@ -174,13 +194,14 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 ...(p.worstCaseGapPct != null ? { worstCaseGapPct: p.worstCaseGapPct } : {}),
                 // Committed notional on this symbol from OTHER working/filled
                 // proposals — the aggregate cap stops same-name stacking.
-                // Same valuation basis as every other exposure figure
-                // (fill > entry > limit) — this one used entry-only and
-                // priced filled positions at their stale proposal entry
-                // (WP0.3, audit 2026-08-20).
-                existingSymbolExposure: exposure
-                    .filter((t) => t.symbol === p.symbol)
-                    .reduce((sum, t) => sum + exposureValue(t), 0),
+                // WP4: MAX of the DB view and the broker's actual holding,
+                // so a manual TWS position in the same name binds the cap.
+                existingSymbolExposure: Math.max(
+                    exposure
+                        .filter((t) => t.symbol === p.symbol)
+                        .reduce((sum, t) => sum + exposureValue(t), 0),
+                    union.notionalBySymbol.get(p.symbol) ?? 0,
+                ),
                 // Daily-loss headroom: the open book's planned stop-outs
                 // (gap cost for bets) plus today's realized losses — the
                 // gate refuses a book that could stop out through the halt.
