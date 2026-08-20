@@ -70,3 +70,17 @@ describe('triggerEligibility (top-3 / deep window / reactor windows)', () => {
             .toEqual({ eligible: true, effectiveThreshold: 75 });
     });
 });
+
+describe('trigger staleness refusal (WP10 — stale data fires nothing)', () => {
+    const BASE = {
+        idx: 0, isReactor: false, onBreadthWatchlist: false,
+        threshold: 75, breadthRelief: 10, reactorReliefPts: 10, deepMargin: 5, depth: 10,
+    };
+    test('a stale candidate is ineligible at ANY rank, reactor or not', () => {
+        expect(triggerEligibility({ ...BASE, stale: true }).eligible).toBe(false);
+        expect(triggerEligibility({ ...BASE, idx: 0, isReactor: true, stale: true }).eligible).toBe(false);
+    });
+    test('fresh candidates are unaffected', () => {
+        expect(triggerEligibility({ ...BASE, stale: false }).eligible).toBe(true);
+    });
+});

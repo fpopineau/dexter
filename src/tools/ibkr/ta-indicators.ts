@@ -230,22 +230,48 @@ export interface VWAPResult {
     vwap: number[];
 }
 
+/** Session key from a bar time — works for both IBKR intraday
+ *  ('yyyymmdd  HH:MM:SS') and ISO ('YYYY-MM-DD HH:MM:SS') formats. */
+function sessionKey(time: string | undefined): string {
+    return (time ?? '').replace(/[^0-9]/g, '').slice(0, 8);
+}
+
+/** Time-of-day key ('HH:MM') from a bar time, both formats. */
+function todKey(time: string | undefined): string | null {
+    const m = /(\d{2}):(\d{2})/.exec(time ?? '');
+    return m ? `${m[1]}:${m[2]}` : null;
+}
+
 /**
- * VWAP — cumulative within the provided bar window.
- * Typically reset daily (caller provides one day of bars).
+ * VWAP — cumulative, RESET AT EACH SESSION BOUNDARY when bar times are
+ * provided (WP10, audit 2026-08-20: callers pass multi-day windows, and a
+ * 10-day cumulative "VWAP" put trending names permanently far from their
+ * anchor — the ±0.3%/±1% mean-reversion bands are calibrated for the
+ * SESSION vwap). Without times, the old whole-window behavior remains
+ * (single-session callers).
  */
 export function vwap(
     high: number[],
     low: number[],
     close: number[],
     volume: number[],
+    times?: string[],
 ): VWAPResult {
     const len = high.length;
     const result = new Array<number>(len).fill(NaN);
 
     let cumTP = 0;
     let cumVol = 0;
+    let session = '';
     for (let i = 0; i < len; i++) {
+        if (times) {
+            const key = sessionKey(times[i]);
+            if (key !== session) {
+                session = key;
+                cumTP = 0;
+                cumVol = 0;
+            }
+        }
         const tp = (high[i] + low[i] + close[i]) / 3;
         cumTP += tp * volume[i];
         cumVol += volume[i];
@@ -265,23 +291,50 @@ export interface VolumeResult {
 }
 
 /**
- * Volume analysis: Z-score (current vol vs rolling mean/stddev) and
- * Relative Volume (current vs rolling average).
- * Default lookback = 20 bars.
+ * Volume analysis (WP10). Both measures compare the current bar against
+ * PRIOR data only — the old windows included the bar under test, which
+ * self-damped every burst (a true 3× bar read ~2.6×).
+ *
+ * RVOL: with bar times, current volume vs the mean of the SAME
+ * time-of-day across prior sessions — the 09:35 bar is judged against
+ * prior 09:35 bars, not the previous afternoon's dead tape (the audit's
+ * core RVOL complaint: a rolling window confuses the normal intraday
+ * volume curve with unusual volume). Without times, falls back to the
+ * prior-`lookback`-bars mean.
+ *
+ * Z-score: current volume vs the prior `lookback` bars' mean/stddev.
  */
-export function volumeAnalysis(volume: number[], lookback = 20): VolumeResult {
+export function volumeAnalysis(volume: number[], lookback = 20, times?: string[]): VolumeResult {
     const len = volume.length;
     const zScore = new Array<number>(len).fill(NaN);
     const rvol = new Array<number>(len).fill(NaN);
 
-    for (let i = lookback - 1; i < len; i++) {
-        const slice = volume.slice(i - lookback + 1, i + 1);
-        const mean = slice.reduce((a, b) => a + b, 0) / lookback;
-        const variance = slice.reduce((s, v) => s + (v - mean) ** 2, 0) / lookback;
-        const std = Math.sqrt(variance);
+    // Prior same-time-of-day volumes, accumulated as we scan forward.
+    const byTod = new Map<string, number[]>();
 
-        rvol[i] = mean > 0 ? volume[i] / mean : NaN;
-        zScore[i] = std > 0 ? (volume[i] - mean) / std : 0;
+    for (let i = 0; i < len; i++) {
+        // Z-score from the PRIOR window (excludes bar i).
+        if (i >= lookback) {
+            const slice = volume.slice(i - lookback, i);
+            const mean = slice.reduce((a, b) => a + b, 0) / lookback;
+            const variance = slice.reduce((s, v) => s + (v - mean) ** 2, 0) / lookback;
+            const std = Math.sqrt(variance);
+            zScore[i] = std > 0 ? (volume[i] - mean) / std : 0;
+            if (!times) rvol[i] = mean > 0 ? volume[i] / mean : NaN;
+        }
+
+        if (times) {
+            const tod = todKey(times[i]);
+            if (tod !== null) {
+                const prior = byTod.get(tod);
+                if (prior && prior.length >= 3) {
+                    const mean = prior.reduce((a, b) => a + b, 0) / prior.length;
+                    rvol[i] = mean > 0 ? volume[i] / mean : NaN;
+                }
+                if (prior) prior.push(volume[i]);
+                else byTod.set(tod, [volume[i]]);
+            }
+        }
     }
 
     return { zScore, rvol };
@@ -323,8 +376,8 @@ export function computeAll(data: OHLCV): AllIndicators {
         macd: macd(data.close),
         bollinger: bollingerBands(data.close),
         atr: atr(data.high, data.low, data.close),
-        vwap: vwap(data.high, data.low, data.close, data.volume),
-        volume: volumeAnalysis(data.volume),
+        vwap: vwap(data.high, data.low, data.close, data.volume, data.time),
+        volume: volumeAnalysis(data.volume, 20, data.time),
         ema9: ema(data.close, 9),
         ema21: ema(data.close, 21),
         ema50: ema(data.close, 50),

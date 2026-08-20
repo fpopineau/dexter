@@ -35,7 +35,7 @@ function findTargetSession(): SessionEntry | null {
 
 function buildPrompt(opp: Opportunity, tapeLine: string): string {
     return [
-        `[OPPORTUNITY TRIGGER] ${opp.symbol} just ranked top-3 in the live scanner.`,
+        `[OPPORTUNITY TRIGGER] ${opp.symbol} entered the live scanner's trigger window (top-${10} by composite rank).`,
         '',
         `Candidate: ${opp.direction.toUpperCase()} ${opp.symbol} (${opp.longName})`,
         `compositeRank ${opp.compositeRank}, signalScore ${opp.signalScore} (${opp.rating}), ` +

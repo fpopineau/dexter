@@ -29,6 +29,7 @@ import { breadthFireAllowed, breadthThresholdRelief, breadthWatchlist, cryptoBre
 import { getMarketRegime, regimeThresholdAdjust } from './market-regime.js';
 import { eventMoverBoost, moverAlertEligible, SENTINEL_SOURCE, sentinelDirection } from './event-mover.js';
 import { fetchDailyRiskContext } from '@/tools/ibkr/daily-atr.js';
+import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
 import { fetchLastPrice } from './proposal-executor.js';
 import { runScan, type ScanCode, type ScanResult } from './scanner-loop.js';
 import { etDatePlus, getEarningsForDate, previousTradingDate } from './earnings-calendar.js';
@@ -79,7 +80,10 @@ export function triggerEligibility(input: {
     reactorReliefPts: number;
     deepMargin: number;
     depth: number;
+    /** WP10: scorer freshness verdict — stale data fires nothing. */
+    stale?: boolean;
 }): { eligible: boolean; effectiveThreshold: number } {
+    if (input.stale) return { eligible: false, effectiveThreshold: Infinity };
     if (input.idx >= input.depth) return { eligible: false, effectiveThreshold: Infinity };
     const base = input.onBreadthWatchlist ? input.threshold - input.breadthRelief : input.threshold;
     if (input.isReactor) {
@@ -145,6 +149,9 @@ export interface Opportunity {
      *  event-mover boost and the pre-market mover alert (MRNA 2026-08-19:
      *  +110% invisible to a composite with no day-move term). */
     dayMovePct: number | null;
+    /** WP10: scorer freshness verdict — a stale bar farm (2026-08-05
+     *  incident) must not fire triggers. Was computed and discarded. */
+    stale: boolean;
 }
 
 export interface OpportunitySnapshot {
@@ -165,8 +172,20 @@ export interface OpportunitySnapshot {
 interface PhasePlan {
     phase: EnginePhase;
     cadenceMs: number;
-    scans: Array<{ code: ScanCode; direction: 'long' | 'short' }>;
+    /** WP10: 'none' for activity scans (MOST_ACTIVE, HOT_BY_VOLUME,
+     *  TOP_TRADE_RATE) — a pre-market most-active list is dominated by
+     *  down-gappers, and the old hard-coded 'long' scored every one of
+     *  them as a long candidate. */
+    scans: Array<{ code: ScanCode; direction: 'long' | 'short' | 'none' }>;
 }
+
+/** Scan families for the multi-scan bonus (WP10): overlapping views of
+ *  the same volume event corroborate NOTHING — only distinct families do. */
+const SCAN_FAMILY: Record<string, string> = {
+    TOP_PERC_GAIN: 'gainer', TOP_OPEN_PERC_GAIN: 'gainer', HIGH_OPEN_GAP: 'gainer',
+    TOP_PERC_LOSE: 'loser', TOP_OPEN_PERC_LOSE: 'loser',
+    MOST_ACTIVE: 'volume', HOT_BY_VOLUME: 'volume', TOP_TRADE_RATE: 'volume',
+};
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -258,7 +277,7 @@ export function planForNow(date?: Date): PhasePlan {
                 { code: 'HIGH_OPEN_GAP', direction: 'long' },
                 { code: 'TOP_OPEN_PERC_GAIN', direction: 'long' },
                 { code: 'TOP_OPEN_PERC_LOSE', direction: 'short' },
-                { code: 'MOST_ACTIVE', direction: 'long' },
+                { code: 'MOST_ACTIVE', direction: 'none' },
             ],
         };
     }
@@ -270,9 +289,9 @@ export function planForNow(date?: Date): PhasePlan {
                 cadenceMs: 2 * 60_000,
                 scans: [
                     { code: 'TOP_PERC_GAIN', direction: 'long' },
-                    { code: 'HOT_BY_VOLUME', direction: 'long' },
+                    { code: 'HOT_BY_VOLUME', direction: 'none' },
                     { code: 'TOP_PERC_LOSE', direction: 'short' },
-                    { code: 'TOP_TRADE_RATE', direction: 'long' },
+                    { code: 'TOP_TRADE_RATE', direction: 'none' },
                 ],
             };
         }
@@ -282,7 +301,7 @@ export function planForNow(date?: Date): PhasePlan {
                 cadenceMs: 10 * 60_000,
                 scans: [
                     { code: 'TOP_PERC_GAIN', direction: 'long' },
-                    { code: 'MOST_ACTIVE', direction: 'long' },
+                    { code: 'MOST_ACTIVE', direction: 'none' },
                     { code: 'TOP_PERC_LOSE', direction: 'short' },
                 ],
             };
@@ -292,8 +311,8 @@ export function planForNow(date?: Date): PhasePlan {
             cadenceMs: 5 * 60_000,
             scans: [
                 { code: 'TOP_PERC_GAIN', direction: 'long' },
-                { code: 'MOST_ACTIVE', direction: 'long' },
-                { code: 'HOT_BY_VOLUME', direction: 'long' },
+                { code: 'MOST_ACTIVE', direction: 'none' },
+                { code: 'HOT_BY_VOLUME', direction: 'none' },
             ],
         };
     }
@@ -309,18 +328,18 @@ function scansForPhase(phase: EnginePhase): PhasePlan['scans'] {
                 { code: 'HIGH_OPEN_GAP', direction: 'long' },
                 { code: 'TOP_OPEN_PERC_GAIN', direction: 'long' },
                 { code: 'TOP_OPEN_PERC_LOSE', direction: 'short' },
-                { code: 'MOST_ACTIVE', direction: 'long' },
+                { code: 'MOST_ACTIVE', direction: 'none' },
             ];
         case 'pre-close':
             return [
                 { code: 'TOP_PERC_GAIN', direction: 'long' },
-                { code: 'MOST_ACTIVE', direction: 'long' },
-                { code: 'HOT_BY_VOLUME', direction: 'long' },
+                { code: 'MOST_ACTIVE', direction: 'none' },
+                { code: 'HOT_BY_VOLUME', direction: 'none' },
             ];
         case 'midday':
             return [
                 { code: 'TOP_PERC_GAIN', direction: 'long' },
-                { code: 'MOST_ACTIVE', direction: 'long' },
+                { code: 'MOST_ACTIVE', direction: 'none' },
                 { code: 'TOP_PERC_LOSE', direction: 'short' },
             ];
         case 'open-drive':
@@ -328,9 +347,9 @@ function scansForPhase(phase: EnginePhase): PhasePlan['scans'] {
         default:
             return [
                 { code: 'TOP_PERC_GAIN', direction: 'long' },
-                { code: 'HOT_BY_VOLUME', direction: 'long' },
+                { code: 'HOT_BY_VOLUME', direction: 'none' },
                 { code: 'TOP_PERC_LOSE', direction: 'short' },
-                { code: 'TOP_TRADE_RATE', direction: 'long' },
+                { code: 'TOP_TRADE_RATE', direction: 'none' },
             ];
     }
 }
@@ -457,7 +476,22 @@ let lastSurfaced: Array<{ symbol: string; sources: string[] }> = [];
  * marketOpen=false so the consumer can caveat staleness.
  */
 export async function runCycleOnce(forcePhase?: EnginePhase): Promise<OpportunitySnapshot> {
-    if (cycleInFlight && latestSnapshot) return latestSnapshot;
+    // WP10: a real mutex — the old `if (inFlight && latestSnapshot)` let a
+    // second caller run CONCURRENTLY before the first snapshot existed,
+    // and its finally cleared the flag for both. Now every concurrent
+    // caller awaits the in-flight cycle's own promise.
+    if (cyclePromise) return cyclePromise;
+    cyclePromise = runCycleInner(forcePhase);
+    try {
+        return await cyclePromise;
+    } finally {
+        cyclePromise = null;
+    }
+}
+
+let cyclePromise: Promise<OpportunitySnapshot> | null = null;
+
+async function runCycleInner(forcePhase?: EnginePhase): Promise<OpportunitySnapshot> {
     cycleInFlight = true;
     try {
         const info = getMarketSession();
@@ -469,8 +503,12 @@ export async function runCycleOnce(forcePhase?: EnginePhase): Promise<Opportunit
             plan = { phase, cadenceMs: plan.cadenceMs, scans: scansForPhase(phase) };
         }
 
-        // 1. Scans (parallel, scanner-loop caches per code for 5 min)
-        const found = new Map<string, { result: ScanResult; direction: 'long' | 'short'; sources: string[] }>();
+        // 1. Scans (parallel, scanner-loop caches per code for 5 min).
+        // WP10: direction is resolved by VOTES after every scan lands —
+        // the old first-insert-wins let cache-warmth pick the side, and a
+        // symbol in both a gainer and a loser scan kept whichever direction
+        // resolved first plus a +3 "corroboration" bonus for the conflict.
+        const found = new Map<string, { result: ScanResult; direction: 'long' | 'short' | null; sources: string[]; longVotes: number; shortVotes: number }>();
         const capBand = marketCapBand();
         await Promise.all(plan.scans.map(async ({ code, direction }) => {
             try {
@@ -478,16 +516,31 @@ export async function runCycleOnce(forcePhase?: EnginePhase): Promise<Opportunit
                 for (const r of results) {
                     if (!r.symbol || r.secType !== 'STK') continue;
                     const existing = found.get(r.symbol);
-                    if (existing) {
-                        existing.sources.push(code);
-                    } else {
-                        found.set(r.symbol, { result: r, direction, sources: [code] });
-                    }
+                    const entry = existing ?? { result: r, direction: null, sources: [], longVotes: 0, shortVotes: 0 };
+                    entry.sources.push(code);
+                    if (direction === 'long') entry.longVotes++;
+                    else if (direction === 'short') entry.shortVotes++;
+                    if (!existing) found.set(r.symbol, entry);
                 }
             } catch (err) {
                 logger.warn(`[opportunity-engine] scan ${code} failed: ${err}`);
             }
         }));
+
+        // Resolve directions: unanimous votes win; CONFLICTS are dropped
+        // (a symbol both ripping and dumping per the scans is not a
+        // directional candidate); vote-less activity-scan symbols stay
+        // null and resolve at scoring time from the day move.
+        for (const [symbol, meta] of [...found.entries()]) {
+            if (meta.longVotes > 0 && meta.shortVotes > 0) {
+                logger.info(`[opportunity-engine] ${symbol}: conflicting scan directions (${meta.sources.join(', ')}) — dropped`);
+                found.delete(symbol);
+            } else if (meta.longVotes > 0) {
+                meta.direction = 'long';
+            } else if (meta.shortVotes > 0) {
+                meta.direction = 'short';
+            }
+        }
 
         // 1b. Watchlist sentinel — admission for declared names the scans
         // ignored (2026-08-19: COIN +10% / MSTR +12% on a BTC rally never
@@ -523,8 +576,29 @@ export async function runCycleOnce(forcePhase?: EnginePhase): Promise<Opportunit
         // 3. Score sequentially (IBKR historical-data pacing)
         const opportunities: Opportunity[] = [];
         for (const [symbol, meta] of candidates) {
-            const signal = await scoreSymbol(symbol, meta.direction);
-            if (signal) {
+            // WP10: vote-less candidates (activity scans only) resolve
+            // their direction here — by the day-move sign when the prior
+            // close is known, else by scoring both sides and proposing
+            // the better one. Never a hard-coded 'long'.
+            let direction = meta.direction;
+            let signal = await scoreSymbol(symbol, direction ?? 'long');
+            if (signal && direction === null) {
+                const ctx0 = await fetchDailyRiskContext(symbol).catch(() => null);
+                const price0 = signal.snapshot.price;
+                if (ctx0?.prevClose != null && ctx0.prevClose > 0 && price0 != null && price0 > 0) {
+                    direction = price0 >= ctx0.prevClose ? 'long' : 'short';
+                    if (direction === 'short') signal = await scoreSymbol(symbol, 'short');
+                } else {
+                    const shortSignal = await scoreSymbol(symbol, 'short');
+                    if (shortSignal && shortSignal.compositeScore > signal.compositeScore) {
+                        signal = shortSignal;
+                        direction = 'short';
+                    } else {
+                        direction = 'long';
+                    }
+                }
+            }
+            if (signal && direction) {
                 const rvol = signal.snapshot.rvol;
                 // Day move (direction-signed) for directionally-scanned
                 // candidates: the TA factors punish verticals (mean-
@@ -538,25 +612,44 @@ export async function runCycleOnce(forcePhase?: EnginePhase): Promise<Opportunit
                     const price = signal.snapshot.price;
                     if (ctx?.prevClose != null && ctx.prevClose > 0 && price != null && price > 0) {
                         const raw = ((price - ctx.prevClose) / ctx.prevClose) * 100;
-                        dayMovePct = Math.round((meta.direction === 'long' ? raw : -raw) * 10) / 10;
+                        dayMovePct = Math.round((direction === 'long' ? raw : -raw) * 10) / 10;
                     }
                 }
-                const boost = eventMoverBoost(dayMovePct);
+                // WP10: the boost must not promote candidates the
+                // extension gate will refuse — when the implied extension
+                // (day move over ATR%) already exceeds max_extension_atr,
+                // boosting only burns a 10-iteration LLM evaluation on a
+                // guaranteed refusal.
+                let boost = eventMoverBoost(dayMovePct);
+                const atrVal = signal.snapshot.atr;
+                const priceVal = signal.snapshot.price;
+                if (boost > 0 && dayMovePct !== null && atrVal != null && atrVal > 0 && priceVal != null && priceVal > 0) {
+                    const atrPct = (atrVal / priceVal) * 100;
+                    const impliedExtension = Math.abs(dayMovePct) / atrPct;
+                    if (impliedExtension > getRiskRules().max_extension_atr) {
+                        logger.info(`[opportunity-engine] ${symbol}: boost suppressed — implied extension ${impliedExtension.toFixed(1)}x ATR exceeds the gate's ${getRiskRules().max_extension_atr}x`);
+                        boost = 0;
+                    }
+                }
+                // WP10: multi-scan bonus counts distinct FAMILIES —
+                // three volume scans surfacing one volume event is one
+                // observation, not three.
+                const families = new Set(meta.sources.map((s) => SCAN_FAMILY[s] ?? s));
                 const compositeRank = Math.round(
                     signal.compositeScore
                     + Math.min(10, (rvol ?? 0) * 2)
-                    + 3 * (meta.sources.length - 1)
+                    + 3 * (families.size - 1)
                     + boost,
                 );
                 const boostKey = `${etDateString()}:${symbol}`;
                 if (boost > 0 && !boostLoggedToday.has(boostKey)) {
                     boostLoggedToday.add(boostKey);
-                    logger.info(`[opportunity-engine] event-mover boost ${symbol} +${boost} (day ${dayMovePct}% toward ${meta.direction})`);
+                    logger.info(`[opportunity-engine] event-mover boost ${symbol} +${boost} (day ${dayMovePct}% toward ${direction})`);
                 }
                 opportunities.push({
                     symbol,
                     longName: meta.result.longName,
-                    direction: meta.direction,
+                    direction,
                     signalScore: signal.compositeScore,
                     rating: signal.rating,
                     compositeRank,
@@ -567,6 +660,9 @@ export async function runCycleOnce(forcePhase?: EnginePhase): Promise<Opportunit
                     vwap: signal.snapshot.vwap,
                     scanSources: meta.sources,
                     dayMovePct,
+                    // WP10: the freshness verdict finally lands on the
+                    // Opportunity instead of being computed and discarded.
+                    stale: signal.freshness?.stale ?? false,
                 });
             }
             await sleep(SCORE_PACING_MS);
@@ -759,7 +855,7 @@ let lastSentinelSweepAt = 0;
  * Best-effort per name; a data failure admits nothing, never guesses.
  */
 async function sweepSentinels(
-    found: Map<string, { result: ScanResult; direction: 'long' | 'short'; sources: string[] }>,
+    found: Map<string, { result: ScanResult; direction: 'long' | 'short' | null; sources: string[]; longVotes: number; shortVotes: number }>,
 ): Promise<void> {
     if (!sentinelEnabled() || process.env.NODE_ENV === 'test') return;
     const now = Date.now();
@@ -786,6 +882,10 @@ async function sweepSentinels(
                     },
                     direction,
                     sources: [SENTINEL_SOURCE],
+                    // A sentinel admission IS a directional observation
+                    // (aligned watchlist move) — it votes like a scan.
+                    longVotes: direction === 'long' ? 1 : 0,
+                    shortVotes: direction === 'short' ? 1 : 0,
                 });
                 hits.push(`${sym} ${movePct > 0 ? '+' : ''}${movePct}%`);
             } catch { /* best-effort per name */ }
@@ -951,6 +1051,7 @@ async function evaluateTriggers(snapshot: OpportunitySnapshot): Promise<void> {
             reactorReliefPts: reactorRelief(),
             deepMargin: deepTriggerMargin(),
             depth: REACTOR_TRIGGER_DEPTH,
+            stale: opp.stale,
         });
         if (!gate.eligible || opp.compositeRank < gate.effectiveThreshold) continue;
         // Live session re-check: trigger callbacks are AWAITED, so the loop

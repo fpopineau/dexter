@@ -327,27 +327,33 @@ function scoreMomentum(ind: AllIndicators, close: number[], direction: 'long' | 
     let total = 0;
 
     // --- MACD histogram slope (0–35 pts) ---
+    // WP10: the slope is normalized by ATR (both are price units, the
+    // ratio is dimensionless). The old fixed ×500 saturated on anything
+    // above a ~$50 stock — a binary sign test masquerading as a magnitude
+    // measure — and behaved differently at every price level.
     const histNow = lastValid(ind.macd.histogram);
     const histPrev = nthLast(ind.macd.histogram, 1);
+    const atrForScale = lastValid(ind.atr.atr);
     let macdScore = 0;
     let macdNote = '';
-    if (!isNaN(histNow) && !isNaN(histPrev)) {
+    if (!isNaN(histNow) && !isNaN(histPrev) && !isNaN(atrForScale) && atrForScale > 0) {
         const slope = histNow - histPrev;
         const favorable = isLong ? slope > 0 : slope < 0;
-        const magnitude = Math.abs(slope);
-        // Positive & in-direction = full score; positive & against = penalize
+        // Slope as a fraction of ATR: ~5% of ATR per bar is a strong
+        // histogram push at any price level — that earns the full band.
+        const magnitudeAtr = Math.abs(slope) / atrForScale;
         if (favorable) {
-            macdScore = Math.min(35, 15 + magnitude * 500); // scale small values up
+            macdScore = Math.min(35, 15 + magnitudeAtr * 400);
         } else {
-            macdScore = Math.max(0, 15 - magnitude * 500);
+            macdScore = Math.max(0, 15 - magnitudeAtr * 400);
         }
-        macdNote = `histogram ${histNow > 0 ? '+' : ''}${histNow.toFixed(4)}, slope ${slope > 0 ? '+' : ''}${slope.toFixed(4)}`;
+        macdNote = `histogram ${histNow > 0 ? '+' : ''}${histNow.toFixed(4)}, slope ${slope > 0 ? '+' : ''}${slope.toFixed(4)} (${(magnitudeAtr * 100).toFixed(1)}% of ATR)`;
     } else {
         macdScore = 15; // neutral if no data
         macdNote = 'insufficient data';
     }
     macdScore = clamp100(macdScore);
-    components['macd_slope'] = { value: histNow || null, contribution: macdScore, note: macdNote };
+    components['macd_slope'] = { value: Number.isFinite(histNow) ? histNow : null, contribution: macdScore, note: macdNote };
     total += macdScore;
 
     // --- RSI direction (0–30 pts) ---
@@ -379,7 +385,7 @@ function scoreMomentum(ind: AllIndicators, close: number[], direction: 'long' | 
         rsiScore = 15;
         rsiNote = 'insufficient data';
     }
-    components['rsi_direction'] = { value: rsiNow || null, contribution: rsiScore, note: rsiNote };
+    components['rsi_direction'] = { value: Number.isFinite(rsiNow) ? rsiNow : null, contribution: rsiScore, note: rsiNote };
     total += rsiScore;
 
     // --- Price vs EMAs (0–35 pts) ---
@@ -413,7 +419,7 @@ function scoreMomentum(ind: AllIndicators, close: number[], direction: 'long' | 
         emaScore = 15;
         emaNote = 'insufficient EMA data';
     }
-    components['price_vs_emas'] = { value: price || null, contribution: emaScore, note: emaNote };
+    components['price_vs_emas'] = { value: Number.isFinite(price) ? price : null, contribution: emaScore, note: emaNote };
     total += emaScore;
 
     return { score: clamp100(total), components };
@@ -457,7 +463,7 @@ function scoreMeanReversion(ind: AllIndicators, close: number[], direction: 'lon
         vwapScore = 15;
         vwapNote = 'VWAP not available';
     }
-    components['vwap_distance'] = { value: vwapVal || null, contribution: vwapScore, note: vwapNote };
+    components['vwap_distance'] = { value: Number.isFinite(vwapVal) ? vwapVal : null, contribution: vwapScore, note: vwapNote };
     total += vwapScore;
 
     // --- Bollinger %B (0–35 pts) ---
@@ -484,7 +490,7 @@ function scoreMeanReversion(ind: AllIndicators, close: number[], direction: 'lon
         bbScore = 15;
         bbNote = 'insufficient data';
     }
-    components['bollinger_pctb'] = { value: pctB || null, contribution: bbScore, note: bbNote };
+    components['bollinger_pctb'] = { value: Number.isFinite(pctB) ? pctB : null, contribution: bbScore, note: bbNote };
     total += bbScore;
 
     // --- RSI extreme (0–30 pts) ---
@@ -508,7 +514,7 @@ function scoreMeanReversion(ind: AllIndicators, close: number[], direction: 'lon
         rsiExtScore = 15;
         rsiExtNote = 'no data';
     }
-    components['rsi_extreme'] = { value: rsiVal || null, contribution: rsiExtScore, note: rsiExtNote };
+    components['rsi_extreme'] = { value: Number.isFinite(rsiVal) ? rsiVal : null, contribution: rsiExtScore, note: rsiExtNote };
     total += rsiExtScore;
 
     return { score: clamp100(total), components };
@@ -540,7 +546,7 @@ function scoreVolume(ind: AllIndicators, volumes: number[]): FactorScore {
         rvolScore = 15;
         rvolNote = 'no volume data';
     }
-    components['rvol'] = { value: rvolVal || null, contribution: rvolScore, note: rvolNote };
+    components['rvol'] = { value: Number.isFinite(rvolVal) ? rvolVal : null, contribution: rvolScore, note: rvolNote };
     total += rvolScore;
 
     // --- Z-score (0–30 pts) ---
@@ -558,7 +564,7 @@ function scoreVolume(ind: AllIndicators, volumes: number[]): FactorScore {
         zScore = 10;
         zNote = 'no data';
     }
-    components['volume_zscore'] = { value: zVal || null, contribution: zScore, note: zNote };
+    components['volume_zscore'] = { value: Number.isFinite(zVal) ? zVal : null, contribution: zScore, note: zNote };
     total += zScore;
 
     // --- Volume trend (last 5 bars increasing?) (0–30 pts) ---
@@ -679,7 +685,7 @@ function scoreTrend(ind: AllIndicators, ohlcv: OHLCV, direction: 'long' | 'short
         atrScore = 12;
         atrNote = 'no ATR data';
     }
-    components['atr_context'] = { value: atrVal || null, contribution: atrScore, note: atrNote };
+    components['atr_context'] = { value: Number.isFinite(atrVal) ? atrVal : null, contribution: atrScore, note: atrNote };
     total += atrScore;
 
     return { score: clamp100(total), components };
@@ -785,6 +791,29 @@ export interface SignalResult {
     weightsSource: string;
     /** Deterministic staleness assessment of the newest bar. */
     freshness: BarFreshness;
+    /** WP10: fraction [0,1] of core indicators carrying real data — the
+     *  composite is CAPPED at coverage×100 (missing data can no longer
+     *  masquerade as a ~46 neutral). */
+    coverage: number;
+}
+
+/** WP10: fraction of core indicator series carrying real data. Missing
+ *  data used to score NEUTRAL mid-points — a symbol with ZERO usable
+ *  history composited to ~46/100. Coverage caps the composite instead:
+ *  what the data cannot support, the score cannot claim. */
+export function indicatorCoverage(ind: AllIndicators): number {
+    const checks = [
+        lastValid(ind.rsi.rsi),
+        lastValid(ind.macd.histogram),
+        lastValid(ind.bollinger.percentB),
+        lastValid(ind.atr.atr),
+        lastValid(ind.vwap.vwap),
+        lastValid(ind.volume.rvol),
+        lastValid(ind.ema21),
+        lastValid(ind.sma20),
+    ];
+    const available = checks.filter((v) => Number.isFinite(v)).length;
+    return available / checks.length;
 }
 
 export function computeSignalScore(
@@ -794,6 +823,7 @@ export function computeSignalScore(
     indicators: AllIndicators,
     ohlcv: OHLCV,
     weights?: FactorWeights,
+    freshnessTimeOverride?: string,
 ): SignalResult {
     const w = weights ? normalizeWeights(weights) : getActiveWeights();
     const mom = scoreMomentum(indicators, ohlcv.close, direction);
@@ -801,9 +831,11 @@ export function computeSignalScore(
     const vol = scoreVolume(indicators, ohlcv.volume);
     const trend = scoreTrend(indicators, ohlcv, direction);
 
-    const composite = Math.round(
+    const raw = Math.round(
         mom.score * w.momentum + mr.score * w.meanReversion + vol.score * w.volume + trend.score * w.trend,
     );
+    const coverage = indicatorCoverage(indicators);
+    const composite = Math.min(raw, Math.round(coverage * 100));
 
     let rating: string;
     if (composite >= 80) rating = 'strong';
@@ -828,7 +860,11 @@ export function computeSignalScore(
         weightsSource: weights
             ? weightsSourceLabel({ weights: w, source: 'override', calibratedAt: null })
             : weightsSourceLabel(getActiveWeightsInfo()),
-        freshness: assessBarFreshness(n > 0 ? ohlcv.time[n - 1] : undefined),
+        // Freshness judges the RAW newest bar even when the caller dropped
+        // the in-progress bar for scoring (WP10) — staleness is about the
+        // feed, not the completed-bar window.
+        freshness: assessBarFreshness(freshnessTimeOverride ?? (n > 0 ? ohlcv.time[n - 1] : undefined)),
+        coverage: Math.round(coverage * 100) / 100,
         snapshot: {
             price: n > 0 ? ohlcv.close[n - 1] : null,
             rsi: (() => { const v = lastValid(indicators.rsi.rsi); return isNaN(v) ? null : Math.round(v * 100) / 100; })(),
@@ -869,9 +905,15 @@ export function createSignalScorer() {
                 return formatToolResult({ error: `No bars returned for ${ticker}` });
             }
 
-            const ohlcv = barsToOHLCV(bars);
+            // WP10: the newest bar is IN PROGRESS (endDateTime '') — RVOL,
+            // %B and MACD read off a partially-formed bar systematically
+            // understate early in every window. Score COMPLETED bars only;
+            // freshness still judges the raw newest bar.
+            const rawLastTime = bars[bars.length - 1]?.time;
+            const completed = bars.length > 1 ? bars.slice(0, -1) : bars;
+            const ohlcv = barsToOHLCV(completed);
             const indicators = computeAll(ohlcv);
-            const result = computeSignalScore(ticker, input.direction, barSizeLabel, indicators, ohlcv);
+            const result = computeSignalScore(ticker, input.direction, barSizeLabel, indicators, ohlcv, undefined, rawLastTime);
 
             return formatToolResult(result);
         },
