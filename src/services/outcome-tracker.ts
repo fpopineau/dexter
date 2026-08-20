@@ -371,13 +371,23 @@ async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string):
                         trade.exitReason = null;
                         trade.closed = false;
                         logger.info(`[outcome-tracker] ${trade.proposalId} kept overnight — tracking continues on protect orders ${newTargetId}/${ids.stopOrderId}`);
+                        // WP5: the apology is conditional now — a keep that
+                        // passed today's pre-bell overnight vet (caps at
+                        // market value + earnings guard) says so; only an
+                        // UNVETTED conversion (triage missed the position)
+                        // still carries the warning.
+                        const { wasVettedKeepToday } = await import('./eod-triage.js');
+                        const vetLine = wasVettedKeepToday(proposalEarly.symbol)
+                            ? `It PASSED today's pre-bell overnight vetting (caps at market value; earnings guard). `
+                            : `NOTE: it did NOT pass through today's overnight vetting (triage may have missed it) — ` +
+                              `it was sized by INTRADAY rules; review it. `;
                         await notifyAutoProtect(
                             `🌙 ${trade.proposalId} ${proposalEarly.symbol}: the DAY bracket expired at the close with the position ` +
                             `still open (${proposalEarly.direction.toUpperCase()} ${proposalEarly.quantity} @ ${trade.entryAvgPrice}) — nothing was closed. ` +
                             `${protectAttempt.message} ` +
                             `The proposal STAYS TRACKED as a kept-overnight hold: it still counts against the position caps, ` +
                             `tomorrow's EOD triage re-checks it, and P&L attributes to ${trade.proposalId} when a GTC exit fills. ` +
-                            `NOTE: it was sized by INTRADAY rules and never passed the overnight vetting (tighter caps, earnings check). ` +
+                            vetLine +
                             `Reply 'close ${proposalEarly.symbol}' if you'd rather not hold it.`,
                         );
                         return;

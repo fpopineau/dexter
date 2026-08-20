@@ -186,8 +186,10 @@ max_risk_per_trade_pct: 0.25 # max loss-if-stopped per trade, % of NetLiq
 min_price: 5.0               # hard-enforced at creation
 # sector cap: hard-enforced at acceptance (skipped only when the sector
 #   cannot be resolved); overnight caps: hard-enforced at acceptance for
-#   deliberate GTC proposals — DAY positions kept at the bell convert
-#   WITHOUT re-vetting (reported, not enforced; audit 2026-08-20)
+#   deliberate GTC proposals AND at the pre-bell triage for DAY keeps
+#   (WP5: market-value vetting, worst-first trims; a 15:40 preview lists
+#   what will close — reply 'keep SYMBOL' to override anything except the
+#   earnings guard)
 # min_avg_volume: advisory only (risk_manager tool in prompts)
 ```
 

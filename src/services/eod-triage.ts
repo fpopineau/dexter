@@ -64,6 +64,10 @@ const ET = 'America/New_York';
 // 13:00, on positions whose protection was already gone (audit 2026-08-20).
 const TRIAGE_CRON_FULL = '52 15 * * 1-5';
 const TRIAGE_CRON_HALF = '52 12 * * 1-5';
+// WP5/D2 preview slots, 12 minutes ahead of the triage: report what WILL
+// close so the operator can arm 'keep SYMBOL' overrides before it does.
+const PREVIEW_CRON_FULL = '40 15 * * 1-5';
+const PREVIEW_CRON_HALF = '40 12 * * 1-5';
 const FADE_LOOKBACK_MIN = 60;
 /** Close before the bell when the symbol reports within this many TRADING
  *  days (0 = today's print after the close, 1 = the next session's
@@ -81,10 +85,12 @@ export interface EodDecision {
 }
 
 /**
- * Close only when BOTH hold: the position is losing against its entry
- * fill, and price has kept moving against it over the fade lookback.
- * Unknown momentum (no hour-ago price) never closes — when in doubt, the
- * position keeps its overnight chance.
+ * WP5 (remediation 2026-08-20, decision D2): an overnight hold must be
+ * EARNED — a position the triage cannot price or whose momentum it cannot
+ * read closes before the bell (fail-closed), overridable by an explicit
+ * pre-bell `keep SYMBOL` from the operator. The old fail-open branches
+ * ("when in doubt, hold") were the audit's crit. 9. Winners and
+ * stabilizing losers still keep on their own merit.
  */
 export function decideEodAction(input: {
     direction: 'long' | 'short';
@@ -93,7 +99,9 @@ export function decideEodAction(input: {
     hourAgo: number | null;
 }): EodDecision {
     const { direction, entryFill, last, hourAgo } = input;
-    if (!(last > 0) || !(entryFill > 0)) return { action: 'keep', reason: 'price unavailable — keeping (fail-open to hold)' };
+    if (!(last > 0) || !(entryFill > 0)) {
+        return { action: 'close', reason: 'price unavailable — cannot vet for overnight; closing (fail-closed; pre-bell \'keep SYMBOL\' overrides)' };
+    }
 
     const pnlPct = direction === 'long'
         ? ((last - entryFill) / entryFill) * 100
@@ -103,7 +111,7 @@ export function decideEodAction(input: {
     }
 
     if (hourAgo === null || !(hourAgo > 0)) {
-        return { action: 'keep', reason: `losing ${pnlPct.toFixed(2)}% but momentum unknown — keeping` };
+        return { action: 'close', reason: `losing ${pnlPct.toFixed(2)}% with momentum unknown — cannot vet; closing (fail-closed; pre-bell 'keep SYMBOL' overrides)` };
     }
     const drift = direction === 'long' ? last - hourAgo : hourAgo - last;
     if (drift < 0) {
@@ -114,6 +122,137 @@ export function decideEodAction(input: {
         };
     }
     return { action: 'keep', reason: `losing ${pnlPct.toFixed(2)}% but stabilizing/recovering over the last hour — keeping` };
+}
+
+// ---------------------------------------------------------------------------
+// Overnight vetting of the conversion book (WP5)
+// ---------------------------------------------------------------------------
+
+export interface OvernightVetCandidate {
+    symbol: string;
+    label: string;
+    /** |qty| × last (market value; avgCost fallback flagged by caller). */
+    marketValueUsd: number | null;
+    /** Signed P&L% in the trade's direction; null = unknown (trims first). */
+    pnlPct: number | null;
+}
+
+export interface OvernightVetResult {
+    /** Symbols to close before the bell, worst-first, with reasons. */
+    trims: Array<{ symbol: string; label: string; reason: string }>;
+    /** Cap-usage line for the report (null = inside the caps). */
+    capLine: string | null;
+}
+
+/**
+ * Pure: vet the CONVERSION book (DAY keeps + kept-overnight holds) against
+ * the overnight caps at MARKET value — the checks a deliberate GTC accept
+ * gets, applied to what converts at the bell. Per-name breaches trim; a
+ * book breach trims worst-first (lowest P&L%, unknown P&L first) until it
+ * fits. `overrides` (pre-bell `keep SYMBOL`) exempts a symbol from
+ * trimming — the exposure still counts and the cap line still reports it.
+ * NetLiq unavailable: per-position vetting impossible — LOUD warning, no
+ * blind mass-close (recorded deviation from pure fail-closed).
+ */
+export function vetOvernightBook(
+    keeps: OvernightVetCandidate[],
+    netLiq: number | null,
+    rules: { max_overnight_exposure_pct: number; max_overnight_position_pct: number },
+    overrides: ReadonlySet<string>,
+): OvernightVetResult {
+    if (keeps.length === 0) return { trims: [], capLine: null };
+    if (netLiq === null || !(netLiq > 0)) {
+        return {
+            trims: [],
+            capLine: '⚠ overnight caps could NOT be verified (NetLiq unavailable) — the conversion book rides UNVETTED.',
+        };
+    }
+    const trims: OvernightVetResult['trims'] = [];
+    const surviving: Array<OvernightVetCandidate & { valueUsd: number }> = [];
+
+    for (const k of keeps) {
+        if (k.marketValueUsd === null || !(k.marketValueUsd >= 0)) {
+            if (overrides.has(k.symbol)) {
+                surviving.push({ ...k, valueUsd: 0 }); // unpriceable but operator-owned
+                continue;
+            }
+            trims.push({ symbol: k.symbol, label: k.label, reason: 'position value unknown — cannot vet against the overnight caps (fail-closed)' });
+            continue;
+        }
+        const pct = (k.marketValueUsd / netLiq) * 100;
+        if (pct > rules.max_overnight_position_pct && !overrides.has(k.symbol)) {
+            trims.push({
+                symbol: k.symbol, label: k.label,
+                reason: `${pct.toFixed(1)}% of NetLiq vs the ${rules.max_overnight_position_pct}% per-position overnight cap`,
+            });
+            continue;
+        }
+        surviving.push({ ...k, valueUsd: k.marketValueUsd });
+    }
+
+    // Book cap: close worst-first until the remaining book fits.
+    let bookUsd = surviving.reduce((s, k) => s + k.valueUsd, 0);
+    const capUsd = (rules.max_overnight_exposure_pct / 100) * netLiq;
+    if (bookUsd > capUsd) {
+        const trimmable = surviving
+            .filter((k) => !overrides.has(k.symbol))
+            .sort((a, b) => (a.pnlPct ?? -Infinity) - (b.pnlPct ?? -Infinity));
+        for (const k of trimmable) {
+            if (bookUsd <= capUsd) break;
+            bookUsd -= k.valueUsd;
+            trims.push({
+                symbol: k.symbol, label: k.label,
+                reason: `book over the ${rules.max_overnight_exposure_pct}% overnight cap — trimming worst-first (${k.pnlPct === null ? 'P&L unknown' : `${k.pnlPct.toFixed(2)}%`})`,
+            });
+        }
+    }
+
+    const finalPct = (bookUsd / netLiq) * 100;
+    const overCap = bookUsd > capUsd;
+    const capLine = overCap
+        ? `⚠ overnight book ${finalPct.toFixed(1)}% of NetLiq still exceeds the ${rules.max_overnight_exposure_pct}% cap after trims (operator overrides hold the excess).`
+        : trims.length
+            ? `overnight book ${finalPct.toFixed(1)}% of NetLiq after ${trims.length} cap trim(s).`
+            : null;
+    return { trims, capLine };
+}
+
+// --- Pre-bell operator overrides (decision D2) ---
+const keepOverrides = new Map<string, string>(); // SYMBOL → ET date armed
+
+function todayEt(): string {
+    return new Date().toLocaleDateString('en-CA', { timeZone: ET });
+}
+
+/** Arm a pre-bell keep override for today (WhatsApp `keep SYMBOL`). */
+export function registerKeepOverride(symbolRaw: string): { ok: boolean; message: string } {
+    const symbol = symbolRaw.trim().toUpperCase();
+    if (!/^[A-Z.]{1,6}$/.test(symbol)) {
+        return { ok: false, message: `'${symbolRaw}' does not look like a ticker.` };
+    }
+    keepOverrides.set(symbol, todayEt());
+    return {
+        ok: true,
+        message:
+            `🤝 ${symbol}: pre-bell KEEP override armed for today — the EOD triage will not fail-close or cap-trim it ` +
+            `(logged as your decision). The EARNINGS GUARD still applies: a print ahead closes it regardless — ` +
+            `hold through a print only via an explicit earnings-bet proposal.`,
+    };
+}
+
+/** Today's armed overrides (ET-dated; yesterday's arm does not carry). */
+export function activeKeepOverrides(): Set<string> {
+    const today = todayEt();
+    return new Set([...keepOverrides.entries()].filter(([, d]) => d === today).map(([s]) => s));
+}
+
+// --- Vetted-keep registry: the 🌙 conversion message consults this ---
+const vettedKeeps = new Map<string, string>(); // SYMBOL → ET date vetted
+
+/** Did today's triage vet-and-keep this symbol? (outcome tracker asks
+ *  before wording the 🌙 conversion notice.) */
+export function wasVettedKeepToday(symbol: string): boolean {
+    return vettedKeeps.get(symbol.trim().toUpperCase()) === todayEt();
 }
 
 /**
@@ -296,12 +435,13 @@ export function isMacroWarningEnabled(): boolean {
     return (process.env.EOD_MACRO_WARNING ?? 'true').trim().toLowerCase() !== 'false';
 }
 
-export async function runEodTriageOnce(): Promise<void> {
+export async function runEodTriageOnce(dryRun = false): Promise<void> {
     const today = new Date().toLocaleDateString('en-CA', { timeZone: ET });
     if (isMarketHoliday(today)) return;
     // Stamp at the START of the run: the boot-time catch-up must never
-    // double-run behind a cron firing that is already in flight.
-    markTriageRun(today, 'ran');
+    // double-run behind a cron firing that is already in flight. A preview
+    // (dryRun) stamps nothing — the real slot must still fire.
+    if (!dryRun) markTriageRun(today, 'ran');
 
     // Adopted rows (WP3) are broker positions Dexter did not open and does
     // not manage — they exist so the caps see them. Triage closing one
@@ -336,6 +476,12 @@ export async function runEodTriageOnce(): Promise<void> {
         }
     }
 
+    const overrides = activeKeepOverrides();
+    const lastBySymbol = new Map<string, number>();
+    // Keeps surviving the momentum/earnings decisions — the conversion book
+    // the overnight vet (WP5) prices next.
+    const vetCandidates: Array<OvernightVetCandidate & { pos: { quantity: number; avgCost: number } }> = [];
+
     for (const t of dayCandidates) {
         const pos = positions.find((p) => p.symbol === t.symbol && p.quantity !== 0);
         if (!pos) continue; // already flat (target/stop just filled, or closed)
@@ -350,20 +496,62 @@ export async function runEodTriageOnce(): Promise<void> {
         } catch (err) {
             logger.warn(`[eod-triage] ${t.symbol}: bars unavailable (${err instanceof Error ? err.message : err})`);
         }
+        if (last !== null) lastBySymbol.set(t.symbol, last);
 
-        const base = last !== null
-            ? decideEodAction({ direction: t.direction, entryFill: t.entryFillPrice!, last, hourAgo })
-            : { action: 'keep' as const, reason: 'price unavailable — keeping (fail-open to hold)' };
-        const decision = applyEarningsGuard(base, earningsBySymbol.get(t.symbol) ?? null, today);
+        // Fail-closed base decision (WP5) → operator override (D2) →
+        // earnings guard LAST: 'keep SYMBOL' never holds through a print.
+        const base = decideEodAction({ direction: t.direction, entryFill: t.entryFillPrice!, last: last ?? 0, hourAgo });
+        const afterOverride = base.action === 'close' && overrides.has(t.symbol)
+            ? { action: 'keep' as const, reason: `operator override ('keep ${t.symbol}') — would otherwise close: ${base.reason}` }
+            : base;
+        const decision = applyEarningsGuard(afterOverride, earningsBySymbol.get(t.symbol) ?? null, today);
 
         const label = t.keptOvernightAt != null ? `${t.id}, kept-overnight` : t.id;
-        logger.info(`[eod-triage] ${t.id} ${t.symbol}: ${decision.action} — ${decision.reason}`);
+        logger.info(`[eod-triage] ${t.id} ${t.symbol}: ${decision.action} — ${decision.reason}${dryRun ? ' (preview)' : ''}`);
         if (decision.action === 'close') {
+            if (dryRun) {
+                lines.push(`• ${t.symbol} (${label}): WILL CLOSE at 15:52 — ${decision.reason}`);
+                continue;
+            }
             const outcome = await closePosition(t.symbol, 'EOD triage');
             if (outcome.ok) closedSymbols.add(t.symbol);
             lines.push(`• ${t.symbol} (${label}): ${decision.reason}. ${outcome.ok ? 'Closed.' : outcome.message}`);
         } else {
             lines.push(`• ${t.symbol} (${label}): ${decision.reason}.`);
+            const pnlPct = last !== null && t.entryFillPrice
+                ? (t.direction === 'long'
+                    ? ((last - t.entryFillPrice) / t.entryFillPrice) * 100
+                    : ((t.entryFillPrice - last) / t.entryFillPrice) * 100)
+                : null;
+            vetCandidates.push({
+                symbol: t.symbol,
+                label,
+                marketValueUsd: last !== null ? Math.abs(pos.quantity) * last : null,
+                pnlPct,
+                pos,
+            });
+        }
+    }
+
+    // WP5: vet the conversion book against the overnight caps at MARKET
+    // value — per-name breaches and a book breach trim worst-first, unless
+    // the operator armed a pre-bell override. The 🌙 conversion at the bell
+    // then only fires on gate-passed positions (wasVettedKeepToday).
+    const vet = vetOvernightBook(vetCandidates, await getNetLiquidation(), getRiskRules(), overrides);
+    for (const trim of vet.trims) {
+        if (dryRun) {
+            lines.push(`• ${trim.symbol} (${trim.label}): WILL CAP-TRIM at 15:52 — ${trim.reason}. Reply 'keep ${trim.symbol}' to hold it anyway.`);
+            continue;
+        }
+        const outcome = await closePosition(trim.symbol, 'EOD triage (overnight cap trim)');
+        if (outcome.ok) closedSymbols.add(trim.symbol);
+        lines.push(`• ${trim.symbol} (${trim.label}): overnight vet — ${trim.reason}. ${outcome.ok ? 'Closed.' : outcome.message}`);
+    }
+    if (!dryRun) {
+        for (const k of vetCandidates) {
+            if (!vet.trims.some((tr) => tr.symbol === k.symbol)) {
+                vettedKeeps.set(k.symbol, today);
+            }
         }
     }
 
@@ -382,7 +570,11 @@ export async function runEodTriageOnce(): Promise<void> {
         const decision = decideGtcEarningsGuard(t.tradeClass, hit, today);
         if (!decision) continue;
 
-        logger.info(`[eod-triage] ${t.id} ${t.symbol} {${t.tradeClass}, GTC}: ${decision.action} — ${decision.reason}`);
+        logger.info(`[eod-triage] ${t.id} ${t.symbol} {${t.tradeClass}, GTC}: ${decision.action} — ${decision.reason}${dryRun ? ' (preview)' : ''}`);
+        if (dryRun) {
+            lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} GTC): WILL CLOSE at 15:52 — ${decision.reason} (earnings guard: 'keep' does NOT override)`);
+            continue;
+        }
         const outcome = await closePosition(t.symbol, 'EOD triage (earnings guard)');
         if (outcome.ok) closedSymbols.add(t.symbol);
         lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} GTC): ${decision.reason}. ${outcome.ok ? 'Closed.' : outcome.message}`);
@@ -400,7 +592,11 @@ export async function runEodTriageOnce(): Promise<void> {
         }
         const reason = decideUnfilledEntryGuard(t.tradeClass, hit, today);
         if (!reason) continue;
-        logger.info(`[eod-triage] ${t.id} ${t.symbol} {${t.tradeClass}, GTC, unfilled}: cancel — ${reason}`);
+        logger.info(`[eod-triage] ${t.id} ${t.symbol} {${t.tradeClass}, GTC, unfilled}: cancel — ${reason}${dryRun ? ' (preview)' : ''}`);
+        if (dryRun) {
+            lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} entry UNFILLED): WILL CANCEL at 15:52 — ${reason}`);
+            continue;
+        }
         let cancelled = 0;
         for (const oid of t.orderIds ?? []) {
             try { api.cancelOrder(oid); cancelled++; } catch { /* already gone */ }
@@ -431,17 +627,20 @@ export async function runEodTriageOnce(): Promise<void> {
     const macroEvents = isMacroWarningEnabled() ? await getMacroEventsWithin(macroHorizonDays) : [];
     const macroLine = macroNightWarning(macroEvents, macroHorizonDays);
 
-    if (lines.length || (macroLine && macroEvents !== null) || capLine) {
+    if (lines.length || (macroLine && macroEvents !== null) || capLine || vet.capLine) {
         const footer =
             (earningsUnknownDays.length
                 ? `\n⚠ earnings calendar unavailable (${earningsUnknownDays.join(', ')}) — keeps and resting entries are NOT verified print-free.`
                 : '') +
+            (vet.capLine ? `\n${vet.capLine}` : '') +
             (capLine ? `\n${capLine}` : '') +
             (macroLine ? `\n${macroLine}` : '');
         const body = lines.length
             ? lines.join('\n')
             : `${dayCandidates.length + gtcCandidates.length} tracked position(s), none needed action.`;
-        await notify(`🌇 EOD triage (pre-close):\n${body}${footer}`);
+        await notify(dryRun
+            ? `🔭 EOD PREVIEW (12 min before triage):\n${body}${footer}\nReply 'keep SYMBOL' before 15:52 to override a fail-closed close or cap trim (never the earnings guard).`
+            : `🌇 EOD triage (pre-close):\n${body}${footer}`);
     }
 }
 
@@ -533,6 +732,8 @@ async function checkMissedTriage(): Promise<void> {
 
 let job: Cron | null = null;
 let halfDayJob: Cron | null = null;
+let previewJob: Cron | null = null;
+let previewHalfDayJob: Cron | null = null;
 
 /** True when the slot firing now is the right one for today: the 12:52
  *  slot on half-days, the 15:52 slot otherwise. The other slot yields. */
@@ -552,6 +753,14 @@ export function startEodTriage(): void {
         if (!slotMatchesToday(true)) return; // normal day: wait for 15:52
         runEodTriageOnce().catch((err) => logger.error(`[eod-triage] half-day run failed: ${err}`));
     });
+    previewJob = new Cron(PREVIEW_CRON_FULL, { timezone: ET }, () => {
+        if (!slotMatchesToday(false)) return;
+        runEodTriageOnce(true).catch((err) => logger.error(`[eod-triage] preview failed: ${err}`));
+    });
+    previewHalfDayJob = new Cron(PREVIEW_CRON_HALF, { timezone: ET }, () => {
+        if (!slotMatchesToday(true)) return;
+        runEodTriageOnce(true).catch((err) => logger.error(`[eod-triage] half-day preview failed: ${err}`));
+    });
     logger.info(
         '[eod-triage] scheduled 15:52 ET (12:52 on half-days): close losing-and-fading DAY positions; keep the rest for protected overnight' +
         (isEarningsGuardEnabled()
@@ -569,6 +778,8 @@ export function startEodTriage(): void {
 }
 
 export function stopEodTriage(): void {
+    if (previewHalfDayJob) { previewHalfDayJob.stop(); previewHalfDayJob = null; }
+    if (previewJob) { previewJob.stop(); previewJob = null; }
     if (halfDayJob) { halfDayJob.stop(); halfDayJob = null; }
     if (job) { job.stop(); job = null; }
 }

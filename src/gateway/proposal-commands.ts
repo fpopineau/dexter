@@ -43,6 +43,9 @@ const POSITIONS_RE = /^\s*positions?\s*$/i;
 const ORDERS_RE = /^\s*orders?\s*$/i;
 const PROTECT_RE = /^\s*protect\s+([A-Za-z.]{1,6})\s+(\d+(?:\.\d+)?)(?:\s+(\d+(?:\.\d+)?))?\s*$/i;
 const CLOSE_RE = /^\s*close\s+([A-Za-z.,\s]+?)\s*$/i;
+// WP5/D2: pre-bell keep override — the EOD triage will not fail-close or
+// cap-trim the symbol today (earnings guard still applies).
+const KEEP_RE = /^\s*keep\s+([A-Za-z.]{1,6})\s*$/i;
 
 /**
  * Parse the argument of a 'close' command into ticker symbols. Accepts
@@ -232,6 +235,12 @@ export async function handleProposalCommand(body: string): Promise<string | null
             protect[3] !== undefined ? Number(protect[3]) : undefined,
         );
         return outcome.message;
+    }
+
+    const keep = KEEP_RE.exec(body);
+    if (keep) {
+        const { registerKeepOverride } = await import('@/services/eod-triage.js');
+        return registerKeepOverride(keep[1]).message;
     }
 
     const close = CLOSE_RE.exec(body);

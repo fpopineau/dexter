@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { applyEarningsGuard, decideEodAction, decideGtcEarningsGuard, decideUnfilledEntryGuard, isUpcomingPrint, overnightCapWarning, splitTriageCandidates, triageCatchUpAction } from './eod-triage.js';
+import { applyEarningsGuard, decideEodAction, decideGtcEarningsGuard, decideUnfilledEntryGuard, isUpcomingPrint, overnightCapWarning, splitTriageCandidates, triageCatchUpAction, vetOvernightBook } from './eod-triage.js';
 
 describe('triageCatchUpAction (missed 15:52 slot — SECZ post-mortem 2026-08-13)', () => {
     const min = (h: number, m: number) => h * 60 + m;
@@ -152,9 +152,16 @@ describe('EOD triage decision', () => {
         expect(decideEodAction({ direction: 'short', entryFill: 100, last: 98.5, hourAgo: 98 }).action).toBe('keep');
     });
 
-    test('unknown momentum or bad prices never close — doubt favors holding', () => {
-        expect(decideEodAction({ direction: 'long', entryFill: 100, last: 98, hourAgo: null }).action).toBe('keep');
-        expect(decideEodAction({ direction: 'long', entryFill: 100, last: 0, hourAgo: 99 }).action).toBe('keep');
+    test('WP5 fail-closed flip: unknown momentum on a loser, or bad prices, CLOSE (was fail-open)', () => {
+        // An overnight hold must be EARNED — a position the triage cannot
+        // price or read does not ride the night by default (audit crit. 9,
+        // decision D2: the operator's pre-bell 'keep SYMBOL' overrides).
+        const noMomentum = decideEodAction({ direction: 'long', entryFill: 100, last: 98, hourAgo: null });
+        expect(noMomentum.action).toBe('close');
+        expect(noMomentum.reason).toContain('keep SYMBOL');
+        const noPrice = decideEodAction({ direction: 'long', entryFill: 100, last: 0, hourAgo: 99 });
+        expect(noPrice.action).toBe('close');
+        expect(noPrice.reason).toContain('fail-closed');
     });
 
     test('exactly breakeven counts as winning (kept)', () => {
@@ -246,5 +253,66 @@ describe('GTC earnings guard (rule 4 made deterministic for swings)', () => {
     test('no print, or a past BMO print today → nothing to do', () => {
         expect(decideGtcEarningsGuard('swing', null, TODAY)).toBeNull();
         expect(decideGtcEarningsGuard('swing', { date: TODAY, time: 'pre-market' }, TODAY)).toBeNull();
+    });
+});
+
+describe('vetOvernightBook (WP5 — the conversion book earns the night)', () => {
+    const RULES = { max_overnight_exposure_pct: 30, max_overnight_position_pct: 10 };
+    const NONE = new Set<string>();
+    const k = (symbol: string, marketValueUsd: number | null, pnlPct: number | null) =>
+        ({ symbol, label: `P-${symbol}`, marketValueUsd, pnlPct });
+
+    test('inside both caps: everything keeps, no cap line', () => {
+        const v = vetOvernightBook([k('AAA', 5_000, 1), k('BBB', 8_000, -0.5)], 100_000, RULES, NONE);
+        expect(v.trims).toEqual([]);
+        expect(v.capLine).toBeNull();
+    });
+
+    test('per-name breach trims that position', () => {
+        const v = vetOvernightBook([k('BIG', 15_000, 2), k('OK', 5_000, 1)], 100_000, RULES, NONE);
+        expect(v.trims.map((t) => t.symbol)).toEqual(['BIG']);
+        expect(v.trims[0].reason).toContain('per-position overnight cap');
+    });
+
+    test('book breach trims worst-first until it fits; unknown P&L trims before any known', () => {
+        // Tighter 20% book cap: 4 x 9.5k = 38k → shed to <= 20k needs TWO
+        // trims — unknown P&L first, then the worst loser; the winner and
+        // the mild keeper survive.
+        const TIGHT = { max_overnight_exposure_pct: 20, max_overnight_position_pct: 10 };
+        const v = vetOvernightBook(
+            [k('WIN', 9_500, 3), k('LOSE', 9_500, -2), k('MEH', 9_500, 0.5), k('UNK', 9_500, null)],
+            100_000, TIGHT, NONE,
+        );
+        expect(v.trims.map((t) => t.symbol)).toEqual(['UNK', 'LOSE']);
+    });
+
+    test('unpriceable position is fail-closed unless the operator armed keep', () => {
+        expect(vetOvernightBook([k('NOPX', null, null)], 100_000, RULES, NONE).trims.length).toBe(1);
+        const withOverride = vetOvernightBook([k('NOPX', null, null)], 100_000, RULES, new Set(['NOPX']));
+        expect(withOverride.trims).toEqual([]);
+    });
+
+    test("operator override survives both caps, and the cap line says the excess is owned", () => {
+        // KEEP breaches the per-name cap AND alone exceeds the book cap —
+        // the override holds it through both; nothing else to trim, so the
+        // excess is explicitly the operator's.
+        const v = vetOvernightBook([k('KEEP', 35_000, -3)], 100_000, RULES, new Set(['KEEP']));
+        expect(v.trims).toEqual([]);
+        expect(v.capLine).toContain('operator overrides hold the excess');
+    });
+
+    test('an override shields only its own symbol — the rest still trims', () => {
+        const v = vetOvernightBook(
+            [k('KEEP', 25_000, -3), k('OTHER', 15_000, 1)],
+            100_000, RULES, new Set(['KEEP']),
+        );
+        // OTHER still breaches the per-name cap on its own.
+        expect(v.trims.map((t) => t.symbol)).toEqual(['OTHER']);
+    });
+
+    test('NetLiq unavailable: no blind mass-close — loud warning instead (recorded deviation)', () => {
+        const v = vetOvernightBook([k('AAA', 5_000, 1)], null, RULES, NONE);
+        expect(v.trims).toEqual([]);
+        expect(v.capLine).toContain('UNVETTED');
     });
 });
