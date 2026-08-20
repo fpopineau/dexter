@@ -242,6 +242,15 @@ validation).
 
 ## Phase 3 — research validity (parallel; audit backtester + scorer §)
 
+**STATUS: WP9 LANDED 2026-08-21** (commit bd9411b; suite 654 green, the
+first tests src/backtest ever had). Next-bar fills (anchor), per-symbol
+advance, gap-aware exits, warm-up preload, risk-based sizing on marked
+equity, 2R defaults, inert train pass deleted, sentiment behind an
+explicit look-ahead flag, archive end-bound fixed, real monthly metrics.
+ENGINE_VERSION 'wp9-honest-replay-1'; calibrate-scorer refuses any
+other. Backtest outputs stay UNTRUSTED until recalibrated under the new
+engine per protocol. Next: WP10 scorer statistics, WP11 residuals.
+
 - **WP9 Backtester: honest replay** (MED — decision point D1)
   Recommended scope (rebuild-lite, ~1 session): process bar i BEFORE
   signals from bar i (kills the same-bar look-ahead); per-symbol bar
