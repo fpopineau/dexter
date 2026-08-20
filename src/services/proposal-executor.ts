@@ -161,8 +161,12 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
             },
             {
                 netLiquidation: lossStatus.netLiquidation,
-                openPositions: await countOpenExecuted(),
-                executedToday: await countExecutedSince(etDayStartMs()),
+                // Both counts exclude the row this accept just claimed to
+                // 'executing' — otherwise the proposal consumes its own
+                // position slot and daily-trade slot and the practical caps
+                // sit one below the configured ones (audit 2026-08-20).
+                openPositions: await countOpenExecuted(p.id),
+                executedToday: await countExecutedSince(etDayStartMs(), p.id),
                 // Class caps re-checked with live counts (this proposal
                 // excluded) — two accepts cannot both pass a full book.
                 openSwingPositions: await countOpenByClass('swing', p.id),

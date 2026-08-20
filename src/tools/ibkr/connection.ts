@@ -103,14 +103,19 @@ export function getManagedAccounts(): string[] {
  * otherwise never have run. Call from order-placement paths (post-connect).
  */
 export async function assertAccountsVerified(timeoutMs = 5_000): Promise<void> {
-    const allowLive = (process.env.IBKR_ALLOW_LIVE ?? '').trim().toLowerCase() === 'true';
     const start = Date.now();
     while (managedAccounts.length === 0 && Date.now() - start < timeoutMs) {
         await new Promise((r) => setTimeout(r, 100));
     }
-    if (managedAccounts.length === 0 && !allowLive) {
+    // UNCONDITIONAL: IBKR_ALLOW_LIVE opts into live trading, it does not opt
+    // out of knowing which account the connection is. An empty list here
+    // means identity is unverified — no order may be placed on that, live or
+    // paper (audit 2026-08-06 finding 3, closed 2026-08-20). The live opt-in
+    // also selects the live risk profile via the managedAccounts handler, so
+    // ordering with no accounts would additionally run on paper-profile caps.
+    if (managedAccounts.length === 0) {
         throw new Error(
-            '[IBKR] SAFETY LOCK: account codes not received yet — cannot verify the connection is a paper account; retry in a moment',
+            '[IBKR] SAFETY LOCK: account codes not received yet — cannot verify which account this connection is; retry in a moment',
         );
     }
     assertOrderingAllowed();

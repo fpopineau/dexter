@@ -35,6 +35,7 @@
 
 import { allocReqId, getIBApi, isNonFatalIbkrError, onReconnect } from '@/tools/ibkr/connection.js';
 import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
+import { isMarketHalfDay } from '@/utils/market-hours.js';
 import { logger } from '@/utils';
 import type { CommissionReport, Contract, Execution, IBApi } from '@stoqey/ib';
 import { BarSizeSetting, EventName } from '@stoqey/ib';
@@ -298,7 +299,14 @@ async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string):
     // in tests (wall-clock dependent).
     const proposalEarly = await getProposal(trade.proposalId).catch(() => null);
     const etNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-    const afterBell = etNow.getHours() > 15 || (etNow.getHours() === 15 && etNow.getMinutes() >= 55);
+    // "At/after the bell" must track today's ACTUAL close: on half-days DAY
+    // brackets expire at 13:00, and a hard-coded 15:55 test classified those
+    // expiries as terminal closes — the EOD-keep transition never fired and
+    // the position sat naked until (a mis-scheduled) triage (audit 2026-08-20).
+    const todayIsoEt = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const closeMinutesEt = isMarketHalfDay(todayIsoEt) ? 13 * 60 : 16 * 60;
+    const minutesNowEt = etNow.getHours() * 60 + etNow.getMinutes();
+    const afterBell = minutesNowEt >= closeMinutesEt - 5;
     const dayExpiry =
         process.env.NODE_ENV !== 'test' &&
         decideDayExpiryHold({

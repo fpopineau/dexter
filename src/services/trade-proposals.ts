@@ -806,12 +806,19 @@ export async function listStaleUnfilled(maxAgeMs: number): Promise<TradeProposal
 
 /** Open exposure count: executed positions PLUS acceptances mid-flight
  *  ('executing') — two concurrent accepts must see each other, or both
- *  slip under max_open_positions (audit 2026-08-06, finding 5). */
-export async function countOpenExecuted(): Promise<number> {
+ *  slip under max_open_positions (audit 2026-08-06, finding 5).
+ *  `excludeId` lets the accept path exclude the proposal it just claimed —
+ *  without it the claimed row counts against its own cap and the practical
+ *  limit is one below max_open_positions (audit 2026-08-20). */
+export async function countOpenExecuted(excludeId?: string): Promise<number> {
     const database = await getDb();
-    const rows = database.query<{ n: number }>(
-        `SELECT COUNT(*) AS n FROM proposals WHERE status IN ('executing', 'executed')`,
-    ).all();
+    const rows = excludeId
+        ? database.query<{ n: number }>(
+            `SELECT COUNT(*) AS n FROM proposals WHERE status IN ('executing', 'executed') AND id != ?`,
+        ).all(excludeId.trim().toUpperCase())
+        : database.query<{ n: number }>(
+            `SELECT COUNT(*) AS n FROM proposals WHERE status IN ('executing', 'executed')`,
+        ).all();
     return rows[0]?.n ?? 0;
 }
 
@@ -827,11 +834,15 @@ export async function listExposure(): Promise<TradeProposal[]> {
 
 /** Net realized P&L (USD) of trades closed since `sinceMs`. Rows with an
  *  unknown outcome (realized_pnl NULL) contribute nothing — the headroom
- *  gate stays conservative elsewhere, it must not invent losses here. */
+ *  gate stays conservative elsewhere, it must not invent losses here.
+ *  realized_pnl is GROSS (tracker convention) — commissions are subtracted
+ *  here so the daily-loss headroom sees the same net number the performance
+ *  report shows (audit 2026-08-20: gross was overstating headroom by the
+ *  day's round-trip commissions). */
 export async function sumRealizedPnlSince(sinceMs: number): Promise<number> {
     const database = await getDb();
     const rows = database.query<{ n: number | null }>(
-        `SELECT SUM(realized_pnl) AS n FROM proposals
+        `SELECT SUM(realized_pnl - COALESCE(commissions, 0)) AS n FROM proposals
          WHERE status = 'closed' AND closed_at >= ? AND realized_pnl IS NOT NULL`,
     ).all(sinceMs);
     return Math.round((rows[0]?.n ?? 0) * 100) / 100;
@@ -845,13 +856,24 @@ export function etDayStartMs(now = Date.now()): number {
     return now - msSinceMidnight;
 }
 
-/** Proposals executed since the given epoch ms (includes already-closed ones). */
-export async function countExecutedSince(sinceMs: number): Promise<number> {
+/** Proposals executed since the given epoch ms (includes already-closed ones).
+ *  'executing' rows have executed_at = NULL (it is stamped only after bracket
+ *  placement), so they must be counted by status alone — `executed_at >= ?`
+ *  is NULL-comparison false for them, which made the original 'executing'
+ *  IN-list term dead code and let two concurrent accepts share the last
+ *  daily-trade slot (audit 2026-08-20, reopening audit 2026-08-06 finding 5).
+ *  A claim is transient (seconds) and always happens "today", so counting
+ *  every 'executing' row regardless of sinceMs is correct and conservative.
+ *  `excludeId` lets the accept path exclude the row it just claimed, so the
+ *  proposal under acceptance does not consume its own daily slot. */
+export async function countExecutedSince(sinceMs: number, excludeId?: string): Promise<number> {
     const database = await getDb();
-    const rows = database.query<{ n: number }>(
-        `SELECT COUNT(*) AS n FROM proposals
-         WHERE status IN ('executing', 'executed', 'closed') AND executed_at >= ?`,
-    ).all(sinceMs);
+    const sql = `SELECT COUNT(*) AS n FROM proposals
+         WHERE ((status IN ('executed', 'closed') AND executed_at >= ?)
+            OR status = 'executing')${excludeId ? ' AND id != ?' : ''}`;
+    const rows = excludeId
+        ? database.query<{ n: number }>(sql).all(sinceMs, excludeId.trim().toUpperCase())
+        : database.query<{ n: number }>(sql).all(sinceMs);
     return rows[0]?.n ?? 0;
 }
 

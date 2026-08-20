@@ -184,7 +184,11 @@ max_extension_atr: 3         # refuse entries > 3 × ATR beyond the 10-day EMA (
 max_target_atr: 1.5          # refuse intraday targets > 1.5 × ATR from entry (reachability cap)
 max_risk_per_trade_pct: 0.25 # max loss-if-stopped per trade, % of NetLiq
 min_price: 5.0               # hard-enforced at creation
-# sector/overnight limits: advisory (risk_manager tool in prompts)
+# sector cap: hard-enforced at acceptance (skipped only when the sector
+#   cannot be resolved); overnight caps: hard-enforced at acceptance for
+#   deliberate GTC proposals — DAY positions kept at the bell convert
+#   WITHOUT re-vetting (reported, not enforced; audit 2026-08-20)
+# min_avg_volume: advisory only (risk_manager tool in prompts)
 ```
 
 Restart the gateway after changing rules (they are cached).

@@ -186,6 +186,35 @@ describe('proposal store lifecycle', () => {
         expect(await sumRealizedPnlSince(Date.now() + 60_000)).toBe(0);
     });
 
+    test('sumRealizedPnlSince subtracts commissions — headroom sees NET (audit 2026-08-20)', async () => {
+        const before = await sumRealizedPnlSince(0);
+        const p = await createProposal(validInput({ symbol: 'PNLC' }));
+        await setProposalStatus(p.id, 'executed', { orderIds: [531, 532, 533], executedAt: Date.now() });
+        await closeProposal(p.id, { exitReason: 'target', realizedPnl: 100, commissions: 7.25 });
+        expect(await sumRealizedPnlSince(0)).toBeCloseTo(before + 92.75, 2);
+    });
+
+    test('accept-path slot counting: executing rows count, the claimed row does not count itself (audit 2026-08-20)', async () => {
+        const { claimProposalForExecution, releaseProposalClaim } = await import('./trade-proposals.js');
+        const baseOpen = await countOpenExecuted();
+        const baseExecuted = await countExecutedSince(etDayStartMs());
+
+        // A claimed ('executing') proposal has executed_at NULL — it must
+        // still occupy a daily-trade slot for OTHER concurrent accepts
+        // (the original SQL matched it against executed_at and counted 0).
+        const racing = await createProposal(validInput({ symbol: 'RACE' }));
+        expect(await claimProposalForExecution(racing.id)).toBe(true);
+        expect(await countExecutedSince(etDayStartMs())).toBe(baseExecuted + 1);
+        expect(await countOpenExecuted()).toBe(baseOpen + 1);
+
+        // …but the row must NOT consume its own slots on its own accept,
+        // or the practical caps sit one below the configured ones.
+        expect(await countExecutedSince(etDayStartMs(), racing.id)).toBe(baseExecuted);
+        expect(await countOpenExecuted(racing.id)).toBe(baseOpen);
+
+        await releaseProposalClaim(racing.id);
+    });
+
     test('EOD-keep transition refuses unfilled entries and rows a concurrent close already won', async () => {
         // Unfilled entry: there is no position to keep — nothing converts.
         const unfilled = await createProposal(validInput({ symbol: 'KEEPX' }));

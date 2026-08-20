@@ -18,6 +18,7 @@
 import { allocReqId, assertOrderingAllowed, getIBApi, isNonFatalIbkrError } from '@/tools/ibkr/connection.js';
 import { withOrderLock } from '@/tools/ibkr/order-lock.js';
 import { getNextValidOrderId } from '@/tools/ibkr/orders.js';
+import { getMarketSession, isTradeableSession } from '@/utils/market-hours.js';
 import { logger } from '@/utils';
 import type { Contract, Order } from '@stoqey/ib';
 import { EventName, OrderAction, OrderType, SecType, TimeInForce } from '@stoqey/ib';
@@ -254,6 +255,24 @@ export async function closePosition(symbolRaw: string, source = 'close command')
     try {
         assertOrderingAllowed();
 
+        // Post-close, a DAY MKT order is a guaranteed IBKR 201 rejection
+        // (market-hours doctrine, observed live 2026-08-11). Placing it
+        // anyway would then CANCEL the tracked bracket exits below — leaving
+        // the position open AND unprotected overnight. Refuse instead: the
+        // position keeps its stops and the operator gets told why (audit
+        // 2026-08-20 finding 5). Pre-market DAY orders legally rest until
+        // the open, so only AFTER_HOURS/OVERNIGHT/CLOSED refuse. Test-gated
+        // like the executor's session gate (wall-clock dependent).
+        if (process.env.NODE_ENV !== 'test' && !isTradeableSession(getMarketSession().session)) {
+            return {
+                ok: false,
+                message:
+                    `⛔ Cannot close ${symbol} now: the session is over, a DAY market order would be ` +
+                    `rejected by the broker and its resting exits would have been cancelled anyway. ` +
+                    `The position keeps its bracket protection; close it at the next open (or manually in TWS).`,
+            };
+        }
+
         const api = await getIBApi();
         const positions = await fetchPositions(api);
         const pos = positions.find((p) => p.symbol === symbol);
@@ -311,12 +330,17 @@ export async function closePosition(symbolRaw: string, source = 'close command')
             ok: true,
             message:
                 `🔚 Closing ${symbol}: ${order.action} ${qty} at market (order ${orderId}). ` +
-                `Outside market hours the order waits for the open. ` +
+                `Placed pre-market it rests until the open. ` +
                 (cancelledExits > 0
                     ? `${cancelledExits} resting bracket/exit order(s) for ${symbol} cancelled with it.`
                     : `Note: any resting exits for ${symbol} should be reviewed ('orders').`),
         };
     } catch (err) {
+        // The close did NOT go out (post-placement failures are absorbed by
+        // the inner try/catches above) — forget the marker, or auto-protect
+        // would treat a still-open position as operator-closed and skip it
+        // for 10 minutes (audit 2026-08-20).
+        recentlyClosed.delete(symbol);
         const msg = err instanceof Error ? err.message : String(err);
         logger.error(`[position-actions] close ${symbol} failed: ${msg}`);
         return { ok: false, message: `❌ Could not close ${symbol} — ${msg}` };

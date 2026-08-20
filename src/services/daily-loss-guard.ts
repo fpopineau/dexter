@@ -63,20 +63,42 @@ function readHalt(): HaltRecord | null {
     }
 }
 
+// In-memory latch mirror: the file is the durable latch, but a failed write
+// must not mean NO latch — without this, an unrealized-P&L recovery later in
+// the day would recompute below the limit and silently reopen trading on a
+// day the kill-switch fired (audit 2026-08-06 finding 7, closed 2026-08-20).
+// Process-lifetime only: a restart with an unwritable data dir still loses
+// the latch — that residual window is accepted and documented.
+let memoryHalt: HaltRecord | null = null;
+
 function writeHalt(rec: HaltRecord): void {
+    // Mirror unconditionally (also on manual clear, which writes an epoch
+    // date) so memory and file can never disagree within this process.
+    memoryHalt = rec;
     try {
         const p = haltFilePath();
         mkdirSync(dirname(p), { recursive: true });
         writeFileSync(p, JSON.stringify(rec, null, 2));
     } catch (err) {
-        logger.error(`[daily-loss-guard] failed to persist halt record: ${err}`);
+        logger.error(`[daily-loss-guard] failed to persist halt record — latched in memory for this process: ${err}`);
     }
 }
 
 /** Active halt for TODAY, if any. */
 export function getActiveHalt(): HaltRecord | null {
     const rec = readHalt();
-    return rec && rec.date === tradingDate() ? rec : null;
+    if (rec && rec.date === tradingDate()) return rec;
+    // File says no halt (missing or unwritable earlier) — the memory mirror
+    // still latches today. The mirror also holds a manual clear, so a
+    // cleared halt does not resurrect from memory.
+    if (memoryHalt && memoryHalt.date === tradingDate()) return memoryHalt;
+    return null;
+}
+
+/** Test hook: forget process-lifetime latches (memory mirrors only). */
+export function __resetMemoryLatchesForTests(): void {
+    memoryHalt = null;
+    memoryBaseline = null;
 }
 
 /** Deliberate operator reset of the current halt. */
@@ -111,16 +133,27 @@ function baselinePath(): string {
     return join(dir, 'netliq-baseline.json');
 }
 
+// Memory mirror for the baseline, same rationale as memoryHalt: if the file
+// write fails, re-capturing the CURRENT (already-degraded) NetLiq as the new
+// baseline on the next call would reset the P&L proxy to ~0 and could keep
+// the kill-switch from ever tripping (audit 2026-08-20).
+let memoryBaseline: NetLiqBaseline | null = null;
+
 /** Today's baseline, or null when absent/stale. */
 export function readNetLiqBaseline(): NetLiqBaseline | null {
     try {
         const p = baselinePath();
-        if (!existsSync(p)) return null;
-        const rec = JSON.parse(readFileSync(p, 'utf-8')) as NetLiqBaseline;
-        return rec?.date === tradingDate() && Number.isFinite(rec.netLiq) ? rec : null;
+        if (existsSync(p)) {
+            const rec = JSON.parse(readFileSync(p, 'utf-8')) as NetLiqBaseline;
+            if (rec?.date === tradingDate() && Number.isFinite(rec.netLiq)) return rec;
+        }
     } catch {
-        return null;
+        // fall through to the memory mirror
     }
+    if (memoryBaseline?.date === tradingDate() && Number.isFinite(memoryBaseline.netLiq)) {
+        return memoryBaseline;
+    }
+    return null;
 }
 
 /** Persist a baseline for today unless one already exists (first wins —
@@ -129,13 +162,14 @@ export function writeNetLiqBaselineIfAbsent(netLiq: number): NetLiqBaseline {
     const existing = readNetLiqBaseline();
     if (existing) return existing;
     const rec: NetLiqBaseline = { date: tradingDate(), netLiq, capturedAt: new Date().toISOString() };
+    memoryBaseline = rec;
     try {
         const p = baselinePath();
         mkdirSync(dirname(p), { recursive: true });
         writeFileSync(p, JSON.stringify(rec, null, 2));
         logger.info(`[daily-loss-guard] NetLiq baseline captured for ${rec.date}: ${netLiq.toFixed(0)}`);
     } catch (err) {
-        logger.error(`[daily-loss-guard] failed to persist NetLiq baseline: ${err}`);
+        logger.error(`[daily-loss-guard] failed to persist NetLiq baseline — held in memory for this process: ${err}`);
     }
     return rec;
 }

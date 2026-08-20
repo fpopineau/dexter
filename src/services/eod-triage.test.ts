@@ -28,6 +28,19 @@ describe('triageCatchUpAction (missed 15:52 slot — SECZ post-mortem 2026-08-13
         expect(triageCatchUpAction(min(15, 55), false, false)).toBe('none');
         expect(triageCatchUpAction(min(17, 0), false, false)).toBe('none');
     });
+
+    test('half-day (13:00 close): the window tracks the real bell, not 16:00 (audit 2026-08-20)', () => {
+        const HALF = min(13, 0);
+        // Before the 12:52 slot: cron will fire.
+        expect(triageCatchUpAction(min(12, 51), false, true, HALF)).toBe('none');
+        // In the missed window before the 13:00 bell: run late.
+        expect(triageCatchUpAction(min(12, 52), false, true, HALF)).toBe('run-late');
+        expect(triageCatchUpAction(min(12, 59), false, true, HALF)).toBe('run-late');
+        // After the 13:00 bell: alert — with the old hard-coded 16:00 close
+        // this returned 'none' and 15:52 quietly triaged a dead session.
+        expect(triageCatchUpAction(min(13, 0), false, true, HALF)).toBe('alert-missed');
+        expect(triageCatchUpAction(min(15, 52), false, true, HALF)).toBe('alert-missed');
+    });
 });
 
 describe('decideUnfilledEntryGuard (entry-side accidental earnings bets)', () => {

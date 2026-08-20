@@ -48,7 +48,7 @@ import { join } from 'node:path';
 import { getIBApi } from '@/tools/ibkr/connection.js';
 import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
 import { logger } from '@/utils';
-import { isMarketHoliday } from '@/utils/market-hours.js';
+import { isMarketHalfDay, isMarketHoliday } from '@/utils/market-hours.js';
 import { getNetLiquidation } from './daily-loss-guard.js';
 import { findUpcomingEarnings, nextTradingDates, type UpcomingEarnings } from './earnings-calendar.js';
 import { getMacroEventsWithin, macroNightWarning } from './event-risk.js';
@@ -57,7 +57,13 @@ import { listTrackable } from './trade-proposals.js';
 import { getRiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
 
 const ET = 'America/New_York';
-const TRIAGE_CRON = '52 15 * * 1-5';
+// Two slots, 8 minutes before each possible close: 15:52 for a normal 16:00
+// close, 12:52 for a 13:00 half-day close. Each firing checks which kind of
+// day today is and yields to the other slot — without this, half-days ran
+// triage at 15:52, almost three hours AFTER the DAY brackets expired at
+// 13:00, on positions whose protection was already gone (audit 2026-08-20).
+const TRIAGE_CRON_FULL = '52 15 * * 1-5';
+const TRIAGE_CRON_HALF = '52 12 * * 1-5';
 const FADE_LOOKBACK_MIN = 60;
 /** Close before the bell when the symbol reports within this many TRADING
  *  days (0 = today's print after the close, 1 = the next session's
@@ -431,7 +437,7 @@ export async function runEodTriageOnce(): Promise<void> {
         const body = lines.length
             ? lines.join('\n')
             : `${dayCandidates.length + gtcCandidates.length} tracked position(s), none needed action.`;
-        await notify(`🌇 EOD triage (15:52 ET):\n${body}${footer}`);
+        await notify(`🌇 EOD triage (pre-close):\n${body}${footer}`);
     }
 }
 
@@ -446,18 +452,28 @@ export async function runEodTriageOnce(): Promise<void> {
 // at tomorrow's open, a different decision that stays with the operator).
 // ---------------------------------------------------------------------------
 
-/** Must match TRIAGE_CRON. */
-const TRIAGE_MINUTES_ET = 15 * 60 + 52;
-const BELL_MINUTES_ET = 16 * 60;
+/** Minutes before the close that the triage slot fires (must match the
+ *  TRIAGE_CRON_* schedules: 15:52 before a 16:00 close, 12:52 before 13:00). */
+const TRIAGE_LEAD_MIN = 8;
+const FULL_DAY_CLOSE_MINUTES_ET = 16 * 60;
+const HALF_DAY_CLOSE_MINUTES_ET = 13 * 60;
 
 export type TriageCatchUp = 'none' | 'run-late' | 'alert-missed';
 
 /** Pure: what a boot at `minutesEt` (minutes since ET midnight) should do
- *  about today's triage slot. */
-export function triageCatchUpAction(minutesEt: number, ranToday: boolean, isTradingDay: boolean): TriageCatchUp {
+ *  about today's triage slot. `closeMinutesEt` is today's actual regular
+ *  close — 13:00 on half-days — so the catch-up window tracks the real
+ *  bell, not a hard-coded 16:00. */
+export function triageCatchUpAction(
+    minutesEt: number,
+    ranToday: boolean,
+    isTradingDay: boolean,
+    closeMinutesEt: number = FULL_DAY_CLOSE_MINUTES_ET,
+): TriageCatchUp {
     if (!isTradingDay || ranToday) return 'none';
-    if (minutesEt >= TRIAGE_MINUTES_ET && minutesEt < BELL_MINUTES_ET) return 'run-late';
-    if (minutesEt >= BELL_MINUTES_ET) return 'alert-missed';
+    const triageMinutes = closeMinutesEt - TRIAGE_LEAD_MIN;
+    if (minutesEt >= triageMinutes && minutesEt < closeMinutesEt) return 'run-late';
+    if (minutesEt >= closeMinutesEt) return 'alert-missed';
     return 'none'; // before the slot — the cron will fire normally
 }
 
@@ -489,20 +505,22 @@ async function checkMissedTriage(): Promise<void> {
     const et = new Date(now.toLocaleString('en-US', { timeZone: ET }));
     const weekday = et.getDay(); // 0=Sun .. 6=Sat, in ET
     const isTradingDay = weekday >= 1 && weekday <= 5 && !isMarketHoliday(todayIso);
+    const closeMinutes = isMarketHalfDay(todayIso) ? HALF_DAY_CLOSE_MINUTES_ET : FULL_DAY_CLOSE_MINUTES_ET;
     const stamp = readTriageStamp();
     const action = triageCatchUpAction(
         et.getHours() * 60 + et.getMinutes(),
         stamp?.date === todayIso,
         isTradingDay,
+        closeMinutes,
     );
     if (action === 'run-late') {
-        logger.warn('[eod-triage] today\'s 15:52 ET slot was missed (gateway was down) — running catch-up triage now');
+        logger.warn('[eod-triage] today\'s pre-close slot was missed (gateway was down) — running catch-up triage now');
         await runEodTriageOnce();
     } else if (action === 'alert-missed') {
         markTriageRun(todayIso, 'missed-alerted'); // once per day, across restarts
-        logger.warn('[eod-triage] today\'s 15:52 ET slot was missed and the bell has rung — positions went untriaged');
+        logger.warn('[eod-triage] today\'s pre-close slot was missed and the bell has rung — positions went untriaged');
         await notify(
-            '⚠️ EOD TRIAGE MISSED today: the gateway was down at 15:52 ET and came back after the bell. ' +
+            '⚠️ EOD TRIAGE MISSED today: the gateway was down at the pre-close slot and came back after the bell. ' +
             'Open positions reached the close untriaged — no losing-and-fading close, no earnings-guard flatten. ' +
             'The 🌙 conversion still protects expired DAY brackets; review \'positions\' and close anything you would not hold.',
         );
@@ -510,15 +528,28 @@ async function checkMissedTriage(): Promise<void> {
 }
 
 let job: Cron | null = null;
+let halfDayJob: Cron | null = null;
 
-/** Start the 15:52 ET triage (idempotent; no-op when disabled). */
+/** True when the slot firing now is the right one for today: the 12:52
+ *  slot on half-days, the 15:52 slot otherwise. The other slot yields. */
+function slotMatchesToday(halfDaySlot: boolean): boolean {
+    const todayIso = new Date().toLocaleDateString('en-CA', { timeZone: ET });
+    return isMarketHalfDay(todayIso) === halfDaySlot;
+}
+
+/** Start the pre-close triage (idempotent; no-op when disabled). */
 export function startEodTriage(): void {
     if (job || !isEodTriageEnabled()) return;
-    job = new Cron(TRIAGE_CRON, { timezone: ET }, () => {
+    job = new Cron(TRIAGE_CRON_FULL, { timezone: ET }, () => {
+        if (!slotMatchesToday(false)) return; // half-day: 12:52 already ran
         runEodTriageOnce().catch((err) => logger.error(`[eod-triage] run failed: ${err}`));
     });
+    halfDayJob = new Cron(TRIAGE_CRON_HALF, { timezone: ET }, () => {
+        if (!slotMatchesToday(true)) return; // normal day: wait for 15:52
+        runEodTriageOnce().catch((err) => logger.error(`[eod-triage] half-day run failed: ${err}`));
+    });
     logger.info(
-        '[eod-triage] scheduled 15:52 ET: close losing-and-fading DAY positions; keep the rest for protected overnight' +
+        '[eod-triage] scheduled 15:52 ET (12:52 on half-days): close losing-and-fading DAY positions; keep the rest for protected overnight' +
         (isEarningsGuardEnabled()
             ? `; earnings guard ON (flat before any print within ${EARNINGS_GUARD_DAYS} trading day(s) — Friday reaches Monday; DAY and GTC non-bet classes; past BMO prints exempt)`
             : '; earnings guard OFF'),
@@ -534,5 +565,6 @@ export function startEodTriage(): void {
 }
 
 export function stopEodTriage(): void {
+    if (halfDayJob) { halfDayJob.stop(); halfDayJob = null; }
     if (job) { job.stop(); job = null; }
 }

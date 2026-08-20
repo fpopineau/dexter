@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,6 +10,7 @@ const prevDataDir = process.env.DEXTER_DATA_DIR;
 process.env.DEXTER_DATA_DIR = dir;
 
 import {
+    __resetMemoryLatchesForTests,
     assertDailyLossOk,
     clearTradingHalt,
     getActiveHalt,
@@ -37,6 +38,12 @@ function writeHaltFile(date: string): void {
 
 beforeAll(() => {
     process.env.DEXTER_DATA_DIR = dir;
+});
+
+// Each test models a FRESH process discovering the current file state — the
+// process-lifetime memory mirrors must not leak across that boundary.
+beforeEach(() => {
+    __resetMemoryLatchesForTests();
 });
 
 afterAll(() => {
@@ -99,5 +106,27 @@ describe('NetLiq baseline (PnL-proxy fallback)', () => {
         // …and the next write replaces it with today's
         expect(writeNetLiqBaselineIfAbsent(500_000).netLiq).toBe(500_000);
         expect(readNetLiqBaseline()?.date).not.toBe('2020-01-02');
+    });
+
+    test('unwritable data dir: memory holds the first baseline — no re-capture of a degraded NetLiq', () => {
+        // Point the store at a path UNDER A FILE so mkdir/write must fail —
+        // this is the audit 2026-08-20 hole: with no memory mirror, the
+        // failed write left readNetLiqBaseline() null, and the next gate
+        // check re-captured the CURRENT (already-degraded) NetLiq as the
+        // baseline, resetting the P&L proxy to ~0 below the kill-switch.
+        const blocker = join(dir, 'not-a-dir');
+        writeFileSync(blocker, 'file, not a directory');
+        const prev = process.env.DEXTER_DATA_DIR;
+        process.env.DEXTER_DATA_DIR = join(blocker, 'sub');
+        try {
+            const first = writeNetLiqBaselineIfAbsent(1_000_000);
+            expect(first.netLiq).toBe(1_000_000);
+            // File write failed, but the session still knows its reference…
+            expect(readNetLiqBaseline()?.netLiq).toBe(1_000_000);
+            // …so a later, post-loss NetLiq must NOT become the new baseline.
+            expect(writeNetLiqBaselineIfAbsent(940_000).netLiq).toBe(1_000_000);
+        } finally {
+            process.env.DEXTER_DATA_DIR = prev;
+        }
     });
 });
