@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { DEFAULT_RULES } from '@/tools/ibkr/risk-rules.js';
 import {
+    assertAcceptContext,
     assertProposalRisk,
     checkPriceRun,
     checkProposalRisk,
@@ -974,5 +975,60 @@ describe('tick alignment (the ACHR 6.845 live rejection, 2026-08-11)', () => {
         // refuse honest cent prices over float noise.
         const r = checkProposalRisk(longProposal({ entry: 6.84, stop: 6.67, target: 7.18, quantity: 100 }), {}, RULES);
         expect(r.violations.join(' ')).not.toContain('tick grid');
+    });
+});
+
+describe('assertAcceptContext (WP6 — the accept-time context is REQUIRED)', () => {
+    const FULL = { symbol: 'NVDA', dailyAtr: 3.2, ema10: 180, lastPrice: 182.5 };
+
+    test('complete context passes silently', () => {
+        expect(() => assertAcceptContext(FULL)).not.toThrow();
+    });
+
+    test('each missing piece refuses, naming the checks it starves', () => {
+        expect(() => assertAcceptContext({ ...FULL, dailyAtr: null })).toThrow(/daily ATR.*noise-stop/);
+        expect(() => assertAcceptContext({ ...FULL, ema10: null })).toThrow(/EMA10.*extension/);
+        expect(() => assertAcceptContext({ ...FULL, lastPrice: null })).toThrow(/live quote.*chase/);
+    });
+
+    test('all failures are named at once — one retry fixes everything visible', () => {
+        try {
+            assertAcceptContext({ symbol: 'X', dailyAtr: null, ema10: null, lastPrice: null });
+            throw new Error('should have refused');
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            expect(msg).toContain('[context-gate]');
+            expect(msg).toContain('daily ATR');
+            expect(msg).toContain('EMA10');
+            expect(msg).toContain('live quote');
+            expect(msg).toContain('FAIL-CLOSED');
+        }
+    });
+
+    test('zero or negative values are as missing as null (NaN-poisoning family)', () => {
+        expect(() => assertAcceptContext({ ...FULL, dailyAtr: 0 })).toThrow(/daily ATR/);
+        expect(() => assertAcceptContext({ ...FULL, lastPrice: -1 })).toThrow(/live quote/);
+    });
+});
+
+describe('UNKNOWN sector bucket (WP6, decision D3)', () => {
+    test('unresolved-sector exposure past the cap refuses with the bucket named', () => {
+        const r = checkProposalRisk(
+            longProposal({ quantity: 25 }),
+            { netLiquidation: 100_000, sector: 'UNKNOWN', sameSectorExposureUsd: 18_000 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('UNKNOWN bucket');
+        expect(r.violations.join(' ')).toContain('unclassifiable exposure');
+    });
+
+    test('the bucket is capped like any sector — inside it passes', () => {
+        const r = checkProposalRisk(
+            longProposal({ quantity: 25 }),
+            { netLiquidation: 100_000, sector: 'UNKNOWN', sameSectorExposureUsd: 5_000 },
+            RULES,
+        );
+        expect(r.ok).toBe(true);
     });
 });

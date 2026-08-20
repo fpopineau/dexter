@@ -641,11 +641,19 @@ export function checkProposalRisk(
         if (ctx.sector) {
             const maxSector = (rules.max_sector_exposure_pct / 100) * ctx.netLiquidation;
             if (positionValue + ctx.sameSectorExposureUsd > maxSector) {
+                // D3 (WP6): 'UNKNOWN' is the shared bucket for unresolvable
+                // sectors (ETFs, metadata misses) — capped like any sector,
+                // so a blind spot cannot accumulate unbounded concentration.
+                const label = ctx.sector === 'UNKNOWN'
+                    ? `UNRESOLVED-sector names (the shared UNKNOWN bucket)`
+                    : ctx.sector;
                 violations.push(
-                    `$${ctx.sameSectorExposureUsd.toFixed(0)} is already committed to ${ctx.sector} — ` +
+                    `$${ctx.sameSectorExposureUsd.toFixed(0)} is already committed to ${label} — ` +
                     `adding $${positionValue.toFixed(0)} totals $${(positionValue + ctx.sameSectorExposureUsd).toFixed(0)}, over the ` +
                     `${rules.max_sector_exposure_pct}% sector cap ($${maxSector.toFixed(0)}). ` +
-                    `On a sector-wide move prefer the breadth vehicle over one more correlated name`,
+                    (ctx.sector === 'UNKNOWN'
+                        ? `Resolve the sectors (or close an unresolved name) before adding more unclassifiable exposure`
+                        : `On a sector-wide move prefer the breadth vehicle over one more correlated name`),
                 );
             }
         } else {
@@ -664,6 +672,38 @@ export function checkProposalRisk(
     }
 
     return { ok: violations.length === 0, violations, notes, riskReward, positionValue };
+}
+
+// ---------------------------------------------------------------------------
+// Acceptance-context gate (WP6, REMEDIATION-2026-08-20)
+// ---------------------------------------------------------------------------
+
+/**
+ * Pure: at ACCEPT the market context is REQUIRED — a proposal created
+ * during an ATR outage used to sail through acceptance with the
+ * noise-stop, target-reachability, extension and chase checks silently
+ * skipped (audit crit. 10). A missing piece refuses with everything
+ * that's missing named at once; the refusal is transient by design —
+ * gates re-run on the next accept. (Creation stays best-effort: creation
+ * is advisory, acceptance is the contract.)
+ */
+export function assertAcceptContext(input: {
+    symbol: string;
+    dailyAtr: number | null;
+    ema10: number | null;
+    lastPrice: number | null;
+}): void {
+    const missing: string[] = [];
+    if (input.dailyAtr === null || !(input.dailyAtr > 0)) missing.push('daily ATR (noise-stop, target-reachability, extension checks)');
+    if (input.ema10 === null || !(input.ema10 > 0)) missing.push('EMA10 (extension check)');
+    if (input.lastPrice === null || !(input.lastPrice > 0)) missing.push('live quote (chase/invalidation check)');
+    if (missing.length > 0) {
+        throw new Error(
+            `[context-gate] ${input.symbol}: required market context unavailable — ${missing.join('; ')}. ` +
+            `Accept refused FAIL-CLOSED: these checks must run before real orders. ` +
+            `Transient — retry the accept when data is back.`,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

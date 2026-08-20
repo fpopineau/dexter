@@ -22,7 +22,8 @@ import { getMarketSession, isTradeableSession } from '@/utils/market-hours.js';
 import { assertDailyLossOk } from './daily-loss-guard.js';
 import { trackExecutedProposal } from './outcome-tracker.js';
 import { getSectorInfo } from './sector-map.js';
-import { assertProposalRisk, checkPriceRun, ENTRY_CONFIRM_FRACTION, plannedWorstLossUsd } from './proposal-risk-gate.js';
+import { assertAcceptContext, assertProposalRisk, checkPriceRun, ENTRY_CONFIRM_FRACTION, plannedWorstLossUsd } from './proposal-risk-gate.js';
+import { fetchDailyRiskContext } from '@/tools/ibkr/daily-atr.js';
 import { fetchBrokerExposure, unionExposure } from './exposure-snapshot.js';
 import {
     claimProposalForExecution,
@@ -126,6 +127,16 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         }
         const lossStatus = await assertDailyLossOk();
 
+        // WP6: refetch the market context — REQUIRED at accept, unlike
+        // creation. A proposal created during a data outage used to reach
+        // real orders with the noise-stop/target/extension/chase checks
+        // silently skipped. Any missing piece refuses fail-closed (the
+        // proposal stays open; retry when data is back).
+        const riskCtx = await fetchDailyRiskContext(p.symbol);
+        const last = await fetchLastPrice(p.symbol);
+        liveLast = last;
+        assertAcceptContext({ symbol: p.symbol, dailyAtr: riskCtx.dailyAtr, ema10: riskCtx.ema10, lastPrice: last });
+
         // Risk gate with live account context. Re-runs the static checks too:
         // rules may have been tightened since the proposal was created.
         const exposure = (await listExposure()).filter((t) => t.id !== p.id);
@@ -148,20 +159,22 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
             logger.warn(`[proposal-executor] ${p.id}: broker holds cap-relevant positions with no DB row yet: ${union.brokerOnlySymbols.join(', ')} (adoption sweep pending)`);
         }
 
-        // Sector concentration context — best-effort: an unknown sector
-        // (ETF, Nasdaq miss) skips the cap WITH a gate note, and a
-        // resolution error must never block an accept on its own.
-        let sector: string | null = null;
-        let sameSectorExposureUsd: number | undefined;
-        try {
-            sector = (await getSectorInfo(p.symbol))?.sector ?? null;
-            let sum = 0;
-            for (const t of exposure) {
-                if ((await getSectorInfo(t.symbol))?.sector === sector && sector !== null) sum += exposureValue(t);
+        // Sector concentration context — decision D3 (WP6): an
+        // unresolvable sector no longer SKIPS the cap. Unknowns (ETFs,
+        // metadata misses, resolution errors) count into a shared
+        // 'UNKNOWN' bucket capped at the same percentage — a blind spot
+        // can no longer accumulate unbounded concentration.
+        const resolveSector = async (sym: string): Promise<string> => {
+            try {
+                return (await getSectorInfo(sym))?.sector ?? 'UNKNOWN';
+            } catch {
+                return 'UNKNOWN';
             }
-            sameSectorExposureUsd = sum;
-        } catch (err) {
-            logger.warn(`[proposal-executor] ${p.id}: sector resolution failed — sector cap skipped: ${err}`);
+        };
+        const sector = await resolveSector(p.symbol);
+        let sameSectorExposureUsd = 0;
+        for (const t of exposure) {
+            if ((await resolveSector(t.symbol)) === sector) sameSectorExposureUsd += exposureValue(t);
         }
         assertProposalRisk(
             {
@@ -227,7 +240,15 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                     .filter((t) => t.tif === 'GTC')
                     .reduce((sum, t) => sum + exposureValue(t), 0),
                 sector,
-                ...(sameSectorExposureUsd !== undefined ? { sameSectorExposureUsd } : {}),
+                sameSectorExposureUsd,
+                // WP6: the context the creation-time checks used, now
+                // guaranteed present (assertAcceptContext above) — the
+                // noise-stop, target-reachability and extension checks run
+                // UNCONDITIONALLY at accept.
+                dailyAtr: riskCtx.dailyAtr!,
+                ema10: riskCtx.ema10!,
+                lastPrice: last!,
+                ...(riskCtx.recentEarnings === true ? { recentEarnings: true } : {}),
                 // Earnings bets: re-verify the evidence at ACCEPTANCE — the
                 // calendar or the record may have shifted since creation,
                 // and this is the last gate before real orders. Fail-closed.
@@ -241,11 +262,9 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         );
 
         // Chase/invalidation gate: proposal levels are anchored at creation
-        // time; on a fast mover the edge may be gone by accept time. Best
-        // effort — an unavailable quote does not block (the hard gates
-        // above already ran), it is only noted.
-        const last = await fetchLastPrice(p.symbol);
-        liveLast = last;
+        // time; on a fast mover the edge may be gone by accept time. The
+        // quote is guaranteed by the context gate above (WP6) — an
+        // unavailable quote refused the accept before reaching here.
         if (last !== null) {
             const run = checkPriceRun(p, last);
             if (!run.ok) {
