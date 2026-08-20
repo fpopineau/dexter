@@ -80,6 +80,13 @@ truth) — starts with the fake-IBApi ack harness in bracket.test.ts.
 The invariant this phase installs: **the broker is the source of truth for
 order and position state; the DB is a view.** All four WPs are HIGH.
 
+**STATUS: WP1 LANDED 2026-08-21** (commit 27e397f; suite 597 green).
+Recorded deviation: an unconfirmed placement is marked 'executed' with a
+loud `placement-unconfirmed` note instead of staying 'executing' — an
+'executing' row is invisible to the tracker and releasable by the claim
+sweeper, and a released claim over live orders invites double placement.
+WP2 (partial-fill truth) is next, on the WP1 fake-IBApi harness.
+
 - **WP1 Acknowledged placement + identity** (crit. 6)
   Files: `bracket.ts`, `orders.ts`, new `src/tools/ibkr/order-ack.ts`,
   `proposal-executor.ts`, `position-actions.ts`.
