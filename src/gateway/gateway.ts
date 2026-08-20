@@ -267,6 +267,12 @@ async function handleInbound(cfg: GatewayConfig, inbound: WhatsAppInboundMessage
 }
 
 export async function startGateway(params: { configPath?: string } = {}): Promise<GatewayService> {
+  // Fail-loud rule load at BOOT (WP0.1): a malformed risk-rules file must
+  // refuse the gateway here, not explode (or silently default) at the
+  // first accept hours later. Throws with the full error list.
+  const { getRiskRules } = await import('@/tools/ibkr/risk-rules.js');
+  getRiskRules();
+
   const cfg = loadGatewayConfig(params.configPath);
   const plugin = createWhatsAppPlugin({
     loadConfig: () => loadGatewayConfig(params.configPath),

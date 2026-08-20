@@ -17,6 +17,7 @@
 import { readFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
+import { logger } from '@/utils';
 
 /**
  * Trade classes — every proposal belongs to exactly one:
@@ -165,7 +166,125 @@ export type AccountProfile = 'paper' | 'live';
 let activeProfile: AccountProfile = 'paper';
 const cachedByProfile = new Map<AccountProfile, RiskRules>();
 
-function parseFlatYaml(path: string): Record<string, unknown> {
+// ---------------------------------------------------------------------------
+// Schema validation (WP0.1, REMEDIATION-2026-08-20). The YAML is a
+// risk-control surface: before this layer, a typo'd key silently no-opped,
+// a string value survived into numeric caps (NaN comparisons are all false
+// — the cap simply vanished), and 'yes' was a truthy boolean. Every load
+// now validates or THROWS; the gateway must refuse to start on a bad file
+// rather than trade on implicit defaults.
+// ---------------------------------------------------------------------------
+
+type RuleSpec =
+    | { kind: 'number'; min: number; max: number; minExclusive?: boolean; integer?: boolean }
+    | { kind: 'boolean' };
+
+const num = (min: number, max: number, opts: { minExclusive?: boolean; integer?: boolean } = {}): RuleSpec =>
+    ({ kind: 'number', min, max, ...opts });
+const bool: RuleSpec = { kind: 'boolean' };
+
+/** Bounds are sanity rails, not policy: generous enough for any plausible
+ *  profile, tight enough that a unit mistake (500 where 5% belongs, a
+ *  disabled kill-switch) cannot load. */
+const RULE_SCHEMA: Record<keyof RiskRules, RuleSpec> = {
+    max_position_pct: num(0, 100, { minExclusive: true }),
+    max_open_positions: num(1, 100, { integer: true }),
+    // 0 would disable the kill-switch — the one rule that must never be off.
+    max_daily_loss_pct: num(0, 100, { minExclusive: true }),
+    max_daily_trades: num(1, 500, { integer: true }),
+    max_sector_exposure_pct: num(0, 100, { minExclusive: true }),
+    min_risk_reward: num(0, 50, { minExclusive: true }),
+    mandatory_stop_loss: bool,
+    max_overnight_exposure_pct: num(0, 100, { minExclusive: true }),
+    max_overnight_position_pct: num(0, 100, { minExclusive: true }),
+    min_price: num(0, 10_000),
+    min_avg_volume: num(0, 1e12),
+    stop_atr_multiplier: num(0, 20, { minExclusive: true }),
+    max_risk_per_trade_pct: num(0, 10, { minExclusive: true }),
+    min_stop_atr_fraction: num(0, 10),
+    max_extension_atr: num(0, 50),
+    max_target_atr: num(0, 50),
+    profit_trail_arm_pct: num(0, 100, { minExclusive: true }),
+    profit_trail_pullback_pct: num(0, 100, { minExclusive: true }),
+    profit_trail_arm_atr_mult: num(0, 50, { minExclusive: true }),
+    profit_trail_pullback_atr_mult: num(0, 50, { minExclusive: true }),
+    sizing_full_score: num(0, 100),
+    sizing_half_score: num(0, 100),
+    sizing_half_mult: num(0, 1),
+    sizing_low_mult: num(0, 1),
+    min_risk_budget_usd: num(0, 1e6),
+    profit_trail_replaces_target: bool,
+    fractional_shares: bool,
+    swing_risk_pct: num(0, 10, { minExclusive: true }),
+    max_swing_positions: num(0, 50, { integer: true }),
+    earnings_bet_enabled: bool,
+    max_earnings_bets: num(0, 10, { integer: true }),
+    earnings_bet_risk_pct: num(0, 10, { minExclusive: true }),
+    earnings_bet_gap_floor_pct: num(0, 100),
+};
+
+export interface RuleIssues { errors: string[]; warnings: string[] }
+
+/** Validate one parsed file (base or overrides — partial sets are fine). */
+export function validateRuleSet(parsed: Record<string, unknown>, source: string): RuleIssues {
+    const errors: string[] = [];
+    for (const [key, value] of Object.entries(parsed)) {
+        const spec = (RULE_SCHEMA as Record<string, RuleSpec | undefined>)[key];
+        if (!spec) {
+            errors.push(`${source}: unknown key '${key}' — typo? Valid keys are the RiskRules fields.`);
+            continue;
+        }
+        if (spec.kind === 'boolean') {
+            if (typeof value !== 'boolean') {
+                errors.push(`${source}: '${key}' must be literally true or false, got ${JSON.stringify(value)}`);
+            }
+            continue;
+        }
+        if (typeof value !== 'number' || !Number.isFinite(value)) {
+            errors.push(`${source}: '${key}' must be a finite number, got ${JSON.stringify(value)}`);
+            continue;
+        }
+        const aboveMin = spec.minExclusive ? value > spec.min : value >= spec.min;
+        if (!aboveMin || value > spec.max) {
+            errors.push(
+                `${source}: '${key}' = ${value} outside ${spec.minExclusive ? '(' : '['}${spec.min}, ${spec.max}]`,
+            );
+            continue;
+        }
+        if (spec.integer && !Number.isInteger(value)) {
+            errors.push(`${source}: '${key}' must be an integer, got ${value}`);
+        }
+    }
+    return { errors, warnings: [] };
+}
+
+/** Checks that only make sense on the MERGED rule set. */
+export function crossFieldIssues(rules: RiskRules): RuleIssues {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+    if (rules.sizing_half_score > rules.sizing_full_score) {
+        errors.push(
+            `sizing_half_score (${rules.sizing_half_score}) > sizing_full_score (${rules.sizing_full_score}) — inverted confidence bands`,
+        );
+    }
+    if (rules.profit_trail_pullback_atr_mult >= rules.profit_trail_arm_atr_mult) {
+        errors.push(
+            `profit_trail_pullback_atr_mult (${rules.profit_trail_pullback_atr_mult}) >= arm mult (${rules.profit_trail_arm_atr_mult}) — the trail's worst exit would be <= 0R`,
+        );
+    }
+    // WARNING, not error: both current profiles run slightly over (paper
+    // 10x0.25=2.5 > 2) — the acceptance-time headroom gate binds first.
+    // Escalate to an error only if that gate ever loosens.
+    const worstCaseBookPct = rules.max_open_positions * rules.max_risk_per_trade_pct;
+    if (worstCaseBookPct > rules.max_daily_loss_pct) {
+        warnings.push(
+            `planned book worst-case ${worstCaseBookPct.toFixed(2)}% (${rules.max_open_positions} x ${rules.max_risk_per_trade_pct}%) exceeds max_daily_loss_pct ${rules.max_daily_loss_pct}% — stop-outs alone can latch the halt`,
+        );
+    }
+    return { errors, warnings };
+}
+
+export function parseFlatYaml(path: string): Record<string, unknown> {
     // Simple YAML parser — the files have only flat key: value pairs
     const raw = readFileSync(path, 'utf-8');
     const parsed: Record<string, unknown> = {};
@@ -189,26 +308,42 @@ function parseFlatYaml(path: string): Record<string, unknown> {
 function loadRules(profile: AccountProfile): RiskRules {
     const hit = cachedByProfile.get(profile);
     if (hit) return hit;
-    let rules: RiskRules;
+    // import.meta.dirname is undefined under jest's ESM VM — derive from
+    // import.meta.url, which both bun and jest support.
+    const dir = resolve(dirname(fileURLToPath(import.meta.url)), '../../config');
+    const basePath = resolve(dir, 'risk-rules.yaml');
+    let base: Record<string, unknown>;
     try {
-        // import.meta.dirname is undefined under jest's ESM VM — derive from
-        // import.meta.url, which both bun and jest support. Getting this
-        // wrong is silent: everything falls back to DEFAULT_RULES and the
-        // live overrides never load.
-        const dir = resolve(dirname(fileURLToPath(import.meta.url)), '../../config');
-        const base = parseFlatYaml(resolve(dir, 'risk-rules.yaml'));
-        let overrides: Record<string, unknown> = {};
-        if (profile === 'live') {
-            try {
-                overrides = parseFlatYaml(resolve(dir, 'risk-rules.live.yaml'));
-            } catch { /* no live override file → live runs on base rules */ }
-        }
-        rules = { ...DEFAULT_RULES, ...base, ...overrides } as RiskRules;
-    } catch {
-        rules = DEFAULT_RULES;
+        base = parseFlatYaml(basePath);
+    } catch (err) {
+        // FAIL LOUD (WP0.1): the old silent fallback to DEFAULT_RULES meant
+        // an unreadable file traded on numbers nobody was looking at.
+        throw new Error(`[risk-rules] cannot read ${basePath} — refusing to trade on implicit defaults: ${err}`);
     }
-    cachedByProfile.set(profile, rules);
-    return rules;
+    const issues: RuleIssues[] = [validateRuleSet(base, 'risk-rules.yaml')];
+    let overrides: Record<string, unknown> = {};
+    if (profile === 'live') {
+        const livePath = resolve(dir, 'risk-rules.live.yaml');
+        try {
+            overrides = parseFlatYaml(livePath);
+        } catch (err) {
+            // A live account silently inheriting the $1M-paper percentages
+            // is exactly the trap this refusal closes.
+            throw new Error(`[risk-rules] LIVE profile requires ${livePath} — refusing to run a live account on paper rules: ${err}`);
+        }
+        issues.push(validateRuleSet(overrides, 'risk-rules.live.yaml'));
+    }
+    const merged = { ...DEFAULT_RULES, ...base, ...overrides } as RiskRules;
+    const cross = crossFieldIssues(merged);
+    for (const w of [...issues.flatMap((i) => i.warnings), ...cross.warnings]) {
+        logger.warn(`[risk-rules] ${w}`);
+    }
+    const errors = [...issues.flatMap((i) => i.errors), ...cross.errors];
+    if (errors.length > 0) {
+        throw new Error(`[risk-rules] ${profile} profile refused — fix the config:\n  - ${errors.join('\n  - ')}`);
+    }
+    cachedByProfile.set(profile, merged);
+    return merged;
 }
 
 /**
