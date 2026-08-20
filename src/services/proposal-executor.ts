@@ -174,14 +174,31 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 ...(p.worstCaseGapPct != null ? { worstCaseGapPct: p.worstCaseGapPct } : {}),
                 // Committed notional on this symbol from OTHER working/filled
                 // proposals — the aggregate cap stops same-name stacking.
+                // Same valuation basis as every other exposure figure
+                // (fill > entry > limit) — this one used entry-only and
+                // priced filled positions at their stale proposal entry
+                // (WP0.3, audit 2026-08-20).
                 existingSymbolExposure: exposure
                     .filter((t) => t.symbol === p.symbol)
-                    .reduce((sum, t) => sum + t.quantity * (t.entry ?? 0), 0),
+                    .reduce((sum, t) => sum + exposureValue(t), 0),
                 // Daily-loss headroom: the open book's planned stop-outs
                 // (gap cost for bets) plus today's realized losses — the
                 // gate refuses a book that could stop out through the halt.
-                openPlannedRiskUsd: exposure
-                    .reduce((sum, t) => sum + (plannedWorstLossUsd(t) ?? 0), 0),
+                // plannedWorstLossUsd's contract says null = NOT countable,
+                // never zero risk — an unpriceable in-flight row therefore
+                // refuses the accept instead of granting free headroom
+                // (WP0.3; the refusal clears once the row prices or dies).
+                openPlannedRiskUsd: exposure.reduce((sum, t) => {
+                    const usd = plannedWorstLossUsd(t);
+                    if (usd === null) {
+                        throw new Error(
+                            `[risk-gate] open proposal ${t.id} (${t.symbol}) has no usable price basis — ` +
+                            `its worst-case risk is unknown, so the daily-loss headroom cannot be computed. ` +
+                            `Retry when its entry fills or it is cleaned up.`,
+                        );
+                    }
+                    return sum + usd;
+                }, 0),
                 realizedLossTodayUsd: Math.min(0, await sumRealizedPnlSince(etDayStartMs())),
                 // Overnight book: GTC rows survive the close (incl. 🌙
                 // kept-overnight holds — converted to GTC at the bell).

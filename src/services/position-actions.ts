@@ -15,7 +15,7 @@
  * only blocks risk-increasing actions, and protecting/closing reduces risk.
  */
 
-import { allocReqId, assertOrderingAllowed, getIBApi, isNonFatalIbkrError } from '@/tools/ibkr/connection.js';
+import { allocReqId, assertAccountsVerified, getIBApi, isNonFatalIbkrError } from '@/tools/ibkr/connection.js';
 import { withOrderLock } from '@/tools/ibkr/order-lock.js';
 import { getNextValidOrderId } from '@/tools/ibkr/orders.js';
 import { getMarketSession, isTradeableSession } from '@/utils/market-hours.js';
@@ -136,7 +136,11 @@ export async function protectPosition(
 ): Promise<PositionActionOutcome> {
     const symbol = symbolRaw.trim().toUpperCase();
     try {
-        assertOrderingAllowed();
+        // Full identity gate, not the static-only check: these place real
+        // orders, and the weaker gate silently passed on an empty account
+        // list (WP0.4, audit 2026-08-20). Risk-reducing, so the 5s timeout
+        // still bounds the wait.
+        await assertAccountsVerified();
 
         const api = await getIBApi();
         const positions = await fetchPositions(api);
@@ -253,7 +257,11 @@ export function wasRecentlyClosed(symbol: string): boolean {
 export async function closePosition(symbolRaw: string, source = 'close command'): Promise<PositionActionOutcome> {
     const symbol = symbolRaw.trim().toUpperCase();
     try {
-        assertOrderingAllowed();
+        // Full identity gate, not the static-only check: these place real
+        // orders, and the weaker gate silently passed on an empty account
+        // list (WP0.4, audit 2026-08-20). Risk-reducing, so the 5s timeout
+        // still bounds the wait.
+        await assertAccountsVerified();
 
         // Post-close, a DAY MKT order is a guaranteed IBKR 201 rejection
         // (market-hours doctrine, observed live 2026-08-11). Placing it
