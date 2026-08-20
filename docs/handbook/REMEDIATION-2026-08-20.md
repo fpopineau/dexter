@@ -1,0 +1,278 @@
+# Remediation plan — closing AUDIT-2026-08-20
+
+The upgrade program that takes every B/[LIVE-GATE] item in
+[AUDIT-2026-08-20.md](AUDIT-2026-08-20.md) to closed. Method: each work
+package (WP) is harness-first (its verifier lands red before the fix), ships
+as one commit with tests, and is independently revertable. The audit doc is
+the spec; WP items cite its sections. No live switch and no new strategy
+rules while the program runs — the rule freeze (WP-VAL) starts only after
+Phase 2 lands.
+
+Risk classes per ADF: **HIGH** = touches order placement, risk gates, or
+schema (approval before implementation); **MED** = behavior change behind
+existing gates; **LOW** = additive/observability.
+
+```
+Phase 0  quick hardening          (LOW/MED, no dependencies, 1–2 sessions)
+Phase 1  broker truth             (HIGH, the critical path, 3–5 sessions)
+Phase 2  policy integrity        (HIGH/MED, depends on Phase 1, 2–4 sessions)
+Phase 3  research validity       (MED, parallel to 1–2, 2–4 sessions)
+Phase 4  frozen validation       (process, calendar time, ≥100 trades)
+```
+
+Dependency spine: WP1 → WP2 → WP3 → WP4 → (WP5, WP7) → WP-VAL.
+Everything else hangs off the spine or runs parallel.
+
+---
+
+## Phase 0 — quick hardening (audit: "cheap" items)
+
+All LOW/MED, no interdependencies, safe to land in any order. One commit
+each or one batched commit.
+
+- **WP0.1 Risk-YAML validation** (audit crit. 13) — `risk-rules.ts`:
+  schema check per key (finite number in range, booleans strictly
+  true/false), cross-field (`plannedBookWorstCasePct ≤ max_daily_loss_pct`),
+  fail LOUD: a malformed file refuses to start the gateway rather than
+  silently running defaults; live profile missing its overrides file is a
+  startup error when `IBKR_ALLOW_LIVE=true`. Harness: unit tests feeding
+  NaN/string/missing-file cases, asserting throw not fallback.
+- **WP0.2 Weights provenance** (backtester §, cheap) — `signal-scorer.ts`:
+  `_meta.note`-aware label; a reset file prints "equal weights (reset
+  2026-08-11)", never "calibrated". Harness: weights-label unit test.
+- **WP0.3 Null-risk contract** (gateway §, cheap) — `proposal-executor.ts`:
+  an unpriceable in-flight row (`plannedWorstLossUsd` null) fails the
+  accept closed with a named refusal instead of `?? 0`; unify per-symbol
+  exposure valuation on fill-price-then-entry (same formula both places).
+- **WP0.4 Ordering-gate symmetry** (gateway §, cheap) —
+  `position-actions.ts`: both paths call `assertAccountsVerified()`.
+  Risk: these are risk-REDUCING paths; verify the tracker's auto-protect
+  cannot deadlock on a slow managedAccounts event (keep the 5s timeout).
+- **WP0.5 Calendar expiry alarm** (gateway §, cheap) — `market-hours.ts`:
+  startup assertion warns ≥30 days before the holiday table's last year
+  ends, fails loud once past it. Also delete the dead half-day ternary.
+- **WP0.6 Log redaction** (gateway §) — `inbound.ts`, `gateway.ts`: JIDs
+  and phone numbers masked (`…last4`), allowlist logged as count not
+  content, previews truncated to 40 chars, debug log size-capped with
+  rotation (reuse `DEXTER_LOG_KEEP`). One-time: rotate the existing
+  `gateway-debug.log` out.
+- **WP0.7 Trigger causality** (gateway §, cheap) — `trigger-alerts.ts`:
+  drop the freshest-proposal fallback entirely; auto-execution happens only
+  via the creation tool's own id (that path already exists). Decouple:
+  evaluation runs even with no WhatsApp target (deliver-if-possible), so
+  the decline ledger always records.
+- **WP0.8 Source lanes** (gateway §) — `tools/proposals/index.ts`,
+  `trade-proposals.ts`: thread a `lane` through the create tool (trigger /
+  cron:<name> / tui / breadth / mover), stamp `source` with it; benchmark
+  and performance report group by it. Additive, no migration (column
+  exists).
+- **WP0.9 MFE/MAE sweep** (gateway §) — new `excursion-sweeper.ts` (or a
+  benchmark step): nightly pass over closed rows with null `mfe_pct`,
+  filled entry, and a bar history — fills them retroactively. Turns 4/112
+  coverage into full coverage without touching the finalize path.
+
+## Phase 1 — broker truth (audit crit. 6, 7, 8; the live blocker)
+
+The invariant this phase installs: **the broker is the source of truth for
+order and position state; the DB is a view.** All four WPs are HIGH.
+
+- **WP1 Acknowledged placement + identity** (crit. 6)
+  Files: `bracket.ts`, `orders.ts`, new `src/tools/ibkr/order-ack.ts`,
+  `proposal-executor.ts`, `position-actions.ts`.
+  Design: every order gets `order.account` (the single verified managed
+  account — refuse multi-account connections until explicitly supported)
+  and `orderRef = "<proposalId>:<leg>"` (entry/tp/stop; close/protect get
+  synthetic ids). `placeBracketOrder` then awaits, per leg, the first of
+  openOrder / orderStatus / error(id) with a bounded timeout (~4s);
+  captures `permId` into a new `order_perm_ids` column (additive
+  migration). Timeout is NOT failure: status goes to a new
+  `'placing'`-in-note state — row stays 'executing' with
+  `note='placement-unconfirmed'` and the reconciler resolves it (avoids a
+  ProposalStatus enum migration; revisit if it proves confusing).
+  Executor marks 'executed' only after entry-leg ack; broker rejection
+  inside the window → 'failed' with the broker's reason (the catch branch
+  becomes reachable for the case it was written for). The user-facing
+  message stops claiming "WORKING" until ack.
+  Harness FIRST: extend `bracket.test.ts` with a fake IBApi event emitter —
+  ack path, reject path, timeout path, permId capture, account/orderRef on
+  every leg. The fake-API harness built here is the fixture for WP2/WP3.
+- **WP2 Partial-fill truth** (crit. 7)
+  Files: `outcome-tracker.ts`, `trade-proposals.ts`, `bracket.ts`.
+  Design: stop discarding `filled` — track `cumQty`/`avgPrice` per entry
+  order; record the entry on FIRST partial fill (`markEntryFilled` gains a
+  quantity); on terminal entry status with `0 < cum < planned`, resize both
+  exit legs to `cumQty` (cancel/replace; do not rely on TWS's
+  child-adjust setting — verify and document it regardless), update
+  `quantity` to filled (new `planned_quantity` column preserves the
+  original for analytics), and the row is a normal live trade — never
+  'cancelled'. P&L everywhere uses filled quantity. `finalize('cancelled')`
+  hard-codes 0 only when cumQty is genuinely 0. Backfill: one-off script
+  flags the two known bad rows (HTH, BBT) in `note` rather than rewriting
+  history. The manual-exit fan-out (one close fill attributed to every
+  tracked trade on the symbol) allocates by quantity, refusing to
+  over-attribute beyond the broker fill.
+  Harness: outcome-tracker scenario tests through the fake API — partial
+  then cancel, partial then fill-out, partial then stop-triggered (exit
+  resized), zero-fill cancel.
+- **WP3 Reverse reconciliation** (crit. 6 second half)
+  Files: `outcome-tracker.ts` (reconciler), new `broker-adopt.ts`.
+  Design: on startup and every N minutes, diff broker openOrders+positions
+  against DB. Unknown broker ORDER on a symbol Dexter tracks → adopt into
+  the trade's `orderIds` (by orderRef when ours, else flagged). Unknown
+  broker POSITION → create an `adopted` proposal row (source='adopted',
+  entry=avgCost, no score) so caps see it, and notify the operator loudly.
+  Deliberately conservative: adoption never places or cancels orders by
+  itself. Harness: reconciler tests over fake snapshots (orphan order,
+  manual position, account mismatch).
+- **WP4 Broker-canonical exposure** (crit. 8)
+  Files: `proposal-executor.ts`, `trade-proposals.ts`, new
+  `exposure-snapshot.ts`.
+  Design: acceptance-time exposure = union(DB rows, broker snapshot
+  ≤10s old) taking the MAX per symbol; open-position count = distinct
+  symbols in the union; failure to fetch the snapshot within timeout fails
+  the accept CLOSED (a proposal can wait; unknown exposure cannot).
+  Depends on WP3 (adopted rows make the union mostly redundant — the
+  snapshot is the backstop). Harness: gate tests where broker and DB
+  disagree in each direction.
+
+## Phase 2 — policy integrity (audit crit. 9–12)
+
+- **WP5 Overnight conversion vetting** (crit. 9, HIGH)
+  Files: `eod-triage.ts`, `outcome-tracker.ts`, `proposal-risk-gate.ts`.
+  Design: triage's keep decisions run through a real overnight gate before
+  the bell — same checks a deliberate GTC accept gets (overnight per-name
+  and book caps at MARKET value, sector cap, earnings, macro), fail-closed
+  on missing data (a keep the gate cannot price becomes a close). Cap
+  breach trims: close keeps worst-first (lowest P&L%) until the book fits.
+  The 🌙 conversion then only ever fires on gate-passed positions; its
+  notification stops apologizing. `decideEodAction` fail-open branches
+  (no price / no momentum → keep) flip to fail-closed (→ close) — a
+  decision the operator can override per-symbol via a `keep SYMBOL` reply
+  window before the bell (decision point D2 below).
+  Harness: extend eod-triage decision tests — cap-trim ordering, gate-fail
+  close, missing-data close, override path.
+- **WP6 Fail-closed acceptance context** (crit. 10, HIGH)
+  Files: `proposal-executor.ts`, `daily-atr.ts`, `proposal-risk-gate.ts`.
+  Design: accept refetches daily ATR, EMA10, last price, earnings window;
+  any fetch failure refuses the accept (transient — gates re-run on retry,
+  matching the existing refusal philosophy). Noise-stop, target-reach,
+  extension, and chase checks become unconditional at accept. Unknown
+  sector stops skipping the cap: it counts into an 'UNKNOWN' bucket with
+  its own cap (decision point D3). Creation-time checks stay best-effort
+  (creation is advisory; acceptance is the contract).
+  Harness: executor tests with each context fetch failing → named refusal.
+- **WP7 Microstructure gates** (crit. 11, HIGH)
+  Files: `proposal-risk-gate.ts`, new `src/tools/ibkr/microstructure.ts`.
+  Design: at accept, fetch quote + 20-day ADV once: hard-refuse when
+  spread% > cap (config `max_spread_pct`), order notional > `max_adv_pct`
+  of ADV, price < min_price (exists), or — for shorts — contract not
+  shortable (reqContractDetails/shortable tick). SSR/halt/LULD detection is
+  best-effort v1: refuse on `halted` tick when available, log otherwise.
+  `min_avg_volume` moves from advisory to this gate. New YAML keys ride
+  WP0.1 validation.
+  Harness: gate unit tests + one paper-session e2e checking refusal copy.
+- **WP8 One currency** (crit. 12, MED)
+  Files: `daily-loss-guard.ts`, `position-sizer.ts`, new `fx.ts`.
+  Design: `fetchNetLiquidation` stops discarding the currency tag; a
+  non-USD base converts via IBKR's own `ExchangeRate` account value
+  (fallback: EUR.USD snapshot, cached 1h, hard-refuse sizing if
+  unavailable and base ≠ USD). Every cap/budget/headroom compares USD to
+  USD. The audit's "conservative today" direction is verified in a test
+  that would fail if the direction ever flips.
+
+## Phase 3 — research validity (parallel; audit backtester + scorer §)
+
+- **WP9 Backtester: honest replay** (MED — decision point D1)
+  Recommended scope (rebuild-lite, ~1 session): process bar i BEFORE
+  signals from bar i (kills the same-bar look-ahead); per-symbol bar
+  advance via the existing index map (kills first-ticker pricing);
+  gap-aware stop fills (`min(stop, open)` long / `max` short); warm-up
+  preloaded from before startDate; risk-based sizing matching the live
+  sizer; 2R defaults matching the live gate; per-symbol metrics from
+  per-symbol curves or dropped; delete the inert walk-forward train pass
+  until a fitting step exists; archive date-bound fix; day-level sentiment
+  behind an explicit `lookaheadOk` flag. `src/backtest/*.test.ts` lands
+  FIRST: "order submitted on bar i fills at bar i+1 open" is the anchor
+  test the whole file hangs on. Until this WP is merged the UNTRUSTED
+  stance stays in force; calibrate-scorer refuses to run against the old
+  engine (version stamp).
+- **WP10 Scorer statistics** (MED)
+  `ta-indicators.ts` + `signal-scorer.ts` + `opportunity-engine.ts`, in
+  slices, each with the currently-missing `ta-indicators.test.ts`:
+  session-reset VWAP; RVOL vs same-time-of-day mean over N sessions
+  (excluding current bar); MACD slope normalized by ATR; missing data
+  yields a `coverage` field consumed as a score CAP not a neutral fill;
+  drop the in-progress bar; fix `|| null` zero coercions. Engine: scan
+  direction becomes per-scan votes (conflict → no direction, no bonus);
+  nondirectional scans stop defaulting long (direction from day-move sign
+  when known, else scored both ways and the better side proposed);
+  freshness verdict lands on `Opportunity` and stale candidates are
+  refused at trigger eligibility; multi-scan bonus only for AGREEING
+  scans; event-mover boost capped at the extension gate's ceiling so the
+  engine stops promoting candidates the gate must refuse; fix the cycle
+  mutex and the "top-3" prompt claim. NOTE: these change discovery
+  behavior — land BEFORE the freeze, never during (they are part of what
+  gets frozen).
+- **WP11 EOD/tracker residuals** (MED) — same-symbol double-close guard
+  (one close per symbol per run; broker-position close caps at the
+  proposals' summed quantity, decision point D4); `hourAgo` by timestamp
+  not index; `finalize` re-dispatches order events that arrived during its
+  await window instead of dropping them; persist auto-protect GTC ids from
+  the non-keep branch onto the row (closes the orphan-pair hole).
+
+## Phase 4 — frozen validation (WP-VAL; audit "Live gate" §3)
+
+Prereq: Phases 0–2 landed; WP10 landed or explicitly deferred WITH its
+items frozen as-is. Then:
+
+1. Tag the freeze (`validation-freeze-1`). From the tag: no rule, gate,
+   scorer, or sizing changes. Bug fixes allowed only for accounting
+   correctness, each logged in the validation journal.
+2. Pre-register `docs/handbook/VALIDATION-PROTOCOL.md` BEFORE the first
+   frozen trade: sample ≥100 correctly-accounted filled trades spanning
+   ≥2 regime labels; acceptance = net expectancy > 0 after costs AND
+   profit factor ≥ 1.3 AND max drawdown within the live daily-loss math
+   AND score-decile monotonicity (Spearman > 0 with p < 0.05) if
+   confidence sizing is ever to turn on. Failing any → no live, new
+   iteration, new freeze.
+3. Weekly automated scorecard (extends benchmark.ts) so drift from the
+   protocol is visible, not remembered.
+
+## Decisions (resolved by the operator, 2026-08-20)
+
+- **D1 RESOLVED: rebuild.** WP9 rebuild-lite proceeds as specced;
+  calibrate-scorer stays version-gated until the new engine lands.
+- **D2 RESOLVED: fail-closed WITH override.** WP5 flips EOD fail-open
+  branches to close, and adds a pre-bell `keep SYMBOL` reply window: the
+  triage report lists gate-failed keeps, the operator may reply
+  `keep SYMBOL` before the bell to override (logged as an explicit
+  operator decision on the row).
+- **D3 RESOLVED: capped UNKNOWN bucket.** Unresolvable sectors count into
+  a shared 'UNKNOWN' bucket with its own cap (same percentage as a named
+  sector). Rationale: hard refusal would blanket-block ETFs and Nasdaq
+  metadata misses; the bucket keeps them tradeable while bounding the
+  concentration a blind spot can accumulate.
+- **D4 RESOLVED: close everything.** closePosition keeps closing the full
+  broker position, manually-held shares included — one `close SYMBOL`
+  means flat, no residue. WP11's double-close guard therefore dedupes by
+  symbol per run (first close wins, second becomes a no-op) rather than
+  capping quantity.
+- **D5 RESOLVED: single-account.** WP1 refuses multi-account connections;
+  revisit only if a second account materializes.
+
+## Traceability
+
+| Audit item | WP | | Audit item | WP |
+|---|---|---|---|---|
+| crit. 6 ack/idempotency | WP1, WP3 | | backtester § | WP9 |
+| crit. 7 partial fills | WP2 | | scorer § | WP10 |
+| crit. 8 exposure truth | WP4 | | gateway § cheap | WP0.3–0.7 |
+| crit. 9 overnight vetting | WP5 | | observability | WP0.8, WP0.9 |
+| crit. 10 fail-open context | WP6 | | logging | WP0.6 |
+| crit. 11 microstructure | WP7 | | EOD residuals | WP11 |
+| crit. 12 currency | WP8 | | validation | WP-VAL |
+| crit. 13 YAML | WP0.1 | | | |
+
+Estimated calendar: Phases 0–3 ≈ 8–14 working sessions; Phase 4 is
+calendar-bound (~5–10 trading weeks for 100 filled trades at recent fill
+rates). `IBKR_ALLOW_LIVE` stays false throughout.
