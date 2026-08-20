@@ -1,4 +1,3 @@
-import { appendFileSync } from 'node:fs';
 import type { GroupContext } from '../agent/prompts.js';
 import { ensureHeartbeatCronJob } from '../cron/heartbeat-migration.js';
 import { captureNetLiqBaseline } from '../services/daily-loss-guard.js';
@@ -43,15 +42,14 @@ import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
 import { startProfitTrail, stopProfitTrail } from '@/services/profit-trail.js';
 import { catchUpPatternScan } from '@/services/pattern-scanner.js';
 import { startStaleEntrySweeper, stopStaleEntrySweeper } from '@/services/stale-entry-sweeper.js';
+import { makeDebugLog } from './debug-log.js';
 import { registerScanHealthAlerts } from './health-alerts.js';
 import { registerTriggerAlerts } from './trigger-alerts.js';
 import { registerMoverAlerts } from './mover-alerts.js';
 import { cleanMarkdownForWhatsApp } from './utils.js';
 
-const LOG_PATH = dexterPath('gateway-debug.log');
-function debugLog(msg: string) {
-  appendFileSync(LOG_PATH, `${new Date().toISOString()} ${msg}\n`);
-}
+// Redacting, size-capped sink (WP0.6) — raw phones/JIDs never hit disk.
+const debugLog = makeDebugLog(dexterPath('gateway-debug.log'));
 
 export type GatewayService = {
   stop: () => Promise<void>;

@@ -13,13 +13,11 @@ import { isRecentInboundMessage } from './dedupe.js';
 import { readSelfId } from './auth-store.js';
 import { checkInboundAccessControl } from '../../access-control.js';
 import { resolveJidToPhoneJid, type LidLookup } from './lid.js';
-import { appendFileSync } from 'node:fs';
 import { dexterPath } from '../../../utils/paths.js';
+import { makeDebugLog } from '../../debug-log.js';
 
-const LOG_PATH = dexterPath('gateway-debug.log');
-function debugLog(msg: string) {
-  appendFileSync(LOG_PATH, `${new Date().toISOString()} ${msg}\n`);
-}
+// Redacting, size-capped sink (WP0.6) — raw phones/JIDs never hit disk.
+const debugLog = makeDebugLog(dexterPath('gateway-debug.log'));
 
 function extractMentionedJids(message: WAMessage): string[] {
   const rawMsg = message.message;
@@ -195,7 +193,9 @@ export async function monitorWebInbox(params: {
       const messageTimestampMs = message.messageTimestamp
         ? Number(message.messageTimestamp) * 1000
         : undefined;
-      debugLog(`[inbound] from=${from} selfE164=${selfE164} isGroup=${isGroup} isFromMe=${message.key?.fromMe} allowFrom=${JSON.stringify(params.allowFrom)} dmPolicy=${params.dmPolicy} groupPolicy=${params.groupPolicy}`);
+      // Allowlist logged as a COUNT — its contents are the operator's
+      // contact list, which has no business in a debug file (WP0.6).
+      debugLog(`[inbound] from=${from} selfE164=${selfE164} isGroup=${isGroup} isFromMe=${message.key?.fromMe} allowFrom=<${params.allowFrom?.length ?? 0} entries> dmPolicy=${params.dmPolicy} groupPolicy=${params.groupPolicy}`);
       const access = await checkInboundAccessControl({
         accountId: params.accountId,
         from,
@@ -233,7 +233,7 @@ export async function monitorWebInbox(params: {
       }
 
       const body = extractText(message);
-      debugLog(`[inbound] body="${body.slice(0, 50)}..."`);
+      debugLog(`[inbound] body="${body.slice(0, 40)}${body.length > 40 ? '…' : ''}" len=${body.length}`);
       if (!body.trim()) {
         debugLog(`[inbound] skipping empty body`);
         continue;
