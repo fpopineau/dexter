@@ -60,6 +60,29 @@ const HALF_DAYS = new Set([
 ]);
 
 // ---------------------------------------------------------------------------
+// Calendar coverage (WP0.5, REMEDIATION-2026-08-20). The tables above are
+// hand-maintained; past their last year every holiday silently becomes a
+// trading day (isMarketHoliday → false) and the session logic treats closed
+// days as open. Surface the cliff instead of falling off it.
+// ---------------------------------------------------------------------------
+
+const LAST_COVERED_YEAR = Math.max(...[...HOLIDAYS].map((d) => Number(d.slice(0, 4))));
+
+export type CalendarCoverage = 'ok' | 'expiring' | 'expired';
+
+/** Pure: coverage status for the ET date `todayIso` (YYYY-MM-DD).
+ *  'expiring' from Dec 1 of the last covered year — a month of warnings
+ *  before 'expired' makes every holiday a phantom trading day. */
+export function calendarCoverageStatus(todayIso: string): { status: CalendarCoverage; lastCoveredYear: number } {
+    const year = Number(todayIso.slice(0, 4));
+    if (year > LAST_COVERED_YEAR) return { status: 'expired', lastCoveredYear: LAST_COVERED_YEAR };
+    if (year === LAST_COVERED_YEAR && todayIso >= `${year}-12-01`) {
+        return { status: 'expiring', lastCoveredYear: LAST_COVERED_YEAR };
+    }
+    return { status: 'ok', lastCoveredYear: LAST_COVERED_YEAR };
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -122,11 +145,10 @@ export function getMarketSession(date?: Date): SessionInfo {
 
     // Regular: 09:30–16:00 (or 13:00 on half-days)
     if (totalMin >= 570 && totalMin < regularClose) {
-        const afterHoursOrOvernight = isHalfDay ? MarketSession.AFTER_HOURS : MarketSession.AFTER_HOURS;
         return {
             session: MarketSession.REGULAR,
             minutesUntilChange: regularClose - totalMin,
-            nextSession: afterHoursOrOvernight,
+            nextSession: MarketSession.AFTER_HOURS,
             isHalfDay,
             isHoliday: false,
             currentTimeET: formatted,

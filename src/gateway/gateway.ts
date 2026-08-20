@@ -9,6 +9,7 @@ import { isOpportunityEngineEnabled, startOpportunityEngine, stopOpportunityEngi
 import { startOutcomeTracker, stopOutcomeTracker } from '../services/outcome-tracker.js';
 import { isUniverseSweepEnabled, startUniverseSweep, stopUniverseSweep } from '../services/universe-sweep.js';
 import { getSetting } from '../utils/config.js';
+import { logger } from '../utils/index.js';
 import { dexterPath } from '../utils/paths.js';
 import { enqueueForSession, isSessionRunning, runAgentForMessage } from './agent-runner.js';
 import { createChannelManager } from './channels/manager.js';
@@ -272,6 +273,18 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
   // first accept hours later. Throws with the full error list.
   const { getRiskRules } = await import('@/tools/ibkr/risk-rules.js');
   getRiskRules();
+
+  // Calendar cliff check (WP0.5): past the holiday table's last year,
+  // every holiday silently becomes a trading day. Loud, not fatal — the
+  // gateway still runs, but every boot names the problem.
+  const { calendarCoverageStatus } = await import('@/utils/market-hours.js');
+  const todayEt = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+  const coverage = calendarCoverageStatus(todayEt);
+  if (coverage.status === 'expired') {
+    logger.error(`[gateway] HOLIDAY TABLE EXPIRED: market-hours.ts covers through ${coverage.lastCoveredYear} — holidays now read as TRADING DAYS. Extend HOLIDAYS/HALF_DAYS before trusting any session logic.`);
+  } else if (coverage.status === 'expiring') {
+    logger.warn(`[gateway] holiday table ends with ${coverage.lastCoveredYear} — extend market-hours.ts HOLIDAYS/HALF_DAYS before January.`);
+  }
 
   const cfg = loadGatewayConfig(params.configPath);
   const plugin = createWhatsAppPlugin({

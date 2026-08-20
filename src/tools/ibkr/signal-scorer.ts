@@ -55,19 +55,19 @@ function normalizeWeights(w: FactorWeights): FactorWeights {
 }
 
 let weightsOverride: FactorWeights | null = null;
-let fileWeights: { weights: FactorWeights; calibratedAt: string | null } | null | undefined; // undefined = not yet loaded
+let fileWeights: { weights: FactorWeights; calibratedAt: string | null; reset: boolean } | null | undefined; // undefined = not yet loaded
 
 /** Set (or clear with null) an in-process weights override — calibration use. */
 export function setActiveWeights(w: FactorWeights | null): void {
     weightsOverride = w ? normalizeWeights(w) : null;
 }
 
-function loadFileWeights(): { weights: FactorWeights; calibratedAt: string | null } | null {
+function loadFileWeights(): { weights: FactorWeights; calibratedAt: string | null; reset: boolean } | null {
     if (fileWeights !== undefined) return fileWeights;
     try {
         const dir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
         const raw = JSON.parse(readFileSync(join(dir, 'scorer-weights.json'), 'utf-8')) as
-            Partial<FactorWeights> & { _meta?: { calibratedAt?: string } };
+            Partial<FactorWeights> & { _meta?: { calibratedAt?: string; note?: string } };
         if (
             typeof raw.momentum === 'number' && typeof raw.meanReversion === 'number' &&
             typeof raw.volume === 'number' && typeof raw.trend === 'number'
@@ -75,6 +75,9 @@ function loadFileWeights(): { weights: FactorWeights; calibratedAt: string | nul
             fileWeights = {
                 weights: normalizeWeights(raw as FactorWeights),
                 calibratedAt: typeof raw._meta?.calibratedAt === 'string' ? raw._meta.calibratedAt : null,
+                // A reset file (the 2026-08-11 rejection) is NOT a calibration
+                // — its provenance label must say so (WP0.2).
+                reset: typeof raw._meta?.note === 'string' && /\breset\b/i.test(raw._meta.note),
             };
         } else {
             fileWeights = null;
@@ -94,6 +97,8 @@ export interface WeightsInfo {
     weights: FactorWeights;
     source: 'override' | 'file' | 'defaults';
     calibratedAt: string | null;
+    /** True when the file records a deliberate reset, not a calibration. */
+    reset?: boolean;
 }
 
 /** Weights + provenance — surfaced in every score so a zeroed or skewed
@@ -101,7 +106,7 @@ export interface WeightsInfo {
 export function getActiveWeightsInfo(): WeightsInfo {
     if (weightsOverride) return { weights: weightsOverride, source: 'override', calibratedAt: null };
     const file = loadFileWeights();
-    if (file) return { weights: file.weights, source: 'file', calibratedAt: file.calibratedAt };
+    if (file) return { weights: file.weights, source: 'file', calibratedAt: file.calibratedAt, reset: file.reset };
     return { weights: DEFAULT_WEIGHTS, source: 'defaults', calibratedAt: null };
 }
 
@@ -112,6 +117,9 @@ export function weightsSourceLabel(info: WeightsInfo): string {
     const zeroNote = zeroed.length ? ` — ${zeroed.join(', ')} weighted ZERO (contribute nothing)` : '';
     if (info.source === 'override') return `in-process override (calibration run)${zeroNote}`;
     if (info.source === 'file') {
+        if (info.reset) {
+            return `scorer-weights.json (reset ${info.calibratedAt?.slice(0, 10) ?? 'date unknown'} — awaiting recalibration)${zeroNote}`;
+        }
         return `scorer-weights.json${info.calibratedAt ? ` (calibrated ${info.calibratedAt.slice(0, 10)})` : ''}${zeroNote}`;
     }
     return `defaults (equal weights)${zeroNote}`;

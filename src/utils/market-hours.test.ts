@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { getMarketSession, isMarketHalfDay, isMarketHoliday, MarketSession } from './market-hours.js';
+import { calendarCoverageStatus, getMarketSession, isMarketHalfDay, isMarketHoliday, MarketSession } from './market-hours.js';
 
 // All dates below are summer (EDT, UTC−4), so HH:00Z = HH−4 ET.
 
@@ -66,5 +66,23 @@ describe('isTradeableSession (the bell-race gate, 2026-08-11)', () => {
         expect(isTradeableSession(MarketSession.PRE_MARKET)).toBe(true);
         expect(isTradeableSession(MarketSession.AFTER_HOURS)).toBe(false);
         expect(isTradeableSession(MarketSession.CLOSED)).toBe(false);
+    });
+});
+
+describe('calendarCoverageStatus (WP0.5 — the 2028 cliff)', () => {
+    test('mid-coverage years are ok', () => {
+        expect(calendarCoverageStatus('2026-08-20').status).toBe('ok');
+        expect(calendarCoverageStatus('2027-06-15').status).toBe('ok');
+    });
+
+    test('December of the last covered year warns', () => {
+        expect(calendarCoverageStatus('2027-12-01').status).toBe('expiring');
+        expect(calendarCoverageStatus('2027-12-31').status).toBe('expiring');
+    });
+
+    test('past the table every holiday is a phantom trading day — expired', () => {
+        const v = calendarCoverageStatus('2028-01-01');
+        expect(v.status).toBe('expired');
+        expect(v.lastCoveredYear).toBe(2027);
     });
 });

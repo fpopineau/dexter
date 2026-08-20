@@ -31,4 +31,19 @@ describe('weightsSourceLabel (weight provenance in every score)', () => {
         const label = weightsSourceLabel({ weights: DEFAULT_WEIGHTS, source: 'override', calibratedAt: null });
         expect(label).toContain('override');
     });
+
+    test('a RESET file must not read as calibrated (WP0.2, audit 2026-08-20)', () => {
+        // The live scorer-weights.json is a deliberate reset to equal
+        // weights; printing "calibrated <date>" for it is an integrity leak
+        // in the exact surface built to prevent one.
+        const label = weightsSourceLabel({
+            weights: DEFAULT_WEIGHTS,
+            source: 'file',
+            calibratedAt: '2026-08-11T00:00:00.000Z',
+            reset: true,
+        });
+        expect(label).not.toContain('calibrated');
+        expect(label).toContain('reset 2026-08-11');
+        expect(label).toContain('awaiting recalibration');
+    });
 });
