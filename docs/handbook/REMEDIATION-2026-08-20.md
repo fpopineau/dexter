@@ -260,7 +260,18 @@ better-of-both, family-based multi-scan bonus, boost suppressed past
 the extension gate's ceiling, staleness trigger-ineligible, real cycle
 mutex, honest trigger prompt. NOTE: scorer semantics changed — the
 score distribution shifts; the validation freeze must postdate this.
-Next: WP11 residuals, then Phase 4.
+
+**STATUS: WP11 LANDED 2026-08-21 — PHASE 3 COMPLETE** (commit ad80fe5;
+suite 667 green). Double-close guard (D4 first-wins), timestamp hourAgo,
+finalize event buffer + resurrect re-dispatch, closePosition orphan-GTC
+sweep by orderRef (closes 2026-08-06 finding 10).
+
+**PHASE 4 STATUS: protocol PRE-REGISTERED 2026-08-21**
+([VALIDATION-PROTOCOL.md](VALIDATION-PROTOCOL.md)); the freeze tag
+`validation-freeze-1` is the OPERATOR'S to place after its prerequisites
+(WP7 lot-factor + tick-semantics live-verify, WP2/WP11 paper-path
+verify, one clean boot). All code phases of this remediation are
+complete.
 
 - **WP9 Backtester: honest replay** (MED — decision point D1)
   Recommended scope (rebuild-lite, ~1 session): process bar i BEFORE
