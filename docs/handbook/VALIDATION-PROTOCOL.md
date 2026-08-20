@@ -22,15 +22,22 @@ positive expectancy after costs, not improved loss control.
 
 ### Prerequisites for tagging (operator checklist)
 
-1. Live-verify on the paper gateway (WP7): the IBKR daily-volume lot
-   factor (×100 in `daily-atr.ts`) against a known symbol's published
-   ADV, and tick-236 field 46/49 semantics (shortable/halted) against a
-   hard-to-borrow name and, opportunistically, a halted one.
+1. ✅ **VERIFIED 2026-08-21** (`scripts/verify-paper-prereqs.ts`, rerun
+   any time): the provisional ×100 lot factor was WRONG — this fetch
+   path returns share-denominated volume (AAPL read 3.09B/day, 100× its
+   ~31M ADV, which would have let `min_avg_volume` pass almost
+   anything). Factor removed, ADVs now read plausibly (AAPL 30.9M,
+   NVDA 68.5M, KO 8.2M). Tick-236 field 46 (shortable) confirmed
+   (AAPL/BYND true); field 49 (halted) is silent on a normal tape —
+   the gate's null→note design stands. EUR.USD midpoint 1.168 ✓.
 2. Live-verify the WP2 resize path and the WP11 buffered-events path
-   once on paper (both are wall-clock/broker-event dependent and
-   test-gated).
+   once on paper (both are broker-event dependent and cannot be forced:
+   they need a genuine partial fill / EOD-keep window). Observe
+   opportunistically during paper trading, or accept on harness
+   coverage — the operator's call at tag time.
 3. One clean gateway boot: YAML validation passes, calendar coverage ok,
-   no adoption-sweep surprises.
+   no adoption-sweep surprises. (The rules/calendar halves passed in the
+   2026-08-21 script run; confirm on the next real gateway start.)
 
 ## Sample definition
 
