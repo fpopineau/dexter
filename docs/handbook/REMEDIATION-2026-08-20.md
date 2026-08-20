@@ -27,8 +27,12 @@ Everything else hangs off the spine or runs parallel.
 
 ## Phase 0 — quick hardening (audit: "cheap" items)
 
-All LOW/MED, no interdependencies, safe to land in any order. One commit
-each or one batched commit.
+**STATUS: LANDED 2026-08-20** (commits b6181ec…e2b57f6, one per WP; suite
+590 green). Closes audit items: crit. 13 (YAML), the gateway-section cheap
+items (null-risk contract, gate symmetry, calendar cliff, log redaction,
+trigger causality + decline-ledger decoupling, source lanes, MFE/MAE
+coverage) and the weights-provenance leak. Next: Phase 1 (WP1, broker
+truth) — starts with the fake-IBApi ack harness in bracket.test.ts.
 
 - **WP0.1 Risk-YAML validation** (audit crit. 13) — `risk-rules.ts`:
   schema check per key (finite number in range, booleans strictly
