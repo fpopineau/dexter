@@ -85,7 +85,14 @@ Recorded deviation: an unconfirmed placement is marked 'executed' with a
 loud `placement-unconfirmed` note instead of staying 'executing' — an
 'executing' row is invisible to the tracker and releasable by the claim
 sweeper, and a released claim over live orders invites double placement.
-WP2 (partial-fill truth) is next, on the WP1 fake-IBApi harness.
+
+**STATUS: WP2 LANDED 2026-08-21** (commit c55082d; suite 602 green).
+Entry recorded on first partial; terminal partial → quantity downgrade
+(planned_quantity preserved) + resized GTC OCA pair replacing the
+full-size exits (re-point before cancel); manual-exit fills allocated by
+the close order's shares — starved rows get P&L unknown, never invented.
+HTH/BBT ledger rows annotated untrustworthy. WP3 (reverse
+reconciliation) is next.
 
 - **WP1 Acknowledged placement + identity** (crit. 6)
   Files: `bracket.ts`, `orders.ts`, new `src/tools/ibkr/order-ack.ts`,
