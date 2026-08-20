@@ -33,12 +33,14 @@
  *       (recorded as null, never guessed).
  */
 
-import { allocReqId, getIBApi, isNonFatalIbkrError, onReconnect } from '@/tools/ibkr/connection.js';
+import { allocReqId, getIBApi, getVerifiedSingleAccount, isNonFatalIbkrError, onReconnect } from '@/tools/ibkr/connection.js';
+import { withOrderLock } from '@/tools/ibkr/order-lock.js';
+import { getNextValidOrderId } from '@/tools/ibkr/orders.js';
 import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
 import { isMarketHalfDay } from '@/utils/market-hours.js';
 import { logger } from '@/utils';
-import type { CommissionReport, Contract, Execution, IBApi } from '@stoqey/ib';
-import { BarSizeSetting, EventName } from '@stoqey/ib';
+import type { CommissionReport, Contract, Execution, IBApi, Order } from '@stoqey/ib';
+import { BarSizeSetting, EventName, OrderAction, OrderType, SecType, TimeInForce } from '@stoqey/ib';
 import {
     closeProposal,
     convertToOvernightHold,
@@ -46,7 +48,9 @@ import {
     listTrackable,
     markEntryFilled,
     recordLateExitFill,
+    recordPartialEntryDowngrade,
     recordTradeExcursion,
+    setProposalStatus,
     type ExitReason,
     type TradeProposal,
 } from './trade-proposals.js';
@@ -193,6 +197,11 @@ interface TrackedTrade {
     stopOrderId: number;
     entryAvgPrice: number | null;
     entryRecorded: boolean;
+    /** Cumulative entry shares filled so far (WP2 — the number the old code
+     *  received as `_filled` and threw away). */
+    entryCumQty: number;
+    /** First-fill timestamp — later avg-price updates must not rewrite it. */
+    entryFilledAtMs: number | null;
     exitAvgPrice: number | null;
     exitReason: ExitReason | null;
     /** execIds seen for this trade — attributes commissionReports. */
@@ -223,8 +232,10 @@ export function onTradeClosed(cb: TradeClosedCallback): () => void {
     return () => closedCallbacks.delete(cb);
 }
 
-/** Let commission reports trail the final fill before computing net P&L. */
+/** Let commission reports trail the final fill before computing net P&L.
+ *  Mutable for the fake-API harness (real timers, shrunk delay). */
 const FINALIZE_DELAY_MS = 2_500;
+let finalizeDelayMs = FINALIZE_DELAY_MS;
 /** Executed proposals older than this are swept as 'unknown' at startup. */
 const STALE_TRACKING_MS = 5 * 24 * 3600_000;
 
@@ -516,7 +527,7 @@ async function notifyAutoProtect(message: string): Promise<void> {
     }
 }
 
-function scheduleFinalize(trade: TrackedTrade, reason: ExitReason, note?: string, delayMs = FINALIZE_DELAY_MS): void {
+function scheduleFinalize(trade: TrackedTrade, reason: ExitReason, note?: string, delayMs = finalizeDelayMs): void {
     if (trade.closed || trade.finalizeTimer) return;
     trade.finalizeTimer = setTimeout(() => {
         trade.finalizeTimer = null;
@@ -571,25 +582,53 @@ export function trackManualExit(symbol: string, orderId: number, quantity: numbe
     );
 }
 
-/** A registered manual-exit order filled at `avgFillPrice`. */
+/** A registered manual-exit order filled at `avgFillPrice`.
+ *  WP2: attribution allocates the CLOSE ORDER's shares across the tracked
+ *  trades — the old fan-out paid every trade its full quantity, so a
+ *  10-share close could fabricate 15 shares of P&L when the DB and the
+ *  broker book had drifted. Shares run out → later trades close with P&L
+ *  unknown, never invented. */
 function handleManualExitFill(orderId: number, avgFillPrice: number): void {
     const manual = manualExitOrders.get(orderId);
     if (!manual) return;
     manualExitOrders.delete(orderId);
 
+    let remaining = manual.quantity;
     for (const trade of manual.trades) {
-        const note = `position closed at market by ${manual.source} @ ${avgFillPrice}`;
+        const alloc = Math.min(trade.quantity, remaining);
+        remaining = Math.round((remaining - alloc) * 10_000) / 10_000;
+        const note = `position closed at market by ${manual.source} @ ${avgFillPrice}` +
+            (alloc < trade.quantity ? ` (allocation: ${alloc} of ${trade.quantity} tracked shares — close order carried ${manual.quantity})` : '');
+
+        if (alloc <= 0) {
+            // The close order's shares are exhausted: this trade's exposure
+            // was not part of what the broker closed.
+            const starved = `manual close by ${manual.source} carried ${manual.quantity} shares — none left for this row (allocation exhausted); P&L unknown`;
+            if (!trade.closed) {
+                trade.pendingManualExit = undefined;
+                if (trade.finalizeTimer) {
+                    clearTimeout(trade.finalizeTimer);
+                    trade.finalizeTimer = null;
+                }
+                scheduleFinalize(trade, 'manual', starved);
+            }
+            continue;
+        }
+
         if (trade.closed) {
             // Finalized before the fill arrived (close placed outside RTH,
             // filled at the next open) — patch the blanks retroactively.
             if (trade.entryAvgPrice != null) {
-                const pnl = computeRealizedPnl(trade.direction, trade.quantity, trade.entryAvgPrice, avgFillPrice);
+                const pnl = computeRealizedPnl(trade.direction, alloc, trade.entryAvgPrice, avgFillPrice);
                 void recordLateExitFill(trade.proposalId, { exitFillPrice: avgFillPrice, realizedPnl: pnl, note }).catch(
                     (err) => logger.error(`[outcome-tracker] late exit fill ${trade.proposalId}: ${err}`),
                 );
             }
             continue;
         }
+        // finalize computes P&L from trade.quantity — pin it to the
+        // allocation so a drifted book cannot inflate the number.
+        trade.quantity = alloc;
         trade.exitAvgPrice = avgFillPrice;
         trade.exitReason = 'manual';
         trade.pendingManualExit = undefined;
@@ -610,10 +649,55 @@ const MANUAL_EXIT_GRACE_MS = 30_000;
 
 const TERMINAL_STATUSES = new Set(['Cancelled', 'ApiCancelled', 'Inactive']);
 
+/** Entry-order lifecycle (WP2): every fill — partial or complete — records;
+ *  a terminal entry with a partial fill downgrades the row to the REAL
+ *  position and resizes the exits; only a genuine zero-fill terminal is
+ *  'cancelled'. */
+function handleEntryStatus(trade: TrackedTrade, status: string, filled: number, avgFillPrice: number): void {
+    if (isIbNumber(filled) && filled > 0) {
+        trade.entryCumQty = Math.max(trade.entryCumQty, filled);
+        if (isIbNumber(avgFillPrice) && avgFillPrice > 0) {
+            if (!trade.entryRecorded) {
+                trade.entryRecorded = true;
+                trade.entryFilledAtMs = Date.now();
+                trade.entryAvgPrice = avgFillPrice;
+                void markEntryFilled(trade.proposalId, avgFillPrice, trade.entryFilledAtMs).catch((err) =>
+                    logger.error(`[outcome-tracker] markEntryFilled ${trade.proposalId}: ${err}`),
+                );
+                logger.info(`[outcome-tracker] ${trade.proposalId} entry filled ${filled}/${trade.quantity} @ ${avgFillPrice}`);
+            } else if (trade.entryAvgPrice !== avgFillPrice) {
+                // avgFillPrice is cumulative — keep the DB in step, but the
+                // first-fill timestamp is history and stays.
+                trade.entryAvgPrice = avgFillPrice;
+                void markEntryFilled(trade.proposalId, avgFillPrice, trade.entryFilledAtMs ?? Date.now()).catch((err) =>
+                    logger.error(`[outcome-tracker] markEntryFilled ${trade.proposalId}: ${err}`),
+                );
+            }
+        }
+    }
+    if (status === 'Filled' && trade.entryCumQty >= trade.quantity) {
+        trade.entryCumQty = trade.quantity;
+        return;
+    }
+    if (TERMINAL_STATUSES.has(status)) {
+        if (trade.entryCumQty <= 0) {
+            // Entry never filled and is gone — bracket is dead, nothing traded.
+            scheduleFinalize(trade, 'cancelled', 'entry order cancelled before filling');
+        } else if (trade.entryCumQty < trade.quantity) {
+            // The audit's HTH/BBT case: a REAL position of entryCumQty shares
+            // exists, and the old code closed the row as 'cancelled, P&L 0'
+            // while full-size exits kept working (reversal risk on fill).
+            void resizeAfterPartialEntry(trade).catch((err) =>
+                logger.error(`[outcome-tracker] ${trade.proposalId} partial-entry resize failed: ${err}`),
+            );
+        }
+    }
+}
+
 function handleOrderStatus(
     orderId: number,
     status: string,
-    _filled: number,
+    filled: number,
     remaining: number,
     avgFillPrice: number,
 ): void {
@@ -633,48 +717,130 @@ function handleOrderStatus(
     if (!entry || entry.trade.closed) return;
     const { trade, role } = entry;
 
+    if (role === 'entry') {
+        handleEntryStatus(trade, status, filled, avgFillPrice);
+        return;
+    }
+
     if (status === 'Filled' && remaining === 0) {
-        if (role === 'entry') {
-            if (!trade.entryRecorded && isIbNumber(avgFillPrice)) {
-                trade.entryRecorded = true;
-                trade.entryAvgPrice = avgFillPrice;
-                void markEntryFilled(trade.proposalId, avgFillPrice).catch((err) =>
-                    logger.error(`[outcome-tracker] markEntryFilled ${trade.proposalId}: ${err}`),
-                );
-                logger.info(`[outcome-tracker] ${trade.proposalId} entry filled @ ${avgFillPrice}`);
-            }
-        } else {
-            if (isIbNumber(avgFillPrice)) trade.exitAvgPrice = avgFillPrice;
-            trade.exitReason = role === 'takeProfit' ? 'target' : 'stop';
-            scheduleFinalize(trade, trade.exitReason);
-        }
+        if (isIbNumber(avgFillPrice)) trade.exitAvgPrice = avgFillPrice;
+        trade.exitReason = role === 'takeProfit' ? 'target' : 'stop';
+        scheduleFinalize(trade, trade.exitReason);
         return;
     }
 
     if (TERMINAL_STATUSES.has(status)) {
-        if (role === 'entry' && !trade.entryRecorded) {
-            // Entry never filled and is gone — bracket is dead, nothing traded.
-            scheduleFinalize(trade, 'cancelled', 'entry order cancelled before filling');
-            return;
+        trade.terminalExits.add(orderId);
+        const bothExitsDead =
+            trade.terminalExits.has(trade.takeProfitOrderId) &&
+            trade.terminalExits.has(trade.stopOrderId);
+        if (bothExitsDead && trade.exitReason === null && trade.entryRecorded) {
+            // Entry filled, both exits gone without filling: closed manually
+            // or the DAY bracket expired. P&L is unknown — never guessed.
+            // When a registered close order is working, give its fill time
+            // to arrive first: it carries the real exit price.
+            scheduleFinalize(
+                trade,
+                'manual',
+                'both bracket exits terminated without filling — position closed or left unprotected outside the bracket',
+                trade.pendingManualExit !== undefined ? MANUAL_EXIT_GRACE_MS : finalizeDelayMs,
+            );
         }
-        if (role !== 'entry') {
-            trade.terminalExits.add(orderId);
-            const bothExitsDead =
-                trade.terminalExits.has(trade.takeProfitOrderId) &&
-                trade.terminalExits.has(trade.stopOrderId);
-            if (bothExitsDead && trade.exitReason === null && trade.entryRecorded) {
-                // Entry filled, both exits gone without filling: closed manually
-                // or the DAY bracket expired. P&L is unknown — never guessed.
-                // When a registered close order is working, give its fill time
-                // to arrive first: it carries the real exit price.
-                scheduleFinalize(
-                    trade,
-                    'manual',
-                    'both bracket exits terminated without filling — position closed or left unprotected outside the bracket',
-                    trade.pendingManualExit !== undefined ? MANUAL_EXIT_GRACE_MS : FINALIZE_DELAY_MS,
-                );
-            }
+    }
+}
+
+/**
+ * A terminal entry with a partial fill (WP2). Order of operations is
+ * deliberate: (1) persist the downgrade — accounting truth must not depend
+ * on order placement succeeding; (2) place the resized OCA pair; (3)
+ * re-point tracking BEFORE cancelling the old full-size exits so their
+ * terminal events are ignored; (4) persist the new order ids. If placement
+ * fails, the old exits are LEFT WORKING: full-size protection over-covers
+ * a partial position (a fill would over-close and reverse), but no
+ * protection at all loses more — the operator is told either way.
+ */
+async function resizeAfterPartialEntry(trade: TrackedTrade): Promise<void> {
+    if (trade.closed) return;
+    const cum = trade.entryCumQty;
+    const planned = trade.quantity;
+    // A pending bothExitsDead finalize would close the row as 'manual'
+    // under this resize — the position is real and stays tracked.
+    if (trade.finalizeTimer) {
+        clearTimeout(trade.finalizeTimer);
+        trade.finalizeTimer = null;
+    }
+    await recordPartialEntryDowngrade(
+        trade.proposalId,
+        cum,
+        `entry terminated partially filled ${cum}/${planned} — quantity downgraded to the real position, exits resized (WP2)`,
+    );
+    trade.quantity = cum;
+    logger.warn(`[outcome-tracker] ${trade.proposalId} ${trade.symbol}: entry terminal at ${cum}/${planned} — resizing exits to the real position`);
+
+    const api = attachedApi;
+    const p = await getProposal(trade.proposalId).catch(() => null);
+    if (!api || !p) {
+        await notifyAutoProtect(
+            `⚠️ ${trade.proposalId} ${trade.symbol}: entry filled ${cum}/${planned} then terminated, and the exits could not be ` +
+            `resized (no broker attachment). The ORIGINAL full-size exits may still be working — a fill would over-close ` +
+            `and REVERSE the position. Review 'orders' and fix the sizes.`,
+        );
+        return;
+    }
+    try {
+        const account = getVerifiedSingleAccount();
+        const exitAction = trade.direction === 'long' ? OrderAction.SELL : OrderAction.BUY;
+        const contract: Contract = { symbol: trade.symbol, secType: SecType.STK, exchange: 'SMART', currency: 'USD' };
+        const { newStopId, newTpId } = await withOrderLock(async () => {
+            const stopId = await getNextValidOrderId(api);
+            const tpId = stopId + 1;
+            const ocaGroup = `dexter-resize-${trade.symbol}-${stopId}`;
+            // GTC deliberately (auto-protect convention): a resize can land
+            // near or after the bell, where fresh DAY exits are broker
+            // rejections — protection must survive the session either way.
+            const stopOrder: Order = {
+                orderId: stopId, account, orderRef: `${trade.proposalId}:stop2`,
+                action: exitAction, totalQuantity: cum, orderType: OrderType.STP,
+                auxPrice: p.stop, tif: TimeInForce.GTC, ocaGroup, ocaType: 1, transmit: true,
+            };
+            const tpOrder: Order = {
+                orderId: tpId, account, orderRef: `${trade.proposalId}:tp2`,
+                action: exitAction, totalQuantity: cum, orderType: OrderType.LMT,
+                lmtPrice: p.target, tif: TimeInForce.GTC, ocaGroup, ocaType: 1, transmit: true,
+            };
+            api.placeOrder(stopId, contract, stopOrder);
+            api.placeOrder(tpId, contract, tpOrder);
+            return { newStopId: stopId, newTpId: tpId };
+        });
+
+        const oldTp = trade.takeProfitOrderId;
+        const oldStop = trade.stopOrderId;
+        byOrderId.delete(oldTp);
+        byOrderId.delete(oldStop);
+        trade.takeProfitOrderId = newTpId;
+        trade.stopOrderId = newStopId;
+        byOrderId.set(newTpId, { trade, role: 'takeProfit' });
+        byOrderId.set(newStopId, { trade, role: 'stop' });
+        trade.terminalExits.clear();
+        for (const id of [oldTp, oldStop]) {
+            try { api.cancelOrder(id); } catch { /* already dead */ }
         }
+        await setProposalStatus(trade.proposalId, 'executed', {
+            orderIds: [trade.entryOrderId, newTpId, newStopId],
+        });
+        logger.info(`[outcome-tracker] ${trade.proposalId} exits resized to ${cum} (orders ${newTpId}/${newStopId}); old pair cancelled`);
+        await notifyAutoProtect(
+            `⚖️ ${trade.proposalId} ${trade.symbol}: the entry terminated after filling ${cum} of ${planned} shares. ` +
+            `The position is REAL at ${cum} shares: quantity downgraded, full-size exits cancelled, and a resized ` +
+            `GTC stop/target pair (${p.stop}/${p.target}) now protects exactly what exists.`,
+        );
+    } catch (err) {
+        logger.error(`[outcome-tracker] ${trade.proposalId} exit resize placement failed: ${err}`);
+        await notifyAutoProtect(
+            `⚠️ ${trade.proposalId} ${trade.symbol}: entry filled ${cum}/${planned} then terminated; resized exits could NOT ` +
+            `be placed (${err instanceof Error ? err.message : err}). The original FULL-SIZE exits were left working as ` +
+            `protection — a fill would over-close and reverse; trim them to ${cum} in TWS or close the position.`,
+        );
     }
 }
 
@@ -707,19 +873,31 @@ function handleExecDetails(_reqId: number, _contract: Contract, execution: Execu
     // gateway restart, where the orderStatus event was missed).
     const avg = isIbNumber(execution.avgPrice) ? execution.avgPrice : undefined;
     const cum = isIbNumber(execution.cumQty) ? execution.cumQty : undefined;
-    if (avg !== undefined && cum !== undefined && cum >= trade.quantity) {
-        if (role === 'entry' && !trade.entryRecorded) {
-            trade.entryRecorded = true;
-            trade.entryAvgPrice = avg;
-            void markEntryFilled(trade.proposalId, avg).catch((err) =>
-                logger.error(`[outcome-tracker] markEntryFilled ${trade.proposalId}: ${err}`),
-            );
-            logger.info(`[outcome-tracker] ${trade.proposalId} entry filled @ ${avg} (execDetails)`);
-        } else if (role !== 'entry' && trade.exitReason === null) {
-            trade.exitAvgPrice = avg;
-            trade.exitReason = role === 'takeProfit' ? 'target' : 'stop';
-            scheduleFinalize(trade, trade.exitReason);
+    if (avg === undefined || cum === undefined) return;
+    if (role === 'entry') {
+        // WP2: ANY entry execution records — the old `cum >= quantity` gate
+        // was the same all-or-nothing discard as orderStatus's `_filled`.
+        if (cum > 0) {
+            trade.entryCumQty = Math.max(trade.entryCumQty, cum);
+            if (!trade.entryRecorded) {
+                trade.entryRecorded = true;
+                trade.entryFilledAtMs = Date.now();
+                trade.entryAvgPrice = avg;
+                void markEntryFilled(trade.proposalId, avg, trade.entryFilledAtMs).catch((err) =>
+                    logger.error(`[outcome-tracker] markEntryFilled ${trade.proposalId}: ${err}`),
+                );
+                logger.info(`[outcome-tracker] ${trade.proposalId} entry filled ${cum}/${trade.quantity} @ ${avg} (execDetails)`);
+            } else if (trade.entryAvgPrice !== avg) {
+                trade.entryAvgPrice = avg;
+                void markEntryFilled(trade.proposalId, avg, trade.entryFilledAtMs ?? Date.now()).catch((err) =>
+                    logger.error(`[outcome-tracker] markEntryFilled ${trade.proposalId}: ${err}`),
+                );
+            }
         }
+    } else if (cum >= trade.quantity && trade.exitReason === null) {
+        trade.exitAvgPrice = avg;
+        trade.exitReason = role === 'takeProfit' ? 'target' : 'stop';
+        scheduleFinalize(trade, trade.exitReason);
     }
 }
 
@@ -897,6 +1075,10 @@ export function trackExecutedProposal(p: TradeProposal): void {
         stopOrderId,
         entryAvgPrice: p.entryFillPrice,
         entryRecorded: p.entryFillPrice != null,
+        // Restart case: a recorded fill price means the row's quantity IS
+        // the filled quantity (a prior downgrade already rewrote it).
+        entryCumQty: p.entryFillPrice != null ? p.quantity : 0,
+        entryFilledAtMs: p.entryFilledAt,
         exitAvgPrice: null,
         exitReason: null,
         execIds: new Set(),
@@ -972,6 +1154,35 @@ export function stopOutcomeTracker(): void {
         }
     }
     logger.info('[outcome-tracker] stopped');
+}
+
+// ---------------------------------------------------------------------------
+// Fake-API harness hooks (WP2). The tracker's contract is event-driven, so
+// the phase-1 harness drives the real handlers directly — no gateway.
+// ---------------------------------------------------------------------------
+
+export const __handleOrderStatusForTests = handleOrderStatus;
+export const __handleExecDetailsForTests = handleExecDetails;
+
+/** Forget all tracked state (per-test isolation). */
+export function __resetTrackerForTests(): void {
+    for (const trade of [...byProposalId.values()]) {
+        if (trade.finalizeTimer) clearTimeout(trade.finalizeTimer);
+    }
+    byProposalId.clear();
+    byOrderId.clear();
+    byExecId.clear();
+    manualExitOrders.clear();
+}
+
+/** Override the commission-trailing finalize delay; null restores. */
+export function __setFinalizeDelayForTests(ms: number | null): void {
+    finalizeDelayMs = ms ?? FINALIZE_DELAY_MS;
+}
+
+/** Inject a fake broker attachment (resize path); null detaches. */
+export function __attachApiForTests(api: IBApi | null): void {
+    attachedApi = api;
 }
 
 /** Diagnostics: proposals currently being watched. */

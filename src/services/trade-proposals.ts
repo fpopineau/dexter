@@ -65,6 +65,9 @@ export interface TradeProposal {
     /** Broker permIds aligned with orderIds; null entries where the ack
      *  never carried one (WP1). */
     orderPermIds: Array<number | null> | null;
+    /** Original intended quantity when a partial entry downgraded
+     *  `quantity` to the real fill (WP2); null = never downgraded. */
+    plannedQuantity: number | null;
     /** Failure or rejection detail. */
     note: string | null;
     // --- Outcome fields (populated by the outcome tracker) ---
@@ -390,6 +393,10 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     // client order ids reset per connection — permId is IBKR's stable
     // handle, the reconciliation key that survives a reconnect.
     ['order_perm_ids', 'TEXT'],
+    // WP2: when an entry terminates partially filled, `quantity` downgrades
+    // to the REAL position and the original intent is preserved here —
+    // analytics can still ask "how often do we get our full size?".
+    ['planned_quantity', 'INTEGER'],
 ];
 
 /** Replay/instrumentation columns added after the refusals-table release. */
@@ -436,6 +443,7 @@ interface Row {
     source: string;
     order_ids: string | null;
     order_perm_ids: string | null;
+    planned_quantity: number | null;
     note: string | null;
     executed_at: number | null;
     entry_fill_price: number | null;
@@ -477,6 +485,7 @@ function fromRow(r: Row): TradeProposal {
         source: r.source,
         orderIds: r.order_ids ? (JSON.parse(r.order_ids) as number[]) : null,
         orderPermIds: r.order_perm_ids ? (JSON.parse(r.order_perm_ids) as Array<number | null>) : null,
+        plannedQuantity: r.planned_quantity ?? null,
         note: r.note,
         executedAt: r.executed_at ?? null,
         entryFillPrice: r.entry_fill_price ?? null,
@@ -672,6 +681,19 @@ export async function setProposalStatus(
 // ---------------------------------------------------------------------------
 // Outcome lifecycle (called by the outcome tracker)
 // ---------------------------------------------------------------------------
+
+/** WP2: an entry terminated partially filled — `quantity` becomes the real
+ *  position (P&L, caps and exits must see what EXISTS), the original
+ *  intent moves to planned_quantity (first downgrade wins), and the note
+ *  says why. */
+export async function recordPartialEntryDowngrade(id: string, filledQty: number, note: string): Promise<void> {
+    const database = await getDb();
+    database.query<void>(
+        `UPDATE proposals SET planned_quantity = COALESCE(planned_quantity, quantity),
+                quantity = ?, note = COALESCE(note || ' — ', '') || ?, updated_at = ?
+         WHERE id = ?`,
+    ).run(filledQty, note, Date.now(), id.trim().toUpperCase());
+}
 
 /** Record the entry order's fill. */
 export async function markEntryFilled(id: string, price: number, at = Date.now()): Promise<void> {

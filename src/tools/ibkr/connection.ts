@@ -121,6 +121,11 @@ export async function assertAccountsVerified(timeoutMs = 5_000): Promise<void> {
     assertOrderingAllowed();
 }
 
+/** Test hook: simulate the managedAccounts event (fake-API harnesses). */
+export function __setManagedAccountsForTests(accounts: string[]): void {
+    managedAccounts = [...accounts];
+}
+
 /**
  * The single verified account every order binds to (WP1). Decision D5
  * (remediation 2026-08-20): exactly one managed account is supported —
