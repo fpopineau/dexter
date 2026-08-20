@@ -167,6 +167,14 @@ Phase 3 (WP9 backtester, WP10 scorer) — Phase 3 can run parallel.
 
 ## Phase 2 — policy integrity (audit crit. 9–12)
 
+**STATUS: WP5 LANDED 2026-08-21** (commit e7d17c7; suite 623 green).
+Fail-open keep branches flipped to close; conversion book vetted against
+overnight caps at market value with worst-first trims; 15:40 preview +
+same-day `keep SYMBOL` override (never the earnings guard); 🌙 notice
+honest about vet status. Recorded deviations: NetLiq-unavailable warns
+loudly instead of mass-closing; conversion-time sector re-check defers
+to WP6. Next: WP6 fail-closed acceptance context.
+
 - **WP5 Overnight conversion vetting** (crit. 9, HIGH)
   Files: `eod-triage.ts`, `outcome-tracker.ts`, `proposal-risk-gate.ts`.
   Design: triage's keep decisions run through a real overnight gate before
