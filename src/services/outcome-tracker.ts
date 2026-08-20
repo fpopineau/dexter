@@ -218,6 +218,14 @@ interface TrackedTrade {
     pendingManualExit?: number;
     finalizeTimer: ReturnType<typeof setTimeout> | null;
     closed: boolean;
+    /** WP11: order events arriving DURING finalize (closed=true through a
+     *  multi-second protectPosition await on the EOD-keep path) used to be
+     *  silently dropped — a genuine stop fill in that window was lost and
+     *  the flat position converted to an overnight "hold". Non-null while
+     *  finalize runs; drained back through the handler if the trade is
+     *  resurrected, discarded on terminal close (the late-fill patch
+     *  covers post-close fills). */
+    bufferedEvents: Array<{ orderId: number; status: string; filled: number; remaining: number; avgFillPrice: number }> | null;
 }
 
 const byOrderId = new Map<number, { trade: TrackedTrade; role: OrderRole }>();
@@ -300,6 +308,7 @@ async function captureTradeExcursion(proposalId: string): Promise<void> {
 async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string): Promise<void> {
     if (trade.closed) return;
     trade.closed = true;
+    trade.bufferedEvents = []; // WP11: capture events during the awaits below
 
     // Surface the broker's rejection reason — 'cancelled' without a why
     // forces log archaeology (e.g. IBKR 201 permission rejections). But an
@@ -370,7 +379,16 @@ async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string):
                         trade.terminalExits.clear();
                         trade.exitReason = null;
                         trade.closed = false;
-                        logger.info(`[outcome-tracker] ${trade.proposalId} kept overnight — tracking continues on protect orders ${newTargetId}/${ids.stopOrderId}`);
+                        // WP11: re-dispatch events that arrived during the
+                        // protect await — a stop fill in that window must
+                        // close the trade for real, not vanish under a
+                        // conversion to an overnight "hold" of a flat book.
+                        const buffered = trade.bufferedEvents ?? [];
+                        trade.bufferedEvents = null;
+                        for (const e of buffered) {
+                            handleOrderStatus(e.orderId, e.status, e.filled, e.remaining, e.avgFillPrice);
+                        }
+                        logger.info(`[outcome-tracker] ${trade.proposalId} kept overnight — tracking continues on protect orders ${newTargetId}/${ids.stopOrderId}${buffered.length ? ` (${buffered.length} buffered event(s) re-dispatched)` : ''}`);
                         // WP5: the apology is conditional now — a keep that
                         // passed today's pre-bell overnight vet (caps at
                         // market value + earnings guard) says so; only an
@@ -441,6 +459,7 @@ async function finalize(trade: TrackedTrade, reason: ExitReason, note?: string):
     } catch (err) {
         logger.error(`[outcome-tracker] failed to close ${trade.proposalId}: ${err}`);
     }
+    trade.bufferedEvents = null; // terminal close: late fills ride the patch path
     unregister(trade);
     logger.info(
         `[outcome-tracker] ${trade.proposalId} ${trade.symbol} closed: ${reason}` +
@@ -725,7 +744,13 @@ function handleOrderStatus(
     }
 
     const entry = byOrderId.get(orderId);
-    if (!entry || entry.trade.closed) return;
+    if (!entry) return;
+    if (entry.trade.closed) {
+        // WP11: finalize is in flight — buffer instead of dropping, in
+        // case the EOD-keep path resurrects the trade.
+        entry.trade.bufferedEvents?.push({ orderId, status, filled, remaining, avgFillPrice });
+        return;
+    }
     const { trade, role } = entry;
 
     if (role === 'entry') {
@@ -1148,6 +1173,7 @@ export function trackExecutedProposal(p: TradeProposal): void {
         terminalExits: new Set(),
         finalizeTimer: null,
         closed: false,
+        bufferedEvents: null,
     });
     logger.info(`[outcome-tracker] tracking ${p.id} (orders ${p.orderIds.join('/')})`);
     if (started) attachWithRetry();

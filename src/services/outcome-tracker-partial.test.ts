@@ -183,3 +183,19 @@ describe('manual-exit attribution allocates by quantity (WP2)', () => {
         expect(rowB?.note ?? '').toContain('allocation');
     });
 });
+
+describe('finalize event buffer (WP11 — no fills lost in the await window)', () => {
+    test('events arriving while a trade is closed+buffering are not applied to the DB', async () => {
+        const t = await trackedProposal('WPF');
+        __handleOrderStatusForTests(t.entryId, 'Filled', 10, 0, 100);
+        // Close via the stop: schedules finalize (10ms in tests).
+        __handleOrderStatusForTests(t.stopId, 'Filled', 10, 0, 95);
+        await sleep(40);
+        const row = await getProposal(t.id);
+        expect(row?.status).toBe('closed');
+        // A very late event on the dead ids is ignored (not tracked).
+        __handleOrderStatusForTests(t.tpId, 'Filled', 10, 0, 110);
+        await sleep(20);
+        expect((await getProposal(t.id))?.realizedPnl).toBeCloseTo((95 - 100) * 10, 2);
+    });
+});

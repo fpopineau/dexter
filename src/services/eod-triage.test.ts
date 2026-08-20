@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { applyEarningsGuard, decideEodAction, decideGtcEarningsGuard, decideUnfilledEntryGuard, isUpcomingPrint, overnightCapWarning, splitTriageCandidates, triageCatchUpAction, vetOvernightBook } from './eod-triage.js';
+import { applyEarningsGuard, decideEodAction, decideGtcEarningsGuard, decideUnfilledEntryGuard, isUpcomingPrint, overnightCapWarning, priceMinutesBack, splitTriageCandidates, triageCatchUpAction, vetOvernightBook } from './eod-triage.js';
 
 describe('triageCatchUpAction (missed 15:52 slot — SECZ post-mortem 2026-08-13)', () => {
     const min = (h: number, m: number) => h * 60 + m;
@@ -314,5 +314,33 @@ describe('vetOvernightBook (WP5 — the conversion book earns the night)', () =>
         const v = vetOvernightBook([k('AAA', 5_000, 1)], null, RULES, NONE);
         expect(v.trims).toEqual([]);
         expect(v.capLine).toContain('UNVETTED');
+    });
+});
+
+describe('priceMinutesBack (WP11 — timestamp arithmetic, not index arithmetic)', () => {
+    // IBKR intraday format; frame converter from the outcome tracker.
+    const frame = (t: string | undefined) => {
+        const m = /^(\d{4})(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/.exec((t ?? '').trim());
+        return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]) : null;
+    };
+    const bar = (hhmm: string, close: number) => ({ time: `20260814  ${hhmm}:00`, close });
+
+    test('gapless series: returns the close from exactly N minutes back', () => {
+        const bars = Array.from({ length: 120 }, (_, i) =>
+            bar(`${String(10 + Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}`, 100 + i));
+        expect(priceMinutesBack(bars, 60, frame)).toBe(100 + 59); // 60 min before the last bar
+    });
+
+    test('gappy series (thin name): finds the bar AT OR BEFORE the target time', () => {
+        // Prints at 10:00, 10:05, 14:00 — an hour before 14:00 is 13:00;
+        // the last print at/before 13:00 is 10:05. Index arithmetic would
+        // have grabbed whatever sat 60 slots back (out of range → first bar).
+        const bars = [bar('10:00', 50), bar('10:05', 51), bar('14:00', 60)];
+        expect(priceMinutesBack(bars, 60, frame)).toBe(51);
+    });
+
+    test('series shorter than the lookback: null, never the first print', () => {
+        const bars = [bar('15:30', 99), bar('15:31', 100)];
+        expect(priceMinutesBack(bars, 60, frame)).toBeNull();
     });
 });

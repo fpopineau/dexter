@@ -90,6 +90,9 @@ export interface OpenOrderSummary {
     orderId: number;
     orderType: string;
     tif: string;
+    /** WP11: our identity key (WP1 stamps one on every order) — the close
+     *  sweep cancels OUR orphaned pairs by it and never touches unknowns. */
+    orderRef: string | null;
 }
 
 /** Working orders for a symbol on the given side (all API clients). */
@@ -107,7 +110,12 @@ export async function fetchOpenOrdersFor(
         const onOpen = (id: number, contract: Contract, order: Order) => {
             if ((contract.symbol ?? '') !== symbol) return;
             if ((order.action ?? '') !== side) return;
-            found.push({ orderId: id, orderType: String(order.orderType ?? ''), tif: String(order.tif ?? '') });
+            found.push({
+                orderId: id,
+                orderType: String(order.orderType ?? ''),
+                tif: String(order.tif ?? ''),
+                orderRef: typeof order.orderRef === 'string' ? order.orderRef : null,
+            });
         };
         const onEnd = () => {
             clearTimeout(timeout);
@@ -332,16 +340,40 @@ export async function closePosition(symbolRaw: string, source = 'close command')
         // on a CLOSED position is a naked short (or unintended long) waiting
         // for the target/stop price to print.
         let cancelledExits = 0;
+        const cancelledIds = new Set<number>();
         try {
             const { listTrackable } = await import('./trade-proposals.js');
             for (const t of await listTrackable()) {
                 if (t.symbol !== symbol || !t.orderIds?.length) continue;
                 for (const oid of t.orderIds) {
-                    try { api.cancelOrder(oid); cancelledExits++; } catch { /* already gone */ }
+                    try { api.cancelOrder(oid); cancelledExits++; cancelledIds.add(oid); } catch { /* already gone */ }
                 }
             }
         } catch (err) {
             logger.warn(`[position-actions] exit cleanup for ${symbol} failed: ${err}`);
+        }
+
+        // WP11 (closes audit 2026-08-06 finding 10): GTC pairs placed
+        // OUTSIDE proposal rows — the auto-protect path after a row already
+        // closed — are persisted nowhere and used to survive every close.
+        // Sweep by symbol: cancel resting GTC orders carrying OUR orderRef
+        // (WP1 stamps one on every order); unknown refs are flagged and
+        // left untouched (the WP3 orphan rule).
+        const OUR_REF = /^(protect-|close-|reduce-|BRKT-|P-[0-9A-F]{4}:)/;
+        try {
+            for (const side of [OrderAction.SELL, OrderAction.BUY]) {
+                for (const o of await fetchOpenOrdersFor(api, symbol, side)) {
+                    if (cancelledIds.has(o.orderId) || o.tif !== 'GTC') continue;
+                    if (OUR_REF.test(o.orderRef ?? '')) {
+                        try { api.cancelOrder(o.orderId); cancelledExits++; cancelledIds.add(o.orderId); } catch { /* gone */ }
+                        logger.info(`[position-actions] ${symbol}: swept orphaned GTC ${o.orderType} #${o.orderId} (ref '${o.orderRef}')`);
+                    } else {
+                        logger.warn(`[position-actions] ${symbol}: UNKNOWN GTC ${o.orderType} #${o.orderId}${o.orderRef ? ` (ref '${o.orderRef}')` : ''} left untouched — review in TWS`);
+                    }
+                }
+            }
+        } catch (err) {
+            logger.warn(`[position-actions] orphan-exit sweep for ${symbol} failed: ${err}`);
         }
 
         logger.info(`[position-actions] closing ${symbol}: ${order.action} ${qty} MKT (order ${orderId}), ${cancelledExits} tracked exit order(s) cancelled`);

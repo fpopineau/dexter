@@ -52,6 +52,7 @@ import { isMarketHalfDay, isMarketHoliday } from '@/utils/market-hours.js';
 import { getNetLiquidation } from './daily-loss-guard.js';
 import { findUpcomingEarnings, nextTradingDates, type UpcomingEarnings } from './earnings-calendar.js';
 import { getMacroEventsWithin, macroNightWarning } from './event-risk.js';
+import { barTimeFrameMs } from './outcome-tracker.js';
 import { closePosition, fetchPositions } from './position-actions.js';
 import { listTrackable } from './trade-proposals.js';
 import { getRiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
@@ -253,6 +254,33 @@ const vettedKeeps = new Map<string, string>(); // SYMBOL → ET date vetted
  *  before wording the 🌙 conversion notice.) */
 export function wasVettedKeepToday(symbol: string): boolean {
     return vettedKeeps.get(symbol.trim().toUpperCase()) === todayEt();
+}
+
+/**
+ * Pure (WP11): close from ~`minutesBack` before the LAST bar, located by
+ * TIMESTAMP. The old `bars[len-1-60]` index arithmetic assumed a gapless
+ * 1-min series — on a thin name it reached back hours, and with <61 bars
+ * it silently became the session's first print. Returns null when the
+ * series does not reach back far enough (the fail-closed decision path
+ * then treats momentum as unknown).
+ */
+export function priceMinutesBack(
+    bars: Array<{ time?: string; close?: number | null }>,
+    minutesBack: number,
+    barFrameMs: (time: string | undefined) => number | null,
+): number | null {
+    if (bars.length === 0) return null;
+    const lastFrame = barFrameMs(bars[bars.length - 1]?.time);
+    if (lastFrame === null) return null;
+    const target = lastFrame - minutesBack * 60_000;
+    for (let i = bars.length - 1; i >= 0; i--) {
+        const f = barFrameMs(bars[i]?.time);
+        if (f !== null && f <= target) {
+            const c = bars[i]?.close;
+            return typeof c === 'number' && c > 0 ? c : null;
+        }
+    }
+    return null; // series too short — momentum honestly unknown
 }
 
 /**
@@ -492,11 +520,22 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
             const bars = (await fetchBars(t.symbol, BarSizeSetting.MINUTES_ONE, '1 D', true))
                 .filter((b) => b.close != null);
             last = bars[bars.length - 1]?.close ?? null;
-            hourAgo = bars[Math.max(0, bars.length - 1 - FADE_LOOKBACK_MIN)]?.close ?? null;
+            // WP11: located by TIMESTAMP — index arithmetic assumed a
+            // gapless series and reached back hours on thin names.
+            hourAgo = priceMinutesBack(bars, FADE_LOOKBACK_MIN, barTimeFrameMs);
         } catch (err) {
             logger.warn(`[eod-triage] ${t.symbol}: bars unavailable (${err instanceof Error ? err.message : err})`);
         }
         if (last !== null) lastBySymbol.set(t.symbol, last);
+
+        // WP11 double-close guard (D4: one 'close SYMBOL' means flat — the
+        // FIRST close this run wins; a second same-symbol proposal's close
+        // would re-fetch the still-nonzero position and place a second
+        // full-size MKT order, a net REVERSAL).
+        if (closedSymbols.has(t.symbol)) {
+            lines.push(`• ${t.symbol} (${t.keptOvernightAt != null ? `${t.id}, kept-overnight` : t.id}): already closed this run (stacked proposal) — no second order.`);
+            continue;
+        }
 
         // Fail-closed base decision (WP5) → operator override (D2) →
         // earnings guard LAST: 'keep SYMBOL' never holds through a print.
@@ -539,6 +578,7 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
     // then only fires on gate-passed positions (wasVettedKeepToday).
     const vet = vetOvernightBook(vetCandidates, await getNetLiquidation(), getRiskRules(), overrides);
     for (const trim of vet.trims) {
+        if (closedSymbols.has(trim.symbol)) continue; // WP11: already flat this run
         if (dryRun) {
             lines.push(`• ${trim.symbol} (${trim.label}): WILL CAP-TRIM at 15:52 — ${trim.reason}. Reply 'keep ${trim.symbol}' to hold it anyway.`);
             continue;
@@ -571,6 +611,10 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
         if (!decision) continue;
 
         logger.info(`[eod-triage] ${t.id} ${t.symbol} {${t.tradeClass}, GTC}: ${decision.action} — ${decision.reason}${dryRun ? ' (preview)' : ''}`);
+        if (closedSymbols.has(t.symbol)) {
+            lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} GTC): already closed this run — no second order.`);
+            continue;
+        }
         if (dryRun) {
             lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} GTC): WILL CLOSE at 15:52 — ${decision.reason} (earnings guard: 'keep' does NOT override)`);
             continue;
