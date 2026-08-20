@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { DEFAULT_RULES } from '@/tools/ibkr/risk-rules.js';
 import {
+    checkMicrostructure,
     assertAcceptContext,
     assertProposalRisk,
     checkPriceRun,
@@ -1030,5 +1031,59 @@ describe('UNKNOWN sector bucket (WP6, decision D3)', () => {
             RULES,
         );
         expect(r.ok).toBe(true);
+    });
+});
+
+describe('checkMicrostructure (WP7 — the market must be able to absorb the order)', () => {
+    const RULES7 = { ...DEFAULT_RULES, max_spread_pct: 0.5, max_adv_pct: 1.0, min_avg_volume: 500_000 };
+    const GOOD = {
+        symbol: 'NVDA', direction: 'long' as const, quantity: 100,
+        bid: 99.95, ask: 100.05, avgDailyVolume20d: 5_000_000,
+        shortable: true, halted: false,
+    };
+
+    test('liquid, tight, unhalted long passes clean', () => {
+        const r = checkMicrostructure(GOOD, RULES7);
+        expect(r.violations).toEqual([]);
+    });
+
+    test('wide spread is refused with the percentage named', () => {
+        const r = checkMicrostructure({ ...GOOD, bid: 99, ask: 100 }, RULES7); // ~1% spread
+        expect(r.violations.join(' ')).toContain('spread');
+        expect(r.violations.join(' ')).toContain('max_spread_pct');
+    });
+
+    test('missing quote sides are fail-closed, never skipped', () => {
+        expect(checkMicrostructure({ ...GOOD, bid: null }, RULES7).violations.join(' ')).toContain('fail-closed');
+        expect(checkMicrostructure({ ...GOOD, ask: null }, RULES7).violations.join(' ')).toContain('fail-closed');
+    });
+
+    test('min_avg_volume is finally deterministic (the 2026-08-06 soft-limit item)', () => {
+        const r = checkMicrostructure({ ...GOOD, avgDailyVolume20d: 200_000 }, RULES7);
+        expect(r.violations.join(' ')).toContain('min_avg_volume');
+    });
+
+    test('order above max_adv_pct of ADV is refused (market-impact bound)', () => {
+        // 100k shares vs 5M ADV = 2% > 1% cap.
+        const r = checkMicrostructure({ ...GOOD, quantity: 100_000 }, RULES7);
+        expect(r.violations.join(' ')).toContain('ADV');
+    });
+
+    test('ADV unavailable is fail-closed', () => {
+        expect(checkMicrostructure({ ...GOOD, avgDailyVolume20d: null }, RULES7).violations.length).toBeGreaterThan(0);
+    });
+
+    test('shorts require CONFIRMED borrow: not-shortable and unknown both refuse; longs never ask', () => {
+        const short = { ...GOOD, direction: 'short' as const };
+        expect(checkMicrostructure({ ...short, shortable: false }, RULES7).violations.join(' ')).toContain('shortable');
+        expect(checkMicrostructure({ ...short, shortable: null }, RULES7).violations.join(' ')).toContain('borrow');
+        expect(checkMicrostructure({ ...GOOD, shortable: null }, RULES7).violations).toEqual([]);
+    });
+
+    test('a halt refuses; unknown halt state is a NOTE, not a refusal (best-effort v1)', () => {
+        expect(checkMicrostructure({ ...GOOD, halted: true }, RULES7).violations.join(' ')).toContain('HALTED');
+        const unknown = checkMicrostructure({ ...GOOD, halted: null }, RULES7);
+        expect(unknown.violations).toEqual([]);
+        expect(unknown.notes.join(' ')).toContain('halt');
     });
 });

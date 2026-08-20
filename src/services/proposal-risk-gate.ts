@@ -707,6 +707,89 @@ export function assertAcceptContext(input: {
 }
 
 // ---------------------------------------------------------------------------
+// Microstructure gate (WP7, REMEDIATION-2026-08-20)
+// ---------------------------------------------------------------------------
+
+/**
+ * Pure: can the market absorb this order? Before WP7 there was NO
+ * deterministic spread, ADV, or borrow check anywhere — min_avg_volume
+ * lived only in the advisory risk_manager tool, fed by the model's own
+ * self-reported number (2026-08-06 "soft limits", the last sibling to
+ * close). Spread and ADV are REQUIRED (fail-closed); shortability is
+ * required for SHORTS only; the halt flag is best-effort v1 — a known
+ * halt refuses, an unknown one is a note.
+ */
+export function checkMicrostructure(
+    input: {
+        symbol: string;
+        direction: 'long' | 'short';
+        quantity: number;
+        bid: number | null;
+        ask: number | null;
+        avgDailyVolume20d: number | null;
+        shortable: boolean | null;
+        halted: boolean | null;
+    },
+    rules: RiskRules,
+): { violations: string[]; notes: string[] } {
+    const violations: string[] = [];
+    const notes: string[] = [];
+
+    if (input.bid === null || input.ask === null || !(input.bid > 0) || !(input.ask >= input.bid)) {
+        violations.push(
+            `bid/ask unavailable for ${input.symbol} — the spread cannot be verified (fail-closed; max_spread_pct ${rules.max_spread_pct}%)`,
+        );
+    } else {
+        const mid = (input.bid + input.ask) / 2;
+        const spreadPct = ((input.ask - input.bid) / mid) * 100;
+        if (spreadPct > rules.max_spread_pct) {
+            violations.push(
+                `spread ${spreadPct.toFixed(2)}% of mid exceeds max_spread_pct ${rules.max_spread_pct}% — ` +
+                `the crossing cost is a tax the R/R math never priced`,
+            );
+        }
+    }
+
+    if (input.avgDailyVolume20d === null || !(input.avgDailyVolume20d > 0)) {
+        violations.push(
+            `20-day average volume unavailable for ${input.symbol} — liquidity cannot be verified (fail-closed)`,
+        );
+    } else {
+        if (input.avgDailyVolume20d < rules.min_avg_volume) {
+            violations.push(
+                `20-day ADV ${Math.round(input.avgDailyVolume20d).toLocaleString()} shares is under min_avg_volume ` +
+                `${rules.min_avg_volume.toLocaleString()} — too thin to exit through a bad tape`,
+            );
+        }
+        const advPct = (input.quantity / input.avgDailyVolume20d) * 100;
+        if (advPct > rules.max_adv_pct) {
+            violations.push(
+                `order is ${advPct.toFixed(2)}% of the 20-day ADV (max_adv_pct ${rules.max_adv_pct}%) — ` +
+                `size that moves the market fills at its own worst price`,
+            );
+        }
+    }
+
+    if (input.direction === 'short') {
+        if (input.shortable === false) {
+            violations.push(`${input.symbol} is not shortable — no borrow available`);
+        } else if (input.shortable === null) {
+            violations.push(
+                `borrow status for ${input.symbol} could not be confirmed — a short with unconfirmed borrow is refused (fail-closed)`,
+            );
+        }
+    }
+
+    if (input.halted === true) {
+        violations.push(`${input.symbol} is HALTED — no order survives contact with a reopening print`);
+    } else if (input.halted === null) {
+        notes.push(`halt state unverified for ${input.symbol} (best-effort tick) — proceeding`);
+    }
+
+    return { violations, notes };
+}
+
+// ---------------------------------------------------------------------------
 // Price-run (chase/invalidation) check — used at ACCEPTANCE time with a
 // live quote. Pure so it is unit-testable.
 // ---------------------------------------------------------------------------

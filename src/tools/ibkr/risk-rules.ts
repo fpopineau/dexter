@@ -51,6 +51,12 @@ export interface RiskRules {
     max_overnight_position_pct: number;
     min_price: number;
     min_avg_volume: number;
+    /** Max bid-ask spread as % of mid at acceptance (WP7) — a wide spread
+     *  is a tax the R/R math never priced. */
+    max_spread_pct: number;
+    /** Max order size as % of the 20-day average daily volume (WP7) —
+     *  bounds market impact. */
+    max_adv_pct: number;
     stop_atr_multiplier: number;
     max_risk_per_trade_pct: number;
     min_stop_atr_fraction: number;
@@ -135,6 +141,8 @@ export const DEFAULT_RULES: RiskRules = {
     max_overnight_position_pct: 3,
     min_price: 5.0,
     min_avg_volume: 500_000,
+    max_spread_pct: 0.5,
+    max_adv_pct: 1.0,
     stop_atr_multiplier: 1.5,
     max_risk_per_trade_pct: 0.25,
     min_stop_atr_fraction: 0.4,
@@ -199,6 +207,8 @@ const RULE_SCHEMA: Record<keyof RiskRules, RuleSpec> = {
     max_overnight_position_pct: num(0, 100, { minExclusive: true }),
     min_price: num(0, 10_000),
     min_avg_volume: num(0, 1e12),
+    max_spread_pct: num(0, 10, { minExclusive: true }),
+    max_adv_pct: num(0, 100, { minExclusive: true }),
     stop_atr_multiplier: num(0, 20, { minExclusive: true }),
     max_risk_per_trade_pct: num(0, 10, { minExclusive: true }),
     min_stop_atr_fraction: num(0, 10),

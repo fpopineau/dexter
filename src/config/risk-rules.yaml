@@ -24,7 +24,9 @@ max_overnight_position_pct: 3 # Max % per position held overnight (tighter than 
 
 # --- Price & Liquidity Filters ---
 min_price: 5.0 # Avoid penny stocks
-min_avg_volume: 500000 # Minimum average daily volume
+min_avg_volume: 500000 # Minimum 20-day average daily volume (shares) — HARD gate at acceptance since WP7
+max_spread_pct: 0.5 # Refuse when bid-ask spread > this % of mid — a wide spread is a tax the R/R never priced
+max_adv_pct: 1.0 # Refuse orders larger than this % of the 20-day ADV — market-impact bound
 
 # --- ATR-Based Stops ---
 stop_atr_multiplier: 1.5 # Default stop = entry ± 1.5 × ATR

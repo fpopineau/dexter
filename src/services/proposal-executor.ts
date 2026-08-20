@@ -22,8 +22,9 @@ import { getMarketSession, isTradeableSession } from '@/utils/market-hours.js';
 import { assertDailyLossOk } from './daily-loss-guard.js';
 import { trackExecutedProposal } from './outcome-tracker.js';
 import { getSectorInfo } from './sector-map.js';
-import { assertAcceptContext, assertProposalRisk, checkPriceRun, ENTRY_CONFIRM_FRACTION, plannedWorstLossUsd } from './proposal-risk-gate.js';
+import { assertAcceptContext, assertProposalRisk, checkMicrostructure, checkPriceRun, ENTRY_CONFIRM_FRACTION, plannedWorstLossUsd } from './proposal-risk-gate.js';
 import { fetchDailyRiskContext } from '@/tools/ibkr/daily-atr.js';
+import { fetchShortabilitySnapshot } from '@/tools/ibkr/microstructure.js';
 import { fetchBrokerExposure, unionExposure } from './exposure-snapshot.js';
 import {
     claimProposalForExecution,
@@ -61,29 +62,42 @@ class ChaseRefusalError extends Error {
     }
 }
 
-/** Best-effort live last price (null when unavailable). Exported for the
- *  creation-time buy-now check and entry-context capture — same live-only
- *  discipline everywhere (delayed quotes refused, never silently used). */
-export async function fetchLastPrice(symbol: string): Promise<number | null> {
+export interface LiveQuote {
+    last: number | null;
+    bid: number | null;
+    ask: number | null;
+}
+
+/** Best-effort live quote (nulls when unavailable). Live-only discipline
+ *  everywhere: delayed quotes refused, never silently used. WP7 exposes
+ *  bid/ask too — the microstructure gate prices the spread. */
+export async function fetchLiveQuote(symbol: string): Promise<LiveQuote> {
+    const none: LiveQuote = { last: null, bid: null, ask: null };
     try {
         const raw = await createIbkrMarketData().invoke({ ticker: symbol, exchange: 'SMART', currency: 'USD' });
         const data = (JSON.parse(String(raw)) as { data?: { last?: number; bid?: number; ask?: number; delayed?: boolean } }).data;
         // Never gate on a delayed quote: with IBKR_MARKET_DATA_TYPE=3 an
         // unentitled instrument degrades to ~15-min-delayed ticks, and for
         // the chase/invalidation check a stale price treated as live would
-        // be exactly the failure the gate exists to catch. No quote → the
-        // check is skipped honestly (and loudly — this should never happen
-        // for US equities while the account's live entitlement holds).
+        // be exactly the failure the gate exists to catch.
         if (data?.delayed) {
-            logger.warn(`[proposal-executor] ${symbol}: quote is DELAYED (entitlement regression?) — chase check will be skipped`);
-            return null;
+            logger.warn(`[proposal-executor] ${symbol}: quote is DELAYED (entitlement regression?) — accept-time checks will refuse`);
+            return none;
         }
-        if (data?.last && Number.isFinite(data.last) && data.last > 0) return data.last;
-        if (data?.bid && data?.ask && data.bid > 0 && data.ask > 0) return (data.bid + data.ask) / 2;
-        return null;
+        const bid = data?.bid && Number.isFinite(data.bid) && data.bid > 0 ? data.bid : null;
+        const ask = data?.ask && Number.isFinite(data.ask) && data.ask > 0 ? data.ask : null;
+        const last = data?.last && Number.isFinite(data.last) && data.last > 0
+            ? data.last
+            : bid !== null && ask !== null ? (bid + ask) / 2 : null;
+        return { last, bid, ask };
     } catch {
-        return null;
+        return none;
     }
+}
+
+/** Last price only (creation-time buy-now check, entry-context capture). */
+export async function fetchLastPrice(symbol: string): Promise<number | null> {
+    return (await fetchLiveQuote(symbol)).last;
 }
 
 export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
@@ -133,9 +147,32 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         // silently skipped. Any missing piece refuses fail-closed (the
         // proposal stays open; retry when data is back).
         const riskCtx = await fetchDailyRiskContext(p.symbol);
-        const last = await fetchLastPrice(p.symbol);
+        const quote = await fetchLiveQuote(p.symbol);
+        const last = quote.last;
         liveLast = last;
         assertAcceptContext({ symbol: p.symbol, dailyAtr: riskCtx.dailyAtr, ema10: riskCtx.ema10, lastPrice: last });
+
+        // WP7: microstructure — can the market absorb this order? Spread
+        // and ADV are hard-required; borrow must be CONFIRMED for shorts;
+        // a known halt refuses. All refusals transient (retry).
+        const shortSnap = await fetchShortabilitySnapshot(p.symbol);
+        const micro = checkMicrostructure(
+            {
+                symbol: p.symbol,
+                direction: p.direction,
+                quantity: p.quantity,
+                bid: quote.bid,
+                ask: quote.ask,
+                avgDailyVolume20d: riskCtx.avgDailyVolume20d,
+                shortable: shortSnap.shortable,
+                halted: shortSnap.halted,
+            },
+            getRiskRules(),
+        );
+        for (const n of micro.notes) logger.info(`[proposal-executor] ${p.id}: ${n}`);
+        if (micro.violations.length > 0) {
+            throw new Error(`[microstructure-gate] ${micro.violations.join('; ')}`);
+        }
 
         // Risk gate with live account context. Re-runs the static checks too:
         // rules may have been tightened since the proposal was created.

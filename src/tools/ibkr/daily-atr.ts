@@ -25,12 +25,20 @@ export interface DailyRiskContext {
      *  entry-context instrumentation (same completed-bars discipline as
      *  ATR: today's in-progress bar never references itself). */
     prevClose: number | null;
+    /** 20-day average daily volume in SHARES (WP7 microstructure gate).
+     *  IBKR reports US-equity daily volume in lots of 100 — converted
+     *  here. ⚠ live-verify the lot factor before the validation freeze
+     *  (a 100x error over-refuses; the E2E checklist carries it). */
+    avgDailyVolume20d: number | null;
 }
 
 const TTL_MS = 10 * 60_000;
 const cache = new Map<string, { value: DailyRiskContext; at: number }>();
 
-const NONE: DailyRiskContext = { dailyAtr: null, ema10: null, recentEarnings: null, prevClose: null };
+const NONE: DailyRiskContext = { dailyAtr: null, ema10: null, recentEarnings: null, prevClose: null, avgDailyVolume20d: null };
+
+/** IBKR historical daily volume for US equities arrives in lots of 100. */
+const IBKR_DAILY_VOLUME_LOT = 100;
 
 function lastValid(series: number[]): number | null {
     for (let i = series.length - 1; i >= 0; i--) {
@@ -67,11 +75,17 @@ export async function fetchDailyRiskContext(symbol: string): Promise<DailyRiskCo
         const highs = completed.map((b) => b.high ?? NaN);
         const lows = completed.map((b) => b.low ?? NaN);
         const closes = completed.map((b) => b.close ?? NaN);
+        // 20-day mean of COMPLETED-session volumes, in shares (WP7).
+        const volumes = completed.map((b) => b.volume ?? NaN).filter((v) => Number.isFinite(v) && v >= 0).slice(-20);
+        const avgDailyVolume20d = volumes.length >= 10
+            ? Math.round((volumes.reduce((s, v) => s + v, 0) / volumes.length) * IBKR_DAILY_VOLUME_LOT)
+            : null;
         value = {
             dailyAtr: lastValid(atr(highs, lows, closes, 14).atr),
             ema10: lastValid(ema(closes, 10)),
             recentEarnings: null,
             prevClose: lastValid(closes),
+            avgDailyVolume20d,
         };
     } catch (err) {
         logger.warn(`[daily-risk-context] ${sym}: ${err instanceof Error ? err.message : String(err)} — ATR/extension checks skipped`);
