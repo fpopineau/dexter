@@ -173,7 +173,15 @@ overnight caps at market value with worst-first trims; 15:40 preview +
 same-day `keep SYMBOL` override (never the earnings guard); 🌙 notice
 honest about vet status. Recorded deviations: NetLiq-unavailable warns
 loudly instead of mass-closing; conversion-time sector re-check defers
-to WP6. Next: WP6 fail-closed acceptance context.
+to WP6.
+
+**STATUS: WP6 LANDED 2026-08-21** (commit b7e82ca; suite 629 green).
+Accept refetches and REQUIRES daily ATR/EMA10/live quote (context-gate
+refusal names every starved check); noise-stop, target-reach, extension
+and chase run unconditionally at accept; UNKNOWN sector bucket (D3)
+capped like any sector. Scope notes: buy-now stays creation-only per its
+documented design; recentEarnings=null stays strict (never waives).
+Next: WP7 microstructure gates, WP8 currency.
 
 - **WP5 Overnight conversion vetting** (crit. 9, HIGH)
   Files: `eod-triage.ts`, `outcome-tracker.ts`, `proposal-risk-gate.ts`.
