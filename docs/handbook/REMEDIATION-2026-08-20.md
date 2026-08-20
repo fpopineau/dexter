@@ -249,7 +249,18 @@ equity, 2R defaults, inert train pass deleted, sentiment behind an
 explicit look-ahead flag, archive end-bound fixed, real monthly metrics.
 ENGINE_VERSION 'wp9-honest-replay-1'; calibrate-scorer refuses any
 other. Backtest outputs stay UNTRUSTED until recalibrated under the new
-engine per protocol. Next: WP10 scorer statistics, WP11 residuals.
+engine per protocol.
+
+**STATUS: WP10 LANDED 2026-08-21** (commit 267f247; suite 663 green,
+ta-indicators' first tests). Session VWAP, time-of-day RVOL excluding
+the bar under test, ATR-normalized MACD, coverage-capped composite,
+in-progress bar dropped, zero-vs-missing fixed; engine: direction by
+votes (conflicts dropped), activity scans resolve by day-move sign or
+better-of-both, family-based multi-scan bonus, boost suppressed past
+the extension gate's ceiling, staleness trigger-ineligible, real cycle
+mutex, honest trigger prompt. NOTE: scorer semantics changed — the
+score distribution shifts; the validation freeze must postdate this.
+Next: WP11 residuals, then Phase 4.
 
 - **WP9 Backtester: honest replay** (MED — decision point D1)
   Recommended scope (rebuild-lite, ~1 session): process bar i BEFORE
