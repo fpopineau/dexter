@@ -16,7 +16,7 @@ import type { Contract, Order, OrderState } from '@stoqey/ib';
 import { EventName, OrderAction, OrderStatus, OrderType, SecType, TimeInForce } from '@stoqey/ib';
 import { z } from 'zod';
 import { formatToolResult } from '../types.js';
-import { assertAccountsVerified, getIBApi, isNonFatalIbkrError } from './connection.js';
+import { assertAccountsVerified, getIBApi, getVerifiedSingleAccount, isNonFatalIbkrError } from './connection.js';
 import { withOrderLock } from './order-lock.js';
 import { assertDailyLossOk } from '@/services/daily-loss-guard.js';
 import { fetchPositions } from '@/services/position-actions.js';
@@ -217,6 +217,10 @@ async function placeOrder(
 
     const order: Order = {
         orderId,
+        // Identity binding (WP1): every order names its account and carries
+        // a broker-side reference for reconciliation.
+        account: getVerifiedSingleAccount(),
+        orderRef: `reduce-${input.ticker.trim().toUpperCase()}`,
         action: input.side === 'BUY' ? OrderAction.BUY : OrderAction.SELL,
         totalQuantity: input.quantity,
         orderType: mapOrderType(input.orderType),

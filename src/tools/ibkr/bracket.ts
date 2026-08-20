@@ -10,14 +10,20 @@
  * assertDailyLossOk) — this module only knows how to build the orders.
  */
 
-import type { Contract, Order } from '@stoqey/ib';
+import type { Contract, IBApi, Order } from '@stoqey/ib';
 import { OrderAction, OrderType, SecType, TimeInForce } from '@stoqey/ib';
 import { logger } from '@/utils';
-import { assertAccountsVerified, getIBApi } from './connection.js';
+import { assertAccountsVerified, getIBApi, getVerifiedSingleAccount } from './connection.js';
+import { watchOrderAcks } from './order-ack.js';
 import { withOrderLock } from './order-lock.js';
 import { getNextValidOrderId } from './orders.js';
 import { getRiskRules } from './risk-rules.js';
 import { isValidQuantity } from '@/services/position-sizer.js';
+
+/** How long placement waits for the broker's first reaction per bracket.
+ *  TWS acks in tens of ms on a healthy link; 4s absorbs a loaded gateway
+ *  without stalling the accept path noticeably. */
+export const BRACKET_ACK_TIMEOUT_MS = 4_000;
 
 export interface BracketRequest {
     symbol: string;
@@ -36,6 +42,21 @@ export interface BracketRequest {
     tif?: 'DAY' | 'GTC';
     exchange?: string;
     currency?: string;
+    /** Stable reference stamped as orderRef "<refId>:<leg>" on every leg
+     *  (WP1) — normally the proposal id. Correlates broker state back to
+     *  the DB across reconnects, where client order ids reset. */
+    refId?: string;
+}
+
+export interface BracketAck {
+    /** 'acknowledged': every leg got a broker reaction. 'rejected': a leg
+     *  errored — the placement is dead and all legs were cancel-swept.
+     *  'unconfirmed': silence inside the window — the orders may well be
+     *  working; VERIFY, never blind-retry. */
+    outcome: 'acknowledged' | 'unconfirmed' | 'rejected';
+    /** permIds aligned [parent, takeProfit, stop]; null where unseen. */
+    permIds: Array<number | null>;
+    rejection?: { orderId: number; code: number | null; reason: string };
 }
 
 export interface BracketResult {
@@ -50,6 +71,7 @@ export interface BracketResult {
     entryPrice?: number;
     stopPrice: number;
     targetPrice: number;
+    ack: BracketAck;
 }
 
 /** Structural validation of a bracket request (exported for tests). */
@@ -97,22 +119,35 @@ export function validateBracketRequest(req: BracketRequest): void {
 }
 
 /**
- * Place a bracket (entry + OCA exits). Resolves once the three orders have
- * been handed to the API with sequential ids; fills are asynchronous and
- * tracked by IBKR itself.
+ * Place a bracket (entry + OCA exits). Resolves after the broker's first
+ * reaction (or the ack window closing): the result's `ack` field says
+ * whether the bracket is acknowledged, rejected (legs cancel-swept), or
+ * unconfirmed (WP1 — before this, "placed" meant "handed to the API").
  */
 export async function placeBracketOrder(req: BracketRequest): Promise<BracketResult> {
     validateBracketRequest(req);
     // The whole id-grant → three placeOrder calls sequence must be atomic
     // vs any other placement (ids N, N+1, N+2 are assumed contiguous).
-    return withOrderLock(() => placeBracketOrderLocked(req));
+    return withOrderLock(async () => {
+        const api = await getIBApi();
+        // Paper/live verification against the ACTUAL account codes — refuses
+        // while they are still unknown (fail closed, not fail open).
+        await assertAccountsVerified();
+        return placeBracketOrderCore(api, getVerifiedSingleAccount(), req, BRACKET_ACK_TIMEOUT_MS);
+    });
 }
 
-async function placeBracketOrderLocked(req: BracketRequest): Promise<BracketResult> {
-    const api = await getIBApi();
-    // Paper/live verification against the ACTUAL account codes — refuses
-    // while they are still unknown (fail closed, not fail open).
-    await assertAccountsVerified();
+/**
+ * The full placement flow against any IBApi-shaped emitter — exported so
+ * the phase-1 harness drives ack/reject/timeout without a gateway. Callers
+ * hold the order lock and have verified the account.
+ */
+export async function placeBracketOrderCore(
+    api: IBApi,
+    account: string,
+    req: BracketRequest,
+    ackTimeoutMs: number,
+): Promise<BracketResult> {
     const parentId = await getNextValidOrderId(api);
     const takeProfitId = parentId + 1;
     const stopId = parentId + 2;
@@ -128,9 +163,14 @@ async function placeBracketOrderLocked(req: BracketRequest): Promise<BracketResu
     const entryAction = req.direction === 'long' ? OrderAction.BUY : OrderAction.SELL;
     const exitAction = req.direction === 'long' ? OrderAction.SELL : OrderAction.BUY;
     const tif = (req.tif ?? 'DAY') as typeof TimeInForce[keyof typeof TimeInForce];
+    // Stable correlation key: client order ids reset per connection, but
+    // orderRef survives on the broker side — reconciliation matches on it.
+    const refBase = req.refId?.trim() || `BRKT-${parentId}`;
 
     const parent: Order = {
         orderId: parentId,
+        account,
+        orderRef: `${refBase}:entry`,
         action: entryAction,
         totalQuantity: req.quantity,
         orderType: req.entryType === 'LMT' ? OrderType.LMT
@@ -146,6 +186,8 @@ async function placeBracketOrderLocked(req: BracketRequest): Promise<BracketResu
     const takeProfit: Order = {
         orderId: takeProfitId,
         parentId,
+        account,
+        orderRef: `${refBase}:tp`,
         action: exitAction,
         totalQuantity: req.quantity,
         orderType: OrderType.LMT,
@@ -159,6 +201,8 @@ async function placeBracketOrderLocked(req: BracketRequest): Promise<BracketResu
     const stop: Order = {
         orderId: stopId,
         parentId,
+        account,
+        orderRef: `${refBase}:stop`,
         action: exitAction,
         totalQuantity: req.quantity,
         orderType: OrderType.STP,
@@ -169,15 +213,52 @@ async function placeBracketOrderLocked(req: BracketRequest): Promise<BracketResu
         transmit: true, // transmits the whole bracket atomically
     };
 
-    api.placeOrder(parentId, contract, parent);
-    api.placeOrder(takeProfitId, contract, takeProfit);
-    api.placeOrder(stopId, contract, stop);
+    // Arm the ack watch BEFORE placement — a fast broker reaction must not
+    // slip between placeOrder and the first listener.
+    const legIds = [parentId, takeProfitId, stopId];
+    const watch = watchOrderAcks(api, legIds);
+    try {
+        api.placeOrder(parentId, contract, parent);
+        api.placeOrder(takeProfitId, contract, takeProfit);
+        api.placeOrder(stopId, contract, stop);
+    } catch (err) {
+        watch.dispose();
+        throw err;
+    }
 
-    logger.info(
-        `[bracket] placed ${req.direction} ${req.quantity} ${contract.symbol} ` +
-        `(${req.entryType}${req.entryPrice ? `@${req.entryPrice}` : ''}, stop ${req.stopPrice}, target ${req.targetPrice}, ` +
-        `ids ${parentId}/${takeProfitId}/${stopId})`,
-    );
+    const states = await watch.settle(ackTimeoutMs);
+    const byId = new Map(states.map((s) => [s.orderId, s]));
+    const rejectedLeg = states.find((s) => s.rejection !== null);
+    const ack: BracketAck = rejectedLeg
+        ? {
+            outcome: 'rejected',
+            permIds: legIds.map((id) => byId.get(id)?.permId ?? null),
+            rejection: { orderId: rejectedLeg.orderId, code: rejectedLeg.rejection!.code, reason: rejectedLeg.rejection!.reason },
+        }
+        : {
+            outcome: states.every((s) => s.acked) ? 'acknowledged' : 'unconfirmed',
+            permIds: legIds.map((id) => byId.get(id)?.permId ?? null),
+        };
+
+    if (ack.outcome === 'rejected') {
+        // A rejected leg must not leave the others live: a parent without
+        // its stop is unprotected exposure; children without a parent are a
+        // reversal waiting for a price to print. Best-effort sweep.
+        for (const id of legIds) {
+            try { api.cancelOrder(id); } catch { /* already dead */ }
+        }
+        logger.error(
+            `[bracket] ${contract.symbol} REJECTED by broker (order ${ack.rejection!.orderId}, ` +
+            `code ${ack.rejection!.code ?? '?'}: ${ack.rejection!.reason}) — all three legs cancel-swept`,
+        );
+    } else {
+        logger.info(
+            `[bracket] placed ${req.direction} ${req.quantity} ${contract.symbol} ` +
+            `(${req.entryType}${req.entryPrice ? `@${req.entryPrice}` : ''}, stop ${req.stopPrice}, target ${req.targetPrice}, ` +
+            `ids ${parentId}/${takeProfitId}/${stopId}, ack ${ack.outcome}` +
+            `${ack.permIds[0] ? `, permId ${ack.permIds[0]}` : ''})`,
+        );
+    }
 
     return {
         parentOrderId: parentId,
@@ -191,5 +272,6 @@ async function placeBracketOrderLocked(req: BracketRequest): Promise<BracketResu
         entryPrice: req.entryPrice,
         stopPrice: req.stopPrice,
         targetPrice: req.targetPrice,
+        ack,
     };
 }

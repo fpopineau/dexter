@@ -62,6 +62,9 @@ export interface TradeProposal {
     source: string;
     /** Set after execution: parent/takeProfit/stop order ids. */
     orderIds: number[] | null;
+    /** Broker permIds aligned with orderIds; null entries where the ack
+     *  never carried one (WP1). */
+    orderPermIds: Array<number | null> | null;
     /** Failure or rejection detail. */
     note: string | null;
     // --- Outcome fields (populated by the outcome tracker) ---
@@ -383,6 +386,10 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     ['vwap_dist_pct', 'REAL'],
     ['day_move_pct', 'REAL'],
     ['minutes_since_open', 'REAL'],
+    // Broker permIds aligned with order_ids (WP1, remediation 2026-08-20):
+    // client order ids reset per connection — permId is IBKR's stable
+    // handle, the reconciliation key that survives a reconnect.
+    ['order_perm_ids', 'TEXT'],
 ];
 
 /** Replay/instrumentation columns added after the refusals-table release. */
@@ -428,6 +435,7 @@ interface Row {
     rationale: string;
     source: string;
     order_ids: string | null;
+    order_perm_ids: string | null;
     note: string | null;
     executed_at: number | null;
     entry_fill_price: number | null;
@@ -468,6 +476,7 @@ function fromRow(r: Row): TradeProposal {
         rationale: r.rationale,
         source: r.source,
         orderIds: r.order_ids ? (JSON.parse(r.order_ids) as number[]) : null,
+        orderPermIds: r.order_perm_ids ? (JSON.parse(r.order_perm_ids) as Array<number | null>) : null,
         note: r.note,
         executedAt: r.executed_at ?? null,
         entryFillPrice: r.entry_fill_price ?? null,
@@ -642,16 +651,18 @@ export async function listProposals(status?: ProposalStatus, limit = 20): Promis
 export async function setProposalStatus(
     id: string,
     status: ProposalStatus,
-    extra?: { orderIds?: number[]; note?: string; executedAt?: number },
+    extra?: { orderIds?: number[]; orderPermIds?: Array<number | null>; note?: string; executedAt?: number },
 ): Promise<void> {
     const database = await getDb();
     database.query<void>(
         `UPDATE proposals SET status = ?, updated_at = ?, order_ids = COALESCE(?, order_ids),
+                order_perm_ids = COALESCE(?, order_perm_ids),
                 note = COALESCE(?, note), executed_at = COALESCE(?, executed_at) WHERE id = ?`,
     ).run(
         status,
         Date.now(),
         extra?.orderIds ? JSON.stringify(extra.orderIds) : null,
+        extra?.orderPermIds ? JSON.stringify(extra.orderPermIds) : null,
         extra?.note ?? null,
         extra?.executedAt ?? null,
         id.trim().toUpperCase(),

@@ -121,6 +121,26 @@ export async function assertAccountsVerified(timeoutMs = 5_000): Promise<void> {
     assertOrderingAllowed();
 }
 
+/**
+ * The single verified account every order binds to (WP1). Decision D5
+ * (remediation 2026-08-20): exactly one managed account is supported —
+ * with two, "which account holds this position / gets this order" is
+ * ambiguous in every placement and P&L path, so placement refuses outright.
+ */
+export function getVerifiedSingleAccount(): string {
+    if (managedAccounts.length === 0) {
+        throw new Error('[IBKR] SAFETY LOCK: account codes not received yet — cannot bind an order to an account; retry in a moment');
+    }
+    if (managedAccounts.length > 1) {
+        throw new Error(
+            `[IBKR] SAFETY LOCK: ${managedAccounts.length} managed accounts on this connection ` +
+            `(${managedAccounts.map(maskAccount).join(', ')}) — order placement supports exactly one (decision D5, remediation 2026-08-20). ` +
+            'Log the gateway into a single-account session.',
+        );
+    }
+    return managedAccounts[0];
+}
+
 function maskAccount(acct: string): string {
     if (acct.length <= 4) return acct;
     return `${acct.slice(0, 2)}…${acct.slice(-2)}`;

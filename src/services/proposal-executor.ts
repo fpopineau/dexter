@@ -281,11 +281,40 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
             stopPrice: p.stop,
             targetPrice: p.target,
             tif: p.tif, // GTC brackets survive the close (overnight/swing)
+            refId: p.id, // orderRef "<id>:leg" — the broker-side correlation key
         });
 
+        // Broker rejection inside the ack window (WP1): the legs were
+        // cancel-swept in bracket.ts — the row is terminally 'failed' with
+        // the broker's own reason, and no position slot stays consumed.
+        // Before this, the row sat 'executed' until the tracker's async
+        // self-heal caught up, and the operator was told it was WORKING.
+        if (result.ack.outcome === 'rejected') {
+            const r = result.ack.rejection!;
+            const reason = `broker rejected order ${r.orderId} (code ${r.code ?? '?'}): ${r.reason}`;
+            await setProposalStatus(p.id, 'failed', { note: reason });
+            logger.error(`[proposal-executor] ${p.id} ${reason}`);
+            return {
+                ok: false,
+                message: `❌ ${p.id} NOT executed — ${reason}. All bracket legs were cancelled; nothing is working.`,
+            };
+        }
+
         const orderIds = [result.parentOrderId, result.takeProfitOrderId, result.stopOrderId];
-        await setProposalStatus(p.id, 'executed', { orderIds, executedAt: Date.now() });
-        logger.info(`[proposal-executor] ${p.id} executed (orders ${orderIds.join('/')})`);
+        // Deviation from the remediation plan's letter (recorded): an
+        // UNCONFIRMED placement is marked 'executed' with a loud note
+        // rather than left 'executing' — 'executing' rows are invisible to
+        // the outcome tracker and releasable by the claim sweeper, and a
+        // released claim on live orders invites a double placement. The
+        // conservative direction is to track and consume the slot.
+        const unconfirmed = result.ack.outcome === 'unconfirmed';
+        await setProposalStatus(p.id, 'executed', {
+            orderIds,
+            orderPermIds: result.ack.permIds,
+            executedAt: Date.now(),
+            ...(unconfirmed ? { note: 'placement-unconfirmed: no broker ack within the window — verify with \'orders\'' } : {}),
+        });
+        logger.info(`[proposal-executor] ${p.id} executed (orders ${orderIds.join('/')}, ack ${result.ack.outcome})`);
 
         // Hand the bracket to the outcome tracker (fills, exit, realized P&L).
         const executed = await getProposal(p.id);
@@ -298,11 +327,14 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         return {
             ok: true,
             message:
-                `✅ ${p.id} bracket placed: ${p.direction.toUpperCase()} ${p.quantity} ${p.symbol} ` +
+                `✅ ${p.id} bracket ${unconfirmed ? 'handed to broker' : 'ACKNOWLEDGED'}: ${p.direction.toUpperCase()} ${p.quantity} ${p.symbol} ` +
                 `${p.entryType === 'MKT' ? 'at market' : `limit ${p.entry}`}, stop ${p.stop}, target ${p.target} ` +
-                `(orders ${orderIds.join('/')}, OCA ${result.ocaGroup}).\n` +
-                `The entry order is now WORKING — you hold a position once it fills. ` +
-                `Track with 'orders' (resting orders) and 'positions' (fills).`,
+                `(orders ${orderIds.join('/')}, OCA ${result.ocaGroup}` +
+                `${result.ack.permIds[0] ? `, permId ${result.ack.permIds[0]}` : ''}).\n` +
+                (unconfirmed
+                    ? `⚠️ The broker has not acknowledged yet — verify with 'orders' before assuming the entry is working.`
+                    : `The entry order is WORKING — you hold a position once it fills. ` +
+                      `Track with 'orders' (resting orders) and 'positions' (fills).`),
         };
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

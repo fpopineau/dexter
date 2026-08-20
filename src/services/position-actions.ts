@@ -15,7 +15,7 @@
  * only blocks risk-increasing actions, and protecting/closing reduces risk.
  */
 
-import { allocReqId, assertAccountsVerified, getIBApi, isNonFatalIbkrError } from '@/tools/ibkr/connection.js';
+import { allocReqId, assertAccountsVerified, getIBApi, getVerifiedSingleAccount, isNonFatalIbkrError } from '@/tools/ibkr/connection.js';
 import { withOrderLock } from '@/tools/ibkr/order-lock.js';
 import { getNextValidOrderId } from '@/tools/ibkr/orders.js';
 import { getMarketSession, isTradeableSession } from '@/utils/market-hours.js';
@@ -186,9 +186,14 @@ export async function protectPosition(
         const placed = await withOrderLock(async () => {
             const stopId = await getNextValidOrderId(api);
             const ocaGroup = `dexter-protect-${symbol}-${stopId}`;
+            // Identity binding (WP1): account + a stable orderRef on every
+            // order this module places.
+            const account = getVerifiedSingleAccount();
 
             const stopOrder: Order = {
                 orderId: stopId,
+                account,
+                orderRef: `protect-${symbol}:stop`,
                 action: exitAction,
                 totalQuantity: qty,
                 orderType: OrderType.STP,
@@ -206,6 +211,8 @@ export async function protectPosition(
                 const targetId = stopId + 1;
                 const targetOrder: Order = {
                     orderId: targetId,
+                    account,
+                    orderRef: `protect-${symbol}:tp`,
                     action: exitAction,
                     totalQuantity: qty,
                     orderType: OrderType.LMT,
@@ -295,6 +302,10 @@ export async function closePosition(symbolRaw: string, source = 'close command')
             const orderId = await getNextValidOrderId(api);
             const order: Order = {
                 orderId,
+                // Identity binding (WP1): the close routes to the verified
+                // account, not the API default.
+                account: getVerifiedSingleAccount(),
+                orderRef: `close-${symbol}`,
                 action: isLong ? OrderAction.SELL : OrderAction.BUY,
                 totalQuantity: qty,
                 orderType: OrderType.MKT,
