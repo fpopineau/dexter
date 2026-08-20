@@ -14,8 +14,6 @@
 
 import { onBreadthTrigger, onOpportunityTrigger, type Opportunity } from '@/services/opportunity-engine.js';
 import { type BreadthEvent } from '@/services/breadth-detector.js';
-import { autoExecuteProposal, isAutoExecuteEnabled } from '@/services/proposal-executor.js';
-import { listProposals } from '@/services/trade-proposals.js';
 import { getSetting } from '@/utils/config.js';
 import { logger } from '@/utils';
 import { runAgentForMessage } from './agent-runner.js';
@@ -116,18 +114,11 @@ async function evaluateAndDeliver(
      *  the nightly replay could not see). */
     declineCtx: { direction: 'long' | 'short'; price?: number | null; score?: number | null },
 ): Promise<void> {
-    const session = findTargetSession();
-    if (!session?.lastTo || !session?.lastAccountId) {
-        logger.warn('[trigger-alerts] no WhatsApp delivery target, skipping alert');
-        return;
-    }
-    try {
-        assertOutboundAllowed({ to: session.lastTo, accountId: session.lastAccountId });
-    } catch {
-        logger.warn('[trigger-alerts] outbound blocked, skipping alert');
-        return;
-    }
-
+    // Delivery availability must NOT gate analysis (WP0.7): with the old
+    // order, no WhatsApp session meant no evaluation, no proposal, and —
+    // worst — no decline ledger row, silently breaking the "a decline is a
+    // recorded decision" invariant this file itself asserts. The evaluation
+    // now always runs; delivery is attempted afterwards, best-effort.
     const model = getSetting('modelId', 'gpt-5.5') as string;
     const modelProvider = getSetting('provider', 'openai') as string;
 
@@ -164,32 +155,30 @@ async function evaluateAndDeliver(
         return;
     }
 
+    // Best-effort delivery. A missing target no longer discards the work:
+    // any proposal the evaluation registered stands (TUI/dashboard show
+    // it), and — if AUTO_EXECUTE_PAPER is on — the creation tool already
+    // auto-executed it CAUSALLY by its own id and folded the outcome into
+    // the answer. The freshest-proposal fallback that used to live here
+    // could execute a concurrent lane's row for the same symbol and
+    // misattribute it to this trigger; it is deliberately gone (WP0.7).
+    const session = findTargetSession();
+    if (!session?.lastTo || !session?.lastAccountId) {
+        logger.warn(`[trigger-alerts] ${symbol}: evaluated (actionable), but no WhatsApp delivery target — proposal visible in TUI/dashboard`);
+        return;
+    }
+    try {
+        assertOutboundAllowed({ to: session.lastTo, accountId: session.lastAccountId });
+    } catch {
+        logger.warn(`[trigger-alerts] ${symbol}: evaluated (actionable), but outbound blocked — proposal visible in TUI/dashboard`);
+        return;
+    }
     await sendMessageWhatsApp({
         to: session.lastTo,
         body: cleanMarkdownForWhatsApp(answer).trim(),
         accountId: session.lastAccountId,
     });
     logger.info(`[trigger-alerts] ${symbol}: alert delivered`);
-
-    // Optional paper-only auto-execution (AUTO_EXECUTE_PAPER=true):
-    // pick the freshest open proposal the evaluation just registered for
-    // this symbol and run it through the auto-executor (paper assertion,
-    // daily cap, then the standard gates). Outcome is reported back.
-    if (isAutoExecuteEnabled()) {
-        const open = await listProposals('open');
-        const candidate = open
-            .filter((p) => p.symbol === symbol && Date.now() - p.createdAt < 10 * 60_000)
-            .sort((a, b) => b.createdAt - a.createdAt)[0];
-        if (candidate) {
-            const outcome = await autoExecuteProposal(candidate.id);
-            logger.info(`[trigger-alerts] ${symbol}: auto-execute ${candidate.id} → ${outcome.ok ? 'ok' : 'refused'}`);
-            await sendMessageWhatsApp({
-                to: session.lastTo,
-                body: cleanMarkdownForWhatsApp(outcome.message).trim(),
-                accountId: session.lastAccountId,
-            });
-        }
-    }
 }
 
 /** Subscribe trigger alerts (idempotent). Called at gateway startup. */
