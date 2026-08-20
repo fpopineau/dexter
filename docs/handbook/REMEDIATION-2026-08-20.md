@@ -181,7 +181,21 @@ refusal names every starved check); noise-stop, target-reach, extension
 and chase run unconditionally at accept; UNKNOWN sector bucket (D3)
 capped like any sector. Scope notes: buy-now stays creation-only per its
 documented design; recentEarnings=null stays strict (never waives).
-Next: WP7 microstructure gates, WP8 currency.
+
+**STATUS: WP7 LANDED 2026-08-21** (commit 8fd4313; suite 637 green).
+Spread (max_spread_pct) and ADV (max_adv_pct, min_avg_volume now
+deterministic) hard-gate at accept, fail-closed on missing data; shorts
+require confirmed borrow (tick 236); known halt refuses, unknown notes.
+⚠ LIVE-VERIFY before the freeze (E2E checklist): the IBKR daily-volume
+lot factor (×100) and the tick-236 field-46/49 value semantics.
+
+**STATUS: WP8 LANDED 2026-08-21 — PHASE 2 COMPLETE** (commit 0a91ffd;
+suite 640 green). NetLiq currency tag captured; exported figure converts
+to USD at the boundary (IDEALPRO midpoint, 1h cache, fail-safe refusal
+when a non-USD base has no rate); internal halt math stays base
+(internally consistent). Direction pinned by test. Remaining phases:
+3 (WP9 backtester, WP10 scorer, WP11 residuals) and 4 (frozen
+validation).
 
 - **WP5 Overnight conversion vetting** (crit. 9, HIGH)
   Files: `eod-triage.ts`, `outcome-tracker.ts`, `proposal-risk-gate.ts`.
