@@ -140,6 +140,9 @@ export async function executeCronJob(
   try {
     answer = await runAgentForMessage({
       sessionKey: `cron:${job.id}`,
+      // Readable lane for proposal attribution (WP0.8): the job NAME, not
+      // the opaque id the sessionKey needs for uniqueness.
+      lane: `cron:${job.name}`,
       query,
       model,
       modelProvider,

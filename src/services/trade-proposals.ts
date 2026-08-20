@@ -946,6 +946,10 @@ export interface PerformanceSummary {
     /** Per-class ledger (intraday / swing / earnings-bet). Each class earns
      *  its own track record — the earnings-bet live switch is gated on this. */
     byClass: Record<string, { closed: number; wins: number; losses: number; netPnl: number }>;
+    /** Per-lane ledger (trigger / breadth / cron:<name> / whatsapp / agent)
+     *  — WP0.8: which pipeline the trade came from, so a losing lane is
+     *  attributable instead of averaged into 'agent'. */
+    bySource: Record<string, { closed: number; wins: number; losses: number; netPnl: number }>;
     openExecuted: number;
     openProposals: number;
 }
@@ -969,16 +973,20 @@ export async function getPerformanceSummary(
     let worst: PerformanceSummary['worst'] = null;
     const byExitReason: Record<string, number> = {};
     const byClass: PerformanceSummary['byClass'] = {};
+    const bySource: PerformanceSummary['bySource'] = {};
 
     for (const p of rows) {
         byExitReason[p.exitReason ?? 'unknown'] = (byExitReason[p.exitReason ?? 'unknown'] ?? 0) + 1;
         const cls = (byClass[p.tradeClass] ??= { closed: 0, wins: 0, losses: 0, netPnl: 0 });
+        const lane = (bySource[p.source || 'agent'] ??= { closed: 0, wins: 0, losses: 0, netPnl: 0 });
         cls.closed++;
+        lane.closed++;
         if (p.realizedPnl == null) {
             unlabeled++;
             continue;
         }
         cls.netPnl = Math.round((cls.netPnl + p.realizedPnl - (p.commissions ?? 0)) * 100) / 100;
+        lane.netPnl = Math.round((lane.netPnl + p.realizedPnl - (p.commissions ?? 0)) * 100) / 100;
         // Win/loss on NET P&L (gross minus commissions): a trade whose
         // gross edge is smaller than its round-trip fees is a loss, and
         // that marginal population is exactly what calibration reads
@@ -986,6 +994,8 @@ export async function getPerformanceSummary(
         const net = Math.round((p.realizedPnl - (p.commissions ?? 0)) * 100) / 100;
         if (net > 0) cls.wins++;
         else if (net < 0) cls.losses++;
+        if (net > 0) lane.wins++;
+        else if (net < 0) lane.losses++;
         grossPnl += p.realizedPnl;
         commissions += p.commissions ?? 0;
         if (net > 0) wins++;
@@ -1012,6 +1022,7 @@ export async function getPerformanceSummary(
         worst,
         byExitReason,
         byClass,
+        bySource,
         openExecuted: await countOpenExecuted(),
         openProposals: (await listProposals('open', 100)).length,
     };

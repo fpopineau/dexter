@@ -24,6 +24,7 @@ import {
     listProposals,
 } from '@/services/trade-proposals.js';
 import { rejectProposal } from '@/services/proposal-executor.js';
+import { currentAgentLane } from '@/agent/lane-context.js';
 import { fetchDailyRiskContext } from '../ibkr/daily-atr.js';
 import { formatToolResult } from '../types.js';
 import { logger } from '@/utils';
@@ -225,7 +226,10 @@ export function createTradeProposalsTool() {
                             worstCaseGapPct: input.worstCaseGapPct,
                             score: input.score,
                             rationale: input.rationale,
-                            source: 'agent',
+                            // Lane attribution (WP0.8): trigger / breadth /
+                            // cron:<name> / whatsapp / agent — read from the
+                            // run context, never self-reported by the model.
+                            source: currentAgentLane() ?? 'agent',
                             expiresMinutes: input.expiresMinutes,
                             entryContext,
                         }, {

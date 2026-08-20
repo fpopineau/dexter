@@ -4,6 +4,7 @@ import { createMessageQueue, type MessageQueue, type QueuePriority } from '../ut
 import { HEARTBEAT_OK_TOKEN } from './heartbeat/suppression.js';
 import type { AgentEvent } from '../agent/types.js';
 import type { GroupContext } from '../agent/prompts.js';
+import { deriveLane, withAgentLane } from '../agent/lane-context.js';
 
 type SessionState = {
   history: InMemoryChatHistory;
@@ -69,6 +70,9 @@ export type AgentRunRequest = {
   isolatedSession?: boolean;
   channel?: string;
   groupContext?: GroupContext;
+  /** Attribution lane for this run (WP0.8) — stamps proposal `source`.
+   *  Omitted: derived from sessionKey/channel conventions. */
+  lane?: string;
 };
 
 export async function runAgentForMessage(req: AgentRunRequest): Promise<string> {
@@ -76,7 +80,8 @@ export async function runAgentForMessage(req: AgentRunRequest): Promise<string> 
   const session = isolated ? null : getSession(req.sessionKey, req.model);
   let finalAnswer = '';
 
-  const run = async () => {
+  const run = () => withAgentLane(deriveLane(req), runInner);
+  const runInner = async () => {
     if (session) {
       session.isRunning = true;
       session.history.saveUserQuery(req.query);
