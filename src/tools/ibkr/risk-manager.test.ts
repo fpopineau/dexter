@@ -19,7 +19,9 @@ describe('risk_manager sizing delegates to the real sizer (the 2× fix)', () => 
         // Sizer: 0.25% of $100k = $250 budget ÷ $5 stop distance = 50 shares.
         // The pre-2026-08-11 formula (25% of the 2% daily limit = $500)
         // suggested 100 — exactly 2× what the gate would accept.
-        const r = validateTrade(input({ score: 85 }), 100_000, DEFAULT_RULES);
+        // Entry $50 keeps the cap (margined $4,975 → 99 shares) out of the
+        // way: this test is about the RISK budget, not the cap.
+        const r = validateTrade(input({ score: 85, entryPrice: 50, stopPrice: 45 }), 100_000, DEFAULT_RULES);
         expect(r.suggestedShares).toBe(50);
         expect(r.checks.find((c) => c.rule === 'position_size')?.detail).toContain('same math');
     });
@@ -28,11 +30,11 @@ describe('risk_manager sizing delegates to the real sizer (the 2× fix)', () => 
         // Production defaults are FLAT until the frozen sample proves
         // decile monotonicity (VALIDATION-PROTOCOL.md, review 2026-08-21):
         // unscored gets the same $250 budget ÷ $5 = 50 shares…
-        const flat = validateTrade(input(), 100_000, DEFAULT_RULES);
+        const flat = validateTrade(input({ entryPrice: 50, stopPrice: 45 }), 100_000, DEFAULT_RULES);
         expect(flat.suggestedShares).toBe(50);
         // …and the banding MECHANISM still works when configured:
         // $250 × 0.35 = $87.50 ÷ $5 = 17 shares.
-        const banded = validateTrade(input(), 100_000, { ...DEFAULT_RULES, sizing_low_mult: 0.35 });
+        const banded = validateTrade(input({ entryPrice: 50, stopPrice: 45 }), 100_000, { ...DEFAULT_RULES, sizing_low_mult: 0.35 });
         expect(banded.suggestedShares).toBe(17);
     });
 
@@ -63,7 +65,8 @@ describe('risk_manager sizing delegates to the real sizer (the 2× fix)', () => 
             100_000,
             { ...DEFAULT_RULES, max_risk_per_trade_pct: 1.0 },
         );
-        expect(r.suggestedShares).toBe(50);
+        // Margined cap: 5% × $100k × 0.995 = $4,975 ÷ $100 = 49 shares.
+        expect(r.suggestedShares).toBe(49);
     });
 });
 

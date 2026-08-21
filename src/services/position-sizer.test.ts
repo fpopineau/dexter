@@ -75,9 +75,10 @@ describe('computeQuantity — €3.7K live account', () => {
 describe('computeQuantity — $1M paper account (sizer must also serve paper)', () => {
     test('produces the familiar risk-budget sizing', () => {
         // budget = 1,000,000 × 0.25% = 2500 at full confidence; stop distance 3.5
-        // → 714 by risk; cap = 5% = 50,000 → 165 shares at $303 → cap binds.
+        // → 714 by risk; cap = 5% × 0.995 drift margin = 49,750 → 164
+        // shares at $303 → cap binds.
         const r = computeQuantity({ entry: 303, stop: 299.5, score: 85, netLiquidation: 1_000_000 }, PAPER);
-        expect(r.quantity).toBe(165);
+        expect(r.quantity).toBe(164);
     });
 
     test('no budget floor on paper — small unscored trades still size', () => {
@@ -124,9 +125,28 @@ describe('fractional shares (small live account)', () => {
     });
 
     test('a $500 mega-cap becomes tradable: cap-bound decimal quantity', () => {
-        // cap = 3700 × 20% = 740 → 740/500 = 1.48 shares; budget 37 / stop 10 = 3.7 → cap binds.
+        // cap = 3700 × 20% × 0.995 drift margin = 736.3 → /500 = 1.4726;
+        // budget 37 / stop 10 = 3.7 → cap binds.
         const r = computeQuantity({ entry: 500, stop: 490, score: 85, netLiquidation: 3700 }, FRAC);
-        expect(r.quantity).toBeCloseTo(1.48, 10);
+        expect(r.quantity).toBeCloseTo(1.4726, 10);
+    });
+
+    test('cap-bound sizing survives NetLiq drifting down before the gate re-checks (P-DBFF, 2026-08-21)', () => {
+        // The real refusal: sized 1553 × $9.36 on creation-time NetLiq,
+        // refused at acceptance when fresh USD NetLiq (EUR account × live
+        // EURUSD) had drifted ~3.5bp lower → gate max 1552. The margin
+        // keeps cap-bound sizes clear of the boundary.
+        const sized = computeQuantity(
+            { entry: 9.36, stop: 9.14, score: 85, netLiquidation: 290_722 },
+            { ...DEFAULT_RULES }, // paper shape: 5% cap, whole shares
+        );
+        expect(sized.quantity).not.toBeNull();
+        // Gate replay at a 30bp-LOWER NetLiq must still pass.
+        const driftedMaxValue = 0.05 * (290_722 * 0.997);
+        expect(sized.quantity! * 9.36).toBeLessThanOrEqual(driftedMaxValue);
+        // And the margin must not be doing more than trimming the boundary:
+        // the size stays within 1% of the unmargined cap.
+        expect(sized.quantity! * 9.36).toBeGreaterThan(0.05 * 290_722 * 0.985);
     });
 
     test('risk budget binds fractionally too', () => {
@@ -142,7 +162,8 @@ describe('fractional shares (small live account)', () => {
     });
 
     test('whole-share mode is unchanged (paper regression)', () => {
+        // Cap-bound at the margined cap: 49,750 / 303 = 164.
         const r = computeQuantity({ entry: 303, stop: 299.5, score: 85, netLiquidation: 1_000_000 }, { ...DEFAULT_RULES });
-        expect(r.quantity).toBe(165);
+        expect(r.quantity).toBe(164);
     });
 });

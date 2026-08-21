@@ -62,6 +62,11 @@ export interface SizeResult {
 /** IBKR fractional resolution: 4 decimal places, minimum 0.0001 share. */
 export const FRACTIONAL_STEP = 0.0001;
 
+/** Sizer headroom under max_position_pct: absorbs NetLiq/FX drift between
+ *  sizing (creation) and the gate's re-check (acceptance). See the
+ *  cap-drift comment at the byCap computation. */
+export const CAP_DRIFT_MARGIN = 0.995;
+
 /**
  * Is `qty` a placeable share quantity under the active rules?
  * Whole-share mode: positive integers. Fractional mode: positive decimals
@@ -148,8 +153,15 @@ export function computeQuantity(input: SizeInput, rules: RiskRules = getRiskRule
 
     const fractional = rules.fractional_shares;
     const maxPositionValue = (rules.max_position_pct / 100) * input.netLiquidation;
+    // Cap-drift margin (P-DBFF, 2026-08-21): the gate re-checks the cap at
+    // ACCEPTANCE with fresh broker-canonical USD NetLiq — on a EUR account
+    // that denominator moves with every EURUSD tick, so a sizer that lands
+    // exactly ON the cap gets refused for one share whenever NetLiq drifts
+    // a few basis points down between creation and acceptance. Sizing to
+    // 99.5% of the cap absorbs the drift; a GENUINE breach (position that
+    // really outgrew the account) is still the gate's to refuse.
     const byRisk = floorToPlaceable(riskBudget / riskPerShare, fractional);
-    const byCap = floorToPlaceable(maxPositionValue / input.entry, fractional);
+    const byCap = floorToPlaceable((maxPositionValue * CAP_DRIFT_MARGIN) / input.entry, fractional);
     const quantity = Math.min(byRisk, byCap);
     const minQty = fractional ? FRACTIONAL_STEP : 1;
 

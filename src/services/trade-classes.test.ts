@@ -60,7 +60,10 @@ describe('classRiskPct — each class has its own budget', () => {
 
 describe('sizer — swing budget doubles the intraday size at the same stop', () => {
     test('$1M account, $10 stop distance, full confidence', () => {
-        const base = { entry: 100, stop: 90, score: 85, netLiquidation: 1_000_000 };
+        // Entry $50 keeps the cap (5% × 0.995 = $49,750 → 995 shares) clear
+        // of the boundary — the test's subject is the RISK budget doubling,
+        // and at entry $100 the swing size coincided with the raw cap.
+        const base = { entry: 50, stop: 40, score: 85, netLiquidation: 1_000_000 };
         const intraday = computeQuantity({ ...base, tradeClass: 'intraday' }, PAPER_BETS);
         const swing = computeQuantity({ ...base, tradeClass: 'swing' }, PAPER_BETS);
         expect(intraday.quantity).toBe(250); // 0.25% = $2500 / $10
