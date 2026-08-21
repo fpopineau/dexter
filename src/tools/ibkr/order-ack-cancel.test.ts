@@ -52,6 +52,11 @@ describe('confirmCancel', () => {
         api.onCancel = (id) => queueMicrotask(() => api.emit(EventName.orderStatus, id, 'PendingCancel', 0, 5, 0));
         expect(await confirmCancel(api as never, 7, 100)).toBe('unconfirmed');
     });
+    test("Inactive does NOT confirm a cancel — IBKR uses it for invalid/rejected/HELD orders (round 6)", async () => {
+        const api = new FakeApi();
+        api.onCancel = (id) => queueMicrotask(() => api.emit(EventName.orderStatus, id, 'Inactive', 0, 5, 0));
+        expect(await confirmCancel(api as never, 7, 200)).toBe('not-cancellable');
+    });
     test('a fill during the cancel is reported as filled', async () => {
         const api = new FakeApi();
         api.onCancel = (id) => queueMicrotask(() => api.emit(EventName.orderStatus, id, 'Filled', 5, 0, 101.5));

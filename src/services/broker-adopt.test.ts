@@ -7,7 +7,7 @@ const dir = mkdtempSync(join(tmpdir(), 'dexter-adopt-'));
 const prevDataDir = process.env.DEXTER_DATA_DIR;
 process.env.DEXTER_DATA_DIR ??= dir;
 
-import { decideAdoptions, type BrokerOrderSnap, type BrokerPositionSnap } from './broker-adopt.js';
+import { decideAdoptions, selectManualExitRehydrations, type BrokerOrderSnap, type BrokerPositionSnap } from './broker-adopt.js';
 import { countOpenExecuted, createAdoptedPosition, getProposal } from './trade-proposals.js';
 
 // WP3 (REMEDIATION-2026-08-20): reconciliation used to run strictly DB →
@@ -103,4 +103,39 @@ afterAll(() => {
     if (prevDataDir === undefined) delete process.env.DEXTER_DATA_DIR;
     else process.env.DEXTER_DATA_DIR = prevDataDir;
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* held by sqlite */ }
+});
+
+describe('manual-exit rehydration (round-6 review)', () => {
+    const pos = (symbol: string, quantity: number): BrokerPositionSnap =>
+        ({ account: ACCT, symbol, quantity, avgCost: 100 });
+
+    test('working close-* orders on our account re-arm the guard', () => {
+        const picked = selectManualExitRehydrations(
+            [order({ orderId: 70, symbol: 'NVDA', orderRef: 'close-NVDA', quantity: 12 })],
+            [pos('NVDA', 12)],
+            ACCT,
+        );
+        expect(picked).toEqual([{ symbol: 'NVDA', orderId: 70, quantity: 12, flatSymbol: false }]);
+    });
+
+    test('a close on a FLAT symbol is flagged — it would OPEN a position, not close one', () => {
+        const picked = selectManualExitRehydrations(
+            [order({ orderId: 71, symbol: 'AMD', orderRef: 'close-AMD', quantity: 5 })],
+            [], // flat book
+            ACCT,
+        );
+        expect(picked[0]?.flatSymbol).toBe(true);
+    });
+
+    test('foreign-account and non-close refs are ignored', () => {
+        const picked = selectManualExitRehydrations(
+            [
+                order({ orderId: 72, symbol: 'NVDA', orderRef: 'close-NVDA', account: 'DU0000001' }),
+                order({ orderId: 73, symbol: 'NVDA', orderRef: 'protect-NVDA:stop' }),
+            ],
+            [pos('NVDA', 10)],
+            ACCT,
+        );
+        expect(picked).toHaveLength(0);
+    });
 });

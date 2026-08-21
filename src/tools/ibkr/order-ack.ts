@@ -132,8 +132,14 @@ export type CancelOutcome = 'cancelled' | 'filled' | 'not-cancellable' | 'unconf
  *  state token in the message decides; TWS localizes it (English
  *  'Filled' / French 'Rempli'), so match both. */
 export function classifyCancelRejection(code: number, message: string): CancelOutcome | null {
-    // 10147: "OrderId <x> that needs to be cancelled is not found" — the
-    // order is not working anywhere; for a cancel, that is success.
+    // 10147: "OrderId <x> that needs to be cancelled is not found" — for
+    // ids THIS client placed (every id Dexter cancels through its own
+    // flows), the order is not working: success. Round-6 caveat, recorded:
+    // for an id owned by ANOTHER client session, IBKR refuses the cancel
+    // and 'not found' would lie — which is why cleanupExitsAfterClose
+    // re-reads the open-orders book afterwards and lets the BOOK, not this
+    // event, have the final word. An earlier fill is likewise the
+    // tracker's execDetails-replay problem, not the cancel's.
     if (code === 10147) return 'cancelled';
     if (code === 10148 || code === 161) {
         // Only the STATE TOKEN decides — the sentence itself always says
@@ -168,8 +174,12 @@ export function confirmCancel(api: IBApi, orderId: number, timeoutMs: number): P
         const onOrderStatus = (id: number, status: string, filled: number, remaining: number) => {
             if (id !== orderId) return;
             // PendingCancel is a request in flight, not a confirmation —
-            // only terminal statuses settle (round-5 review).
-            if (status === 'Cancelled' || status === 'ApiCancelled' || status === 'Inactive') finish('cancelled');
+            // only terminal statuses settle (round-5 review). Round 6:
+            // 'Inactive' is NOT a confirmed cancellation either — IBKR uses
+            // it for invalid, rejected AND held orders; a held order can
+            // resume. It settles as not-cancellable: verify, never assume.
+            if (status === 'Cancelled' || status === 'ApiCancelled') finish('cancelled');
+            else if (status === 'Inactive') finish('not-cancellable');
             else if (status === 'Filled' && remaining === 0 && filled > 0) finish('filled');
         };
         const onError = (err: Error, code: number, reqId: number) => {

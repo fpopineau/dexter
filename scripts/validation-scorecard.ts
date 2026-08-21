@@ -171,7 +171,13 @@ const verdictFails: string[] = [];
 const sinceArg = process.argv[2];
 let sinceMs: number;
 let windowLabel: string;
+// Round-6 review: the frozen denominator is read unconditionally — an
+// explicit --since window previously lost it and could never PASS.
 let epochNetliq: number | null = null;
+try {
+    const b = JSON.parse(readFileSync(join(dataDir, 'performance-epoch.json'), 'utf-8')) as { netLiq?: number };
+    if (typeof b.netLiq === 'number' && b.netLiq > 0) epochNetliq = b.netLiq;
+} catch { /* reported by the drawdown line */ }
 if (sinceArg && /^\d{4}-\d{2}-\d{2}(T[\d:.]+Z?)?$/.test(sinceArg)) {
     // Round-5 review: accept the exact tag TIMESTAMP, not just midnight —
     // a date-only argument floors to 00:00Z and admits pre-tag trades.
@@ -180,9 +186,8 @@ if (sinceArg && /^\d{4}-\d{2}-\d{2}(T[\d:.]+Z?)?$/.test(sinceArg)) {
 } else {
     try {
         const p = join(dataDir, 'performance-epoch.json');
-        const b = JSON.parse(readFileSync(p, 'utf-8')) as { epochMs: number; note?: string; netLiq?: number };
+        const b = JSON.parse(readFileSync(p, 'utf-8')) as { epochMs: number; note?: string };
         sinceMs = b.epochMs;
-        if (typeof b.netLiq === 'number' && b.netLiq > 0) epochNetliq = b.netLiq;
         windowLabel = `since baseline ${new Date(b.epochMs).toISOString()}${b.note ? ` (${b.note})` : ''}`;
     } catch {
         sinceMs = 0;
@@ -246,15 +251,40 @@ const missingCommissions = rows.filter((r) => r.commissions === null).length;
 // Round-5 review: adoptions ARE reconciliation events — unknown broker
 // state appeared during the window; and a post-freeze row without its
 // model/regime stamp is an instrumentation failure, not a shrug.
-const adoptionsInWindow = db.query<{ c: number }>(`
+// Round-6: only UNRESOLVED adoptions block (protocol: zero unresolved
+// anomalies AT EVALUATION TIME) — an adopted row since closed/resolved
+// is history, not an outstanding discrepancy.
+const adoptionsOpen = db.query<{ c: number }>(`
     SELECT COUNT(*) AS c FROM proposals WHERE source = 'adopted' AND created_at >= ?
+      AND status NOT IN ('closed', 'cancelled', 'failed', 'rejected')
 `).all(sinceMs)[0]?.c ?? 0;
+const adoptionsResolved = (db.query<{ c: number }>(`
+    SELECT COUNT(*) AS c FROM proposals WHERE source = 'adopted' AND created_at >= ?
+`).all(sinceMs)[0]?.c ?? 0) - adoptionsOpen;
+// Reconciliation truth persisted by the sweep (round-6): orphan orders,
+// stale closes, and sweep freshness are now provable, not remembered.
+let reconLine = 'reconciliation report: MISSING (.dexter/data/reconciliation-status.json — is the gateway sweep running?)';
+let reconAnomalies: string[] = ['no reconciliation report'];
+try {
+    const rec = JSON.parse(readFileSync(join(dataDir, 'reconciliation-status.json'), 'utf-8')) as {
+        at: number; orphanOrders: Array<{ orderId: number; symbol: string }>; staleCloses: Array<{ orderId: number; symbol: string }>;
+    };
+    const ageH = (Date.now() - rec.at) / 3_600_000;
+    reconAnomalies = [];
+    if (ageH > 24) reconAnomalies.push(`reconciliation report is ${ageH.toFixed(0)}h old`);
+    if (rec.orphanOrders.length > 0) reconAnomalies.push(`${rec.orphanOrders.length} orphan order(s) outstanding: ${rec.orphanOrders.map((o) => `#${o.orderId} ${o.symbol}`).join(', ')}`);
+    if ((rec.staleCloses ?? []).length > 0) reconAnomalies.push(`${rec.staleCloses.length} stale close order(s) on flat symbols`);
+    reconLine = `reconciliation report: ${new Date(rec.at).toISOString()} — ${reconAnomalies.length === 0 ? 'clean' : reconAnomalies.join('; ')}`;
+} catch { /* reconLine already says MISSING */ }
+console.log(reconLine);
 const missingStamps = rows.filter((r) => r.model === null || r.regime === null || r.regime === 'unknown').length;
 const anomalies: string[] = [];
 if (staleUnconfirmed > 0) anomalies.push(`${staleUnconfirmed} placement-unconfirmed row(s) older than 24h`);
 if (pnlHoles > 0) anomalies.push(`${pnlHoles} in-window close(s) with NULL realized P&L`);
 if (missingCommissions > 0) anomalies.push(`${missingCommissions} sample row(s) missing commissions (net P&L overstated)`);
-if (adoptionsInWindow > 0) anomalies.push(`${adoptionsInWindow} position(s)/order(s) ADOPTED in-window (reconciliation events — resolve before evaluating)`);
+if (adoptionsOpen > 0) anomalies.push(`${adoptionsOpen} adopted position(s) still OPEN (unresolved reconciliation events)`);
+if (adoptionsResolved > 0) console.log(`note: ${adoptionsResolved} in-window adoption(s) already resolved — informational, not blocking`);
+for (const a of reconAnomalies) anomalies.push(a);
 if (missingStamps > 0) anomalies.push(`${missingStamps} sample row(s) missing model/regime stamps (post-freeze instrumentation failure)`);
 console.log(`integrity: ${anomalies.length === 0 ? 'CLEAN' : `ANOMALIES — ${anomalies.join('; ')}`}`);
 for (const a of anomalies) verdictFails.push(`integrity: ${a}`);

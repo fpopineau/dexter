@@ -362,24 +362,45 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         });
 
         // Broker rejection inside the ack window (WP1): the legs were
-        // cancel-swept in bracket.ts — the row is terminally 'failed' with
-        // the broker's own reason, and no position slot stays consumed.
-        // Before this, the row sat 'executed' until the tracker's async
-        // self-heal caught up, and the operator was told it was WORKING.
+        // cancel-swept in bracket.ts. Round-6 review: 'failed' is only
+        // truthful when the sweep CONFIRMED every leg dead — a 'failed'
+        // row is invisible to exposure caps and the outcome tracker, so a
+        // surviving leg (or a parent that filled during the sweep) would
+        // be live risk on a slot Dexter considers free. With residues the
+        // row stays 'executed' + tracked, mirroring the
+        // placement-unconfirmed precedent: consume the slot, watch the
+        // legs, let reconciliation finalize the truth.
         if (result.ack.outcome === 'rejected') {
             const r = result.ack.rejection!;
             const reason = `broker rejected order ${r.orderId} (code ${r.code ?? '?'}): ${r.reason}`;
-            await setProposalStatus(p.id, 'failed', { note: reason });
-            logger.error(`[proposal-executor] ${p.id} ${reason}`);
-            // Round-5 review: only claim "nothing is working" when the
-            // sweep CONFIRMED every leg dead — a surviving leg can fill.
             const residues = result.ack.sweepResidues ?? [];
+            if (residues.length === 0) {
+                await setProposalStatus(p.id, 'failed', { note: reason });
+                logger.error(`[proposal-executor] ${p.id} ${reason}`);
+                return {
+                    ok: false,
+                    message: `❌ ${p.id} NOT executed — ${reason}. All bracket legs were cancelled (broker-confirmed); nothing is working.`,
+                };
+            }
+            const residueNote = `rejected-with-residues: ${reason}; legs NOT confirmed dead: ${residues.join(', ')}`;
+            await setProposalStatus(p.id, 'executed', {
+                orderIds: [result.parentOrderId, result.takeProfitOrderId, result.stopOrderId],
+                orderPermIds: result.ack.permIds,
+                executedAt: Date.now(),
+                note: residueNote,
+            });
+            logger.error(`[proposal-executor] ${p.id} ${residueNote} — row kept 'executed' and TRACKED so exposure caps and reconciliation see the surviving legs`);
+            const residueRow = await getProposal(p.id);
+            if (residueRow) {
+                try { trackExecutedProposal(residueRow); } catch (err) {
+                    logger.warn(`[proposal-executor] outcome tracking failed for residue row ${p.id}: ${err}`);
+                }
+            }
             return {
                 ok: false,
                 message: `❌ ${p.id} NOT executed — ${reason}. ` +
-                    (residues.length === 0
-                        ? 'All bracket legs were cancelled (broker-confirmed); nothing is working.'
-                        : `⚠️ Bracket legs NOT confirmed dead: ${residues.join(', ')} — check 'orders'/TWS before retrying.`),
+                    `⚠️ Bracket legs NOT confirmed dead: ${residues.join(', ')} — the row stays TRACKED (slot consumed) ` +
+                    `until reconciliation proves them gone; check 'orders'/TWS before retrying.`,
             };
         }
 

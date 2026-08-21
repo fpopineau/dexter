@@ -1185,8 +1185,10 @@ async function attach(): Promise<void> {
     }
     // WP3: the reverse direction — adopt broker orders carrying our
     // orderRef, record unknown positions as capped rows, flag orphans.
-    // Best-effort: the periodic sweep reruns it.
-    void runAdoptionSweep(api);
+    // Round-6 review: the FIRST sweep is awaited — the duplicate-close
+    // guard must be rehydrated before any close request can race it; the
+    // periodic sweep stays best-effort.
+    await runAdoptionSweep(api);
     logger.info(`[outcome-tracker] attached (${byProposalId.size} trade(s) tracked)`);
 }
 

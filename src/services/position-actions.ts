@@ -223,7 +223,12 @@ export async function protectPosition(
                 orderType: OrderType.STP,
                 auxPrice: stopPrice,
                 tif: TimeInForce.GTC, // protection must survive the close
-                ...(targetPrice !== undefined ? { ocaGroup, ocaType: 1 } : {}),
+                // Round-6 review: a LONE stop gets the OCA group too — a
+                // one-member group is legal, and it is what lets a later
+                // close JOIN it for broker-side close-vs-stop exclusion.
+                // Without it, stop-only protection kept the over-close race.
+                ocaGroup,
+                ocaType: 1,
                 // NOTE: transmit-chaining only works for parent/child brackets.
                 // A standalone OCA pair must transmit BOTH legs explicitly, or
                 // the first leg sits untransmitted and the position has no stop.
@@ -416,7 +421,28 @@ export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, sy
         logger.warn(`[position-actions] orphan-exit sweep for ${symbol} failed: ${err}`);
     }
     let cancelledExits = 0;
-    for (const [oid, outcome] of await Promise.all(pending)) {
+    const outcomes = await Promise.all(pending);
+    // Round-6 review: the POST-CONDITION is the book, not the events. A
+    // cancel event stream can lie (10147 for a foreign-client id, a missed
+    // status) — re-read the open orders and let anything still working
+    // override its classification loudly.
+    try {
+        const stillOpen = new Set<number>();
+        for (const side of [OrderAction.SELL, OrderAction.BUY]) {
+            for (const o of await fetchOpenOrdersFor(api, symbol, side)) stillOpen.add(o.orderId);
+        }
+        for (const [oid, outcome] of outcomes) {
+            if (stillOpen.has(oid)) {
+                logger.error(
+                    `[position-actions] ${symbol}: order #${oid} is STILL WORKING after cleanup (events said '${outcome}') — ` +
+                    `the book overrides the event stream; cancel it in TWS or it can fill against a flat position.`,
+                );
+            }
+        }
+    } catch (err) {
+        logger.warn(`[position-actions] ${symbol}: post-cleanup book verification failed: ${err}`);
+    }
+    for (const [oid, outcome] of outcomes) {
         if (outcome === 'cancelled') {
             cancelledExits++;
         } else if (entryIds.has(oid) && (outcome === 'filled' || outcome === 'not-cancellable')) {

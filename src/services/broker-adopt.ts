@@ -13,6 +13,8 @@
  */
 
 import { EventName, type IBApi, type Order } from '@stoqey/ib';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { logger } from '@/utils';
 import { createAdoptedPosition, listExposure } from './trade-proposals.js';
 import { fetchPositions } from './position-actions.js';
@@ -128,6 +130,27 @@ export function fetchOpenOrderSnaps(api: IBApi): Promise<BrokerOrderSnap[]> {
     });
 }
 
+/** Round-6 review, pure: which broker orders re-arm the duplicate-close
+ *  guard after a restart, and which of them sit on a FLAT symbol (a
+ *  "close" with no position is a reversal order waiting to fill). */
+export function selectManualExitRehydrations(
+    orders: BrokerOrderSnap[],
+    positions: BrokerPositionSnap[],
+    verifiedAccount: string,
+): Array<{ symbol: string; orderId: number; quantity: number; flatSymbol: boolean }> {
+    const held = new Set(
+        positions.filter((p) => p.quantity !== 0 && p.account === verifiedAccount).map((p) => p.symbol.toUpperCase()),
+    );
+    return orders
+        .filter((o) => (o.account === null || o.account === verifiedAccount) && /^close-/.test((o.orderRef ?? '').trim()))
+        .map((o) => ({
+            symbol: o.symbol,
+            orderId: o.orderId,
+            quantity: o.quantity ?? 0,
+            flatSymbol: !held.has(o.symbol.toUpperCase()),
+        }));
+}
+
 /** Orphans already reported this process — the sweep repeats every N
  *  minutes and must not repeat the alarm for the same standing order. */
 const notifiedOrphans = new Set<number>();
@@ -171,11 +194,18 @@ export async function runBrokerAdoption(api: IBApi, hooks: AdoptionHooks): Promi
     // Round-5 review: rehydrate the duplicate-close guard from broker
     // truth — a resting close (pre-market MKT, hours to the open) must
     // refuse a second full-size close even across a gateway restart.
+    const rehydrations = selectManualExitRehydrations(orders, positions, account);
     if (hooks.registerManualExit) {
-        for (const o of orders) {
-            if (o.account !== null && o.account !== account) continue;
-            if (/^close-/.test((o.orderRef ?? '').trim())) {
-                hooks.registerManualExit(o.symbol, o.orderId, o.quantity ?? 0);
+        for (const r of rehydrations) {
+            hooks.registerManualExit(r.symbol, r.orderId, r.quantity);
+            if (r.flatSymbol && !notifiedOrphans.has(r.orderId)) {
+                notifiedOrphans.add(r.orderId);
+                // Round-6 review: a close order on a FLAT symbol is not a
+                // close anymore — if it fills, it OPENS a position.
+                await hooks.notify(
+                    `⚠️ Resting close order #${r.orderId} (${r.symbol}) but the symbol is FLAT — if it fills it ` +
+                    `REVERSES into a new position. Cancel it in TWS/'cancel ${r.symbol}'.`,
+                );
             }
         }
     }
@@ -227,5 +257,23 @@ export async function runBrokerAdoption(api: IBApi, hooks: AdoptionHooks): Promi
             newForeign.map((p) => `${p.symbol} x${p.quantity} (${p.account})`).join(', ') +
             `. Single-account rule (D5): not adopted, not counted — use a single-account login.`,
         );
+    }
+
+    // Round-6 review: the protocol's integrity gate ("adoption sweep
+    // clean, no orphans outstanding") was unprovable — orphans lived only
+    // in this process's memory. Every sweep persists its findings so the
+    // scorecard can read reconciliation truth at evaluation time.
+    try {
+        const dataDir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
+        writeFileSync(join(dataDir, 'reconciliation-status.json'), JSON.stringify({
+            at: Date.now(),
+            orphanOrders: plan.orphanOrders.map((o) => ({ orderId: o.orderId, symbol: o.symbol, orderRef: o.orderRef })),
+            legAdoptions: plan.orderAdoptions.length,
+            positionAdoptions: plan.positionAdoptions.length,
+            foreignPositions: plan.foreignPositions.length,
+            staleCloses: rehydrations.filter((r) => r.flatSymbol).map((r) => ({ orderId: r.orderId, symbol: r.symbol })),
+        }, null, 2));
+    } catch (err) {
+        logger.warn(`[broker-adopt] could not persist reconciliation status: ${err}`);
     }
 }

@@ -470,6 +470,53 @@ checklist). NOTE for the freeze: the OCA-join and every round-5 change
 are behavior changes — they land BEFORE `validation-freeze-1`, which
 is exactly why the tag has not been placed yet.
 
+## Review 6 triage (2026-08-21, reviewed at 807f239)
+
+**Fixed same day:**
+
+- **Residue brackets stay TRACKED** (the round's P1): a rejected
+  placement whose sweep left residues is no longer marked 'failed'
+  (invisible to exposure caps and the tracker while a leg might be
+  live) — the row stays 'executed' with a `rejected-with-residues`
+  note, consumes the slot, and enters outcome tracking so
+  reconciliation finalizes the truth. Clean sweeps still fail
+  terminally. (The executor branch itself has no direct test — the
+  accept pipeline has no seam; residue production is tested in
+  bracket-ack. Recorded gap.)
+- **`Inactive` no longer confirms a cancel** — IBKR uses it for
+  invalid, rejected AND HELD orders; it now classifies
+  `not-cancellable` (verify), with a test.
+- **The book is the post-condition**: `cleanupExitsAfterClose` re-reads
+  the open-orders snapshot after all cancels — any requested id still
+  working overrides its event classification with a loud error. This
+  is also the answer to the 10147 cross-client caveat: the event can
+  lie, the book cannot.
+- **Stop-only protection now carries an OCA group** (one-member groups
+  are legal), extending close-join coverage to the auto-protect path.
+- **Boot-atomic guard rehydration**: `attach()` AWAITS the first
+  adoption sweep, so a close request cannot race the guard's
+  restoration; `selectManualExitRehydrations` is pure + tested, and a
+  close-* order on a FLAT symbol is flagged as a reversal order
+  (notify) while still guarding.
+- **Reconciliation is provable**: every sweep persists
+  `reconciliation-status.json` (orphans, leg/position adoptions,
+  stale closes, timestamp); the scorecard requires a fresh (<24h)
+  clean report — missing/stale/orphaned → NOT-EVALUABLE.
+- **Adoptions block only while UNRESOLVED** (protocol: at evaluation
+  time): open adopted rows are anomalies; resolved ones informational.
+- **Explicit-timestamp scorecard windows keep the frozen NetLiq**
+  denominator (previously they silently fell back to the daily file
+  and could never pass).
+
+**Accepted/recorded (still open)**: 10147 remains classified
+cancelled-for-working-ness on own-client ids (the book re-read is the
+guard against the foreign-id lie; execDetails replay owns earlier
+fills); stacked multi-group positions and legacy ungrouped exits still
+fall back to fill-gated cleanup (the OCA-join covers single-group
+books only); IBKR's dynamic add-to-working-OCA-group behavior is
+harness-unverified — added to the freeze prerequisites as a paper
+observation; weekly scorecard execution remains operator-manual.
+
 - **WP9 Backtester: honest replay** (MED — decision point D1)
   Recommended scope (rebuild-lite, ~1 session): process bar i BEFORE
   signals from bar i (kills the same-bar look-ahead); per-symbol bar

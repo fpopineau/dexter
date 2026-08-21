@@ -59,6 +59,10 @@ positive expectancy after costs, not improved loss control.
    they need a genuine partial fill / EOD-keep window). Observe
    opportunistically during paper trading, or accept on harness
    coverage — the operator's call at tag time.
+   Same for the OCA-JOINED close (round-6 review): the harness verifies
+   the transmitted fields, not IBKR's behavior when an order joins an
+   already-working OCA group — observe one joined close cancelling its
+   stop/target broker-side on paper before relying on it.
 3. One clean gateway boot: YAML validation passes, calendar coverage ok,
    no adoption-sweep surprises. (The rules/calendar halves passed in the
    2026-08-21 script run; confirm on the next real gateway start.)
