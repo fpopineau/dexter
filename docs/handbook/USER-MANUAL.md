@@ -273,7 +273,7 @@ All times ET; weekends and NYSE holidays are skipped automatically.
 | on fills | outcome tracker | 🎯/🛑 close alerts with realized P&L; 🛡️ auto-protect if DAY exits died on an open position |
 | 16:20 | archive scheduler | (logs only) day's bars archived |
 | 18:00 | universe sweep + swing-pattern scan | (logs only) watchlist + midcap history refreshed, pattern-scan.json rebuilt |
-| all day | **dashboard** at `http://127.0.0.1:8484/` | live book, charts with entry/stop/target/peak lines, accept/reject/cancel/close/protect buttons |
+| all day | **dashboard** at `http://127.0.0.1:8585/` | live book, charts with entry/stop/target/peak lines, accept/reject/cancel/close/protect buttons |
 
 Schedules are editable: the jobs live in the cron store and can be tuned
 (time, active hours) without code changes; prompts are re-synced from code.
@@ -679,7 +679,7 @@ band via `OPP_MARKET_CAP_MIN/MAX`, and the `ibkr_scanner` tool accepts
 
 ## 15bis. The local dashboard
 
-`http://127.0.0.1:8484/` (with the gateway running) — charts and the live
+`http://127.0.0.1:8585/` (with the gateway running) — charts and the live
 book, served by dexter itself from its own data. **This is the supported
 way to watch the paper account visually**: any external viewer that logs
 in with the paper credentials (TradingView's broker integration, a second
@@ -701,7 +701,9 @@ full gate stack (paper lock, kill-switch, risk gates, chase gate).
 Mutations are CSRF-protected by a per-startup token baked into the page;
 after a gateway restart, reload the page if actions return 403.
 
-Knobs: `DASHBOARD=false` to disable, `DASHBOARD_PORT` (8484),
+Knobs: `DASHBOARD=false` to disable, `DASHBOARD_PORT` (code default
+8484; this deployment pins 8585 — Windows' shifting Hyper-V excluded
+port ranges swallowed 8484 after a reboot),
 `DASHBOARD_HOST` (127.0.0.1 — it has no auth; do not bind it wider on an
 untrusted network).
 
