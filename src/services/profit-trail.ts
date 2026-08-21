@@ -33,12 +33,16 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getIBApi } from '@/tools/ibkr/connection.js';
+import { confirmCancel } from '@/tools/ibkr/order-ack.js';
 import { fetchDailyRiskContext } from '@/tools/ibkr/daily-atr.js';
 import { createIbkrMarketData } from '@/tools/ibkr/market-data.js';
 import { getRiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
 import { logger } from '@/utils';
 import { getMarketSession, MarketSession } from '@/utils/market-hours.js';
 import { closePosition, fetchOpenOrdersFor, fetchPositions, wasRecentlyClosed } from './position-actions.js';
+
+/** Broker-confirmation window for a cancel request (round-4 review). */
+const CANCEL_CONFIRM_MS = 5_000;
 import { listTrackable } from './trade-proposals.js';
 import { OrderAction } from '@stoqey/ib';
 
@@ -250,15 +254,24 @@ async function releaseTargetLeg(
     const exits = await fetchOpenOrdersFor(api, entry.symbol, exitActionFor(entry.direction));
     const targets = selectTargetLegs(exits);
     if (targets.length === 0) return null;
+    // Round-4 review (2026-08-21): "released" means the broker CONFIRMED
+    // the cancel — announcing runner mode while the fixed target may still
+    // be working promises an exit management that is not in effect.
+    const released: string[] = [];
     for (const t of targets) {
-        try {
-            api.cancelOrder(t.orderId);
-            logger.info(`[profit-trail] ${entry.symbol}: runner mode — target order #${t.orderId} cancelled, trail manages the exit`);
-        } catch (err) {
-            logger.warn(`[profit-trail] ${entry.symbol}: could not cancel target #${t.orderId}: ${err}`);
+        const outcome = await confirmCancel(api, t.orderId, CANCEL_CONFIRM_MS);
+        if (outcome === 'cancelled') {
+            released.push(`#${t.orderId}`);
+            logger.info(`[profit-trail] ${entry.symbol}: runner mode — target order #${t.orderId} cancelled (confirmed), trail manages the exit`);
+        } else if (outcome === 'filled') {
+            // The target won the race: profit banked at the fixed target.
+            // The tracker handles the fill; runner mode is moot.
+            logger.warn(`[profit-trail] ${entry.symbol}: target #${t.orderId} FILLED during runner-mode release — exit already taken at the fixed target`);
+        } else {
+            logger.error(`[profit-trail] ${entry.symbol}: target #${t.orderId} cancel NOT CONFIRMED — the fixed target may still be working; runner mode not announced`);
         }
     }
-    return targets.map((t) => `#${t.orderId}`).join(', ');
+    return released.length > 0 ? released.join(', ') : null;
 }
 
 async function runCycle(state: Map<string, TrailEntry>): Promise<void> {

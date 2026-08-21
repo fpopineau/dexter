@@ -35,7 +35,7 @@
 
 import { BRACKET_ACK_TIMEOUT_MS } from '@/tools/ibkr/bracket.js';
 import { allocReqId, getIBApi, getVerifiedSingleAccount, isNonFatalIbkrError, onReconnect } from '@/tools/ibkr/connection.js';
-import { watchOrderAcks } from '@/tools/ibkr/order-ack.js';
+import { confirmCancel, watchOrderAcks } from '@/tools/ibkr/order-ack.js';
 import { withOrderLock } from '@/tools/ibkr/order-lock.js';
 import { getNextValidOrderId } from '@/tools/ibkr/orders.js';
 import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
@@ -609,22 +609,38 @@ export function selectManualExitTargets<T extends { symbol: string; closed: bool
 }
 
 /**
- * Register a deliberate market-close order (called by closePosition right
- * after placement, BEFORE it cancels the bracket exits). All entry-filled
- * tracked trades on the symbol share the close's fill price — economically
- * exact even when two proposals stacked the position.
+ * Register a deliberate market-close order. Review 2026-08-21 (round 4):
+ * called by closePosition BEFORE placement — registering after waiting for
+ * the fill let the permanent listener receive and DISCARD the fill first,
+ * losing the P&L and leaving the entry "working" forever (which blocks
+ * every future close of the symbol through hasWorkingManualExit).
+ * All entry-filled tracked trades on the symbol share the close's fill
+ * price — economically exact even when two proposals stacked the position.
+ * A symbol with NO attributable rows (adopted/manually opened) still
+ * registers: the duplicate-close guard must outlive the 10-minute window
+ * for those positions too.
  */
 export function trackManualExit(symbol: string, orderId: number, quantity: number, source: string): void {
     const trades = selectManualExitTargets([...byProposalId.values()], symbol);
-    if (trades.length === 0) {
-        logger.info(`[outcome-tracker] manual exit ${symbol} order ${orderId} (${source}): no tracked trades to attribute`);
-        return;
-    }
     manualExitOrders.set(orderId, { symbol: symbol.trim().toUpperCase(), quantity, source, trades });
     for (const t of trades) t.pendingManualExit = orderId;
     logger.info(
-        `[outcome-tracker] manual exit ${symbol} order ${orderId} (${source}) → will attribute P&L to ${trades.map((t) => t.proposalId).join(', ')}`,
+        trades.length > 0
+            ? `[outcome-tracker] manual exit ${symbol} order ${orderId} (${source}) → will attribute P&L to ${trades.map((t) => t.proposalId).join(', ')}`
+            : `[outcome-tracker] manual exit ${symbol} order ${orderId} (${source}): no tracked trades to attribute — guarding the order's life only`,
     );
+}
+
+/** The close order never reached the broker (placement threw) or was
+ *  rejected inside the window — forget it, or hasWorkingManualExit would
+ *  refuse every future close of the symbol for an order that does not
+ *  exist. Idempotent: broker-signaled terminals already untrack via the
+ *  status listener. */
+export function untrackManualExit(orderId: number): void {
+    const manual = manualExitOrders.get(orderId);
+    if (!manual) return;
+    manualExitOrders.delete(orderId);
+    for (const t of manual.trades) t.pendingManualExit = undefined;
 }
 
 /** A registered manual-exit order filled at `avgFillPrice`.
@@ -894,11 +910,16 @@ async function resizeAfterPartialEntry(trade: TrackedTrade): Promise<void> {
             if (rejected || unconfirmed) {
                 // Review 2026-08-21 (round 3): BOTH replacement legs must be
                 // acknowledged before the old exits die — on rejection OR
-                // broker silence, sweep the new pair best-effort and KEEP
-                // the old full-size exits (over-sized protection beats an
-                // unknown pair and beats none).
+                // broker silence, sweep the new pair and KEEP the old
+                // full-size exits (over-sized protection beats an unknown
+                // pair and beats none). Round 4: the sweep is confirmed —
+                // a new leg that survives alongside the old pair is a
+                // third closing order on the same shares.
                 for (const id of [stopId, tpId]) {
-                    try { api.cancelOrder(id); } catch { /* already dead */ }
+                    const outcome = await confirmCancel(api, id, ackWindowMs);
+                    if (outcome !== 'cancelled') {
+                        logger.error(`[outcome-tracker] ${trade.proposalId} replacement leg #${id} sweep ${outcome === 'filled' ? 'lost to a FILL' : 'NOT confirmed'} — verify the ${trade.symbol} order book in TWS`);
+                    }
                 }
                 return {
                     newStopId: stopId, newTpId: tpId,
@@ -929,13 +950,28 @@ async function resizeAfterPartialEntry(trade: TrackedTrade): Promise<void> {
         byOrderId.set(newTpId, { trade, role: 'takeProfit' });
         byOrderId.set(newStopId, { trade, role: 'stop' });
         trade.terminalExits.clear();
+        // Round-4 review: the old full-size pair's death is broker-CONFIRMED.
+        // If an old exit survives next to the resized pair, a fill on either
+        // over-closes and reverses — that is precisely the failure this
+        // resize exists to prevent, so an unconfirmed cancel is operator-loud.
+        const oldPairResidue: string[] = [];
         for (const id of [oldTp, oldStop]) {
-            try { api.cancelOrder(id); } catch { /* already dead */ }
+            const outcome = await confirmCancel(api, id, ackWindowMs);
+            if (outcome === 'filled') oldPairResidue.push(`#${id} FILLED during the swap`);
+            else if (outcome !== 'cancelled') oldPairResidue.push(`#${id} cancel not confirmed`);
+        }
+        if (oldPairResidue.length > 0) {
+            logger.error(`[outcome-tracker] ${trade.proposalId} old full-size exit(s) NOT cleanly dead (${oldPairResidue.join('; ')})`);
+            await notifyAutoProtect(
+                `⚠️ ${trade.proposalId} ${trade.symbol}: exits were resized to ${cum}, but the OLD full-size pair is not ` +
+                `confirmed gone (${oldPairResidue.join('; ')}). BOTH pairs may be working — a fill on either over-closes ` +
+                `and reverses. Cancel the old pair in TWS now.`,
+            );
         }
         await setProposalStatus(trade.proposalId, 'executed', {
             orderIds: [trade.entryOrderId, newTpId, newStopId],
         });
-        logger.info(`[outcome-tracker] ${trade.proposalId} exits resized to ${cum} (orders ${newTpId}/${newStopId}); old pair cancelled`);
+        logger.info(`[outcome-tracker] ${trade.proposalId} exits resized to ${cum} (orders ${newTpId}/${newStopId}); old pair ${oldPairResidue.length === 0 ? 'cancelled (confirmed)' : 'cancel UNRESOLVED'}`);
         await notifyAutoProtect(
             `⚖️ ${trade.proposalId} ${trade.symbol}: the entry terminated after filling ${cum} of ${planned} shares. ` +
             `The position is REAL at ${cum} shares: quantity downgraded, full-size exits cancelled, and a resized ` +

@@ -50,6 +50,11 @@ class FakeIb extends EventEmitter {
     }
     cancelOrder(id: number): void {
         this.cancelled.push(id);
+        // Round-4 review: cancels are broker-CONFIRMED — a healthy fake
+        // reports Cancelled, so the resize path's confirmation resolves on
+        // the event, not the timeout. (Ids already forgotten by the tracker
+        // make this a no-op status, same as production.)
+        queueMicrotask(() => this.emit(EventName.orderStatus, id, 'Cancelled', 0, 0, 0));
     }
 }
 

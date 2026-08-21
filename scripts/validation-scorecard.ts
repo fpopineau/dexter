@@ -6,17 +6,21 @@
  * machine-readable form — changing them mid-sample ends the window.
  *
  *   bun run scripts/validation-scorecard.ts               # since baseline
- *   bun run scripts/validation-scorecard.ts 2026-08-25    # since a date (freeze tag day)
+ *   npx tsx scripts/validation-scorecard.ts               # same, node runtime
+ *   ... scripts/validation-scorecard.ts 2026-08-25        # since a date (freeze tag day)
  *
  * Definitions (pinned):
  *   - Sample row: status='closed', entry filled, realized_pnl NOT NULL,
  *     exit_reason != 'cancelled', source != 'adopted', note free of the
  *     untrustworthy marker ('NOT trustworthy').
- *   - Net P&L: realized_pnl − commissions.
+ *   - Net P&L: realized_pnl − commissions. A NULL commission is NOT zero:
+ *     it is an accounting hole, counted against the integrity gate.
  *   - Profit factor: Σ net wins ÷ |Σ net losses|.
  *   - Drawdown: worst peak-to-trough of the cumulative-net-P&L series in
- *     close order, as % of the PAPER baseline NetLiq (1,000,000), scaled
- *     by (live max_risk_per_trade_pct ÷ paper max_risk_per_trade_pct);
+ *     close order, as % of the CAPTURED paper NetLiq baseline
+ *     (netliq-baseline.json — round-4 review: the old hardcoded 1M was 4×
+ *     the real paper account and understated drawdown 4×), scaled by
+ *     (live max_risk_per_trade_pct ÷ paper max_risk_per_trade_pct);
  *     PASS bar: ≤ 2 × live max_daily_loss_pct.
  *   - Score deciles: trades bucketed by score into 10 equal-width bins
  *     0–100; Spearman rank correlation computed over PER-TRADE
@@ -25,15 +29,23 @@
  *   - Top/bottom band: score ≥ 80th percentile vs ≤ 20th percentile of
  *     the SAMPLE's scores, each needing n ≥ 10 to be evaluable.
  *   - Judgment purity: exactly one distinct non-null `model` across the
- *     sample; regime breadth: ≥ 2 distinct non-null `regime` tags and
- *     ≥ 6 distinct ISO calendar weeks of closes.
+ *     sample; regime breadth: ≥ 2 distinct non-null, non-'unknown'
+ *     `regime` tags; calendar breadth: ≥ 6 distinct ISO-8601 weeks.
+ *   - Integrity gate (protocol "zero unresolved anomalies"): no
+ *     placement-unconfirmed rows older than 24h, no in-window closes with
+ *     NULL realized P&L (outside 'cancelled'), no sample rows missing
+ *     commissions. Any anomaly freezes the evaluation: VERDICT is
+ *     NOT-EVALUABLE, never PASS.
+ *   - VERDICT: single aggregated line at the end; PASS requires EVERY
+ *     criterion to hold on an evaluable, integrity-clean sample.
  */
 
 import 'dotenv/config';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const PAPER_BASELINE_NETLIQ = 1_000_000;
 const UNTRUSTWORTHY = '%NOT trustworthy%';
+const dataDir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
 
 interface Row {
     id: string; symbol: string; trade_class: string | null; source: string;
@@ -41,10 +53,43 @@ interface Row {
     realized_pnl: number; commissions: number | null; closed_at: number;
 }
 
-async function openDb() {
-    const dbPath = join(process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data'), 'proposals.db');
-    const sqlite = await import('bun:sqlite');
-    return new sqlite.Database(dbPath, { readonly: true });
+interface SqliteQuery<T> { all(...params: unknown[]): T[] }
+interface SqliteDb { query<T>(sql: string): SqliteQuery<T>; close(): void }
+
+/** Same dual-driver pattern as the store: bun:sqlite under bun,
+ *  better-sqlite3 under node/tsx (round-4 review: the script failed on
+ *  the gateway's node runtime). */
+async function openDb(): Promise<SqliteDb> {
+    const dbPath = join(dataDir, 'proposals.db');
+    try {
+        const sqlite = await import('bun:sqlite');
+        const raw = new sqlite.Database(dbPath, { readonly: true });
+        return {
+            query: <T>(sql: string) => ({ all: (...p: unknown[]) => raw.query(sql).all(...(p as never[])) as T[] }),
+            close: () => raw.close(),
+        };
+    } catch {
+        const mod = await import('better-sqlite3');
+        const raw = new mod.default(dbPath, { readonly: true });
+        return {
+            query: <T>(sql: string) => ({ all: (...p: unknown[]) => raw.prepare(sql).all(...p) as T[] }),
+            close: () => raw.close(),
+        };
+    }
+}
+
+/** ISO-8601 week label (round-4 review: the old Jan-1 arithmetic was
+ *  wrong around year boundaries — week 1 is the week containing Jan 4). */
+export function isoWeekLabel(ms: number): string {
+    const d = new Date(ms);
+    const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    // Shift to the Thursday of this week: its year IS the ISO year.
+    const day = (t.getUTCDay() + 6) % 7; // Mon=0..Sun=6
+    t.setUTCDate(t.getUTCDate() - day + 3);
+    const isoYear = t.getUTCFullYear();
+    const jan4 = new Date(Date.UTC(isoYear, 0, 4));
+    const week = 1 + Math.round(((t.getTime() - jan4.getTime()) / 86_400_000 - 3 + ((jan4.getUTCDay() + 6) % 7)) / 7);
+    return `${isoYear}-W${String(week).padStart(2, '0')}`;
 }
 
 function spearman(pairs: Array<[number, number]>): { rho: number; p: number } | null {
@@ -122,6 +167,7 @@ function lgamma(z: number): number {
 // ---------------------------------------------------------------------------
 
 const db = await openDb();
+const verdictFails: string[] = [];
 const sinceArg = process.argv[2];
 let sinceMs: number;
 let windowLabel: string;
@@ -130,18 +176,26 @@ if (sinceArg && /^\d{4}-\d{2}-\d{2}$/.test(sinceArg)) {
     windowLabel = `since ${sinceArg} (explicit — use the freeze-tag date)`;
 } else {
     try {
-        const { readFileSync } = await import('node:fs');
-        const p = join(process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data'), 'performance-epoch.json');
+        const p = join(dataDir, 'performance-epoch.json');
         const b = JSON.parse(readFileSync(p, 'utf-8')) as { epochMs: number; note?: string };
         sinceMs = b.epochMs;
         windowLabel = `since baseline ${new Date(b.epochMs).toISOString()}${b.note ? ` (${b.note})` : ''}`;
     } catch {
         sinceMs = 0;
         windowLabel = 'ALL HISTORY (no baseline found — pass a date)';
+        verdictFails.push('no performance epoch — window undefined');
     }
 }
 
-const rows = db.query<Row, [number]>(`
+// Paper equity denominator: the captured daily NetLiq baseline, never a
+// constant (round-4 review: 1M hardcoded vs 249k real = 4× understated DD).
+let paperNetliq: number | null = null;
+try {
+    const b = JSON.parse(readFileSync(join(dataDir, 'netliq-baseline.json'), 'utf-8')) as { netLiq?: number };
+    if (typeof b.netLiq === 'number' && b.netLiq > 0) paperNetliq = b.netLiq;
+} catch { /* reported below */ }
+
+const rows = db.query<Row>(`
     SELECT id, symbol, trade_class, source, score, model, regime,
            realized_pnl, commissions, closed_at
     FROM proposals
@@ -157,8 +211,34 @@ const net = (r: Row) => r.realized_pnl - (r.commissions ?? 0);
 const n = rows.length;
 console.log(`\n=== VALIDATION SCORECARD — ${windowLabel} ===`);
 console.log(`sample n = ${n} (protocol needs >= 100)`);
+if (n < 100) verdictFails.push(`sample n=${n} < 100`);
+
+// Integrity gate — anomalies freeze the evaluation (protocol: "zero
+// unresolved fill/reconciliation anomalies at evaluation time").
+const staleUnconfirmed = db.query<{ c: number }>(`
+    SELECT COUNT(*) AS c FROM proposals
+    WHERE status = 'executed' AND note LIKE '%placement-unconfirmed%'
+      AND updated_at < ?
+`).all(Date.now() - 24 * 3_600_000)[0]?.c ?? 0;
+const pnlHoles = db.query<{ c: number }>(`
+    SELECT COUNT(*) AS c FROM proposals
+    WHERE status = 'closed' AND closed_at >= ?
+      AND realized_pnl IS NULL
+      AND (exit_reason IS NULL OR exit_reason != 'cancelled')
+      AND source != 'adopted'
+`).all(sinceMs)[0]?.c ?? 0;
+const missingCommissions = rows.filter((r) => r.commissions === null).length;
+const anomalies: string[] = [];
+if (staleUnconfirmed > 0) anomalies.push(`${staleUnconfirmed} placement-unconfirmed row(s) older than 24h`);
+if (pnlHoles > 0) anomalies.push(`${pnlHoles} in-window close(s) with NULL realized P&L`);
+if (missingCommissions > 0) anomalies.push(`${missingCommissions} sample row(s) missing commissions (net P&L overstated)`);
+console.log(`integrity: ${anomalies.length === 0 ? 'CLEAN' : `ANOMALIES — ${anomalies.join('; ')}`}`);
+for (const a of anomalies) verdictFails.push(`integrity: ${a}`);
+
 if (n === 0) {
     console.log('No sample rows yet.');
+    console.log(`\nVERDICT: NOT EVALUABLE (${verdictFails.join('; ')})\n`);
+    db.close();
     process.exit(0);
 }
 
@@ -172,13 +252,21 @@ const pf = losses.length ? wins.reduce((s, v) => s + v, 0) / Math.abs(losses.red
 console.log(`net P&L ${total.toFixed(2)}  expectancy/trade ${expectancy.toFixed(2)} (${expectancy > 0 ? 'PASS' : 'FAIL'} — must be > 0)`);
 console.log(`profit factor ${Number.isFinite(pf) ? pf.toFixed(2) : '∞'} (${pf >= 1.3 ? 'PASS' : 'FAIL'} — must be >= 1.3)`);
 console.log(`win rate ${(100 * wins.length / n).toFixed(1)}% (${wins.length}W/${losses.length}L/${n - wins.length - losses.length} flat)`);
+if (expectancy <= 0) verdictFails.push(`expectancy ${expectancy.toFixed(2)} <= 0`);
+if (pf < 1.3) verdictFails.push(`profit factor ${pf.toFixed(2)} < 1.3`);
 
 // Drawdown (protocol formula)
 let equity = 0, peak = 0, maxDd = 0;
 for (const v of nets) { equity += v; if (equity > peak) peak = equity; maxDd = Math.max(maxDd, peak - equity); }
 const liveRisk = 1.0, paperRisk = 0.25, liveDailyLoss = 3.0; // risk-rules.live.yaml pins
-const ddPct = (maxDd / PAPER_BASELINE_NETLIQ) * 100 * (liveRisk / paperRisk);
-console.log(`max drawdown ${maxDd.toFixed(2)} → scaled ${ddPct.toFixed(2)}% of live equity (${ddPct <= 2 * liveDailyLoss ? 'PASS' : 'FAIL'} — must be <= ${2 * liveDailyLoss}%)`);
+if (paperNetliq !== null) {
+    const ddPct = (maxDd / paperNetliq) * 100 * (liveRisk / paperRisk);
+    console.log(`max drawdown ${maxDd.toFixed(2)} on paper NetLiq ${paperNetliq.toFixed(0)} → scaled ${ddPct.toFixed(2)}% of live equity (${ddPct <= 2 * liveDailyLoss ? 'PASS' : 'FAIL'} — must be <= ${2 * liveDailyLoss}%)`);
+    if (ddPct > 2 * liveDailyLoss) verdictFails.push(`scaled drawdown ${ddPct.toFixed(2)}% > ${2 * liveDailyLoss}%`);
+} else {
+    console.log(`max drawdown ${maxDd.toFixed(2)} — NOT EVALUABLE: netliq-baseline.json missing/unreadable`);
+    verdictFails.push('drawdown not evaluable (no netliq baseline)');
+}
 
 // Per-class discipline
 console.log('\nper-class (each class with n>=10 must be net-positive alone):');
@@ -191,6 +279,7 @@ for (const [k, rs] of byClass) {
     const t = rs.reduce((s, r) => s + net(r), 0);
     const evaluable = rs.length >= 10;
     console.log(`  ${k}: n=${rs.length} net ${t.toFixed(2)} ${evaluable ? (t > 0 ? 'PASS' : 'FAIL') : '(below 10 — stays paper-only)'}`);
+    if (evaluable && t <= 0) verdictFails.push(`class ${k} net ${t.toFixed(2)} <= 0 at n=${rs.length}`);
 }
 
 // Per-lane split (informational)
@@ -199,7 +288,8 @@ const byLane = new Map<string, number[]>();
 for (const r of rows) (byLane.get(r.source) ?? byLane.set(r.source, []).get(r.source)!).push(net(r));
 for (const [k, vs] of byLane) console.log(`  ${k}: n=${vs.length} net ${vs.reduce((s, v) => s + v, 0).toFixed(2)}`);
 
-// Score deciles + Spearman (confidence-sizing gate)
+// Score deciles + Spearman (confidence-sizing gate — NOT part of the
+// go-live verdict; it decides flat-vs-banded sizing separately).
 const scored = rows.filter((r) => r.score !== null) as Array<Row & { score: number }>;
 console.log(`\nscore deciles (scored n=${scored.length}):`);
 for (let d = 0; d < 10; d++) {
@@ -228,15 +318,25 @@ if (sp) {
 
 // Purity + breadth
 const models = new Set(rows.map((r) => r.model ?? 'NULL'));
-const regimes = new Set(rows.map((r) => r.regime).filter((v): v is string => v !== null));
-const weeks = new Set(rows.map((r) => {
-    const d = new Date(r.closed_at);
-    const y = d.getUTCFullYear();
-    const onejan = Date.UTC(y, 0, 1);
-    return `${y}-w${Math.ceil(((r.closed_at - onejan) / 86_400_000 + new Date(onejan).getUTCDay() + 1) / 7)}`;
-}));
-console.log(`\njudgment purity: models = [${[...models].join(', ')}] ${models.size === 1 && !models.has('NULL') ? 'PASS' : 'FAIL — sample must be single-model, no NULLs'}`);
-console.log(`regime breadth: ${regimes.size} tag(s) [${[...regimes].join(', ')}] (${regimes.size >= 2 ? 'PASS' : 'FAIL'} — needs >= 2)`);
+// 'unknown' is the regime service's fallback tag, not an observed regime —
+// it must not satisfy breadth (round-4 review).
+const regimes = new Set(rows.map((r) => r.regime).filter((v): v is string => v !== null && v !== 'unknown'));
+const weeks = new Set(rows.map((r) => isoWeekLabel(r.closed_at)));
+const purityOk = models.size === 1 && !models.has('NULL');
+console.log(`\njudgment purity: models = [${[...models].join(', ')}] ${purityOk ? 'PASS' : 'FAIL — sample must be single-model, no NULLs'}`);
+console.log(`regime breadth: ${regimes.size} tag(s) [${[...regimes].join(', ')}] (${regimes.size >= 2 ? 'PASS' : 'FAIL'} — needs >= 2 real tags; NULL/'unknown' do not count)`);
 console.log(`calendar breadth: ${weeks.size} ISO week(s) (${weeks.size >= 6 ? 'PASS' : 'FAIL'} — needs >= 6)`);
-console.log('');
+if (!purityOk) verdictFails.push('judgment purity (multiple or NULL models)');
+if (regimes.size < 2) verdictFails.push(`regime breadth ${regimes.size} < 2`);
+if (weeks.size < 6) verdictFails.push(`calendar breadth ${weeks.size} < 6 ISO weeks`);
+
+// One unambiguous line (round-4 review: the criteria were printed but
+// never combined). Anomalies make the sample NOT-EVALUABLE, never PASS.
+if (anomalies.length > 0) {
+    console.log(`\nVERDICT: NOT EVALUABLE — resolve integrity anomalies first (${anomalies.join('; ')})\n`);
+} else if (verdictFails.length === 0) {
+    console.log('\nVERDICT: PASS — every protocol criterion holds on a clean sample. Record this run in the validation journal with the git SHA.\n');
+} else {
+    console.log(`\nVERDICT: FAIL — ${verdictFails.join('; ')}\n`);
+}
 db.close();

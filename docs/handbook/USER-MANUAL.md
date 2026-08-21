@@ -474,11 +474,10 @@ Guarantees, in code, not convention:
   (trigger rank threshold, skill score floors, the daily cap): floor 0
   removes the last stage of selection, it does not make sampling
   unbiased. Raise the floor only after the scorer passes its
-  calibration gate. (Historical postures: **80** selective, **1** burn-in
-  executes so the benchmark ledger samples every score band without
-  selection bias; the confidence-weighted sizer, not the floor, is the
-  risk control across bands). The burn-in profile runs at 1 — that is a
-  documented sampling decision, not a disabled safety;
+  calibration gate. (Historical postures, no longer defaults: **80**
+  selective, **1** early burn-in — both predate D6; the floor is 0
+  everywhere now, and FLAT sizing, not the floor, is the risk control
+  across bands);
 - capped per day (`AUTO_EXECUTE_MAX_PER_DAY`, default 5) — a SEPARATE,
   stricter budget than `max_daily_trades`: when auto-exec hits its cap,
   manual accepts still work until the risk-rules cap;

@@ -56,6 +56,10 @@ import { barTimeFrameMs } from './outcome-tracker.js';
 import { closePosition, fetchPositions } from './position-actions.js';
 import { listTrackable } from './trade-proposals.js';
 import { getRiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
+import { confirmCancel } from '@/tools/ibkr/order-ack.js';
+
+/** Broker-confirmation window for a cancel request (round-4 review). */
+const CANCEL_CONFIRM_MS = 5_000;
 
 const ET = 'America/New_York';
 // Two slots, 8 minutes before each possible close: 15:52 for a normal 16:00
@@ -644,11 +648,26 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
             lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} entry UNFILLED): WILL CANCEL at 15:52 — ${reason}`);
             continue;
         }
+        // Round-4 review (2026-08-21): count broker-CONFIRMED cancels, not
+        // requests — a "cancelled" entry that actually fills after this
+        // report is a position nobody is watching overnight.
         let cancelled = 0;
-        for (const oid of t.orderIds ?? []) {
-            try { api.cancelOrder(oid); cancelled++; } catch { /* already gone */ }
+        let unconfirmed = 0;
+        let filledDuringCancel = 0;
+        const outcomes = await Promise.all((t.orderIds ?? []).map((oid) => confirmCancel(api, oid, CANCEL_CONFIRM_MS)));
+        for (const outcome of outcomes) {
+            if (outcome === 'cancelled') cancelled++;
+            else if (outcome === 'filled') filledDuringCancel++;
+            else unconfirmed++;
         }
-        lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} entry UNFILLED): ${reason}. ${cancelled ? `${cancelled} resting order(s) cancelled.` : 'No live orders found — check ibkr_orders.'}`);
+        if (filledDuringCancel > 0) {
+            logger.error(`[eod-triage] ${t.id} ${t.symbol}: an order FILLED while being cancelled — the position now EXISTS; it was NOT vetted for overnight`);
+        }
+        const tail =
+            (cancelled ? `${cancelled} resting order(s) cancelled (confirmed).` : 'No confirmed cancels — check ibkr_orders.') +
+            (filledDuringCancel ? ` ⚠️ ${filledDuringCancel} order(s) FILLED during the cancel — position EXISTS, review now.` : '') +
+            (unconfirmed ? ` ⚠️ ${unconfirmed} cancel(s) NOT confirmed — verify in TWS.` : '');
+        lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} entry UNFILLED): ${reason}. ${tail}`);
     }
 
     // Overnight-cap usage (advisory, never trims): everything still open

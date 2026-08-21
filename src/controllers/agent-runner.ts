@@ -1,4 +1,5 @@
 import { Agent } from '../agent/agent.js';
+import { withAgentLane } from '../agent/lane-context.js';
 import type { InMemoryChatHistory } from '../utils/in-memory-chat-history.js';
 import { defaultQueue } from '../utils/message-queue.js';
 import type {
@@ -146,20 +147,29 @@ export class AgentRunnerController {
     this.emitChange();
 
     try {
-      const agent = await Agent.create({
-        ...this.agentConfig,
-        signal: this.abortController.signal,
-        requestToolApproval: this.requestToolApproval,
-        sessionApprovedTools: this.sessionApprovedTools,
-        messageQueue: defaultQueue,
-      });
-      const stream = agent.run(query, this.inMemoryChatHistory);
-      for await (const event of stream) {
-        if (event.type === 'done') {
-          finalAnswer = (event as DoneEvent).answer;
+      // Round-4 review (2026-08-21): the TUI is a judgment lane like any
+      // gateway lane — without the wrapper, TUI-born proposals carried
+      // NULL model/lane and silently broke the frozen sample's purity.
+      const abortSignal = this.abortController.signal;
+      await withAgentLane('tui', async () => {
+        const agent = await Agent.create({
+          ...this.agentConfig,
+          signal: abortSignal,
+          requestToolApproval: this.requestToolApproval,
+          sessionApprovedTools: this.sessionApprovedTools,
+          messageQueue: defaultQueue,
+        });
+        const stream = agent.run(query, this.inMemoryChatHistory);
+        for await (const event of stream) {
+          if (event.type === 'done') {
+            finalAnswer = (event as DoneEvent).answer;
+          }
+          await this.handleEvent(event);
         }
-        await this.handleEvent(event);
-      }
+        // Both fields are optional on the TUI config: stamp only a real
+        // model id — 'undefined:undefined' would satisfy the purity check
+        // while naming no judgment policy.
+      }, this.agentConfig.model ? `${this.agentConfig.modelProvider ?? 'unknown'}:${this.agentConfig.model}` : undefined);
 
       // Post-run: if messages arrived after the agent's last drain, start a new turn
       if (!defaultQueue.isEmpty()) {

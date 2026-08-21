@@ -17,7 +17,7 @@
 
 import { BRACKET_ACK_TIMEOUT_MS } from '@/tools/ibkr/bracket.js';
 import { allocReqId, assertAccountsVerified, getIBApi, getVerifiedSingleAccount, isNonFatalIbkrError } from '@/tools/ibkr/connection.js';
-import { watchOrderAcks } from '@/tools/ibkr/order-ack.js';
+import { confirmCancel, watchOrderAcks, type CancelOutcome } from '@/tools/ibkr/order-ack.js';
 import { withOrderLock } from '@/tools/ibkr/order-lock.js';
 import { getNextValidOrderId } from '@/tools/ibkr/orders.js';
 import { getMarketSession, isTradeableSession } from '@/utils/market-hours.js';
@@ -322,26 +322,63 @@ const closesInFlight = new Set<string>();
  *  a pre-market/resting close exits via the 'working' path instead. */
 const CLOSE_FILL_WAIT_MS = 8_000;
 
+/** Injection seam for the close-lifecycle tests (round-4 review: the
+ *  filled/working/rejected branches carry real safety semantics and had
+ *  zero coverage). Production always runs the real bindings; mock.module
+ *  is process-global under bun and would poison sibling suites. */
+/** Broker-confirmation window for a cancel request (round-4 review). */
+const CANCEL_CONFIRM_MS = 5_000;
+
+const closeDeps = {
+    getApi: getIBApi,
+    verifyAccounts: assertAccountsVerified,
+    verifiedAccount: getVerifiedSingleAccount,
+    nextOrderId: getNextValidOrderId,
+    fillWaitMs: CLOSE_FILL_WAIT_MS,
+    cancelConfirmMs: CANCEL_CONFIRM_MS,
+};
+export function __setCloseDepsForTests(overrides: Partial<typeof closeDeps> | null): void {
+    if (overrides === null) {
+        closeDeps.getApi = getIBApi;
+        closeDeps.verifyAccounts = assertAccountsVerified;
+        closeDeps.verifiedAccount = getVerifiedSingleAccount;
+        closeDeps.nextOrderId = getNextValidOrderId;
+        closeDeps.fillWaitMs = CLOSE_FILL_WAIT_MS;
+        closeDeps.cancelConfirmMs = CANCEL_CONFIRM_MS;
+    } else {
+        Object.assign(closeDeps, overrides);
+    }
+}
+
 /**
  * Cancel this symbol's exit protection AFTER the position is flat:
  * tracked bracket/exit ids first, then the WP11 orphan sweep (our
  * orderRef'd GTC pairs; unknown refs flagged, never touched). Called by
  * closePosition on an immediate fill and by the outcome tracker when a
- * resting close's fill lands later. Cancels are best-effort — the WP3
- * reconciliation sweep is the healing loop for a cancel the broker
- * dropped (recorded residual: cancellation is not ack-confirmed).
+ * resting close's fill lands later.
+ *
+ * Round-4 review (2026-08-21): every cancel is broker-CONFIRMED — the
+ * count returned is orders the broker reported dead, not requests sent.
+ * The dangerous residues are loud: an exit that FILLED during cleanup
+ * means the flat account now holds an unintended position (a GTC stop
+ * surviving a close can short the account when it triggers), and an
+ * unconfirmed cancel means the book must not be assumed clean — the WP3
+ * sweep retries, but the operator is told NOW, not at the next sweep.
  */
 export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, symbolRaw: string): Promise<number> {
     const symbol = symbolRaw.trim().toUpperCase();
-    let cancelledExits = 0;
-    const cancelledIds = new Set<number>();
+    const requested = new Set<number>();
+    const pending: Array<Promise<readonly [number, CancelOutcome]>> = [];
+    const requestCancel = (oid: number) => {
+        if (requested.has(oid)) return;
+        requested.add(oid);
+        pending.push(confirmCancel(api, oid, closeDeps.cancelConfirmMs).then((o) => [oid, o] as const));
+    };
     try {
         const { listTrackable } = await import('./trade-proposals.js');
         for (const t of await listTrackable()) {
             if (t.symbol !== symbol || !t.orderIds?.length) continue;
-            for (const oid of t.orderIds) {
-                try { api.cancelOrder(oid); cancelledExits++; cancelledIds.add(oid); } catch { /* already gone */ }
-            }
+            for (const oid of t.orderIds) requestCancel(oid);
         }
     } catch (err) {
         logger.warn(`[position-actions] exit cleanup for ${symbol} failed: ${err}`);
@@ -353,10 +390,10 @@ export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, sy
     try {
         for (const side of [OrderAction.SELL, OrderAction.BUY]) {
             for (const o of await fetchOpenOrdersFor(api, symbol, side)) {
-                if (cancelledIds.has(o.orderId) || o.tif !== 'GTC') continue;
+                if (requested.has(o.orderId) || o.tif !== 'GTC') continue;
                 if (OUR_REF.test(o.orderRef ?? '')) {
-                    try { api.cancelOrder(o.orderId); cancelledExits++; cancelledIds.add(o.orderId); } catch { /* gone */ }
-                    logger.info(`[position-actions] ${symbol}: swept orphaned GTC ${o.orderType} #${o.orderId} (ref '${o.orderRef}')`);
+                    requestCancel(o.orderId);
+                    logger.info(`[position-actions] ${symbol}: sweeping orphaned GTC ${o.orderType} #${o.orderId} (ref '${o.orderRef}')`);
                 } else {
                     logger.warn(`[position-actions] ${symbol}: UNKNOWN GTC ${o.orderType} #${o.orderId}${o.orderRef ? ` (ref '${o.orderRef}')` : ''} left untouched — review in TWS`);
                 }
@@ -364,6 +401,22 @@ export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, sy
         }
     } catch (err) {
         logger.warn(`[position-actions] orphan-exit sweep for ${symbol} failed: ${err}`);
+    }
+    let cancelledExits = 0;
+    for (const [oid, outcome] of await Promise.all(pending)) {
+        if (outcome === 'cancelled') {
+            cancelledExits++;
+        } else if (outcome === 'filled') {
+            logger.error(
+                `[position-actions] ${symbol}: exit order #${oid} FILLED during post-close cleanup — the account ` +
+                `may hold an UNINTENDED position (a surviving stop shorts on trigger). Review 'positions' NOW.`,
+            );
+        } else {
+            logger.error(
+                `[position-actions] ${symbol}: cancel of exit order #${oid} NOT CONFIRMED by the broker — do not ` +
+                `assume it is gone; the reconciliation sweep retries, verify in TWS if the symbol matters tonight.`,
+            );
+        }
     }
     return cancelledExits;
 }
@@ -408,7 +461,7 @@ export async function closePosition(symbolRaw: string, source = 'close command')
         // orders, and the weaker gate silently passed on an empty account
         // list (WP0.4, audit 2026-08-20). Risk-reducing, so the 5s timeout
         // still bounds the wait.
-        await assertAccountsVerified();
+        await closeDeps.verifyAccounts();
 
         // Post-close, a DAY MKT order is a guaranteed IBKR 201 rejection
         // (market-hours doctrine, observed live 2026-08-11). Placing it
@@ -428,7 +481,7 @@ export async function closePosition(symbolRaw: string, source = 'close command')
             };
         }
 
-        const api = await getIBApi();
+        const api = await closeDeps.getApi();
         const positions = await fetchPositions(api);
         const pos = positions.find((p) => p.symbol === symbol);
         if (!pos) {
@@ -438,13 +491,25 @@ export async function closePosition(symbolRaw: string, source = 'close command')
 
         const isLong = pos.quantity > 0;
         const qty = Math.abs(pos.quantity);
+        // Review 2026-08-21 (round 4): the tracker registration must exist
+        // BEFORE the first broker event can arrive. The old order —
+        // place, wait up to 8s for the fill, then register — let the
+        // tracker's permanent listener consume the fill of an order it did
+        // not know: P&L lost, and the late-registered entry stayed
+        // "working" forever, refusing every future close of the symbol.
+        // (Dynamic import mirrors the tracker's own import of this module —
+        // no static cycle.)
+        const tracker = await import('./outcome-tracker.js').catch((err) => {
+            logger.warn(`[position-actions] outcome tracker unavailable for ${symbol} close registration: ${err}`);
+            return null;
+        });
         const { orderId, order, ack } = await withOrderLock(async () => {
-            const orderId = await getNextValidOrderId(api);
+            const orderId = await closeDeps.nextOrderId(api);
             const order: Order = {
                 orderId,
                 // Identity binding (WP1): the close routes to the verified
                 // account, not the API default.
-                account: getVerifiedSingleAccount(),
+                account: closeDeps.verifiedAccount(),
                 orderRef: `close-${symbol}`,
                 action: isLong ? OrderAction.SELL : OrderAction.BUY,
                 totalQuantity: qty,
@@ -459,18 +524,24 @@ export async function closePosition(symbolRaw: string, source = 'close command')
             // pre-market one rests and the outcome tracker cleans up at
             // its eventual fill instead.
             const watch = watchOrderAcks(api, [orderId]);
+            tracker?.trackManualExit(symbol, orderId, qty, source);
             try {
                 api.placeOrder(orderId, stockContract(symbol), order);
             } catch (err) {
+                // Never reached the broker: no events will ever untrack it.
+                tracker?.untrackManualExit(orderId);
                 watch.dispose();
                 throw err;
             }
-            const states = await watch.settle(CLOSE_FILL_WAIT_MS, 'filled');
+            const states = await watch.settle(closeDeps.fillWaitMs, 'filled');
             return { orderId, order, ack: states[0] };
         });
 
         if (ack?.rejection) {
             // The close DID NOT go out: protection stays exactly as it was.
+            // The status listener usually untracked already (Inactive/
+            // Cancelled event); this covers error-only rejections.
+            tracker?.untrackManualExit(orderId);
             recentlyClosed.delete(symbol);
             const r = ack.rejection;
             logger.error(`[position-actions] close ${symbol} REJECTED by broker (${r.code ?? '?'}: ${r.reason})`);
@@ -481,18 +552,6 @@ export async function closePosition(symbolRaw: string, source = 'close command')
                     `❌ Close ${symbol} REJECTED by the broker (${r.reason}). ` +
                     `Nothing was cancelled — the position keeps its protection. Resolve and retry.`,
             };
-        }
-
-        // Register the close with the outcome tracker BEFORE cancelling the
-        // bracket exits: its fill is the exit price that turns the tracked
-        // proposals' 'manual / P&L unknown' into a real realized P&L.
-        // (Dynamic import mirrors the tracker's own import of this module —
-        // no static cycle.)
-        try {
-            const { trackManualExit } = await import('./outcome-tracker.js');
-            trackManualExit(symbol, orderId, qty, source);
-        } catch (err) {
-            logger.warn(`[position-actions] could not register ${symbol} close with the outcome tracker: ${err}`);
         }
 
         if (!ack?.filled) {
@@ -515,15 +574,21 @@ export async function closePosition(symbolRaw: string, source = 'close command')
         }
 
         // The close FILLED — the position is flat, and only now does
-        // protection removal become safe (review 2026-08-21).
+        // protection removal become safe (review 2026-08-21). The tracker's
+        // listener has already attributed the P&L (registration preceded
+        // placement) and may have started its own fire-and-forget cleanup;
+        // this awaited pass is the deterministic one the operator report
+        // counts, and double-cancel of an already-dead order is a no-op.
         const cancelledExits = await cleanupExitsAfterClose(api, symbol);
 
-        logger.info(`[position-actions] closing ${symbol}: ${order.action} ${qty} MKT (order ${orderId}), ${cancelledExits} tracked exit order(s) cancelled`);
+        logger.info(`[position-actions] closed ${symbol}: ${order.action} ${qty} MKT (order ${orderId}) FILLED, ${cancelledExits} tracked exit order(s) cancelled`);
         return {
             ok: true,
+            // Round 4: eod-triage and stacked-close flows gate on this —
+            // omitting it made every filled close read as not-closed.
+            state: 'filled',
             message:
-                `🔚 Closing ${symbol}: ${order.action} ${qty} at market (order ${orderId}). ` +
-                `Placed pre-market it rests until the open. ` +
+                `🔚 Closed ${symbol}: ${order.action} ${qty} at market (order ${orderId}) — FILLED, the position is flat. ` +
                 (cancelledExits > 0
                     ? `${cancelledExits} resting bracket/exit order(s) for ${symbol} cancelled with it.`
                     : `Note: any resting exits for ${symbol} should be reviewed ('orders').`),

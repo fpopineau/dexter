@@ -665,6 +665,11 @@ async function proposeChaseContinuation(original: TradeProposal): Promise<Execut
             // Judgment purity (review 2026-08-21): the continuation is the
             // ORIGINAL judgment re-priced — it inherits its model stamp.
             model: original.model ?? undefined,
+            // Round 4: regime is stamped at CREATION time like the tool
+            // path does — a continuation minutes later inherits the
+            // original's tag (same thesis, same session) rather than
+            // leaving NULL to erode the sample's regime breadth.
+            regime: original.regime ?? undefined,
             entryType: 'STP_LMT',
             entry: levels.entry,
             entryLimit: levels.entryLimit,

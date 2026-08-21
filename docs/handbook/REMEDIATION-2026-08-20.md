@@ -362,6 +362,60 @@ authoritative gate judges at the cap); plus the review-2 backlog
 (drift reconciliation, gap model, broker-native reduce-only, simulator
 microstructure, stale archives). None gate the paper validation.
 
+## Review 4 triage (2026-08-21, reviewed at 9a354e3)
+
+The round-3 close-lifecycle work itself carried two defects; both
+confirmed and **fixed same day, with the previously-missing direct
+tests** (`position-actions-close.test.ts`, 5 scenarios):
+
+- **Filled closes now return `state:'filled'`** — the success branch
+  omitted it, so EOD triage (which gates on exactly that) never counted
+  a successful close as closed: stale overnight exposure, double-close
+  prompts, no "Closed" in the report.
+- **Manual-exit registration precedes placement** — registering after
+  the up-to-8s fill wait let the tracker's permanent listener consume
+  and DISCARD the fill of an order it did not know: P&L lost AND the
+  late-registered entry stayed "working" forever, refusing every later
+  close of the symbol. `trackManualExit` is now called before
+  `placeOrder` (with `untrackManualExit` on throw/rejection), and it
+  registers even with zero attributable rows so adopted/manual
+  positions get the order-lifetime duplicate-close guard too.
+- **Cancellation is broker-confirmed** (`confirmCancel` in order-ack):
+  post-close exit cleanup, profit-trail target release, EOD unfilled-
+  entry cancels and BOTH resize sweeps now wait for the Cancelled
+  event (or gone-codes 10147/10148) and report three honest outcomes —
+  confirmed, FILLED-during-cancel (loud: unintended position), or
+  unconfirmed (loud: do not assume gone). Reports count confirmed
+  cancels, not requests.
+- **Scorecard hardened**: dual sqlite driver (bun + node/tsx — it
+  failed on the gateway's runtime), drawdown denominator from
+  `netliq-baseline.json` (hardcoded 1M vs 249k real understated DD
+  4×), integrity gate queried (stale placement-unconfirmed, P&L holes,
+  missing commissions — anomalies make the verdict NOT-EVALUABLE),
+  ISO-8601 weeks, NULL/'unknown' regimes excluded from breadth, and a
+  single aggregated VERDICT line.
+- **Attribution completed**: TUI runs wrapped in `withAgentLane('tui',
+  …, provider:model)`; chase continuations inherit the original's
+  `regime`; `docs/day2day/VALIDATION-JOURNAL.md` skeleton created with
+  the tag-time fingerprint checklist (model+provider, RULES.md SHA-256,
+  scorer-weights provenance).
+- **D6 doc stragglers**: env.example's "default 80 / burn-in 1 /
+  banded sizer" block and the manual's "burn-in runs at 1" sentence
+  rewritten to floor-0 + flat sizing.
+
+**Accepted/recorded (not fixed)**: over-close race at a gap open (DAY
+close and triggered GTC stop can both fill — the OCA group does not
+span the close order; mitigations: fill-gated cleanup + duplicate-close
+guard + loud FILLED-during-cancel detection; the real fix is
+broker-native reduce-only/OCA-joined closes, backlog); ack contract
+covers the window only (a post-window rejection reaches the tracker,
+not the acker); the duplicate-close guard is process-memory (restart
+forgets a resting close — WP3 adoption sweep + the 10-minute window are
+the net); weekly scorecard execution is operator-manual (journal
+entries enforce cadence; a gateway cron spawning the script is
+backlog); pre-stamping rows carry NULL model/regime until they drain
+(the purity check flags them; the freeze tag postdates the drain).
+
 - **WP9 Backtester: honest replay** (MED — decision point D1)
   Recommended scope (rebuild-lite, ~1 session): process bar i BEFORE
   signals from bar i (kills the same-bar look-ahead); per-symbol bar

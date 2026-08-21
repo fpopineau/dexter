@@ -118,3 +118,53 @@ export function watchOrderAcks(api: IBApi, orderIds: number[]): OrderAckWatch {
         },
     };
 }
+
+/** How a cancel request actually ended at the broker. 'filled' means the
+ *  cancel LOST the race — the order executed, and the caller is holding a
+ *  position change it did not intend. */
+export type CancelOutcome = 'cancelled' | 'filled' | 'unconfirmed';
+
+/** IBKR error codes that mean "that order is not working anymore" — for a
+ *  cancel, that is success (10147/10148: order to cancel not found /
+ *  already cancelled). */
+const CANCEL_GONE_CODES = new Set([10147, 10148]);
+
+/**
+ * Cancel an order and wait for the broker to CONFIRM it (round-4 review,
+ * 2026-08-21: every cancel used to be request-and-forget — "cancelled" in
+ * a report meant "we asked", and a target/stop/close could fill during
+ * the 15-minute healing-sweep gap while the book said it was gone).
+ * Listeners armed before the request; always resolves.
+ */
+export function confirmCancel(api: IBApi, orderId: number, timeoutMs: number): Promise<CancelOutcome> {
+    return new Promise<CancelOutcome>((resolve) => {
+        let settled = false;
+        const finish = (outcome: CancelOutcome) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            api.off(EventName.orderStatus, onOrderStatus);
+            api.off(EventName.error, onError);
+            resolve(outcome);
+        };
+        const onOrderStatus = (id: number, status: string, filled: number, remaining: number) => {
+            if (id !== orderId) return;
+            if (status === 'Cancelled' || status === 'ApiCancelled' || status === 'Inactive') finish('cancelled');
+            else if (status === 'Filled' && remaining === 0 && filled > 0) finish('filled');
+        };
+        const onError = (_err: Error, code: number, reqId: number) => {
+            if (reqId !== orderId) return;
+            if (CANCEL_GONE_CODES.has(code)) finish('cancelled');
+            // Other errors: keep waiting — a real status may still arrive,
+            // and the timeout bounds the wait either way.
+        };
+        const timer = setTimeout(() => finish('unconfirmed'), timeoutMs);
+        api.on(EventName.orderStatus, onOrderStatus);
+        api.on(EventName.error, onError);
+        try {
+            api.cancelOrder(orderId);
+        } catch {
+            finish('unconfirmed');
+        }
+    });
+}
