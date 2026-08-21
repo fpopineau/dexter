@@ -293,8 +293,19 @@ exposure-in-waiting for unknown orders, general overnight gap-risk
 model, broker-native reduce-only, regime-conditioned scorer routing,
 RVOL double-counting, scanner depth, simulator microstructure (queue/
 partial/latency/borrow) and stale FirstRate/GDELT archives → open
-backlog, none gate the PAPER validation. Auto-exec's ≥80 threshold
-contaminating band sampling = operator decision D6 (pending).
+backlog, none gate the PAPER validation.
+
+**D6 RESOLVED (2026-08-21): auto-exec floor 0 + fresh statistics.** The
+ledger has NO positive score band (50–75 would give 22% wins at
+−$812/trade; 76–79 is 0-for-9; 80+ is 0-for-5), and the historical
+scores came from the pre-WP10 scorer, which no longer exists —
+band-shopping that record is post-hoc selection. The burn-in is an
+experiment ON the score: `AUTO_EXECUTE_MIN_SCORE` defaults to 0 (env
+set to 0; the guard now accepts 0), so every band accrues samples for
+the decile-monotonicity test. All deterministic gates and the daily cap
+still apply; sizing is flat. Performance baseline reset 2026-08-21
+13:03Z ("fresh statistics") — history stays queryable, reports start
+clean.
 
 **PHASE 4 STATUS: protocol PRE-REGISTERED 2026-08-21**
 ([VALIDATION-PROTOCOL.md](VALIDATION-PROTOCOL.md)); the freeze tag

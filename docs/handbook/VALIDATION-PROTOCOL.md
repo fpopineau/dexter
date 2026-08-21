@@ -20,6 +20,9 @@ positive expectancy after costs, not improved loss control.
   model change ends the window like any behavior change.
 - Confidence sizing is FLAT (multipliers 1.0) in both profiles as of
   2026-08-21 — verified in config, not just mandated here.
+- Auto-execution samples ALL score bands (D6: `AUTO_EXECUTE_MIN_SCORE`
+  0) so the decile-monotonicity test gets cross-band data — the floor
+  value freezes with the tag like every other knob.
 - Bug fixes during the window are allowed ONLY for accounting
   correctness (a fill recorded wrong, a P&L mis-attributed), never for
   behavior, and each is logged in the validation journal

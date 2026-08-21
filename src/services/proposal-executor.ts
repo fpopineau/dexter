@@ -457,7 +457,14 @@ function autoExecMaxPerDay(): number {
 
 function autoExecMinScore(): number {
     const n = Number(process.env.AUTO_EXECUTE_MIN_SCORE);
-    return Number.isFinite(n) && n > 0 ? n : 80;
+    // D6 (resolved 2026-08-21): DEFAULT 0 for the paper burn-in. The old
+    // 80 floor preferentially sampled one band — the ledger's worst
+    // (0-for-5) — and starved the protocol's decile-monotonicity test of
+    // cross-band data. The burn-in is an EXPERIMENT ON THE SCORE:
+    // conditioning sampling on the score biases it. Every deterministic
+    // gate still applies; AUTO_EXECUTE_MAX_PER_DAY bounds volume; sizing
+    // is flat. The freeze pins whatever value is set here.
+    return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
 function etDate(): string {
