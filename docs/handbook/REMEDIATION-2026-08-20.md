@@ -624,6 +624,28 @@ remains exercised only at boot on paper; the transition semantics are
 what the test pins. OCA dynamic-join paper observation stays a freeze
 prerequisite; weekly scorecard run stays operator-manual.
 
+## Review 10 triage (2026-08-21, reviewed at 3aa3474)
+
+**Fixed same day — three precision defects in the round-9 work:**
+
+- **Manual exits no longer bypass the atomic refusal** (P1): the probe
+  filtered to OUR_REF before deciding "nothing to race", so a manual
+  TWS stop made the book look empty and the close proceeded ungrouped
+  against it. ANY working exit-side order not placed by Dexter now
+  refuses the close outright (it can be neither joined nor cancelled
+  from here), naming the orders and pointing at TWS. Tested.
+- **A thrown verification is a failed verification** (P1): the
+  post-cleanup book check's catch now clears `verifyComplete`, so
+  event-only outcomes cannot certify cancels after the very failure
+  the verification exists to catch.
+- **FLAT is a first-class outcome field** (P1):
+  `PositionActionOutcome.flat` (true / false / null-unverified) —
+  the fill is an order fact, flatness is a position fact. All three
+  EOD-triage gates and the profit-trail state deletion now require
+  `state === 'filled' && flat === true`; anything else surfaces the
+  full warning message instead of "Closed." and keeps the trail state.
+  Happy-path flat:true pinned by test.
+
 - **WP9 Backtester: honest replay** (MED — decision point D1)
   Recommended scope (rebuild-lite, ~1 session): process bar i BEFORE
   signals from bar i (kills the same-bar look-ahead); per-symbol bar

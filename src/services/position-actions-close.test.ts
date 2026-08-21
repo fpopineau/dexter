@@ -137,6 +137,8 @@ describe('closePosition lifecycle (round-4 review)', () => {
         // The regression: this was undefined, so EOD triage never counted
         // a successful close as closed.
         expect(out.state).toBe('filled');
+        // Round-10: FLAT is a distinct position claim — consumers gate on it.
+        expect(out.flat).toBe(true);
         expect(fake.placed).toHaveLength(1);
         expect(fake.placed[0]!.order.orderType).toBe(OrderType.MKT);
         // The fill was consumed by the tracker (registration preceded
@@ -282,6 +284,20 @@ describe('closePosition lifecycle (round-4 review)', () => {
         const retry = await closePosition('CLQJ', 'test-operator');
         expect(retry.state).toBe('filled');
         expect((fake.placed[0]!.order as unknown as { ocaGroup?: string }).ocaGroup).toBe('dexter-CLQJ-1');
+    });
+
+    test('a MANUAL (non-Dexter) exit refuses the close — it cannot be joined or cancelled from here (round 10)', async () => {
+        fake.position = { symbol: 'CLQK', qty: 10 };
+        fake.openOrders = [{
+            id: 9008,
+            contract: { symbol: 'CLQK' } as Contract,
+            // Operator-placed TWS stop: no Dexter ref, no group we own.
+            order: { action: 'SELL', orderType: 'STP', tif: 'GTC', orderRef: 'my manual stop' } as unknown as Order,
+        }];
+        const out = await closePosition('CLQK', 'test-operator');
+        expect(out.ok).toBe(false);
+        expect(out.message).toContain('not placed by');
+        expect(fake.placed).toHaveLength(0);
     });
 
     test('working close (acked, unfilled): cleanup happens when the fill lands later', async () => {

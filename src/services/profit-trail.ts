@@ -380,8 +380,10 @@ async function runCycle(state: Map<string, TrailEntry>): Promise<void> {
         // worse basis. Working/unconfirmed closes keep the entry too: the
         // duplicate-close guard refuses a re-close, and the state prunes
         // itself when the position disappears.
-        if (outcome.state === 'filled') state.delete(pos.symbol);
-        else logger.warn(`[profit-trail] ${pos.symbol}: close not confirmed flat (${outcome.state ?? 'no state'}) — trail entry kept (peak ${entry.best})`);
+        // Round-10: gate on CONFIRMED flatness — a filled close with an
+        // over-close residue still owns a position worth trailing.
+        if (outcome.state === 'filled' && outcome.flat === true) state.delete(pos.symbol);
+        else logger.warn(`[profit-trail] ${pos.symbol}: close not confirmed flat (state=${outcome.state ?? 'none'}, flat=${outcome.flat ?? 'unknown'}) — trail entry kept (peak ${entry.best})`);
         const message =
             `📉➡️💰 PROFIT TRAIL ${pos.symbol}: peaked +${decision.gainAtBestPct}% (best ${entry.best}, ` +
             `basis ${entry.basis.toFixed(2)}), pulled back ${decision.pullbackPct}% to ${price} ` +

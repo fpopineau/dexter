@@ -31,6 +31,13 @@ export interface PositionActionOutcome {
      *  "the order exists but the position is not flat yet". Consumers that
      *  treat a close as DONE must check for 'filled', never just ok. */
     state?: 'filled' | 'working' | 'unconfirmed' | 'rejected';
+    /** Round-10 review: the FILL is an order fact; FLAT is a position
+     *  fact — an exit filling alongside the close leaves a filled close
+     *  and a NOT-flat book. true = position book confirms flat; false =
+     *  confirmed NOT flat (over-close residue); null = could not verify.
+     *  Consumers that mean "the symbol is closed" gate on flat === true,
+     *  never on state alone. */
+    flat?: boolean | null;
     message: string;
     /** protectPosition only: the GTC exit order ids just placed — the
      *  outcome tracker adopts them so the protected position stays a
@@ -486,6 +493,10 @@ export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, sy
             }
         }
     } catch (err) {
+        // Round-10 review: a THROWN verification is a failed verification —
+        // leaving the flag true let event-only outcomes certify cancels
+        // after the exact failure the verification exists to catch.
+        verifyComplete = false;
         logger.warn(`[position-actions] ${symbol}: post-cleanup book verification failed: ${err}`);
     }
     let exitFilledDuringClose = false;
@@ -636,11 +647,27 @@ export async function closePosition(symbolRaw: string, source = 'close command')
                         `reverse the position. Retry in a moment.`,
                 };
             }
+            // Round-10 review: EVERY working exit-side order can race the
+            // close — a manual TWS stop is not ours to join OR cancel, so
+            // filtering to OUR_REF before deciding "nothing to race" was a
+            // bypass. Foreign/manual exits refuse outright.
+            const foreign = exitView.orders.filter((o) => !OUR_REF.test(o.orderRef ?? ''));
+            if (foreign.length > 0) {
+                recentlyClosed.delete(symbol);
+                return {
+                    ok: false,
+                    message:
+                        `⛔ Cannot close ${symbol} atomically: ${foreign.length} working exit-side order(s) not placed by ` +
+                        `Dexter (${foreign.map((o) => `#${o.orderId} ${o.orderType}${o.orderRef ? ` ref '${o.orderRef}'` : ''}`).join(', ')}) — ` +
+                        `they cannot be joined or cancelled from here, and one filling alongside the close REVERSES the ` +
+                        `position. Cancel them in TWS first, or close there.`,
+                };
+            }
             const ours = exitView.orders.filter((o) => OUR_REF.test(o.orderRef ?? ''));
             const groups = [...new Set(ours.filter((o) => o.ocaGroup !== null).map((o) => o.ocaGroup as string))];
             const ungrouped = ours.filter((o) => o.ocaGroup === null).length;
             if (ours.length === 0) {
-                // Unprotected position — nothing can race the close.
+                // Truly empty exit book — nothing can race the close.
             } else if (groups.length === 1 && ungrouped === 0) {
                 joinOcaGroup = groups[0]!;
                 logger.info(`[position-actions] ${symbol}: close joins exit OCA group '${joinOcaGroup}' — broker-side mutual exclusion with the stop/target`);
@@ -761,17 +788,24 @@ export async function closePosition(symbolRaw: string, source = 'close command')
         // cleanup saw an exit fill during the race, was unverified, or left
         // orders working, re-read the position book before claiming it.
         let flatSuffix = 'the position is flat.';
+        // Round-10: flat is a POSITION claim consumers gate on — a clean
+        // full-size fill with verified no-incident cleanup is flat; any
+        // incident demands the position book's answer.
+        let flat: boolean | null = true;
         if (cleanup.exitFilledDuringClose || !cleanup.verified || cleanup.stillWorking.length > 0) {
             try {
                 const after = (await fetchPositions(api)).find((p) => p.symbol === symbol);
                 if (after && after.quantity !== 0) {
+                    flat = false;
                     flatSuffix = `⚠️ the position is NOT flat: ${after.quantity > 0 ? 'LONG' : 'SHORT'} ${Math.abs(after.quantity)} remains — ` +
                         `an exit filled alongside the close (over-close race). Review 'positions' NOW.`;
                     logger.error(`[position-actions] ${symbol}: post-close position check shows ${after.quantity} — NOT flat after close+cleanup incident`);
                 } else {
+                    flat = true;
                     flatSuffix = 'the position book confirms FLAT (re-checked after a cleanup incident).';
                 }
             } catch {
+                flat = null;
                 flatSuffix = "⚠️ flatness could NOT be re-verified — check 'positions'.";
             }
         }
@@ -790,6 +824,7 @@ export async function closePosition(symbolRaw: string, source = 'close command')
             // Round 4: eod-triage and stacked-close flows gate on this —
             // omitting it made every filled close read as not-closed.
             state: 'filled',
+            flat,
             message:
                 `🔚 Closed ${symbol}: ${order.action} ${qty} at market (order ${orderId}) — FILLED, ${flatSuffix} ` +
                 exitsNote + workingNote,
