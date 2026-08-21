@@ -17,7 +17,7 @@ import { countOpenExecuted, createAdoptedPosition, getProposal } from './trade-p
 
 const ACCT = 'DU7777777';
 const order = (o: Partial<BrokerOrderSnap>): BrokerOrderSnap =>
-    ({ orderId: 1, symbol: 'NVDA', orderRef: null, account: ACCT, ...o });
+    ({ orderId: 1, symbol: 'NVDA', orderRef: null, account: ACCT, quantity: null, ...o });
 const position = (p: Partial<BrokerPositionSnap>): BrokerPositionSnap =>
     ({ account: ACCT, symbol: 'NVDA', quantity: 10, avgCost: 100, ...p });
 

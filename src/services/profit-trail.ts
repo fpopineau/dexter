@@ -371,7 +371,14 @@ async function runCycle(state: Map<string, TrailEntry>): Promise<void> {
             `pullback ${decision.pullbackPct}% at ${price} (${geometry.mode} thresholds ${geometry.armPct}/${geometry.pullbackPct}) — closing`,
         );
         const outcome = await closePosition(pos.symbol, 'profit-trail');
-        state.delete(pos.symbol);
+        // Round-5 review: forget the trail ONLY when the position is
+        // actually flat — discarding the entry on a rejected/ambiguous
+        // close loses the recorded peak and would restart trailing from a
+        // worse basis. Working/unconfirmed closes keep the entry too: the
+        // duplicate-close guard refuses a re-close, and the state prunes
+        // itself when the position disappears.
+        if (outcome.state === 'filled') state.delete(pos.symbol);
+        else logger.warn(`[profit-trail] ${pos.symbol}: close not confirmed flat (${outcome.state ?? 'no state'}) — trail entry kept (peak ${entry.best})`);
         const message =
             `📉➡️💰 PROFIT TRAIL ${pos.symbol}: peaked +${decision.gainAtBestPct}% (best ${entry.best}, ` +
             `basis ${entry.basis.toFixed(2)}), pulled back ${decision.pullbackPct}% to ${price} ` +

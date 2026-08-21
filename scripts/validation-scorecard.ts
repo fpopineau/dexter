@@ -171,14 +171,18 @@ const verdictFails: string[] = [];
 const sinceArg = process.argv[2];
 let sinceMs: number;
 let windowLabel: string;
-if (sinceArg && /^\d{4}-\d{2}-\d{2}$/.test(sinceArg)) {
-    sinceMs = Date.parse(`${sinceArg}T00:00:00Z`);
-    windowLabel = `since ${sinceArg} (explicit — use the freeze-tag date)`;
+let epochNetliq: number | null = null;
+if (sinceArg && /^\d{4}-\d{2}-\d{2}(T[\d:.]+Z?)?$/.test(sinceArg)) {
+    // Round-5 review: accept the exact tag TIMESTAMP, not just midnight —
+    // a date-only argument floors to 00:00Z and admits pre-tag trades.
+    sinceMs = sinceArg.includes('T') ? Date.parse(sinceArg) : Date.parse(`${sinceArg}T00:00:00Z`);
+    windowLabel = `since ${sinceArg} (explicit — use the freeze tag's full timestamp)`;
 } else {
     try {
         const p = join(dataDir, 'performance-epoch.json');
-        const b = JSON.parse(readFileSync(p, 'utf-8')) as { epochMs: number; note?: string };
+        const b = JSON.parse(readFileSync(p, 'utf-8')) as { epochMs: number; note?: string; netLiq?: number };
         sinceMs = b.epochMs;
+        if (typeof b.netLiq === 'number' && b.netLiq > 0) epochNetliq = b.netLiq;
         windowLabel = `since baseline ${new Date(b.epochMs).toISOString()}${b.note ? ` (${b.note})` : ''}`;
     } catch {
         sinceMs = 0;
@@ -187,25 +191,36 @@ if (sinceArg && /^\d{4}-\d{2}-\d{2}$/.test(sinceArg)) {
     }
 }
 
-// Paper equity denominator: the captured daily NetLiq baseline, never a
-// constant (round-4 review: 1M hardcoded vs 249k real = 4× understated DD).
-let paperNetliq: number | null = null;
-try {
-    const b = JSON.parse(readFileSync(join(dataDir, 'netliq-baseline.json'), 'utf-8')) as { netLiq?: number };
-    if (typeof b.netLiq === 'number' && b.netLiq > 0) paperNetliq = b.netLiq;
-} catch { /* reported below */ }
+// Paper equity denominator (round-5 review): the FREEZE-TIME NetLiq
+// stored in the epoch file. The daily netliq-baseline.json is refreshed
+// every trading date — weeks into the sample it is the final day's
+// equity, not the equity the sample started from. Fallback is loud.
+let paperNetliq: number | null = epochNetliq;
+let netliqSource = 'frozen at epoch';
+if (paperNetliq === null) {
+    try {
+        const b = JSON.parse(readFileSync(join(dataDir, 'netliq-baseline.json'), 'utf-8')) as { netLiq?: number };
+        if (typeof b.netLiq === 'number' && b.netLiq > 0) {
+            paperNetliq = b.netLiq;
+            netliqSource = "TODAY'S capture — NOT freeze-time equity; re-freeze the epoch to pin it";
+        }
+    } catch { /* reported below */ }
+}
 
 const rows = db.query<Row>(`
     SELECT id, symbol, trade_class, source, score, model, regime,
            realized_pnl, commissions, closed_at
     FROM proposals
-    WHERE status = 'closed' AND closed_at >= ?
+    WHERE status = 'closed' AND created_at >= ? AND closed_at >= ?
       AND entry_fill_price IS NOT NULL AND realized_pnl IS NOT NULL
       AND (exit_reason IS NULL OR exit_reason != 'cancelled')
       AND source != 'adopted'
       AND (note IS NULL OR note NOT LIKE '${UNTRUSTWORTHY}')
     ORDER BY closed_at ASC
-`).all(sinceMs);
+`).all(sinceMs, sinceMs);
+// created_at >= window start (round-5 review): "never count pre-freeze
+// rows" means rows PROPOSED under the frozen policy — a pre-freeze trade
+// that merely closes inside the window was judged by the old policy.
 
 const net = (r: Row) => r.realized_pnl - (r.commissions ?? 0);
 const n = rows.length;
@@ -228,10 +243,19 @@ const pnlHoles = db.query<{ c: number }>(`
       AND source != 'adopted'
 `).all(sinceMs)[0]?.c ?? 0;
 const missingCommissions = rows.filter((r) => r.commissions === null).length;
+// Round-5 review: adoptions ARE reconciliation events — unknown broker
+// state appeared during the window; and a post-freeze row without its
+// model/regime stamp is an instrumentation failure, not a shrug.
+const adoptionsInWindow = db.query<{ c: number }>(`
+    SELECT COUNT(*) AS c FROM proposals WHERE source = 'adopted' AND created_at >= ?
+`).all(sinceMs)[0]?.c ?? 0;
+const missingStamps = rows.filter((r) => r.model === null || r.regime === null || r.regime === 'unknown').length;
 const anomalies: string[] = [];
 if (staleUnconfirmed > 0) anomalies.push(`${staleUnconfirmed} placement-unconfirmed row(s) older than 24h`);
 if (pnlHoles > 0) anomalies.push(`${pnlHoles} in-window close(s) with NULL realized P&L`);
 if (missingCommissions > 0) anomalies.push(`${missingCommissions} sample row(s) missing commissions (net P&L overstated)`);
+if (adoptionsInWindow > 0) anomalies.push(`${adoptionsInWindow} position(s)/order(s) ADOPTED in-window (reconciliation events — resolve before evaluating)`);
+if (missingStamps > 0) anomalies.push(`${missingStamps} sample row(s) missing model/regime stamps (post-freeze instrumentation failure)`);
 console.log(`integrity: ${anomalies.length === 0 ? 'CLEAN' : `ANOMALIES — ${anomalies.join('; ')}`}`);
 for (const a of anomalies) verdictFails.push(`integrity: ${a}`);
 
@@ -261,7 +285,8 @@ for (const v of nets) { equity += v; if (equity > peak) peak = equity; maxDd = M
 const liveRisk = 1.0, paperRisk = 0.25, liveDailyLoss = 3.0; // risk-rules.live.yaml pins
 if (paperNetliq !== null) {
     const ddPct = (maxDd / paperNetliq) * 100 * (liveRisk / paperRisk);
-    console.log(`max drawdown ${maxDd.toFixed(2)} on paper NetLiq ${paperNetliq.toFixed(0)} → scaled ${ddPct.toFixed(2)}% of live equity (${ddPct <= 2 * liveDailyLoss ? 'PASS' : 'FAIL'} — must be <= ${2 * liveDailyLoss}%)`);
+    console.log(`max drawdown ${maxDd.toFixed(2)} on paper NetLiq ${paperNetliq.toFixed(0)} [${netliqSource}] → scaled ${ddPct.toFixed(2)}% of live equity (${ddPct <= 2 * liveDailyLoss ? 'PASS' : 'FAIL'} — must be <= ${2 * liveDailyLoss}%)`);
+    if (netliqSource !== 'frozen at epoch') verdictFails.push('drawdown denominator not frozen (epoch has no netLiq)');
     if (ddPct > 2 * liveDailyLoss) verdictFails.push(`scaled drawdown ${ddPct.toFixed(2)}% > ${2 * liveDailyLoss}%`);
 } else {
     console.log(`max drawdown ${maxDd.toFixed(2)} — NOT EVALUABLE: netliq-baseline.json missing/unreadable`);

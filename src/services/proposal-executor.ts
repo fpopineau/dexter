@@ -371,9 +371,15 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
             const reason = `broker rejected order ${r.orderId} (code ${r.code ?? '?'}): ${r.reason}`;
             await setProposalStatus(p.id, 'failed', { note: reason });
             logger.error(`[proposal-executor] ${p.id} ${reason}`);
+            // Round-5 review: only claim "nothing is working" when the
+            // sweep CONFIRMED every leg dead — a surviving leg can fill.
+            const residues = result.ack.sweepResidues ?? [];
             return {
                 ok: false,
-                message: `❌ ${p.id} NOT executed — ${reason}. All bracket legs were cancelled; nothing is working.`,
+                message: `❌ ${p.id} NOT executed — ${reason}. ` +
+                    (residues.length === 0
+                        ? 'All bracket legs were cancelled (broker-confirmed); nothing is working.'
+                        : `⚠️ Bracket legs NOT confirmed dead: ${residues.join(', ')} — check 'orders'/TWS before retrying.`),
             };
         }
 

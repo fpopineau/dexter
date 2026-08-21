@@ -22,6 +22,10 @@ export interface BrokerOrderSnap {
     symbol: string;
     orderRef: string | null;
     account: string | null;
+    /** Round-5 review: a working close-<SYM> order found at boot must
+     *  rehydrate the duplicate-close guard; its quantity sizes the
+     *  re-registered manual exit. */
+    quantity: number | null;
 }
 
 export interface BrokerPositionSnap {
@@ -110,6 +114,7 @@ export function fetchOpenOrderSnaps(api: IBApi): Promise<BrokerOrderSnap[]> {
                 symbol: (contract.symbol ?? '').toUpperCase(),
                 orderRef: typeof order.orderRef === 'string' ? order.orderRef : null,
                 account: typeof order.account === 'string' ? order.account : null,
+                quantity: typeof order.totalQuantity === 'number' ? order.totalQuantity : null,
             });
         };
         const onEnd = () => { clearTimeout(timer); cleanup(); resolve(found); };
@@ -134,6 +139,11 @@ export interface AdoptionHooks {
     repointOrder(proposalId: string, leg: AdoptLeg, orderId: number): Promise<void>;
     notify(message: string): Promise<void>;
     verifiedAccount(): string;
+    /** Round-5 review: a working `close-<SYM>` order at the broker means a
+     *  close is mid-flight — the duplicate-close guard is process-memory
+     *  and a restart forgot it. The sweep hands every such order back so
+     *  the tracker re-registers it (idempotent on the tracker side). */
+    registerManualExit?(symbol: string, orderId: number, quantity: number): void;
 }
 
 /** One reverse-reconciliation sweep. Best-effort by contract: any failure
@@ -157,6 +167,18 @@ export async function runBrokerAdoption(api: IBApi, hooks: AdoptionHooks): Promi
         tracked: exposure.map((t) => ({ proposalId: t.id, symbol: t.symbol, orderIds: t.orderIds ?? [] })),
         verifiedAccount: account,
     });
+
+    // Round-5 review: rehydrate the duplicate-close guard from broker
+    // truth — a resting close (pre-market MKT, hours to the open) must
+    // refuse a second full-size close even across a gateway restart.
+    if (hooks.registerManualExit) {
+        for (const o of orders) {
+            if (o.account !== null && o.account !== account) continue;
+            if (/^close-/.test((o.orderRef ?? '').trim())) {
+                hooks.registerManualExit(o.symbol, o.orderId, o.quantity ?? 0);
+            }
+        }
+    }
 
     for (const a of plan.orderAdoptions) {
         try {

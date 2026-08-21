@@ -121,13 +121,31 @@ export function watchOrderAcks(api: IBApi, orderIds: number[]): OrderAckWatch {
 
 /** How a cancel request actually ended at the broker. 'filled' means the
  *  cancel LOST the race — the order executed, and the caller is holding a
- *  position change it did not intend. */
-export type CancelOutcome = 'cancelled' | 'filled' | 'unconfirmed';
+ *  position change it did not intend. 'not-cancellable' (round-5 review)
+ *  is IBKR 10148/161: the order is in a state that refuses cancellation
+ *  and the broker did not say which — the caller must NOT treat it as
+ *  gone. */
+export type CancelOutcome = 'cancelled' | 'filled' | 'not-cancellable' | 'unconfirmed';
 
-/** IBKR error codes that mean "that order is not working anymore" — for a
- *  cancel, that is success (10147/10148: order to cancel not found /
- *  already cancelled). */
-const CANCEL_GONE_CODES = new Set([10147, 10148]);
+/** Round-5 review: 10148 is NOT "already cancelled" — it is "cannot be
+ *  cancelled, state: <X>", most commonly because the order FILLED. The
+ *  state token in the message decides; TWS localizes it (English
+ *  'Filled' / French 'Rempli'), so match both. */
+export function classifyCancelRejection(code: number, message: string): CancelOutcome | null {
+    // 10147: "OrderId <x> that needs to be cancelled is not found" — the
+    // order is not working anywhere; for a cancel, that is success.
+    if (code === 10147) return 'cancelled';
+    if (code === 10148 || code === 161) {
+        // Only the STATE TOKEN decides — the sentence itself always says
+        // "cannot be cancelled", so a whole-message keyword scan would
+        // classify everything as cancelled.
+        const token = /(?:state|état)\s*:?\s*([A-Za-zé]+)/i.exec(message)?.[1] ?? '';
+        if (/^(filled|rempli)$/i.test(token)) return 'filled';
+        if (/^(cancelled|canceled|annulé)$/i.test(token)) return 'cancelled';
+        return 'not-cancellable';
+    }
+    return null; // not a cancel-classifying code
+}
 
 /**
  * Cancel an order and wait for the broker to CONFIRM it (round-4 review,
@@ -149,12 +167,15 @@ export function confirmCancel(api: IBApi, orderId: number, timeoutMs: number): P
         };
         const onOrderStatus = (id: number, status: string, filled: number, remaining: number) => {
             if (id !== orderId) return;
+            // PendingCancel is a request in flight, not a confirmation —
+            // only terminal statuses settle (round-5 review).
             if (status === 'Cancelled' || status === 'ApiCancelled' || status === 'Inactive') finish('cancelled');
             else if (status === 'Filled' && remaining === 0 && filled > 0) finish('filled');
         };
-        const onError = (_err: Error, code: number, reqId: number) => {
+        const onError = (err: Error, code: number, reqId: number) => {
             if (reqId !== orderId) return;
-            if (CANCEL_GONE_CODES.has(code)) finish('cancelled');
+            const classified = classifyCancelRejection(code, err?.message ?? '');
+            if (classified) finish(classified);
             // Other errors: keep waiting — a real status may still arrive,
             // and the timeout bounds the wait either way.
         };

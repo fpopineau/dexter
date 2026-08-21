@@ -14,7 +14,7 @@ import type { Contract, IBApi, Order } from '@stoqey/ib';
 import { OrderAction, OrderType, SecType, TimeInForce } from '@stoqey/ib';
 import { logger } from '@/utils';
 import { assertAccountsVerified, getIBApi, getVerifiedSingleAccount } from './connection.js';
-import { watchOrderAcks } from './order-ack.js';
+import { confirmCancel, watchOrderAcks } from './order-ack.js';
 import { withOrderLock } from './order-lock.js';
 import { getNextValidOrderId } from './orders.js';
 import { getRiskRules } from './risk-rules.js';
@@ -57,6 +57,11 @@ export interface BracketAck {
     /** permIds aligned [parent, takeProfit, stop]; null where unseen. */
     permIds: Array<number | null>;
     rejection?: { orderId: number; code: number | null; reason: string };
+    /** Round-5 review: legs of a rejected placement whose cancel the
+     *  broker did NOT confirm dead ("#id outcome"). Empty = every leg
+     *  confirmed cancelled; callers must not claim "nothing is working"
+     *  when this is non-empty. */
+    sweepResidues?: string[];
 }
 
 export interface BracketResult {
@@ -243,13 +248,21 @@ export async function placeBracketOrderCore(
     if (ack.outcome === 'rejected') {
         // A rejected leg must not leave the others live: a parent without
         // its stop is unprotected exposure; children without a parent are a
-        // reversal waiting for a price to print. Best-effort sweep.
+        // reversal waiting for a price to print. Round-5 review: the sweep
+        // is broker-CONFIRMED — "all legs cancelled" was previously just
+        // "we asked", and a surviving child could still fill.
+        const residues: string[] = [];
         for (const id of legIds) {
-            try { api.cancelOrder(id); } catch { /* already dead */ }
+            const outcome = await confirmCancel(api, id, ackTimeoutMs);
+            if (outcome !== 'cancelled') residues.push(`#${id} ${outcome}`);
         }
+        ack.sweepResidues = residues;
         logger.error(
             `[bracket] ${contract.symbol} REJECTED by broker (order ${ack.rejection!.orderId}, ` +
-            `code ${ack.rejection!.code ?? '?'}: ${ack.rejection!.reason}) — all three legs cancel-swept`,
+            `code ${ack.rejection!.code ?? '?'}: ${ack.rejection!.reason}) — ` +
+            (residues.length === 0
+                ? 'all three legs cancel-swept (confirmed)'
+                : `legs NOT confirmed dead: ${residues.join(', ')} — verify in TWS`),
         );
     } else {
         logger.info(

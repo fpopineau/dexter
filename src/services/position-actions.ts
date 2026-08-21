@@ -99,6 +99,10 @@ export interface OpenOrderSummary {
     /** WP11: our identity key (WP1 stamps one on every order) — the close
      *  sweep cancels OUR orphaned pairs by it and never touches unknowns. */
     orderRef: string | null;
+    /** Round-5 review: the exits' OCA group — a close that JOINS it makes
+     *  close-vs-stop mutual exclusion broker-side, killing the gap-open
+     *  over-close race. */
+    ocaGroup: string | null;
 }
 
 /** Working orders for a symbol on the given side (all API clients). */
@@ -121,6 +125,7 @@ export async function fetchOpenOrdersFor(
                 orderType: String(order.orderType ?? ''),
                 tif: String(order.tif ?? ''),
                 orderRef: typeof order.orderRef === 'string' ? order.orderRef : null,
+                ocaGroup: typeof order.ocaGroup === 'string' && order.ocaGroup.length > 0 ? order.ocaGroup : null,
             });
         };
         const onEnd = () => {
@@ -329,6 +334,11 @@ const CLOSE_FILL_WAIT_MS = 8_000;
 /** Broker-confirmation window for a cancel request (round-4 review). */
 const CANCEL_CONFIRM_MS = 5_000;
 
+/** Our order identity (WP1/WP11): refs Dexter stamps on everything it
+ *  places. The orphan sweep cancels ONLY these; the OCA-join trusts only
+ *  these. Unknown refs are never touched. */
+const OUR_REF = /^(protect-|close-|reduce-|BRKT-|P-[0-9A-F]{4}:)/;
+
 const closeDeps = {
     getApi: getIBApi,
     verifyAccounts: assertAccountsVerified,
@@ -368,6 +378,12 @@ export function __setCloseDepsForTests(overrides: Partial<typeof closeDeps> | nu
 export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, symbolRaw: string): Promise<number> {
     const symbol = symbolRaw.trim().toUpperCase();
     const requested = new Set<number>();
+    // Round-5 review: orderIds[0] is the ENTRY by convention. Cancelling
+    // it is deliberate (a partially-filled entry left working would rebuild
+    // the position after the close), but on a routine close the entry is
+    // long FILLED — the broker answers 10148 state:Filled, which is benign
+    // for the entry and an ALARM for an exit. Classify per id.
+    const entryIds = new Set<number>();
     const pending: Array<Promise<readonly [number, CancelOutcome]>> = [];
     const requestCancel = (oid: number) => {
         if (requested.has(oid)) return;
@@ -378,15 +394,12 @@ export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, sy
         const { listTrackable } = await import('./trade-proposals.js');
         for (const t of await listTrackable()) {
             if (t.symbol !== symbol || !t.orderIds?.length) continue;
+            entryIds.add(t.orderIds[0]);
             for (const oid of t.orderIds) requestCancel(oid);
         }
     } catch (err) {
         logger.warn(`[position-actions] exit cleanup for ${symbol} failed: ${err}`);
     }
-    // WP11 (closes audit 2026-08-06 finding 10): GTC pairs placed OUTSIDE
-    // proposal rows — the auto-protect path after a row already closed —
-    // are persisted nowhere and used to survive every close.
-    const OUR_REF = /^(protect-|close-|reduce-|BRKT-|P-[0-9A-F]{4}:)/;
     try {
         for (const side of [OrderAction.SELL, OrderAction.BUY]) {
             for (const o of await fetchOpenOrdersFor(api, symbol, side)) {
@@ -406,6 +419,10 @@ export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, sy
     for (const [oid, outcome] of await Promise.all(pending)) {
         if (outcome === 'cancelled') {
             cancelledExits++;
+        } else if (entryIds.has(oid) && (outcome === 'filled' || outcome === 'not-cancellable')) {
+            // The entry that built the position we just closed — complete,
+            // nothing working, nothing to alarm about.
+            logger.info(`[position-actions] ${symbol}: entry order #${oid} already complete (${outcome}) — expected on a routine close`);
         } else if (outcome === 'filled') {
             logger.error(
                 `[position-actions] ${symbol}: exit order #${oid} FILLED during post-close cleanup — the account ` +
@@ -413,7 +430,7 @@ export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, sy
             );
         } else {
             logger.error(
-                `[position-actions] ${symbol}: cancel of exit order #${oid} NOT CONFIRMED by the broker — do not ` +
+                `[position-actions] ${symbol}: cancel of exit order #${oid} ${outcome === 'not-cancellable' ? 'REFUSED (not in a cancellable state)' : 'NOT CONFIRMED'} — do not ` +
                 `assume it is gone; the reconciliation sweep retries, verify in TWS if the symbol matters tonight.`,
             );
         }
@@ -491,6 +508,32 @@ export async function closePosition(symbolRaw: string, source = 'close command')
 
         const isLong = pos.quantity > 0;
         const qty = Math.abs(pos.quantity);
+        const closeAction = isLong ? OrderAction.SELL : OrderAction.BUY;
+
+        // Round-5 review: the gap-open over-close race — a resting close
+        // and a triggered stop both filling — dies when the close JOINS the
+        // exits' OCA group: the broker cancels the losers of the race
+        // atomically. Join only when the group is unambiguous (one distinct
+        // group among OUR exit orders); stacked positions with two pairs
+        // fall back to the fill-gated cleanup.
+        let joinOcaGroup: string | null = null;
+        try {
+            const exitOrders = await fetchOpenOrdersFor(api, symbol, closeAction);
+            const groups = [...new Set(
+                exitOrders
+                    .filter((o) => OUR_REF.test(o.orderRef ?? '') && o.ocaGroup !== null)
+                    .map((o) => o.ocaGroup as string),
+            )];
+            if (groups.length === 1) {
+                joinOcaGroup = groups[0]!;
+                logger.info(`[position-actions] ${symbol}: close joins exit OCA group '${joinOcaGroup}' — broker-side mutual exclusion with the stop/target`);
+            } else if (groups.length > 1) {
+                logger.warn(`[position-actions] ${symbol}: ${groups.length} distinct exit OCA groups (stacked pairs) — close not OCA-joined; post-fill cleanup covers them`);
+            }
+        } catch (err) {
+            logger.warn(`[position-actions] ${symbol}: OCA-group probe failed (close proceeds unjoined): ${err}`);
+        }
+
         // Review 2026-08-21 (round 4): the tracker registration must exist
         // BEFORE the first broker event can arrive. The old order —
         // place, wait up to 8s for the fill, then register — let the
@@ -511,11 +554,15 @@ export async function closePosition(symbolRaw: string, source = 'close command')
                 // account, not the API default.
                 account: closeDeps.verifiedAccount(),
                 orderRef: `close-${symbol}`,
-                action: isLong ? OrderAction.SELL : OrderAction.BUY,
+                action: closeAction,
                 totalQuantity: qty,
                 orderType: OrderType.MKT,
                 tif: TimeInForce.DAY,
                 transmit: true,
+                // Same OCA type as the exits (1 = cancel remaining on fill):
+                // the close's fill kills the stop/target at the broker, and
+                // a stop's fill kills this close — no over-close window.
+                ...(joinOcaGroup ? { ocaGroup: joinOcaGroup, ocaType: 1 } : {}),
             };
             // Review 2026-08-21 (round 3): protection is removed only after
             // the close FILLS — an acknowledgement proves the broker saw

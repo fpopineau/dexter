@@ -375,10 +375,13 @@ async function cancelOrder(
             avgFillPrice: number,
         ) => {
             if (id !== input.orderId) return;
+            // Round-5 review: PendingCancel is a request in flight, NOT a
+            // confirmation — reporting it as done hid cancels that never
+            // landed. Only terminal statuses resolve; PendingCancel keeps
+            // waiting and the timeout reports the truth.
             if (
                 status === OrderStatus.Cancelled ||
-                status === OrderStatus.ApiCancelled ||
-                status === OrderStatus.PendingCancel
+                status === OrderStatus.ApiCancelled
             ) {
                 clearTimeout(timeout);
                 cleanup();

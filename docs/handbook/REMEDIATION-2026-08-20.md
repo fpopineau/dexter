@@ -416,6 +416,60 @@ entries enforce cadence; a gateway cron spawning the script is
 backlog); pre-stamping rows carry NULL model/regime until they drain
 (the purity check flags them; the freeze tag postdates the drain).
 
+## Review 5 triage (2026-08-21, reviewed at 363a37a)
+
+**Fixed same day:**
+
+- **10148 ≠ cancelled** (the round's P1, confirmed): IBKR 10148 is
+  "cannot be cancelled, state: X" — most often because the order
+  FILLED. `confirmCancel` now classifies by the STATE TOKEN
+  (locale-tolerant: Filled/Rempli, Cancelled/Annulé; the sentence
+  always contains "cancelled", so whole-message matching was the trap)
+  with a new `not-cancellable` outcome, plus first tests of the helper
+  (14 scenarios incl. both locales and the PendingCancel non-terminal).
+  Post-close cleanup classifies per order id: the tracked ENTRY id
+  answering filled/not-cancellable is benign (the position we just
+  closed); an EXIT id answering that stays an alarm.
+- **Bracket rejection sweep broker-confirmed**: `sweepResidues` on the
+  ack; the executor only says "nothing is working" when every leg
+  confirmed dead, otherwise it names the residues. The generic cancel
+  tool no longer reports success on `PendingCancel`.
+- **Gap-open over-close race**: the close now JOINS the exits' OCA
+  group (ocaType 1) when exactly one distinct group exists among OUR
+  exit orders — close-vs-stop mutual exclusion happens at the broker,
+  atomically. Stacked positions (two pairs, two groups) fall back to
+  fill-gated cleanup with a logged warning.
+- **Duplicate-close guard survives restarts** via broker truth: the
+  WP3 adoption sweep re-registers any working `close-<SYM>` order it
+  finds (idempotent), so a resting pre-market close re-arms
+  `hasWorkingManualExit` on boot — no new persistence file.
+- **Frozen-sample boundary**: the scorecard requires `created_at >=`
+  window start (a pre-freeze trade that merely closes inside the
+  window was judged by the OLD policy — ROST dropped from the fresh
+  sample on this fix); explicit CLI windows accept the tag's full
+  timestamp, not just midnight.
+- **Frozen drawdown denominator**: `setPerformanceBaseline` captures
+  the day's NetLiq into `performance-epoch.json` (current epoch
+  backfilled with 249,176.45, same-day capture); the scorecard uses
+  the frozen value and treats the daily file as a loud, verdict-
+  failing fallback.
+- **Integrity widened**: in-window adopted rows (reconciliation
+  events) and sample rows missing model/regime stamps are anomalies —
+  the verdict is NOT-EVALUABLE until resolved.
+- **Profit-trail keeps its peak** unless the close confirmed
+  `filled` — a rejected/ambiguous close no longer restarts trailing
+  from a worse basis.
+- **AUTOMATION.md** floor references (§5 text + §6 table) now say 0.
+
+**Accepted/recorded (still open)**: ack contract covers the window
+only (post-window rejection reaches the tracker, not the acker);
+weekly scorecard execution stays operator-manual (the script is not
+gateway-importable; a spawn-based cron is backlog); tag-time
+fingerprint fields fill at the tag by hand (journal has the
+checklist). NOTE for the freeze: the OCA-join and every round-5 change
+are behavior changes — they land BEFORE `validation-freeze-1`, which
+is exactly why the tag has not been placed yet.
+
 - **WP9 Backtester: honest replay** (MED — decision point D1)
   Recommended scope (rebuild-lite, ~1 session): process bar i BEFORE
   signals from bar i (kills the same-bar look-ahead); per-symbol bar

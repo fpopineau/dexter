@@ -402,7 +402,9 @@ manual acceptance:
   any configuration — going live always requires explicit human acceptance
   per trade.
 - **Confidence floor**: only proposals with score ≥ `AUTO_EXECUTE_MIN_SCORE`
-  (default 80) execute unattended — lower scores stay open for manual accept.
+  execute unattended — lower scores stay open for manual accept. Default
+  **0** since D6 (2026-08-21): the validation burn-in samples every score
+  band with FLAT sizing; unscored proposals still never auto-execute.
 - Daily cap: `AUTO_EXECUTE_MAX_PER_DAY` (default 5).
 - All standard gates still apply (kill-switch included).
 - Every auto-execution is reported on WhatsApp (`🤖 AUTO-EXECUTE (paper, score S, n/cap)`).
@@ -421,7 +423,7 @@ manual acceptance:
 | `UNIVERSE_EXTRA_SYMBOLS` | — | watchlist archived nightly + swing-pattern-scanned regardless of the cap band |
 | `AUTO_EXECUTE_PAPER` | false | paper-only auto-execution of proposals (all sources) |
 | `AUTO_EXECUTE_MAX_PER_DAY` | 5 | auto-execution cap per ET day |
-| `AUTO_EXECUTE_MIN_SCORE` | 80 | auto-exec confidence floor (score) |
+| `AUTO_EXECUTE_MIN_SCORE` | 0 (D6) | auto-exec confidence floor (score); unscored never auto-executes |
 | `AUTO_PROTECT` | true | GTC exits auto-reattached when DAY exits die on an open position |
 | `EOD_TRIAGE` | true | 15:52 ET losing-and-fading DAY positions closed; rest kept overnight |
 | `PROFIT_TRAIL` | true | auto-close winners: arm at `profit_trail_arm_atr_mult`×ATR (2.5), close on `profit_trail_pullback_atr_mult`×ATR (0.75) pullback from peak; 5%/1.5% absolute fallback when ATR unknown; swing/earnings-bet exempt |

@@ -658,7 +658,7 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
         for (const outcome of outcomes) {
             if (outcome === 'cancelled') cancelled++;
             else if (outcome === 'filled') filledDuringCancel++;
-            else unconfirmed++;
+            else unconfirmed++; // 'not-cancellable' and silence both mean: verify
         }
         if (filledDuringCancel > 0) {
             logger.error(`[eod-triage] ${t.id} ${t.symbol}: an order FILLED while being cancelled — the position now EXISTS; it was NOT vetted for overnight`);

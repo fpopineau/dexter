@@ -1201,6 +1201,13 @@ async function runAdoptionSweep(api: IBApi): Promise<void> {
             repointOrder: adoptTrackedOrderId,
             notify: notifyAutoProtect,
             verifiedAccount: verified,
+            // Round-5 review: a working close-<SYM> at the broker after a
+            // restart re-arms hasWorkingManualExit — the guard's memory is
+            // the broker's book, not this process.
+            registerManualExit: (symbol, orderId, quantity) => {
+                if (manualExitOrders.has(orderId)) return;
+                trackManualExit(symbol, orderId, quantity, 'rehydrated from broker (restart reconciliation)');
+            },
         });
     } catch (err) {
         logger.warn(`[outcome-tracker] adoption sweep failed: ${err}`);

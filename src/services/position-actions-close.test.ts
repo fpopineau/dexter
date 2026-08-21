@@ -60,8 +60,13 @@ class FakeIb extends EventEmitter {
         });
     }
     cancelPositions(): void { /* one-shot fetch cleanup */ }
+    /** Open-order book served to the OCA probe and the orphan sweep. */
+    openOrders: Array<{ id: number; contract: Contract; order: Order }> = [];
     reqAllOpenOrders(): void {
-        queueMicrotask(() => this.emit(EventName.openOrderEnd));
+        queueMicrotask(() => {
+            for (const o of this.openOrders) this.emit(EventName.openOrder, o.id, o.contract, o.order);
+            this.emit(EventName.openOrderEnd);
+        });
     }
 }
 
@@ -185,6 +190,37 @@ describe('closePosition lifecycle (round-4 review)', () => {
         const second = await closePosition('CLQD', 'test-operator');
         expect(second.ok).toBe(false);
         expect(second.message).toContain('WORKING');
+    });
+
+    test('close JOINS a single exit OCA group — broker-side mutual exclusion (round 5)', async () => {
+        fake.position = { symbol: 'CLQF', qty: 10 };
+        const exit = (id: number, orderType: string, oca: string) => ({
+            id,
+            contract: { symbol: 'CLQF' } as Contract,
+            order: { action: 'SELL', orderType, tif: 'GTC', orderRef: 'protect-CLQF', ocaGroup: oca } as unknown as Order,
+        });
+        fake.openOrders = [exit(9001, 'STP', 'dexter-CLQF-1'), exit(9002, 'LMT', 'dexter-CLQF-1')];
+
+        const out = await closePosition('CLQF', 'test-operator');
+        expect(out.state).toBe('filled');
+        const placed = fake.placed[0]!.order as unknown as { ocaGroup?: string; ocaType?: number };
+        expect(placed.ocaGroup).toBe('dexter-CLQF-1');
+        expect(placed.ocaType).toBe(1);
+    });
+
+    test('stacked pairs (two OCA groups): close does NOT join — ambiguity falls back to cleanup', async () => {
+        fake.position = { symbol: 'CLQG', qty: 10 };
+        const exit = (id: number, oca: string) => ({
+            id,
+            contract: { symbol: 'CLQG' } as Contract,
+            order: { action: 'SELL', orderType: 'STP', tif: 'GTC', orderRef: 'protect-CLQG', ocaGroup: oca } as unknown as Order,
+        });
+        fake.openOrders = [exit(9003, 'dexter-CLQG-1'), exit(9004, 'dexter-CLQG-2')];
+
+        const out = await closePosition('CLQG', 'test-operator');
+        expect(out.state).toBe('filled');
+        const placed = fake.placed[0]!.order as unknown as { ocaGroup?: string };
+        expect(placed.ocaGroup).toBeUndefined();
     });
 
     test('working close (acked, unfilled): cleanup happens when the fill lands later', async () => {

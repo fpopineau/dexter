@@ -1038,6 +1038,11 @@ export async function listProposalSymbolsSince(sinceMs: number): Promise<string[
 export interface PerformanceBaseline {
     epochMs: number;
     note?: string;
+    /** Round-5 review: the paper NetLiq CAPTURED AT EPOCH TIME — the
+     *  validation drawdown denominator. Reading the daily-refreshed
+     *  netliq-baseline.json weeks later would divide by the final day's
+     *  equity, not the freeze-time equity. */
+    netLiq?: number;
 }
 
 function baselinePath(): string {
@@ -1057,9 +1062,17 @@ export function getPerformanceBaseline(): PerformanceBaseline | null {
 
 /** Stamp a new baseline at now. Overwrites any previous one. */
 export function setPerformanceBaseline(note?: string): PerformanceBaseline {
-    const baseline: PerformanceBaseline = { epochMs: Date.now(), ...(note ? { note } : {}) };
+    // Freeze the drawdown denominator with the epoch (round-5 review):
+    // today's captured NetLiq is the equity the sample starts from.
+    let netLiq: number | undefined;
+    try {
+        const dataDir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
+        const b = JSON.parse(readFileSync(join(dataDir, 'netliq-baseline.json'), 'utf-8')) as { netLiq?: number };
+        if (typeof b.netLiq === 'number' && b.netLiq > 0) netLiq = b.netLiq;
+    } catch { /* no capture yet — scorecard reports the gap loudly */ }
+    const baseline: PerformanceBaseline = { epochMs: Date.now(), ...(note ? { note } : {}), ...(netLiq !== undefined ? { netLiq } : {}) };
     writeFileSync(baselinePath(), JSON.stringify(baseline, null, 2));
-    logger.info(`[proposals] performance baseline reset to ${new Date(baseline.epochMs).toISOString()}${note ? ` (${note})` : ''}`);
+    logger.info(`[proposals] performance baseline reset to ${new Date(baseline.epochMs).toISOString()}${note ? ` (${note})` : ''}${netLiq !== undefined ? `, NetLiq ${netLiq} frozen as denominator` : ' — WARNING: no NetLiq capture to freeze'}`);
     return baseline;
 }
 
