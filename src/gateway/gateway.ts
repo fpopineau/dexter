@@ -348,7 +348,11 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     // month reading like a disabled safety (audit 2026-08-11). State the
     // effective config every boot so it can never be invisible again.
     if (isAutoExecuteEnabled()) {
-      const floor = Number(process.env.AUTO_EXECUTE_MIN_SCORE) > 0 ? Number(process.env.AUTO_EXECUTE_MIN_SCORE) : 80;
+      // Review 2026-08-21: display the EXECUTOR'S resolution, not a
+      // reimplementation — the copies disagreed the day D6 landed (real
+      // floor 0, boot banner said 80).
+      const { autoExecMinScore } = await import('@/services/proposal-executor.js');
+      const floor = autoExecMinScore();
       const cap = Number(process.env.AUTO_EXECUTE_MAX_PER_DAY) > 0 ? Number(process.env.AUTO_EXECUTE_MAX_PER_DAY) : 5;
       debugLog(
         `[gateway] auto-execute ON (paper-only): score floor ${floor}` +

@@ -71,6 +71,8 @@ export interface TradeProposal {
     /** Model id that proposed the trade (review 2026-08-21) — the frozen
      *  sample's judgment-purity check reads this. */
     model: string | null;
+    /** Market-regime tag at creation (protocol breadth criterion). */
+    regime: string | null;
     /** Failure or rejection detail. */
     note: string | null;
     // --- Outcome fields (populated by the outcome tracker) ---
@@ -404,6 +406,10 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     // validation sample must be judgment-pure — a runtime model switch
     // mid-sample is detectable instead of invisible.
     ['model', 'TEXT'],
+    // Review 2026-08-21 (round 3): the protocol's breadth criterion needs
+    // >=2 regime labels ACROSS THE SAMPLE — recorded at creation, from the
+    // market-regime service's tag, or the criterion is unevaluable.
+    ['regime', 'TEXT'],
 ];
 
 /** Replay/instrumentation columns added after the refusals-table release. */
@@ -452,6 +458,7 @@ interface Row {
     order_perm_ids: string | null;
     planned_quantity: number | null;
     model: string | null;
+    regime: string | null;
     note: string | null;
     executed_at: number | null;
     entry_fill_price: number | null;
@@ -495,6 +502,7 @@ function fromRow(r: Row): TradeProposal {
         orderPermIds: r.order_perm_ids ? (JSON.parse(r.order_perm_ids) as Array<number | null>) : null,
         plannedQuantity: r.planned_quantity ?? null,
         model: r.model ?? null,
+        regime: r.regime ?? null,
         note: r.note,
         executedAt: r.executed_at ?? null,
         entryFillPrice: r.entry_fill_price ?? null,
@@ -527,6 +535,8 @@ export interface CreateProposalInput {
     entryType: 'LMT' | 'MKT' | 'STP_LMT';
     /** Model id that proposed the trade (judgment-purity stamp). */
     model?: string;
+    /** Market-regime tag at creation (protocol breadth criterion). */
+    regime?: string;
     entry?: number;
     /** Required for STP_LMT: the limit cap for the triggered entry. */
     entryLimit?: number;
@@ -651,6 +661,9 @@ export async function createProposal(
     // proposed the trade — the frozen sample verifies it never mixed.
     if (input.model) {
         database.query<void>(`UPDATE proposals SET model = ? WHERE id = ?`).run(input.model, id);
+    }
+    if (input.regime) {
+        database.query<void>(`UPDATE proposals SET regime = ? WHERE id = ?`).run(input.regime, id);
     }
 
     logger.info(`[proposals] created ${id}: ${input.direction} ${input.quantity} ${input.symbol} (source: ${input.source})`);

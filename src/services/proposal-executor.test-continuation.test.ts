@@ -10,9 +10,12 @@ describe('continuationLevels (the SMCI chase-refusal fix, 2026-08-12)', () => {
         expect(l).not.toBeNull();
         expect(l!.entry).toBeCloseTo(36.93, 2); // ceil(36.75 + 0.175)
         expect(l!.entry - 36.75).toBeGreaterThanOrEqual(ENTRY_CONFIRM_FRACTION * 0.70 - 1e-9);
-        expect(l!.stop).toBeCloseTo(36.23, 2); // 0.70 stop distance preserved
-        const dist = l!.entry - l!.stop;
-        expect(l!.target - l!.entry).toBeGreaterThanOrEqual(2 * dist - 0.011); // 2:1 from ROUNDED distance
+        // Review 2026-08-21 (round 3): geometry is built FROM THE LIMIT CAP
+        // (the worst permitted fill) — the gate judges it there, so a
+        // trigger-based 2:1 was ~1.56R at the cap and always refused.
+        expect(l!.stop).toBeCloseTo(l!.entryLimit - 0.70, 2); // 0.70 preserved from the cap
+        const dist = l!.entryLimit - l!.stop;
+        expect(l!.target - l!.entryLimit).toBeGreaterThanOrEqual(2 * dist - 0.011); // 2:1 AT THE CAP
         for (const v of [l!.entry, l!.entryLimit, l!.stop, l!.target]) {
             expect(Math.abs(v * 100 - Math.round(v * 100))).toBeLessThan(1e-6); // tick grid
         }

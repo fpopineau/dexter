@@ -455,7 +455,7 @@ function autoExecMaxPerDay(): number {
     return Number.isFinite(n) && n > 0 ? n : 5;
 }
 
-function autoExecMinScore(): number {
+export function autoExecMinScore(): number {
     const n = Number(process.env.AUTO_EXECUTE_MIN_SCORE);
     // D6 (resolved 2026-08-21): DEFAULT 0 for the paper burn-in. The old
     // 80 floor preferentially sampled one band — the ledger's worst
@@ -601,17 +601,25 @@ export function continuationLevels(
     const c2 = (x: number) => Math.ceil(x * 100) / 100;
     const f2 = (x: number) => Math.floor(x * 100) / 100;
     const confirm = Math.max(0.001 * last, ENTRY_CONFIRM_FRACTION * stopDist);
+    // Review 2026-08-21 (round 3): the gate judges STP_LMT geometry at the
+    // LIMIT CAP (the worst permitted fill) — so the continuation builds its
+    // stop and target FROM the cap, or every continuation is refused by
+    // the very gate it exists to satisfy (~1.56R at the cap when built
+    // from the trigger).
     if (p.direction === 'long') {
         const trigger = c2(last + confirm);
-        const stop = f2(trigger - stopDist);
-        const dist = Math.round((trigger - stop) * 100) / 100;
-        return { entry: trigger, entryLimit: c2(trigger * 1.003), stop, target: c2(trigger + minRiskReward * dist) };
+        const cap = c2(trigger * 1.003);
+        const stop = f2(cap - stopDist);
+        const dist = Math.round((cap - stop) * 100) / 100;
+        return { entry: trigger, entryLimit: cap, stop, target: c2(cap + minRiskReward * dist) };
     }
     const trigger = f2(last - confirm);
     if (!(trigger > 0)) return null;
-    const stop = c2(trigger + stopDist);
-    const dist = Math.round((stop - trigger) * 100) / 100;
-    return { entry: trigger, entryLimit: f2(trigger * 0.997), stop, target: f2(trigger - minRiskReward * dist) };
+    const cap = f2(trigger * 0.997);
+    if (!(cap > 0)) return null;
+    const stop = c2(cap + stopDist);
+    const dist = Math.round((stop - cap) * 100) / 100;
+    return { entry: trigger, entryLimit: cap, stop, target: f2(cap - minRiskReward * dist) };
 }
 
 /** One continuation per original proposal, process-lifetime. */
@@ -636,7 +644,8 @@ async function proposeChaseContinuation(original: TradeProposal): Promise<Execut
     const netLiq = (await getDailyLossStatus().catch(() => null))?.netLiquidation;
     if (netLiq == null || !(netLiq > 0)) return null;
     const sized = computeQuantity({
-        entry: levels.entry,
+        // Worst permitted fill (review 2026-08-21): STP_LMT sizes at the cap.
+        entry: levels.entryLimit,
         stop: levels.stop,
         score: original.score,
         netLiquidation: netLiq,
@@ -653,6 +662,9 @@ async function proposeChaseContinuation(original: TradeProposal): Promise<Execut
         const cont = await createProposal({
             symbol: original.symbol,
             direction: original.direction,
+            // Judgment purity (review 2026-08-21): the continuation is the
+            // ORIGINAL judgment re-priced — it inherits its model stamp.
+            model: original.model ?? undefined,
             entryType: 'STP_LMT',
             entry: levels.entry,
             entryLimit: levels.entryLimit,

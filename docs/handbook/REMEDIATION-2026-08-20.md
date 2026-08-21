@@ -314,6 +314,54 @@ clean.
 verify, one clean boot). All code phases of this remediation are
 complete.
 
+## Review 3 triage (2026-08-21, reviewed at 0709eef)
+
+Core finding accepted: the code still confused "the broker emitted an
+event" with "the position is flat/protected". **Fixed same day**:
+
+- **Fill-gated flatness.** `order-ack` now tracks `filled`
+  (Filled + remaining 0 + filled > 0) and `settle(ms, 'filled')` waits
+  for it; `closePosition` returns a tri-state outcome
+  (`filled`/`working`/`unconfirmed`/`rejected`), only cancels the
+  protective exits AFTER the close FILLS (`cleanupExitsAfterClose`,
+  which also runs the WP11 orphan-GTC sweep), refuses when a manual
+  exit is already working (`hasWorkingManualExit`), and on
+  working/unconfirmed leaves the exits standing with an honest message.
+  The tracker's `handleManualExitFill` triggers the same cleanup when
+  the fill event lands later.
+- **EOD triage** counts a symbol closed only on `state === 'filled'` —
+  an unconfirmed close no longer reports "closed" to the operator.
+- **Resize fail-closed both ways**: the new pair must BOTH ack inside
+  the window; timeout → sweep the new pair, KEEP the old full-size
+  exits (test codifies broker-silence now, not the old unsafe path).
+- **protectPosition** treats unconfirmed like rejected: sweep + "NOT
+  protected".
+- **Continuation geometry** rebuilt at the LIMIT CAP so the 2R floor
+  holds at the worst permitted fill (my own regression from the
+  review-2 STP_LMT basis change); continuation inherits the parent's
+  `model` stamp.
+- **VIABLE-GEOMETRY guidance** rebased on the same worst-fill basis as
+  the gate that rejects (no more self-contradictory hints).
+- **D6 surfaces aligned**: `autoExecMinScore()` exported and used by
+  the gateway boot display; env.example and USER-MANUAL say 0; manual
+  carries the honest sampling caveat (floor 0 removes the LAST
+  selection stage, upstream shaping remains).
+- **Regime recorded per proposal** (`regime` column, migrated + stamped
+  at creation) — the protocol's ≥2-regime breadth is now measurable.
+- **`scripts/validation-scorecard.ts` exists** — the pinned evaluator
+  the protocol names; smoke-run on history correctly FAILs (n=67,
+  expectancy −671, PF 0.29, DD 18.1% vs 6% bar) and reads the fresh
+  epoch (`performance-epoch.json`) for the real window (n=0 today).
+
+**Accepted/recorded (not fixed)**: cancellations are still not
+confirmed-by-event before the tracker forgets an order id (the WP3
+adoption sweep + `cleanupExitsAfterClose` re-sweep heal stragglers);
+kill-switch counts risk at order time only; `risk_manager` tool schema
+still previews entry as a single price (advisory display only — the
+authoritative gate judges at the cap); plus the review-2 backlog
+(drift reconciliation, gap model, broker-native reduce-only, simulator
+microstructure, stale archives). None gate the paper validation.
+
 - **WP9 Backtester: honest replay** (MED — decision point D1)
   Recommended scope (rebuild-lite, ~1 session): process bar i BEFORE
   signals from bar i (kills the same-bar look-ahead); per-symbol bar

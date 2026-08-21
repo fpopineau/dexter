@@ -237,3 +237,18 @@ describe('auto-execution gates (paper-only by construction)', () => {
         }
     });
 });
+
+describe('auto-exec score floor (D6, review 2026-08-21 round 3)', () => {
+    test('default is 0 — the burn-in samples every scored band', async () => {
+        const { autoExecMinScore } = await import('./proposal-executor.js');
+        delete process.env.AUTO_EXECUTE_MIN_SCORE;
+        expect(autoExecMinScore()).toBe(0);
+        process.env.AUTO_EXECUTE_MIN_SCORE = '0'; // explicit 0 must be honored (old guard fell back to 80)
+        expect(autoExecMinScore()).toBe(0);
+        process.env.AUTO_EXECUTE_MIN_SCORE = '40';
+        expect(autoExecMinScore()).toBe(40);
+        process.env.AUTO_EXECUTE_MIN_SCORE = '-5'; // invalid → default
+        expect(autoExecMinScore()).toBe(0);
+        delete process.env.AUTO_EXECUTE_MIN_SCORE;
+    });
+});

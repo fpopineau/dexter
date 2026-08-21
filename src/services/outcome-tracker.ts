@@ -587,6 +587,17 @@ interface ManualExit {
 
 const manualExitOrders = new Map<number, ManualExit>();
 
+/** Review 2026-08-21: is a registered close order for `symbol` still
+ *  working? The duplicate-close guard tracks the ORDER's life through
+ *  this, not a wall-clock window (a pre-market close rests for hours). */
+export function hasWorkingManualExit(symbolRaw: string): boolean {
+    const symbol = symbolRaw.trim().toUpperCase();
+    for (const m of manualExitOrders.values()) {
+        if (m.symbol === symbol) return true;
+    }
+    return false;
+}
+
 /** Pure: the tracked trades a manual close of `symbol` attributes to —
  *  entry filled (there is a position to close) and not yet finalized. */
 export function selectManualExitTargets<T extends { symbol: string; closed: boolean; entryRecorded: boolean }>(
@@ -626,6 +637,24 @@ function handleManualExitFill(orderId: number, avgFillPrice: number): void {
     const manual = manualExitOrders.get(orderId);
     if (!manual) return;
     manualExitOrders.delete(orderId);
+
+    // Review 2026-08-21: the close has FILLED — the position is flat, so
+    // NOW protection removal is safe. closePosition only cleans up when
+    // the fill lands inside its own window; resting closes (pre-market)
+    // reach flat here, hours later. Fire-and-forget: cleanup failure never
+    // blocks P&L attribution, and the WP3 sweep heals leftovers.
+    if (attachedApi) {
+        const api = attachedApi;
+        void (async () => {
+            try {
+                const { cleanupExitsAfterClose } = await import('./position-actions.js');
+                const n = await cleanupExitsAfterClose(api, manual.symbol);
+                if (n > 0) logger.info(`[outcome-tracker] ${manual.symbol}: ${n} exit order(s) cancelled after the close filled`);
+            } catch (err) {
+                logger.warn(`[outcome-tracker] post-fill exit cleanup ${manual.symbol} failed: ${err}`);
+            }
+        })();
+    }
 
     let remaining = manual.quantity;
     for (const trade of manual.trades) {
@@ -861,22 +890,31 @@ async function resizeAfterPartialEntry(trade: TrackedTrade): Promise<void> {
             }
             const states = await watch.settle(ackWindowMs);
             const rejected = states.find((s) => s.rejection !== null);
-            if (rejected) {
-                // Replacement refused: sweep any surviving new leg and KEEP
-                // the old full-size exits (over-sized protection beats none).
+            const unconfirmed = states.some((s) => !s.acked);
+            if (rejected || unconfirmed) {
+                // Review 2026-08-21 (round 3): BOTH replacement legs must be
+                // acknowledged before the old exits die — on rejection OR
+                // broker silence, sweep the new pair best-effort and KEEP
+                // the old full-size exits (over-sized protection beats an
+                // unknown pair and beats none).
                 for (const id of [stopId, tpId]) {
                     try { api.cancelOrder(id); } catch { /* already dead */ }
                 }
-                return { newStopId: stopId, newTpId: tpId, rejection: `order ${rejected.orderId}: ${rejected.rejection!.reason}` };
+                return {
+                    newStopId: stopId, newTpId: tpId,
+                    rejection: rejected
+                        ? `order ${rejected.orderId}: ${rejected.rejection!.reason}`
+                        : 'replacement pair not acknowledged within the window',
+                };
             }
             return { newStopId: stopId, newTpId: tpId, rejection: null as string | null };
         });
 
         if (rejection) {
-            logger.error(`[outcome-tracker] ${trade.proposalId} resize pair REJECTED (${rejection}) — old full-size exits left working`);
+            logger.error(`[outcome-tracker] ${trade.proposalId} resize pair NOT CONFIRMED (${rejection}) — old full-size exits left working`);
             await notifyAutoProtect(
-                `⚠️ ${trade.proposalId} ${trade.symbol}: entry filled ${cum}/${planned} then terminated; the RESIZED exits were ` +
-                `rejected by the broker (${rejection}). The original FULL-SIZE exits were left working as protection — ` +
+                `⚠️ ${trade.proposalId} ${trade.symbol}: entry filled ${cum}/${planned} then terminated; the RESIZED exits could ` +
+                `not be confirmed (${rejection}). The original FULL-SIZE exits were left working as protection — ` +
                 `a fill would over-close and reverse; trim them to ${cum} in TWS or close the position.`,
             );
             return;

@@ -34,11 +34,19 @@ class FakeIb extends EventEmitter {
     placed: Array<{ id: number; contract: Contract; order: Order }> = [];
     cancelled: number[] = [];
     nextId = 9_000;
+    /** Review 2026-08-21: a healthy broker ACKNOWLEDGES — the resize path
+     *  requires both replacement legs acked before the old exits die, so
+     *  the default fake acks every placement. autoAck=false models broker
+     *  silence (the timeout test asserts the old exits SURVIVE it). */
+    autoAck = true;
     reqIds(): void {
         queueMicrotask(() => this.emit(EventName.nextValidId, this.nextId));
     }
     placeOrder(id: number, contract: Contract, order: Order): void {
         this.placed.push({ id, contract, order });
+        if (this.autoAck) {
+            queueMicrotask(() => this.emit(EventName.orderStatus, id, 'PreSubmitted', 0, Number(order.totalQuantity ?? 0), 0, 60_000 + id));
+        }
     }
     cancelOrder(id: number): void {
         this.cancelled.push(id);
@@ -159,6 +167,32 @@ describe('terminal partial entry → downgrade + exit resize', () => {
         expect(row?.status).toBe('closed');
         expect(row?.exitReason).toBe('stop');
         expect(row?.realizedPnl).toBeCloseTo((95 - 100) * 4, 2);
+    });
+});
+
+describe('resize timeout fails CLOSED (review 2026-08-21 round 3)', () => {
+    test('broker silence: new pair swept, OLD full-size exits survive', async () => {
+        const fake = new FakeIb();
+        fake.autoAck = false; // total broker silence
+        __attachApiForTests(fake as never);
+        const t = await trackedProposal('WPG');
+
+        __handleOrderStatusForTests(t.entryId, 'Submitted', 4, 6, 100.0);
+        __handleOrderStatusForTests(t.entryId, 'Cancelled', 4, 6, 100.0);
+        await sleep(80);
+
+        // The quantity downgrade is accounting truth and still lands…
+        const row = await getProposal(t.id);
+        expect(row?.quantity).toBe(4);
+        // …but with no acknowledgement, the NEW pair is swept and the OLD
+        // exits are NOT cancelled — an unknown replacement must never
+        // replace known protection.
+        const newIds = fake.placed.map((p) => p.id);
+        expect(fake.cancelled.sort()).toEqual(newIds.sort());
+        expect(fake.cancelled).not.toContain(t.tpId);
+        expect(fake.cancelled).not.toContain(t.stopId);
+        // Tracking still points at the ORIGINAL exits.
+        expect(row?.orderIds).toContain(t.stopId);
     });
 });
 

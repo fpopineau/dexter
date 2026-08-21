@@ -20,9 +20,23 @@ positive expectancy after costs, not improved loss control.
   model change ends the window like any behavior change.
 - Confidence sizing is FLAT (multipliers 1.0) in both profiles as of
   2026-08-21 — verified in config, not just mandated here.
-- Auto-execution samples ALL score bands (D6: `AUTO_EXECUTE_MIN_SCORE`
-  0) so the decile-monotonicity test gets cross-band data — the floor
-  value freezes with the tag like every other knob.
+- Auto-execution's final floor is 0 (D6) so the decile-monotonicity
+  test gets cross-band data. HONESTY NOTE (review 2026-08-21): the
+  sample is still shaped upstream (trigger rank threshold, skill score
+  floors, the daily cap's time-of-day bias) — floor 0 removes the last
+  selection stage, it does not make sampling unbiased; the monotonicity
+  result is conditional on the proposed-score range.
+- At tag time the journal also records: the model AND provider strings,
+  a SHA-256 of `.dexter/RULES.md` (mutable judgment input), and the
+  scorer-weights provenance line — `model` column homogeneity alone
+  does not prove a homogeneous judgment policy.
+- **The evaluator is `scripts/validation-scorecard.ts`** — its pinned
+  definitions ARE this protocol's machine-readable form (sample filter,
+  net P&L, profit factor, the drawdown scaling formula, per-trade
+  Spearman with the t-approximation p-value, top/bottom bands at the
+  sample's 80th/20th score percentiles with n ≥ 10 each, single-model
+  purity incl. no-NULLs, ≥2 regime tags, ≥6 ISO weeks). Run it weekly
+  and at completion; editing its definitions mid-sample ends the window.
 - Bug fixes during the window are allowed ONLY for accounting
   correctness (a fill recorded wrong, a P&L mis-attributed), never for
   behavior, and each is logged in the validation journal

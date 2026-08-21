@@ -20,15 +20,19 @@ export interface LegAckState {
     orderId: number;
     /** The broker reacted to this order (openOrder or orderStatus). */
     acked: boolean;
+    /** The order FILLED completely (review 2026-08-21: acknowledgement is
+     *  not flatness — risk-reducing flows gate on THIS, not on acked). */
+    filled: boolean;
     /** IBKR's connection-independent order id, when the reaction carried it. */
     permId: number | null;
     rejection: { code: number | null; reason: string } | null;
 }
 
 export interface OrderAckWatch {
-    /** Resolve when all legs reacted, any leg rejected, or after timeoutMs.
-     *  Always resolves (never rejects); listeners are removed on settle. */
-    settle(timeoutMs: number): Promise<LegAckState[]>;
+    /** Resolve when every leg reached `until` ('acked' default, or
+     *  'filled'), any leg rejected, or after timeoutMs. Always resolves
+     *  (never rejects); listeners are removed on settle. */
+    settle(timeoutMs: number, until?: 'acked' | 'filled'): Promise<LegAckState[]>;
     /** Remove listeners without settling (error-path cleanup). */
     dispose(): void;
 }
@@ -36,19 +40,20 @@ export interface OrderAckWatch {
 /** Arm acknowledgement listeners for `orderIds`. Call BEFORE placeOrder. */
 export function watchOrderAcks(api: IBApi, orderIds: number[]): OrderAckWatch {
     const states = new Map<number, LegAckState>(
-        orderIds.map((id) => [id, { orderId: id, acked: false, permId: null, rejection: null }]),
+        orderIds.map((id) => [id, { orderId: id, acked: false, filled: false, permId: null, rejection: null }]),
     );
     let onSettled: (() => void) | null = null;
+    let untilMode: 'acked' | 'filled' = 'acked';
 
     // A single rejection settles immediately: a refused parent means the
     // children will never react (they were never transmitted), so waiting
     // for them only burns the timeout.
     const done = () =>
         [...states.values()].some((s) => s.rejection !== null) ||
-        [...states.values()].every((s) => s.acked);
+        [...states.values()].every((s) => (untilMode === 'filled' ? s.filled : s.acked));
     const check = () => { if (onSettled && done()) onSettled(); };
 
-    const onOrderStatus = (id: number, status: string, _filled: number, _remaining: number, _avg: number, permId?: number) => {
+    const onOrderStatus = (id: number, status: string, filled: number, remaining: number, _avg: number, permId?: number) => {
         const s = states.get(id);
         if (!s) return;
         if (typeof permId === 'number' && permId > 0) s.permId = permId;
@@ -59,13 +64,21 @@ export function watchOrderAcks(api: IBApi, orderIds: number[]): OrderAckWatch {
             s.rejection ??= { code: null, reason: `order went ${status} immediately after placement` };
         } else {
             s.acked = true;
+            if (status === 'Filled' && remaining === 0 && filled > 0) s.filled = true;
         }
         check();
     };
-    const onOpenOrder = (id: number, _contract: unknown, order: Order) => {
+    const onOpenOrder = (id: number, _contract: unknown, order: Order, orderState?: { status?: string }) => {
         const s = states.get(id);
         if (!s) return;
-        s.acked = true;
+        // Review 2026-08-21: the accompanying OrderState can carry the
+        // refusal ('Inactive') that no error event reports.
+        const st = orderState?.status;
+        if (st === 'Inactive' || st === 'Cancelled' || st === 'ApiCancelled') {
+            s.rejection ??= { code: null, reason: `openOrder reported state ${st}` };
+        } else {
+            s.acked = true;
+        }
         if (s.permId === null && typeof order?.permId === 'number' && order.permId > 0) s.permId = order.permId;
         check();
     };
@@ -89,7 +102,8 @@ export function watchOrderAcks(api: IBApi, orderIds: number[]): OrderAckWatch {
 
     return {
         dispose,
-        settle(timeoutMs: number): Promise<LegAckState[]> {
+        settle(timeoutMs: number, until: 'acked' | 'filled' = 'acked'): Promise<LegAckState[]> {
+            untilMode = until;
             return new Promise<LegAckState[]>((resolve) => {
                 const timer = setTimeout(finish, timeoutMs);
                 function finish() {

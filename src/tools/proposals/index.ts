@@ -239,6 +239,13 @@ export function createTradeProposalsTool() {
                             source: currentAgentLane() ?? 'agent',
                             // Judgment-purity stamp (review 2026-08-21).
                             model: currentAgentModel() ?? undefined,
+                            // Regime tag at creation — the frozen sample's
+                            // breadth criterion reads this (cached service;
+                            // failure leaves null, never blocks a create).
+                            regime: process.env.NODE_ENV !== 'test'
+                                ? (await import('@/services/market-regime.js')
+                                    .then((m) => m.getMarketRegime()).catch(() => null))?.tag ?? undefined
+                                : undefined,
                             expiresMinutes: input.expiresMinutes,
                             entryContext,
                         }, {

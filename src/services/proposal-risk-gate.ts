@@ -454,6 +454,10 @@ export function checkProposalRisk(
     // audit). The honest-objective question comes first; the numbers only
     // matter if the answer is yes.
     if ((noiseStopFailed || rrFailed || targetCapFailed) && ctx.dailyAtr !== undefined && ctx.dailyAtr > 0) {
+        // Review 2026-08-21: prescribe from the WORST-FILL basis (the
+        // STP_LMT limit cap when present) — trigger-based guidance built
+        // levels that failed again at the cap on the very next retry.
+        const gEntry = riskBasis;
         const minStop = rules.min_stop_atr_fraction * ctx.dailyAtr;
         // Bounds rounded AWAY from entry, and the target derived from the
         // ROUNDED stop distance — following the prescription verbatim must
@@ -461,26 +465,26 @@ export function checkProposalRisk(
         // "$119.26", the model obeyed exactly and was refused by 0.4¢ —
         // an unsatisfiable-looking gate teaches surrender.)
         const stopBound = p.direction === 'long'
-            ? Math.floor((entry - minStop) * 100) / 100
-            : Math.ceil((entry + minStop) * 100) / 100;
-        const stopDist = Math.abs(entry - stopBound);
+            ? Math.floor((gEntry - minStop) * 100) / 100
+            : Math.ceil((gEntry + minStop) * 100) / 100;
+        const stopDist = Math.abs(gEntry - stopBound);
         const targetBound = p.direction === 'long'
-            ? Math.ceil((entry + rules.min_risk_reward * stopDist) * 100) / 100
-            : Math.floor((entry - rules.min_risk_reward * stopDist) * 100) / 100;
+            ? Math.ceil((gEntry + rules.min_risk_reward * stopDist) * 100) / 100
+            : Math.floor((gEntry - rules.min_risk_reward * stopDist) * 100) / 100;
         if (targetCapActive && ctx.dailyAtr !== undefined) {
             // Both-bounded band: the reachability cap bounds the target from
             // above, which bounds the stop distance at cap/min_rr from below
             // (inner-rounded so obeying the band verbatim passes both ends).
             const maxReward = rules.max_target_atr * ctx.dailyAtr;
             const targetCap = p.direction === 'long'
-                ? Math.floor((entry + maxReward) * 100) / 100
-                : Math.ceil((entry - maxReward) * 100) / 100;
+                ? Math.floor((gEntry + maxReward) * 100) / 100
+                : Math.ceil((gEntry - maxReward) * 100) / 100;
             const maxStop = maxReward / rules.min_risk_reward;
             const stopFarBound = p.direction === 'long'
-                ? Math.ceil((entry - maxStop) * 100) / 100
-                : Math.floor((entry + maxStop) * 100) / 100;
+                ? Math.ceil((gEntry - maxStop) * 100) / 100
+                : Math.floor((gEntry + maxStop) * 100) / 100;
             violations.push(
-                `VIABLE GEOMETRY for ${p.direction} ${p.symbol} at $${entry}: FIRST — does an honest objective ` +
+                `VIABLE GEOMETRY for ${p.direction} ${p.symbol} at $${gEntry}${gEntry !== entry ? ' (the STP_LMT limit cap — the worst permitted fill)' : ''}: FIRST — does an honest objective ` +
                 `(prior high/low, measured move, gap fill) sit between $${targetBound.toFixed(2)} and ` +
                 `$${targetCap.toFixed(2)}? If not, SKIP the symbol; never stretch the target to manufacture ` +
                 `${rules.min_risk_reward}:1. If yes: stop at real structure between $${stopFarBound.toFixed(2)} and ` +
@@ -492,7 +496,7 @@ export function checkProposalRisk(
             // No reachability cap for this class (swing / earnings-bet) or
             // day (post-print repricing): one-sided bounds, still skip-first.
             violations.push(
-                `VIABLE GEOMETRY for ${p.direction} ${p.symbol} at $${entry}: FIRST — is there an honest objective ` +
+                `VIABLE GEOMETRY for ${p.direction} ${p.symbol} at $${gEntry}${gEntry !== entry ? ' (the STP_LMT limit cap — the worst permitted fill)' : ''}: FIRST — is there an honest objective ` +
                 `at/beyond $${targetBound.toFixed(2)}? If not, SKIP the symbol; never stretch the target to ` +
                 `manufacture ${rules.min_risk_reward}:1. If yes: stop at/beyond $${stopBound.toFixed(2)} AND target ` +
                 `at/beyond $${targetBound.toFixed(2)} — both together (a wider stop needs a proportionally farther ` +

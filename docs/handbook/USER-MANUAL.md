@@ -156,7 +156,7 @@ Everything else has sensible defaults:
 | `UNIVERSE_MAX_REQUESTS` / `UNIVERSE_PACE_MS` | 1200 / 3000 | nightly IBKR request budget and pacing |
 | `AUTO_EXECUTE_PAPER` | false | paper-only auto-exec of proposals, all sources (§11) |
 | `AUTO_EXECUTE_MAX_PER_DAY` | 5 | auto-exec daily cap |
-| `AUTO_EXECUTE_MIN_SCORE` | 80 | confidence floor — lower scores stay manual |
+| `AUTO_EXECUTE_MIN_SCORE` | 0 | score floor — 0 since D6 (2026-08-21): the burn-in samples every band; raise only with a calibrated scorer |
 | `PROFIT_TRAIL` | true | auto-close winners: arm at `profit_trail_arm_atr_mult`×ATR, close on `profit_trail_pullback_atr_mult`×ATR pullback from peak; absolute % fallback when ATR unknown; swing/earnings-bet exempt (§9) |
 | `STALE_ENTRY_MAX_DAYS` | 3 | cancel executed-but-unfilled entries after N days (0 = off) |
 | `AUTO_PROTECT` | true | re-attach GTC exits when DAY exits die on an open position (§9) |
@@ -465,11 +465,16 @@ Guarantees, in code, not convention:
 - refuses live ports/accounts **regardless of `IBKR_ALLOW_LIVE`** — no
   configuration can make auto-execution trade live (live port refused
   statically, account identity fail-closed, non-paper accounts refused);
-- **confidence floor** (`AUTO_EXECUTE_MIN_SCORE`): only proposals
-  scoring ≥ the floor execute unattended; lower-scored ones stay open
-  for a manual `accept`, and UNSCORED proposals never auto-execute at
-  any floor. Two deliberate postures: **80** (default — selective,
-  high-conviction only) and **1** (burn-in — every gate-passing proposal
+- **score floor** (`AUTO_EXECUTE_MIN_SCORE`): only proposals scoring
+  ≥ the floor execute unattended; lower-scored ones stay open for a
+  manual `accept`, and UNSCORED proposals never auto-execute at any
+  floor. Default **0** since D6 (2026-08-21): the burn-in is an
+  experiment ON the score — a floor conditions the sample on the
+  variable under test. NOTE the sample is still shaped upstream
+  (trigger rank threshold, skill score floors, the daily cap): floor 0
+  removes the last stage of selection, it does not make sampling
+  unbiased. Raise the floor only after the scorer passes its
+  calibration gate. (Historical postures: **80** selective, **1** burn-in
   executes so the benchmark ledger samples every score band without
   selection bias; the confidence-weighted sizer, not the floor, is the
   risk control across bands). The burn-in profile runs at 1 — that is a

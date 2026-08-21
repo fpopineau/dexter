@@ -27,6 +27,10 @@ import { EventName, OrderAction, OrderType, SecType, TimeInForce } from '@stoqey
 
 export interface PositionActionOutcome {
     ok: boolean;
+    /** Broker-lifecycle state (review 2026-08-21): a boolean cannot carry
+     *  "the order exists but the position is not flat yet". Consumers that
+     *  treat a close as DONE must check for 'filled', never just ok. */
+    state?: 'filled' | 'working' | 'unconfirmed' | 'rejected';
     message: string;
     /** protectPosition only: the GTC exit order ids just placed — the
      *  outcome tracker adopts them so the protected position stays a
@@ -244,30 +248,37 @@ export async function protectPosition(
             }
             const states = await watch.settle(BRACKET_ACK_TIMEOUT_MS);
             const rejected = states.find((s) => s.rejection !== null);
-            if (rejected) {
-                // A half-armed OCA pair is worse than none: sweep the legs
-                // and report the truth — the position is NOT protected.
+            const unconfirmed = states.some((s) => !s.acked);
+            if (rejected || unconfirmed) {
+                // Review 2026-08-21 (round 3): an UNCONFIRMED pair must not
+                // report "protected" — an unknown broker state would be
+                // promoted into database truth (the tracker converts DAY
+                // rows into "protected" overnight holds on this result).
+                // Fail closed: sweep the legs best-effort and say NOT
+                // protected — loud and wrong-side-safe beats silent naked.
                 for (const id of legIds) {
                     try { api.cancelOrder(id); } catch { /* already dead */ }
                 }
                 return {
-                    rejected: `order ${rejected.orderId}: ${rejected.rejection!.reason}`,
+                    rejected: rejected
+                        ? `order ${rejected.orderId}: ${rejected.rejection!.reason}`
+                        : 'no broker acknowledgement within the window (legs cancel-swept best-effort)',
                     msg: '', ids: { stopOrderId: stopId },
                 };
             }
-            const unconfirmed = states.some((s) => !s.acked);
             const idsOut = targetId !== null ? { stopOrderId: stopId, targetOrderId: targetId } : { stopOrderId: stopId };
             const msg = targetId !== null
-                ? `, target ${targetPrice} (orders ${stopId}/${targetId}, OCA ${ocaGroup}${unconfirmed ? ', ack PENDING — verify with \'orders\'' : ''})`
-                : ` (order ${stopId}${unconfirmed ? ', ack PENDING — verify with \'orders\'' : ''})`;
+                ? `, target ${targetPrice} (orders ${stopId}/${targetId}, OCA ${ocaGroup})`
+                : ` (order ${stopId})`;
             return { rejected: null as string | null, msg, ids: idsOut };
         });
 
         if (placed.rejected) {
-            logger.error(`[position-actions] protect ${symbol} REJECTED: ${placed.rejected}`);
+            logger.error(`[position-actions] protect ${symbol} NOT protected: ${placed.rejected}`);
             return {
                 ok: false,
-                message: `❌ ${symbol} is NOT protected — the broker rejected the protective exits (${placed.rejected}). Fix the levels and retry, or close the position.`,
+                state: 'rejected',
+                message: `❌ ${symbol} is NOT protected (${placed.rejected}). Verify with 'orders', then fix the levels and retry — or close the position.`,
             };
         }
 
@@ -307,6 +318,56 @@ export function wasRecentlyClosed(symbol: string): boolean {
  *  REVERSAL (review 2026-08-21). */
 const closesInFlight = new Set<string>();
 
+/** Fill window for a close: an RTH market order fills in well under this;
+ *  a pre-market/resting close exits via the 'working' path instead. */
+const CLOSE_FILL_WAIT_MS = 8_000;
+
+/**
+ * Cancel this symbol's exit protection AFTER the position is flat:
+ * tracked bracket/exit ids first, then the WP11 orphan sweep (our
+ * orderRef'd GTC pairs; unknown refs flagged, never touched). Called by
+ * closePosition on an immediate fill and by the outcome tracker when a
+ * resting close's fill lands later. Cancels are best-effort — the WP3
+ * reconciliation sweep is the healing loop for a cancel the broker
+ * dropped (recorded residual: cancellation is not ack-confirmed).
+ */
+export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, symbolRaw: string): Promise<number> {
+    const symbol = symbolRaw.trim().toUpperCase();
+    let cancelledExits = 0;
+    const cancelledIds = new Set<number>();
+    try {
+        const { listTrackable } = await import('./trade-proposals.js');
+        for (const t of await listTrackable()) {
+            if (t.symbol !== symbol || !t.orderIds?.length) continue;
+            for (const oid of t.orderIds) {
+                try { api.cancelOrder(oid); cancelledExits++; cancelledIds.add(oid); } catch { /* already gone */ }
+            }
+        }
+    } catch (err) {
+        logger.warn(`[position-actions] exit cleanup for ${symbol} failed: ${err}`);
+    }
+    // WP11 (closes audit 2026-08-06 finding 10): GTC pairs placed OUTSIDE
+    // proposal rows — the auto-protect path after a row already closed —
+    // are persisted nowhere and used to survive every close.
+    const OUR_REF = /^(protect-|close-|reduce-|BRKT-|P-[0-9A-F]{4}:)/;
+    try {
+        for (const side of [OrderAction.SELL, OrderAction.BUY]) {
+            for (const o of await fetchOpenOrdersFor(api, symbol, side)) {
+                if (cancelledIds.has(o.orderId) || o.tif !== 'GTC') continue;
+                if (OUR_REF.test(o.orderRef ?? '')) {
+                    try { api.cancelOrder(o.orderId); cancelledExits++; cancelledIds.add(o.orderId); } catch { /* gone */ }
+                    logger.info(`[position-actions] ${symbol}: swept orphaned GTC ${o.orderType} #${o.orderId} (ref '${o.orderRef}')`);
+                } else {
+                    logger.warn(`[position-actions] ${symbol}: UNKNOWN GTC ${o.orderType} #${o.orderId}${o.orderRef ? ` (ref '${o.orderRef}')` : ''} left untouched — review in TWS`);
+                }
+            }
+        }
+    } catch (err) {
+        logger.warn(`[position-actions] orphan-exit sweep for ${symbol} failed: ${err}`);
+    }
+    return cancelledExits;
+}
+
 export async function closePosition(symbolRaw: string, source = 'close command'): Promise<PositionActionOutcome> {
     const symbol = symbolRaw.trim().toUpperCase();
     if (closesInFlight.has(symbol)) {
@@ -315,12 +376,30 @@ export async function closePosition(symbolRaw: string, source = 'close command')
             message: `⏳ A close for ${symbol} is already in flight — not placing a second full-size order (reversal guard). Verify with 'orders'.`,
         };
     }
+    // Review 2026-08-21 (round 3): a resting close (pre-market) can work
+    // for HOURS — the guard must track the ORDER's life, not a wall-clock
+    // window. The outcome tracker knows every registered close still
+    // working; only when none is live does the 10-minute courtesy window
+    // apply (covers the gap between fill and tracker bookkeeping).
+    try {
+        const { hasWorkingManualExit } = await import('./outcome-tracker.js');
+        if (hasWorkingManualExit(symbol)) {
+            return {
+                ok: false,
+                message:
+                    `⏳ A close order for ${symbol} is still WORKING at the broker — a second full-size close ` +
+                    `would REVERSE the position when both fill. Cancel the working order first ('cancel ${symbol}' ` +
+                    `or TWS) if you want to replace it.`,
+            };
+        }
+    } catch { /* tracker unavailable — fall through to the time guard */ }
     if (wasRecentlyClosed(symbol)) {
         return {
             ok: false,
             message:
-                `⏳ ${symbol} was closed less than 10 minutes ago — its close order may still be working ` +
-                `(a second full-size close would REVERSE the position). Verify with 'orders' and 'positions' first.`,
+                `⏳ ${symbol} was closed less than 10 minutes ago. If 'positions' still shows it and 'orders' shows ` +
+                `no working close, wait out the window — it exists so a filled close's bookkeeping can settle, ` +
+                `never to be raced.`,
         };
     }
     closesInFlight.add(symbol);
@@ -373,9 +452,12 @@ export async function closePosition(symbolRaw: string, source = 'close command')
                 tif: TimeInForce.DAY,
                 transmit: true,
             };
-            // Review 2026-08-21: a close must be ACKNOWLEDGED before any
-            // protection is removed — armed before placement so a fast
-            // broker reaction cannot slip past the first listener.
+            // Review 2026-08-21 (round 3): protection is removed only after
+            // the close FILLS — an acknowledgement proves the broker saw
+            // the order, not that the position is flat. Watch armed before
+            // placement; an RTH market order fills within the window, a
+            // pre-market one rests and the outcome tracker cleans up at
+            // its eventual fill instead.
             const watch = watchOrderAcks(api, [orderId]);
             try {
                 api.placeOrder(orderId, stockContract(symbol), order);
@@ -383,7 +465,7 @@ export async function closePosition(symbolRaw: string, source = 'close command')
                 watch.dispose();
                 throw err;
             }
-            const states = await watch.settle(BRACKET_ACK_TIMEOUT_MS);
+            const states = await watch.settle(CLOSE_FILL_WAIT_MS, 'filled');
             return { orderId, order, ack: states[0] };
         });
 
@@ -394,6 +476,7 @@ export async function closePosition(symbolRaw: string, source = 'close command')
             logger.error(`[position-actions] close ${symbol} REJECTED by broker (${r.code ?? '?'}: ${r.reason})`);
             return {
                 ok: false,
+                state: 'rejected',
                 message:
                     `❌ Close ${symbol} REJECTED by the broker (${r.reason}). ` +
                     `Nothing was cancelled — the position keeps its protection. Resolve and retry.`,
@@ -412,60 +495,28 @@ export async function closePosition(symbolRaw: string, source = 'close command')
             logger.warn(`[position-actions] could not register ${symbol} close with the outcome tracker: ${err}`);
         }
 
-        if (!ack?.acked) {
-            // Unconfirmed close (broker silent through the window): removing
-            // protection now gambles a naked position against a reversal —
-            // the naked side loses. Exits stay; the operator resolves.
-            logger.warn(`[position-actions] close ${symbol}: no broker ack within the window — exits left standing`);
+        if (!ack?.filled) {
+            // Acked-or-silent but NOT FLAT: protection stays exactly where
+            // it is. The outcome tracker owns the rest of this lifecycle —
+            // when the close order's fill lands (pre-market closes fill at
+            // the open), handleManualExitFill runs the exit cleanup; if the
+            // order dies instead, the tracked exits were never touched.
+            const working = ack?.acked === true;
+            logger.warn(`[position-actions] close ${symbol}: ${working ? 'acknowledged but not filled' : 'no broker reaction'} within the window — exits left standing; cleanup happens at fill`);
             return {
                 ok: true,
+                state: working ? 'working' : 'unconfirmed',
                 message:
-                    `⚠️ Close ${symbol} handed to the broker but NOT acknowledged yet (order ${orderId}). ` +
-                    `The resting exits were LEFT STANDING — cancelling them against an unconfirmed close risks a ` +
-                    `naked position. Verify with 'orders': close working → cancel the exits ('cancel ${symbol}'); ` +
-                    `close absent → retry.`,
+                    `⏳ Close ${symbol} is ${working ? 'WORKING at the broker' : 'submitted but UNCONFIRMED'} (order ${orderId}) — ` +
+                    `the position is NOT flat yet. Protective exits were LEFT STANDING and will be cancelled ` +
+                    `automatically when the close fills. Do not assume flat until 'positions' shows it; ` +
+                    `a second 'close ${symbol}' is refused while this order works.`,
             };
         }
 
-        // Cancel this symbol's tracked bracket/exit orders: a live GTC exit
-        // on a CLOSED position is a naked short (or unintended long) waiting
-        // for the target/stop price to print.
-        let cancelledExits = 0;
-        const cancelledIds = new Set<number>();
-        try {
-            const { listTrackable } = await import('./trade-proposals.js');
-            for (const t of await listTrackable()) {
-                if (t.symbol !== symbol || !t.orderIds?.length) continue;
-                for (const oid of t.orderIds) {
-                    try { api.cancelOrder(oid); cancelledExits++; cancelledIds.add(oid); } catch { /* already gone */ }
-                }
-            }
-        } catch (err) {
-            logger.warn(`[position-actions] exit cleanup for ${symbol} failed: ${err}`);
-        }
-
-        // WP11 (closes audit 2026-08-06 finding 10): GTC pairs placed
-        // OUTSIDE proposal rows — the auto-protect path after a row already
-        // closed — are persisted nowhere and used to survive every close.
-        // Sweep by symbol: cancel resting GTC orders carrying OUR orderRef
-        // (WP1 stamps one on every order); unknown refs are flagged and
-        // left untouched (the WP3 orphan rule).
-        const OUR_REF = /^(protect-|close-|reduce-|BRKT-|P-[0-9A-F]{4}:)/;
-        try {
-            for (const side of [OrderAction.SELL, OrderAction.BUY]) {
-                for (const o of await fetchOpenOrdersFor(api, symbol, side)) {
-                    if (cancelledIds.has(o.orderId) || o.tif !== 'GTC') continue;
-                    if (OUR_REF.test(o.orderRef ?? '')) {
-                        try { api.cancelOrder(o.orderId); cancelledExits++; cancelledIds.add(o.orderId); } catch { /* gone */ }
-                        logger.info(`[position-actions] ${symbol}: swept orphaned GTC ${o.orderType} #${o.orderId} (ref '${o.orderRef}')`);
-                    } else {
-                        logger.warn(`[position-actions] ${symbol}: UNKNOWN GTC ${o.orderType} #${o.orderId}${o.orderRef ? ` (ref '${o.orderRef}')` : ''} left untouched — review in TWS`);
-                    }
-                }
-            }
-        } catch (err) {
-            logger.warn(`[position-actions] orphan-exit sweep for ${symbol} failed: ${err}`);
-        }
+        // The close FILLED — the position is flat, and only now does
+        // protection removal become safe (review 2026-08-21).
+        const cancelledExits = await cleanupExitsAfterClose(api, symbol);
 
         logger.info(`[position-actions] closing ${symbol}: ${order.action} ${qty} MKT (order ${orderId}), ${cancelledExits} tracked exit order(s) cancelled`);
         return {
