@@ -675,6 +675,21 @@ prerequisite; weekly scorecard run stays operator-manual.
   verified/exit-fill/still-working details — no more log-only
   incidents on the asynchronous path.
 
+## Review 12 triage (2026-08-21, reviewed at f0924b1)
+
+**Fixed same day — the last delayed-fill gap:**
+
+- **Delayed fills ALWAYS verify the position** (P1): the settlement
+  check no longer hides behind a cleanup incident — after every
+  resting-close fill the tracker queries the position book and
+  notifies the operator whenever the position is not confirmed flat
+  OR the cleanup is not confirmed clean. A thrown cleanup notifies
+  with everything marked unverified instead of a log-only warn. Two
+  tests pin it: a clean delayed fill raises no alarm; a residual
+  position after an outdated-quantity fill alarms even though the
+  cleanup itself settled clean — exactly the case the incident-gated
+  check missed.
+
 - **WP9 Backtester: honest replay** (MED — decision point D1)
   Recommended scope (rebuild-lite, ~1 session): process bar i BEFORE
   signals from bar i (kills the same-bar look-ahead); per-symbol bar

@@ -343,15 +343,49 @@ describe('closePosition lifecycle (round-4 review)', () => {
         expect(fake.cancelled).toHaveLength(0);
 
         // The resting close fills later (e.g. at the open) — the tracker
-        // attributes P&L and runs the exit cleanup itself.
+        // attributes P&L and runs the exit cleanup itself. Round 12: the
+        // fill leaves the account flat and settlement verifies it — a
+        // clean delayed fill must NOT alarm the operator.
+        const alerts: string[] = [];
+        const { onAutoProtect } = await import('./outcome-tracker.js');
+        const off = onAutoProtect((m) => { alerts.push(m); });
         fake.emit(EventName.orderStatus, closeOrderId, 'Filled', 4, 0, 195);
-        await sleep(80);
+        fake.position = null; // the broker book reflects the fill
+        await sleep(120);
+        off();
         const row = await getProposal(t.id);
         expect(row?.exitReason).toBe('manual');
         expect(row?.realizedPnl).toBeCloseTo((195 - 200) * 4, 2);
         expect(hasWorkingManualExit('CLQE')).toBe(false);
         // Tracked bracket ids swept by the tracker's post-fill cleanup.
         expect(fake.cancelled.length).toBeGreaterThan(0);
+        expect(alerts.filter((m) => m.includes('NOT FLAT'))).toHaveLength(0);
+    });
+
+    test('delayed fill with RESIDUAL position: the settlement check alarms even with clean cleanup (round 12)', async () => {
+        const t = await trackedProposal('CLQM', 4, 200);
+        __handleOrderStatusForTests(t.entryId, 'Filled', 4, 0, 200);
+        fake.position = { symbol: 'CLQM', qty: 4 };
+        let closeOrderId = 0;
+        fake.onPlace = (id, order) => {
+            closeOrderId = id;
+            queueMicrotask(() => fake.emit(EventName.orderStatus, id, 'PreSubmitted', 0, Number(order.totalQuantity ?? 0), 0));
+        };
+        const out = await closePosition('CLQM', 'test-operator');
+        expect(out.state).toBe('working');
+
+        // The resting close fills an OUTDATED quantity — the broker book
+        // still shows a residual position. Cleanup itself settles clean
+        // (exits cancel-confirmed, book snapshot complete), which was
+        // exactly the case the old incident-gated check missed.
+        const alerts: string[] = [];
+        const { onAutoProtect } = await import('./outcome-tracker.js');
+        const off = onAutoProtect((m) => { alerts.push(m); });
+        fake.emit(EventName.orderStatus, closeOrderId, 'Filled', 4, 0, 195);
+        // fake.position stays { CLQM, 4 } — residue after the fill.
+        await sleep(120);
+        off();
+        expect(alerts.some((m) => m.includes('CLQM') && m.includes('NOT FLAT'))).toBe(true);
     });
 });
 
