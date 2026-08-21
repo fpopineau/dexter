@@ -44,7 +44,13 @@ class FakeIb extends EventEmitter {
     placeOrder(id: number, _contract: Contract, order: Order): void {
         this.placed.push({ id, order });
         if (this.onPlace) this.onPlace(id, order);
-        else queueMicrotask(() => this.emit(EventName.orderStatus, id, 'Filled', Number(order.totalQuantity ?? 0), 0, this.fillPrice));
+        else {
+            queueMicrotask(() => this.emit(EventName.orderStatus, id, 'Filled', Number(order.totalQuantity ?? 0), 0, this.fillPrice));
+            // A filled full-size close leaves the account flat — round 11:
+            // closePosition VERIFIES flatness with a fresh snapshot, so the
+            // fake book must reflect the fill like the real one does.
+            this.position = null;
+        }
     }
     cancelOrder(id: number): void {
         this.cancelled.push(id);
@@ -284,6 +290,27 @@ describe('closePosition lifecycle (round-4 review)', () => {
         const retry = await closePosition('CLQJ', 'test-operator');
         expect(retry.state).toBe('filled');
         expect((fake.placed[0]!.order as unknown as { ocaGroup?: string }).ocaGroup).toBe('dexter-CLQJ-1');
+    });
+
+    test('a manual order appearing AFTER preflight surfaces in the result — flat but NOT clean (round 11)', async () => {
+        fake.position = { symbol: 'CLQL', qty: 10 };
+        fake.onPlace = (id, order) => {
+            // Between preflight and cleanup, the operator parks a manual
+            // stop in TWS. The close still fills and the account is flat —
+            // but that resting order OPENS a position when it fills.
+            fake.openOrders.push({
+                id: 9009,
+                contract: { symbol: 'CLQL' } as Contract,
+                order: { action: 'SELL', orderType: 'STP', tif: 'GTC', orderRef: 'late manual stop' } as unknown as Order,
+            });
+            fake.position = null;
+            queueMicrotask(() => fake.emit(EventName.orderStatus, id, 'Filled', Number(order.totalQuantity ?? 0), 0, fake.fillPrice));
+        };
+        const out = await closePosition('CLQL', 'test-operator');
+        expect(out.state).toBe('filled');
+        expect(out.flat).toBe(true);       // the account IS flat…
+        expect(out.clean).toBe(false);     // …but the book is NOT settled
+        expect(out.message).toContain('STILL WORKING');
     });
 
     test('a MANUAL (non-Dexter) exit refuses the close — it cannot be joined or cancelled from here (round 10)', async () => {

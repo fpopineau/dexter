@@ -646,6 +646,35 @@ prerequisite; weekly scorecard run stays operator-manual.
   full warning message instead of "Closed." and keeps the trail state.
   Happy-path flat:true pinned by test.
 
+## Review 11 triage (2026-08-21, reviewed at fca6109)
+
+**Fixed same day — end-to-end truthfulness of the close lifecycle:**
+
+- **`stillWorking` reports EVERY surviving order** (P1): the result no
+  longer filters to ids the cleanup itself requested — a manual order
+  that appeared after preflight (or during a delayed close) now lands
+  in the result and gets its own loud error ("against a flat account
+  it OPENS a position").
+- **`flat: true` is VERIFIED on every filled close** (P1): a fresh
+  position snapshot runs unconditionally before the claim — the fill
+  proves the order completed; only the position book proves the
+  account is flat (quantity can drift between preflight and
+  execution). The fake broker now clears its position on a filled
+  close so the tests exercise the real verification.
+- **`flat` and `clean` are separate facts** (P1): a flat account with
+  a resting manual exit is NOT settled. `clean` = flat AND verified
+  cleanup AND no exit-fill race AND nothing still working; EOD triage
+  prints "Closed." only on `clean === true` and otherwise preserves
+  the full warning text (it previously compressed a
+  flat-but-unsettled close to "Closed.", hiding exactly the
+  future-position warning). Tested: flat:true + clean:false with the
+  message carrying STILL WORKING.
+- **The delayed-fill path has the same honesty** (P1): when a resting
+  close fills later, an unsettled cleanup now does the position
+  recheck AND notifies the operator (WhatsApp) with
+  verified/exit-fill/still-working details — no more log-only
+  incidents on the asynchronous path.
+
 - **WP9 Backtester: honest replay** (MED — decision point D1)
   Recommended scope (rebuild-lite, ~1 session): process bar i BEFORE
   signals from bar i (kills the same-bar look-ahead); per-symbol bar

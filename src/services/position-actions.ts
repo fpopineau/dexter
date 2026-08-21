@@ -38,6 +38,12 @@ export interface PositionActionOutcome {
      *  Consumers that mean "the symbol is closed" gate on flat === true,
      *  never on state alone. */
     flat?: boolean | null;
+    /** Round-11 review: flat and SETTLED are different facts — a flat
+     *  account can still carry a manual resting exit that OPENS a position
+     *  when it fills. true = flat AND cleanup fully settled (verified, no
+     *  exit-fill race, nothing still working). Consumers may compress the
+     *  message to "Closed." ONLY on clean === true. */
+    clean?: boolean;
     message: string;
     /** protectPosition only: the GTC exit order ids just placed — the
      *  outcome tracker adopts them so the protected position stays a
@@ -525,11 +531,23 @@ export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, sy
             );
         }
     }
+    // Round-11 review: report EVERY surviving order, not just the ones we
+    // tried to cancel — a manual order that appeared after preflight is a
+    // future position-opener against a flat account and was being dropped
+    // from the result.
+    for (const id of stillOpen) {
+        if (!outcomes.some(([oid]) => oid === id)) {
+            logger.error(
+                `[position-actions] ${symbol}: order #${id} (not placed by this cleanup — manual or late) is STILL ` +
+                `WORKING after the close — against a flat account it OPENS a position when it fills. Cancel it in TWS.`,
+            );
+        }
+    }
     return {
         confirmedCancelled: cancelledExits,
         verified: verifyComplete,
         exitFilledDuringClose,
-        stillWorking: [...stillOpen].filter((id) => outcomes.some(([oid]) => oid === id)),
+        stillWorking: [...stillOpen],
     };
 }
 
@@ -787,27 +805,26 @@ export async function closePosition(symbolRaw: string, source = 'close command')
         // Round-9 review: "the position is flat" is a POSITION claim — when
         // cleanup saw an exit fill during the race, was unverified, or left
         // orders working, re-read the position book before claiming it.
-        let flatSuffix = 'the position is flat.';
-        // Round-10: flat is a POSITION claim consumers gate on — a clean
-        // full-size fill with verified no-incident cleanup is flat; any
-        // incident demands the position book's answer.
-        let flat: boolean | null = true;
-        if (cleanup.exitFilledDuringClose || !cleanup.verified || cleanup.stillWorking.length > 0) {
-            try {
-                const after = (await fetchPositions(api)).find((p) => p.symbol === symbol);
-                if (after && after.quantity !== 0) {
-                    flat = false;
-                    flatSuffix = `⚠️ the position is NOT flat: ${after.quantity > 0 ? 'LONG' : 'SHORT'} ${Math.abs(after.quantity)} remains — ` +
-                        `an exit filled alongside the close (over-close race). Review 'positions' NOW.`;
-                    logger.error(`[position-actions] ${symbol}: post-close position check shows ${after.quantity} — NOT flat after close+cleanup incident`);
-                } else {
-                    flat = true;
-                    flatSuffix = 'the position book confirms FLAT (re-checked after a cleanup incident).';
-                }
-            } catch {
-                flat = null;
-                flatSuffix = "⚠️ flatness could NOT be re-verified — check 'positions'.";
+        // Round-11 review: flat is VERIFIED on every filled close, never
+        // inferred — the fill proves the ORDER completed, and only a fresh
+        // position snapshot proves the ACCOUNT is flat (quantity can drift
+        // between the preflight snapshot and execution).
+        let flatSuffix: string;
+        let flat: boolean | null;
+        try {
+            const after = (await fetchPositions(api)).find((p) => p.symbol === symbol);
+            if (after && after.quantity !== 0) {
+                flat = false;
+                flatSuffix = `⚠️ the position is NOT flat: ${after.quantity > 0 ? 'LONG' : 'SHORT'} ${Math.abs(after.quantity)} remains — ` +
+                    `review 'positions' NOW (over-close race or drifted quantity).`;
+                logger.error(`[position-actions] ${symbol}: post-close position check shows ${after.quantity} — NOT flat`);
+            } else {
+                flat = true;
+                flatSuffix = 'the position book confirms FLAT.';
             }
+        } catch {
+            flat = null;
+            flatSuffix = "⚠️ flatness could NOT be verified — check 'positions'.";
         }
         const exitsNote = cleanup.verified
             ? (cleanup.confirmedCancelled > 0
@@ -825,6 +842,7 @@ export async function closePosition(symbolRaw: string, source = 'close command')
             // omitting it made every filled close read as not-closed.
             state: 'filled',
             flat,
+            clean: flat === true && cleanup.verified && !cleanup.exitFilledDuringClose && cleanup.stillWorking.length === 0,
             message:
                 `🔚 Closed ${symbol}: ${order.action} ${qty} at market (order ${orderId}) — FILLED, ${flatSuffix} ` +
                 exitsNote + workingNote,

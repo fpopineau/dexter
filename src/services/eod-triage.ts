@@ -563,7 +563,7 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
             // Round-10 review: 'closed' means CONFIRMED FLAT, not 'the
             // close order filled' — an over-close incident must surface.
             if (outcome.state === 'filled' && outcome.flat === true) closedSymbols.add(t.symbol);
-            lines.push(`• ${t.symbol} (${label}): ${decision.reason}. ${outcome.state === 'filled' && outcome.flat === true ? 'Closed.' : outcome.message}`);
+            lines.push(`• ${t.symbol} (${label}): ${decision.reason}. ${outcome.clean === true ? 'Closed.' : outcome.message}`);
         } else {
             lines.push(`• ${t.symbol} (${label}): ${decision.reason}.`);
             const pnlPct = last !== null && t.entryFillPrice
@@ -594,7 +594,7 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
         }
         const outcome = await closePosition(trim.symbol, 'EOD triage (overnight cap trim)');
         if (outcome.state === 'filled' && outcome.flat === true) closedSymbols.add(trim.symbol);
-        lines.push(`• ${trim.symbol} (${trim.label}): overnight vet — ${trim.reason}. ${outcome.state === 'filled' && outcome.flat === true ? 'Closed.' : outcome.message}`);
+        lines.push(`• ${trim.symbol} (${trim.label}): overnight vet — ${trim.reason}. ${outcome.clean === true ? 'Closed.' : outcome.message}`);
     }
     if (!dryRun) {
         for (const k of vetCandidates) {
@@ -630,7 +630,7 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
         }
         const outcome = await closePosition(t.symbol, 'EOD triage (earnings guard)');
         if (outcome.state === 'filled' && outcome.flat === true) closedSymbols.add(t.symbol);
-        lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} GTC): ${decision.reason}. ${outcome.state === 'filled' && outcome.flat === true ? 'Closed.' : outcome.message}`);
+        lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} GTC): ${decision.reason}. ${outcome.clean === true ? 'Closed.' : outcome.message}`);
     }
 
     // Unfilled GTC entries: a resting order is exposure-in-waiting. With a

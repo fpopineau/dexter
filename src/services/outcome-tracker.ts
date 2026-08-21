@@ -663,11 +663,28 @@ function handleManualExitFill(orderId: number, avgFillPrice: number): void {
         const api = attachedApi;
         void (async () => {
             try {
-                const { cleanupExitsAfterClose } = await import('./position-actions.js');
+                const { cleanupExitsAfterClose, fetchPositions } = await import('./position-actions.js');
                 const r = await cleanupExitsAfterClose(api, manual.symbol);
                 if (r.confirmedCancelled > 0) logger.info(`[outcome-tracker] ${manual.symbol}: ${r.confirmedCancelled} exit order(s) confirmed cancelled after the close filled`);
                 if (!r.verified || r.exitFilledDuringClose || r.stillWorking.length > 0) {
-                    logger.error(`[outcome-tracker] ${manual.symbol}: post-fill cleanup incident (verified=${r.verified}, exitFilled=${r.exitFilledDuringClose}, working=${r.stillWorking.length}) — review the book`);
+                    // Round-11 review: the DELAYED-fill path (pre-market
+                    // close filling at the open) gets the same honesty as
+                    // the immediate one — position recheck + operator
+                    // notification, not a log line nobody is watching.
+                    let posNote = 'position could NOT be verified';
+                    try {
+                        const after = (await fetchPositions(api)).find((p) => p.symbol === manual.symbol);
+                        posNote = after && after.quantity !== 0
+                            ? `position NOT FLAT: ${after.quantity > 0 ? 'LONG' : 'SHORT'} ${Math.abs(after.quantity)} remains`
+                            : 'position book confirms flat';
+                    } catch { /* posNote already says unverified */ }
+                    logger.error(`[outcome-tracker] ${manual.symbol}: post-fill cleanup incident (verified=${r.verified}, exitFilled=${r.exitFilledDuringClose}, working=${r.stillWorking.length}); ${posNote}`);
+                    await notifyAutoProtect(
+                        `⚠️ ${manual.symbol}: the resting close FILLED, but exit cleanup did not settle cleanly ` +
+                        `(verified=${r.verified}${r.exitFilledDuringClose ? ', an exit ALSO filled' : ''}` +
+                        `${r.stillWorking.length > 0 ? `, ${r.stillWorking.length} order(s) STILL WORKING` : ''}) — ${posNote}. ` +
+                        `Review 'positions'/'orders'; a resting exit on a flat symbol OPENS a position when it fills.`,
+                    ).catch(() => { /* alert bridge down — the error log above stands */ });
                 }
             } catch (err) {
                 logger.warn(`[outcome-tracker] post-fill exit cleanup ${manual.symbol} failed: ${err}`);
