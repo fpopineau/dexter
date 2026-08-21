@@ -592,6 +592,38 @@ protection with fill-gated cleanup + book-truth post-condition is the
 chosen trade-off. OCA dynamic-join paper observation remains a freeze
 prerequisite; weekly scorecard run remains operator-manual.
 
+## Review 9 triage (2026-08-21, reviewed at 06e8b9a)
+
+**Fixed same day — the fallback became a refusal:**
+
+- **Non-atomic closes REFUSE** (P1): an automated close now goes out
+  only when every working Dexter exit shares ONE atomic exclusion
+  scheme with it — complete book view with either no Dexter exits
+  (nothing to race) or a wholly-single OCA group (joined). Multi-group,
+  ungrouped-exit, incomplete-view and probe-failure books all REFUSE
+  with instructions ('cancel <SYM>' the extra pair, or retry on a
+  transient view) instead of submitting the racy unjoined close. The
+  three tests that codified the old fallback now codify the refusal,
+  including snapshot-recovers-then-join. EOD triage and profit-trail
+  already handle non-filled outcomes (report + keep state).
+- **Unverified cleanup certifies nothing** (P1):
+  `cleanupExitsAfterClose` returns a typed result — confirmed cancels
+  are counted ONLY when the post-condition snapshot completed; an
+  unverified pass reports "treat no cancellation as confirmed". And
+  "the position is flat" became a POSITION claim: after any cleanup
+  incident (exit filled during the race, unverified view, orders still
+  working) the close re-reads the position book and reports FLAT /
+  NOT-flat / could-not-verify honestly.
+- **Boot-gate transitions have regression cover** (P2):
+  `__armAfterSweepForTests` + a test pinning pending→(false)→pending→
+  (true)→done→(false)→done — an unconditional-arm regression now fails
+  a test, not a paper review.
+
+**Residual**: the IO loop around the arming (real sweep → retry timer)
+remains exercised only at boot on paper; the transition semantics are
+what the test pins. OCA dynamic-join paper observation stays a freeze
+prerequisite; weekly scorecard run stays operator-manual.
+
 - **WP9 Backtester: honest replay** (MED — decision point D1)
   Recommended scope (rebuild-lite, ~1 session): process bar i BEFORE
   signals from bar i (kills the same-bar look-ahead); per-symbol bar

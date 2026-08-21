@@ -216,7 +216,7 @@ describe('closePosition lifecycle (round-4 review)', () => {
         expect(placed.ocaType).toBe(1);
     });
 
-    test('stacked pairs (two OCA groups): close does NOT join — ambiguity falls back to cleanup', async () => {
+    test('stacked pairs (two OCA groups): close REFUSES — no atomic exclusion, no order (round 9)', async () => {
         fake.position = { symbol: 'CLQG', qty: 10 };
         const exit = (id: number, oca: string) => ({
             id,
@@ -226,9 +226,9 @@ describe('closePosition lifecycle (round-4 review)', () => {
         fake.openOrders = [exit(9003, 'dexter-CLQG-1'), exit(9004, 'dexter-CLQG-2')];
 
         const out = await closePosition('CLQG', 'test-operator');
-        expect(out.state).toBe('filled');
-        const placed = fake.placed[0]!.order as unknown as { ocaGroup?: string };
-        expect(placed.ocaGroup).toBeUndefined();
+        expect(out.ok).toBe(false);
+        expect(out.message).toContain('atomically');
+        expect(fake.placed).toHaveLength(0); // the racy close never went out
     });
 
     test('boot gate (round 7): a close during pending reconciliation is refused, not guessed', async () => {
@@ -244,7 +244,7 @@ describe('closePosition lifecycle (round-4 review)', () => {
         expect(retry.state).toBe('filled');
     });
 
-    test('mixed exit book (grouped + ungrouped): close does NOT join — partial coverage is no coverage (round 7)', async () => {
+    test('mixed exit book (grouped + ungrouped): close REFUSES — partial coverage is no coverage (rounds 7+9)', async () => {
         fake.position = { symbol: 'CLQI', qty: 10 };
         fake.openOrders = [
             {
@@ -260,12 +260,12 @@ describe('closePosition lifecycle (round-4 review)', () => {
             },
         ];
         const out = await closePosition('CLQI', 'test-operator');
-        expect(out.state).toBe('filled');
-        const placed = fake.placed[0]!.order as unknown as { ocaGroup?: string };
-        expect(placed.ocaGroup).toBeUndefined();
+        expect(out.ok).toBe(false);
+        expect(out.message).toContain('atomically');
+        expect(fake.placed).toHaveLength(0);
     });
 
-    test('incomplete book view (no openOrderEnd): close does NOT join even a clean-looking group (round 8)', async () => {
+    test('incomplete book view (no openOrderEnd): close REFUSES — an unprovable book is unprovable (rounds 8+9)', async () => {
         fake.position = { symbol: 'CLQJ', qty: 10 };
         fake.serveOrdersEnd = false; // partial snapshot — an ungrouped exit could be hidden
         fake.openOrders = [{
@@ -274,9 +274,14 @@ describe('closePosition lifecycle (round-4 review)', () => {
             order: { action: 'SELL', orderType: 'STP', tif: 'GTC', orderRef: 'protect-CLQJ:stop', ocaGroup: 'dexter-CLQJ-1' } as unknown as Order,
         }];
         const out = await closePosition('CLQJ', 'test-operator');
-        expect(out.state).toBe('filled');
-        const placed = fake.placed[0]!.order as unknown as { ocaGroup?: string };
-        expect(placed.ocaGroup).toBeUndefined();
+        expect(out.ok).toBe(false);
+        expect(out.message).toContain('snapshot');
+        expect(fake.placed).toHaveLength(0);
+        // The snapshot recovers → the same close proceeds, joined.
+        fake.serveOrdersEnd = true;
+        const retry = await closePosition('CLQJ', 'test-operator');
+        expect(retry.state).toBe('filled');
+        expect((fake.placed[0]!.order as unknown as { ocaGroup?: string }).ocaGroup).toBe('dexter-CLQJ-1');
     });
 
     test('working close (acked, unfilled): cleanup happens when the fill lands later', async () => {
@@ -304,5 +309,20 @@ describe('closePosition lifecycle (round-4 review)', () => {
         expect(hasWorkingManualExit('CLQE')).toBe(false);
         // Tracked bracket ids swept by the tracker's post-fill cleanup.
         expect(fake.cancelled.length).toBeGreaterThan(0);
+    });
+});
+
+describe('boot-gate arming transitions (round-9 review)', () => {
+    test('a failed/partial sweep never arms; a complete one does; done never regresses', async () => {
+        const { __armAfterSweepForTests, reconciliationState, stopOutcomeTracker } = await import('./outcome-tracker.js');
+        __setReconciliationStateForTests('pending');
+        __armAfterSweepForTests(false); // skipped/partial sweep
+        expect(reconciliationState()).toBe('pending'); // the regression under test: unconditional arming
+        __armAfterSweepForTests(true); // a later COMPLETE sweep (retry or periodic)
+        expect(reconciliationState()).toBe('done');
+        __armAfterSweepForTests(false); // sticky: a later bad sweep must not close the gate mid-session
+        expect(reconciliationState()).toBe('done');
+        stopOutcomeTracker(); // clears the 60s arm-retry timer the false path scheduled
+        expect(reconciliationState()).toBe('idle');
     });
 });

@@ -664,8 +664,11 @@ function handleManualExitFill(orderId: number, avgFillPrice: number): void {
         void (async () => {
             try {
                 const { cleanupExitsAfterClose } = await import('./position-actions.js');
-                const n = await cleanupExitsAfterClose(api, manual.symbol);
-                if (n > 0) logger.info(`[outcome-tracker] ${manual.symbol}: ${n} exit order(s) cancelled after the close filled`);
+                const r = await cleanupExitsAfterClose(api, manual.symbol);
+                if (r.confirmedCancelled > 0) logger.info(`[outcome-tracker] ${manual.symbol}: ${r.confirmedCancelled} exit order(s) confirmed cancelled after the close filled`);
+                if (!r.verified || r.exitFilledDuringClose || r.stillWorking.length > 0) {
+                    logger.error(`[outcome-tracker] ${manual.symbol}: post-fill cleanup incident (verified=${r.verified}, exitFilled=${r.exitFilledDuringClose}, working=${r.stillWorking.length}) — review the book`);
+                }
             } catch (err) {
                 logger.warn(`[outcome-tracker] post-fill exit cleanup ${manual.symbol} failed: ${err}`);
             }
@@ -1341,6 +1344,9 @@ export function reconciliationState(): 'idle' | 'pending' | 'done' {
 export function __setReconciliationStateForTests(s: 'idle' | 'pending' | 'done' | null): void {
     reconciliation = s ?? 'idle';
 }
+/** Round-9 review: the arming transition itself needs regression cover —
+ *  an unconditional-arm regression must fail a test, not a paper review. */
+export const __armAfterSweepForTests = (swept: boolean): void => armAfterSweep(swept);
 
 /** Round-7 review: replay today's executions through the permanent
  *  listener NOW — the recovery for a fill that landed while its order ids

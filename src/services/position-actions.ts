@@ -402,7 +402,21 @@ export function __setCloseDepsForTests(overrides: Partial<typeof closeDeps> | nu
  * unconfirmed cancel means the book must not be assumed clean — the WP3
  * sweep retries, but the operator is told NOW, not at the next sweep.
  */
-export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, symbolRaw: string): Promise<number> {
+export interface ExitCleanupResult {
+    /** Cancels the broker CONFIRMED, counted only when `verified` — an
+     *  unverified count is a certification the book never backed
+     *  (round-9 review). */
+    confirmedCancelled: number;
+    /** The post-condition open-orders snapshot completed on both sides. */
+    verified: boolean;
+    /** A non-entry order classified FILLED during cleanup — the close
+     *  raced an exit; the position may not be flat. */
+    exitFilledDuringClose: boolean;
+    /** Ids the book still shows working after everything. */
+    stillWorking: number[];
+}
+
+export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, symbolRaw: string): Promise<ExitCleanupResult> {
     const symbol = symbolRaw.trim().toUpperCase();
     const requested = new Set<number>();
     // Round-5 review: orderIds[0] is the ENTRY by convention. Cancelling
@@ -474,16 +488,21 @@ export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, sy
     } catch (err) {
         logger.warn(`[position-actions] ${symbol}: post-cleanup book verification failed: ${err}`);
     }
+    let exitFilledDuringClose = false;
     for (const [oid, outcome] of outcomes) {
         if (stillOpen.has(oid)) {
             continue; // book truth: working — already loudly reported above
         } else if (outcome === 'cancelled') {
-            cancelledExits++;
+            // Round-9 review: only a VERIFIED book backs a confirmed count —
+            // with a partial post-condition snapshot the event class alone
+            // certifies nothing (the 10147 foreign-id lie again).
+            if (verifyComplete) cancelledExits++;
         } else if (entryIds.has(oid) && (outcome === 'filled' || outcome === 'not-cancellable')) {
             // The entry that built the position we just closed — complete,
             // nothing working, nothing to alarm about.
             logger.info(`[position-actions] ${symbol}: entry order #${oid} already complete (${outcome}) — expected on a routine close`);
         } else if (outcome === 'filled') {
+            exitFilledDuringClose = true;
             logger.error(
                 `[position-actions] ${symbol}: exit order #${oid} FILLED during post-close cleanup — the account ` +
                 `may hold an UNINTENDED position (a surviving stop shorts on trigger). Review 'positions' NOW.`,
@@ -495,7 +514,12 @@ export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, sy
             );
         }
     }
-    return cancelledExits;
+    return {
+        confirmedCancelled: cancelledExits,
+        verified: verifyComplete,
+        exitFilledDuringClose,
+        stillWorking: [...stillOpen].filter((id) => outcomes.some(([oid]) => oid === id)),
+    };
 }
 
 export async function closePosition(symbolRaw: string, source = 'close command'): Promise<PositionActionOutcome> {
@@ -590,35 +614,53 @@ export async function closePosition(symbolRaw: string, source = 'close command')
         const qty = Math.abs(pos.quantity);
         const closeAction = isLong ? OrderAction.SELL : OrderAction.BUY;
 
-        // Round-5 review: the gap-open over-close race — a resting close
-        // and a triggered stop both filling — dies when the close JOINS the
-        // exits' OCA group: the broker cancels the losers of the race
-        // atomically. Join only when the group is unambiguous (one distinct
-        // group among OUR exit orders); stacked positions with two pairs
-        // fall back to the fill-gated cleanup.
+        // Round-9 review: an automated close either shares ONE atomic
+        // exclusion scheme with every working Dexter exit, or it does not
+        // go out. Proceeding unjoined embedded the over-close race (a stop
+        // and the close both filling = reversal); "documented trade-off"
+        // is not a fix. Cases:
+        //   complete view, no Dexter exits  → nothing to race, proceed
+        //   complete view, wholly one group → JOIN it
+        //   multi-group / ungrouped exits   → REFUSE with instructions
+        //   incomplete view / probe failure → REFUSE (unprovable book)
         let joinOcaGroup: string | null = null;
         try {
             const exitView = await fetchOpenOrdersFor(api, symbol, closeAction, closeDeps.probeTimeoutMs);
             if (!exitView.complete) {
-                // A partial view can show one clean group while hiding an
-                // ungrouped exit — joining on it is partial coverage.
-                logger.warn(`[position-actions] ${symbol}: open-orders snapshot incomplete — close not OCA-joined`);
+                recentlyClosed.delete(symbol);
+                return {
+                    ok: false,
+                    message:
+                        `⛔ Cannot close ${symbol} safely right now: the open-orders snapshot did not complete, ` +
+                        `so a working exit could be hidden — the close and a hidden stop could BOTH fill and ` +
+                        `reverse the position. Retry in a moment.`,
+                };
             }
-            const ours = exitView.complete ? exitView.orders.filter((o) => OUR_REF.test(o.orderRef ?? '')) : [];
+            const ours = exitView.orders.filter((o) => OUR_REF.test(o.orderRef ?? ''));
             const groups = [...new Set(ours.filter((o) => o.ocaGroup !== null).map((o) => o.ocaGroup as string))];
             const ungrouped = ours.filter((o) => o.ocaGroup === null).length;
-            // Round-7 review: an UNGROUPED exit next to a grouped pair means
-            // the join would only cover part of the book — the ungrouped
-            // order keeps racing the close. Join only a WHOLLY single-group
-            // book; everything else falls back to fill-gated cleanup.
-            if (groups.length === 1 && ungrouped === 0) {
+            if (ours.length === 0) {
+                // Unprotected position — nothing can race the close.
+            } else if (groups.length === 1 && ungrouped === 0) {
                 joinOcaGroup = groups[0]!;
                 logger.info(`[position-actions] ${symbol}: close joins exit OCA group '${joinOcaGroup}' — broker-side mutual exclusion with the stop/target`);
-            } else if (groups.length > 1 || ungrouped > 0) {
-                logger.warn(`[position-actions] ${symbol}: exit book not wholly one OCA group (${groups.length} group(s), ${ungrouped} ungrouped) — close not OCA-joined; post-fill cleanup covers them`);
+            } else {
+                recentlyClosed.delete(symbol);
+                return {
+                    ok: false,
+                    message:
+                        `⛔ Cannot close ${symbol} atomically: its exit book spans ${groups.length} OCA group(s)` +
+                        `${ungrouped > 0 ? ` plus ${ungrouped} ungrouped exit(s)` : ''} — the close cannot be made ` +
+                        `mutually exclusive with ALL of them, and a stop filling alongside the close would REVERSE ` +
+                        `the position. Cancel the extra exit pair first ('cancel ${symbol}' or TWS), then close.`,
+                };
             }
         } catch (err) {
-            logger.warn(`[position-actions] ${symbol}: OCA-group probe failed (close proceeds unjoined): ${err}`);
+            recentlyClosed.delete(symbol);
+            return {
+                ok: false,
+                message: `⛔ Cannot close ${symbol} safely: the exit-book probe failed (${err instanceof Error ? err.message : err}). Retry in a moment.`,
+            };
         }
 
         // Review 2026-08-21 (round 4): the tracker registration must exist
@@ -713,19 +755,44 @@ export async function closePosition(symbolRaw: string, source = 'close command')
         // placement) and may have started its own fire-and-forget cleanup;
         // this awaited pass is the deterministic one the operator report
         // counts, and double-cancel of an already-dead order is a no-op.
-        const cancelledExits = await cleanupExitsAfterClose(api, symbol);
+        const cleanup = await cleanupExitsAfterClose(api, symbol);
 
-        logger.info(`[position-actions] closed ${symbol}: ${order.action} ${qty} MKT (order ${orderId}) FILLED, ${cancelledExits} tracked exit order(s) cancelled`);
+        // Round-9 review: "the position is flat" is a POSITION claim — when
+        // cleanup saw an exit fill during the race, was unverified, or left
+        // orders working, re-read the position book before claiming it.
+        let flatSuffix = 'the position is flat.';
+        if (cleanup.exitFilledDuringClose || !cleanup.verified || cleanup.stillWorking.length > 0) {
+            try {
+                const after = (await fetchPositions(api)).find((p) => p.symbol === symbol);
+                if (after && after.quantity !== 0) {
+                    flatSuffix = `⚠️ the position is NOT flat: ${after.quantity > 0 ? 'LONG' : 'SHORT'} ${Math.abs(after.quantity)} remains — ` +
+                        `an exit filled alongside the close (over-close race). Review 'positions' NOW.`;
+                    logger.error(`[position-actions] ${symbol}: post-close position check shows ${after.quantity} — NOT flat after close+cleanup incident`);
+                } else {
+                    flatSuffix = 'the position book confirms FLAT (re-checked after a cleanup incident).';
+                }
+            } catch {
+                flatSuffix = "⚠️ flatness could NOT be re-verified — check 'positions'.";
+            }
+        }
+        const exitsNote = cleanup.verified
+            ? (cleanup.confirmedCancelled > 0
+                ? `${cleanup.confirmedCancelled} resting exit order(s) cancelled (broker-verified).`
+                : `No resting exits needed cancelling.`)
+            : `⚠️ Exit cleanup ran but could NOT be verified (partial book view) — treat no cancellation as confirmed; check 'orders'.`;
+        const workingNote = cleanup.stillWorking.length > 0
+            ? ` ⚠️ ${cleanup.stillWorking.length} order(s) STILL WORKING despite cleanup — cancel in TWS.`
+            : '';
+
+        logger.info(`[position-actions] closed ${symbol}: ${order.action} ${qty} MKT (order ${orderId}) FILLED, ${cleanup.confirmedCancelled} exit(s) confirmed cancelled (verified=${cleanup.verified})`);
         return {
             ok: true,
             // Round 4: eod-triage and stacked-close flows gate on this —
             // omitting it made every filled close read as not-closed.
             state: 'filled',
             message:
-                `🔚 Closed ${symbol}: ${order.action} ${qty} at market (order ${orderId}) — FILLED, the position is flat. ` +
-                (cancelledExits > 0
-                    ? `${cancelledExits} resting bracket/exit order(s) for ${symbol} cancelled with it.`
-                    : `Note: any resting exits for ${symbol} should be reviewed ('orders').`),
+                `🔚 Closed ${symbol}: ${order.action} ${qty} at market (order ${orderId}) — FILLED, ${flatSuffix} ` +
+                exitsNote + workingNote,
         };
     } catch (err) {
         // The close did NOT go out (post-placement failures are absorbed by
