@@ -24,10 +24,16 @@ describe('risk_manager sizing delegates to the real sizer (the 2× fix)', () => 
         expect(r.checks.find((c) => c.rule === 'position_size')?.detail).toContain('same math');
     });
 
-    test('an unscored candidate is sized at the low multiplier, like acceptance would', () => {
+    test('an unscored candidate sizes FLAT by default; banding is opt-in config', () => {
+        // Production defaults are FLAT until the frozen sample proves
+        // decile monotonicity (VALIDATION-PROTOCOL.md, review 2026-08-21):
+        // unscored gets the same $250 budget ÷ $5 = 50 shares…
+        const flat = validateTrade(input(), 100_000, DEFAULT_RULES);
+        expect(flat.suggestedShares).toBe(50);
+        // …and the banding MECHANISM still works when configured:
         // $250 × 0.35 = $87.50 ÷ $5 = 17 shares.
-        const r = validateTrade(input(), 100_000, DEFAULT_RULES);
-        expect(r.suggestedShares).toBe(17);
+        const banded = validateTrade(input(), 100_000, { ...DEFAULT_RULES, sizing_low_mult: 0.35 });
+        expect(banded.suggestedShares).toBe(17);
     });
 
     test('earnings bets size against the gap, and a disabled class is refused like the gate', () => {
@@ -44,8 +50,8 @@ describe('risk_manager sizing delegates to the real sizer (the 2× fix)', () => 
             100_000,
             { ...DEFAULT_RULES, earnings_bet_enabled: true },
         );
-        // 0.25% × $100k × 0.35 (unscored) = $87.50 ÷ $25 gap/share = 3 shares.
-        expect(enabled.suggestedShares).toBe(3);
+        // 0.25% × $100k (flat multiplier) = $250 ÷ $25 gap/share = 10 shares.
+        expect(enabled.suggestedShares).toBe(10);
     });
 
     test('the position-value cap still bounds the suggestion (inside the sizer)', () => {

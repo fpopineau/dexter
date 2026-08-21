@@ -17,6 +17,7 @@ import {
     __attachApiForTests,
     __handleOrderStatusForTests,
     __resetTrackerForTests,
+    __setAckWindowForTests,
     __setFinalizeDelayForTests,
     trackExecutedProposal,
     trackManualExit,
@@ -70,12 +71,14 @@ async function trackedProposal(symbol: string, quantity = 10, entry = 100) {
 beforeEach(() => {
     __resetTrackerForTests();
     __setFinalizeDelayForTests(10);
+    __setAckWindowForTests(15);
     __setManagedAccountsForTests(['DU9999999']);
 });
 
 afterAll(() => {
     __resetTrackerForTests();
     __setFinalizeDelayForTests(null);
+    __setAckWindowForTests(null);
     __setManagedAccountsForTests([]);
     __attachApiForTests(null);
     if (prevDataDir === undefined) delete process.env.DEXTER_DATA_DIR;

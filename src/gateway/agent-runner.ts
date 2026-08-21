@@ -80,7 +80,7 @@ export async function runAgentForMessage(req: AgentRunRequest): Promise<string> 
   const session = isolated ? null : getSession(req.sessionKey, req.model);
   let finalAnswer = '';
 
-  const run = () => withAgentLane(deriveLane(req), runInner);
+  const run = () => withAgentLane(deriveLane(req), runInner, req.model);
   const runInner = async () => {
     if (session) {
       session.isRunning = true;

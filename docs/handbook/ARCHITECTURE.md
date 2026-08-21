@@ -348,24 +348,37 @@ quality of *judgment*, never *safety*.
 
 ## 12. Known limits
 
-Honest edges of the current design:
+Honest edges of the current design (refreshed 2026-08-21 — stale entries
+here are a safety issue; see REMEDIATION-2026-08-20.md for what changed):
 
 - **Kill-switch checks at order time**, not continuously — between orders a
   breach goes unnoticed (open positions still have bracket stops). A
   periodic check in the engine loop is a planned hardening.
 - **The kill-switch trusts IBKR's `reqPnL` daily figure** — resets on
   IBKR's schedule, includes unrealized P&L of held positions.
-- **DAY-tif brackets expire at the close**: an intraday trade that neither
-  hits target nor stop keeps its position with no exits after the close.
-  The tracker labels this `manual`; the Pre-Close Review is the human
-  backstop.
+- **DAY-tif brackets expiring at the close now CONVERT**: the EOD triage
+  (15:52 / 12:52 half-days, with a 15:40 preview and `keep SYMBOL`
+  overrides) vets keeps against the overnight caps at market value, and
+  the tracker's 🌙 conversion re-protects survivors under a GTC pair. The
+  conversion for a position triage MISSED still happens un-vetted with a
+  warning — that residual is deliberate (the alternative was the
+  orphaned-keep hole).
+- **Sector and overnight exposure are hard-enforced** at acceptance (the
+  UNKNOWN-sector bucket included) and at the pre-bell vet — no longer
+  advisory. `min_avg_volume`, spread and ADV caps are deterministic too.
 - **Auto-exec daily cap is in-memory** — a restart resets the counter
   (paper-mode courtesy, not a safety gate).
-- **Trigger/outcome alerts need one prior WhatsApp session** — after a
-  session-store wipe, alerts are skipped (logged) until the user messages
-  the bot once.
-- **Sector-exposure and overnight-exposure rules remain advisory** (LLM +
-  `risk_manager`) — enforcing them deterministically requires live position
-  and sector data in the executor; planned.
+- **Trigger alerts need one prior WhatsApp session for DELIVERY** — the
+  evaluation and decline ledger run regardless; only the outbound message
+  is skipped until the user messages the bot once.
+- **Overnight gap risk is modeled only for earnings bets** — intraday and
+  swing positions held overnight are stop-distance sized, and a stop does
+  not bound gap loss. A general overnight gap-risk model is open backlog.
+- **Reduce-only is a point-in-time check** — a resting reduce order can
+  outlive the position it reduced and open a reverse position; it is not
+  broker-native reduce-only. Open backlog.
+- **Broker-union exposure values positions at avgCost**, not marked value
+  (appreciated positions understate); planned-risk headroom and sector
+  sums are DB-side. The WP3 adoption sweep narrows, not closes, this.
 - **Scanner depth** — IBKR returns ~25 rows/scan; the engine sees the
   scanners' view of the market, not the whole tape.

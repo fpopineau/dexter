@@ -215,8 +215,11 @@ describe('buy-now entry-pricing filter (2026-08-18 entry audit)', () => {
         );
         expect(refused.ok).toBe(false);
         expect(refused.violations.join(' ')).toContain('first-uptick');
+        // Geometry judged at the CAP since review 2026-08-21: at 101.15 the
+        // worst-fill risk is 3.40, so the confirmation margin is 0.85
+        // (0.25 × 3.40) and the target must clear 2R from the cap.
         const ok = checkProposalRisk(
-            longProposal({ entryType: 'STP_LMT', entry: 100.75, entryLimit: 101.05, stop: 97.75, target: 106.75 }),
+            longProposal({ entryType: 'STP_LMT', entry: 100.85, entryLimit: 101.15, stop: 97.75, target: 108.05 }),
             { lastPrice: 100 },
             RULES,
         );
@@ -413,10 +416,11 @@ describe('per-trade risk budget', () => {
 });
 
 describe('STP_LMT (momentum) entries', () => {
-    test('valid long stop-limit entry passes', () => {
-        // risk 2.2 (102.2−100.0), reward 4.6 (106.8−102.2) → R/R 2.09 ≥ 2.0
+    test('valid long stop-limit entry passes (geometry at the limit cap)', () => {
+        // Judged at the CAP (worst permitted fill, review 2026-08-21):
+        // risk 2.8 (102.8−100.0), reward 5.65 (108.45−102.8) → R/R 2.02 ≥ 2.0
         const r = checkProposalRisk(
-            longProposal({ entryType: 'STP_LMT', entry: 102.2, entryLimit: 102.8, stop: 100.0, target: 106.8 }),
+            longProposal({ entryType: 'STP_LMT', entry: 102.2, entryLimit: 102.8, stop: 100.0, target: 108.45 }),
             {},
             RULES,
         );
@@ -1085,5 +1089,40 @@ describe('checkMicrostructure (WP7 — the market must be able to absorb the ord
         const unknown = checkMicrostructure({ ...GOOD, halted: null }, RULES7);
         expect(unknown.violations).toEqual([]);
         expect(unknown.notes.join(' ')).toContain('halt');
+    });
+});
+
+describe('STP_LMT worst-fill risk basis (review 2026-08-21)', () => {
+    test('geometry that passes at the trigger but fails at the limit cap is refused', () => {
+        // Trigger 100, cap 104, stop 95, target 112: at the trigger R/R is
+        // 12/5 = 2.4 (passes); at the cap — the worst permitted fill — it
+        // is 8/9 ≈ 0.89. The trade the broker can actually give us fails.
+        const r = checkProposalRisk(
+            longProposal({ entryType: 'STP_LMT', entry: 100, entryLimit: 104, stop: 95, target: 112 }),
+            {},
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('limit cap');
+    });
+
+    test('position value and share caps are judged at the cap too', () => {
+        // 50 shares at cap 104 = $5,200 > 5% of $100k; at the trigger it
+        // would have squeaked under.
+        const r = checkProposalRisk(
+            longProposal({ entryType: 'STP_LMT', entry: 100, entryLimit: 104, stop: 92, target: 130, quantity: 50 }),
+            { netLiquidation: 100_000 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('exceeds');
+    });
+
+    test('plannedWorstLossUsd prices unfilled STP_LMT rows at the worse basis', () => {
+        // Long: cap 104 is farther from stop 95 than trigger 100 → 9/share.
+        expect(plannedWorstLossUsd(
+            { quantity: 10, entry: 100, entryLimit: 104, stop: 95 },
+            RULES,
+        )).toBe(90);
     });
 });

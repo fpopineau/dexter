@@ -266,6 +266,36 @@ suite 667 green). Double-close guard (D4 first-wins), timestamp hourAgo,
 finalize event buffer + resurrect re-dispatch, closePosition orphan-GTC
 sweep by orderRef (closes 2026-08-06 finding 10).
 
+## Review 2 triage (2026-08-21, reviewed at abae294)
+
+A second external review confirmed the no-go disposition (shared) and
+surfaced new items. **Fixed same day** (commit refs in git log):
+confidence sizing FLATTENED to 1.0/1.0 in defaults + live yaml (the
+protocol's own mandate — the 80+ band is 0-for-5 on the ledger);
+ack-window terminal statuses (Inactive/Cancelled) now classify as
+rejection; closePosition gained a per-symbol in-flight mutex + a
+recently-closed refusal + ACK-GATED protection removal (rejected close →
+exits untouched; unconfirmed → exits left standing, operator resolves);
+protectPosition and the WP2 resize pair are broker-acked (rejection →
+sweep + honest NOT-protected report / old exits kept); STP_LMT risk,
+R/R, position value, sizing and headroom all judge at the LIMIT CAP (the
+worst permitted fill); proposals record the proposing MODEL (judgment-
+purity for the frozen sample); the live ledger migrated cleanly and
+MFE/MAE backfilled 4/86 → 69/86 (15 horizon-expired marked);
+ARCHITECTURE.md known-limits rewritten to current behavior.
+
+**Accepted/recorded (not fixed)**: no demonstrated edge (the protocol IS
+the answer); backtest validates a proxy of the live policy (recorded in
+WP9 — the paper sample is the real validation); D2 keep-override and the
+NetLiq-unavailable warn are deliberate decisions; avgCost-valued broker
+union, DB-side sector/planned-risk, qty/direction drift reconciliation,
+exposure-in-waiting for unknown orders, general overnight gap-risk
+model, broker-native reduce-only, regime-conditioned scorer routing,
+RVOL double-counting, scanner depth, simulator microstructure (queue/
+partial/latency/borrow) and stale FirstRate/GDELT archives → open
+backlog, none gate the PAPER validation. Auto-exec's ≥80 threshold
+contaminating band sampling = operator decision D6 (pending).
+
 **PHASE 4 STATUS: protocol PRE-REGISTERED 2026-08-21**
 ([VALIDATION-PROTOCOL.md](VALIDATION-PROTOCOL.md)); the freeze tag
 `validation-freeze-1` is the OPERATOR'S to place after its prerequisites

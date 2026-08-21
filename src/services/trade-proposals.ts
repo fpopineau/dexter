@@ -68,6 +68,9 @@ export interface TradeProposal {
     /** Original intended quantity when a partial entry downgraded
      *  `quantity` to the real fill (WP2); null = never downgraded. */
     plannedQuantity: number | null;
+    /** Model id that proposed the trade (review 2026-08-21) — the frozen
+     *  sample's judgment-purity check reads this. */
+    model: string | null;
     /** Failure or rejection detail. */
     note: string | null;
     // --- Outcome fields (populated by the outcome tracker) ---
@@ -397,6 +400,10 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     // to the REAL position and the original intent is preserved here —
     // analytics can still ask "how often do we get our full size?".
     ['planned_quantity', 'INTEGER'],
+    // Review 2026-08-21: which model proposed the trade. The frozen
+    // validation sample must be judgment-pure — a runtime model switch
+    // mid-sample is detectable instead of invisible.
+    ['model', 'TEXT'],
 ];
 
 /** Replay/instrumentation columns added after the refusals-table release. */
@@ -444,6 +451,7 @@ interface Row {
     order_ids: string | null;
     order_perm_ids: string | null;
     planned_quantity: number | null;
+    model: string | null;
     note: string | null;
     executed_at: number | null;
     entry_fill_price: number | null;
@@ -486,6 +494,7 @@ function fromRow(r: Row): TradeProposal {
         orderIds: r.order_ids ? (JSON.parse(r.order_ids) as number[]) : null,
         orderPermIds: r.order_perm_ids ? (JSON.parse(r.order_perm_ids) as Array<number | null>) : null,
         plannedQuantity: r.planned_quantity ?? null,
+        model: r.model ?? null,
         note: r.note,
         executedAt: r.executed_at ?? null,
         entryFillPrice: r.entry_fill_price ?? null,
@@ -516,6 +525,8 @@ export interface CreateProposalInput {
     symbol: string;
     direction: 'long' | 'short';
     entryType: 'LMT' | 'MKT' | 'STP_LMT';
+    /** Model id that proposed the trade (judgment-purity stamp). */
+    model?: string;
     entry?: number;
     /** Required for STP_LMT: the limit cap for the triggered entry. */
     entryLimit?: number;
@@ -635,6 +646,12 @@ export async function createProposal(
         input.entryContext?.extensionAtr ?? null, input.entryContext?.vwapDistPct ?? null,
         input.entryContext?.dayMovePct ?? null, input.entryContext?.minutesSinceOpen ?? null,
     );
+
+    // Judgment-purity stamp (review 2026-08-21): record which model
+    // proposed the trade — the frozen sample verifies it never mixed.
+    if (input.model) {
+        database.query<void>(`UPDATE proposals SET model = ? WHERE id = ?`).run(input.model, id);
+    }
 
     logger.info(`[proposals] created ${id}: ${input.direction} ${input.quantity} ${input.symbol} (source: ${input.source})`);
     const created = await getProposal(id);
@@ -944,9 +961,19 @@ export async function listClosedMissingExcursion(limit: number): Promise<TradePr
            AND entry_fill_price IS NOT NULL AND entry_filled_at IS NOT NULL
            AND closed_at IS NOT NULL
            AND (exit_reason IS NULL OR exit_reason != 'cancelled')
+           AND (note IS NULL OR note NOT LIKE '%excursion-horizon-expired%')
          ORDER BY closed_at ASC LIMIT ?`,
     ).all(limit);
     return rows.map(fromRow);
+}
+
+/** Permanently mark a row as beyond the bar horizon — honest nulls, and
+ *  the nightly sweep stops re-selecting it into every batch. */
+export async function markExcursionHorizonExpired(id: string): Promise<void> {
+    const database = await getDb();
+    database.query<void>(
+        `UPDATE proposals SET note = COALESCE(note || ' — ', '') || 'excursion-horizon-expired (fill older than the IBKR intraday bar horizon)', updated_at = ? WHERE id = ?`,
+    ).run(Date.now(), id.trim().toUpperCase());
 }
 
 /** Start of the current America/New_York day in epoch ms. */

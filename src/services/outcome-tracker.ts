@@ -33,7 +33,9 @@
  *       (recorded as null, never guessed).
  */
 
+import { BRACKET_ACK_TIMEOUT_MS } from '@/tools/ibkr/bracket.js';
 import { allocReqId, getIBApi, getVerifiedSingleAccount, isNonFatalIbkrError, onReconnect } from '@/tools/ibkr/connection.js';
+import { watchOrderAcks } from '@/tools/ibkr/order-ack.js';
 import { withOrderLock } from '@/tools/ibkr/order-lock.js';
 import { getNextValidOrderId } from '@/tools/ibkr/orders.js';
 import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
@@ -245,6 +247,8 @@ export function onTradeClosed(cb: TradeClosedCallback): () => void {
  *  Mutable for the fake-API harness (real timers, shrunk delay). */
 const FINALIZE_DELAY_MS = 2_500;
 let finalizeDelayMs = FINALIZE_DELAY_MS;
+/** Broker-ack window for the resize replacement pair (test-overridable). */
+let ackWindowMs = BRACKET_ACK_TIMEOUT_MS;
 /** Executed proposals older than this are swept as 'unknown' at startup. */
 const STALE_TRACKING_MS = 5 * 24 * 3600_000;
 
@@ -827,10 +831,14 @@ async function resizeAfterPartialEntry(trade: TrackedTrade): Promise<void> {
         const account = getVerifiedSingleAccount();
         const exitAction = trade.direction === 'long' ? OrderAction.SELL : OrderAction.BUY;
         const contract: Contract = { symbol: trade.symbol, secType: SecType.STK, exchange: 'SMART', currency: 'USD' };
-        const { newStopId, newTpId } = await withOrderLock(async () => {
+        const { newStopId, newTpId, rejection } = await withOrderLock(async () => {
             const stopId = await getNextValidOrderId(api);
             const tpId = stopId + 1;
             const ocaGroup = `dexter-resize-${trade.symbol}-${stopId}`;
+            // Review 2026-08-21: the replacement pair must be ACKNOWLEDGED
+            // before the old full-size exits are cancelled — watch armed
+            // before placement.
+            const watch = watchOrderAcks(api, [stopId, tpId]);
             // GTC deliberately (auto-protect convention): a resize can land
             // near or after the bell, where fresh DAY exits are broker
             // rejections — protection must survive the session either way.
@@ -844,10 +852,35 @@ async function resizeAfterPartialEntry(trade: TrackedTrade): Promise<void> {
                 action: exitAction, totalQuantity: cum, orderType: OrderType.LMT,
                 lmtPrice: p.target, tif: TimeInForce.GTC, ocaGroup, ocaType: 1, transmit: true,
             };
-            api.placeOrder(stopId, contract, stopOrder);
-            api.placeOrder(tpId, contract, tpOrder);
-            return { newStopId: stopId, newTpId: tpId };
+            try {
+                api.placeOrder(stopId, contract, stopOrder);
+                api.placeOrder(tpId, contract, tpOrder);
+            } catch (err) {
+                watch.dispose();
+                throw err;
+            }
+            const states = await watch.settle(ackWindowMs);
+            const rejected = states.find((s) => s.rejection !== null);
+            if (rejected) {
+                // Replacement refused: sweep any surviving new leg and KEEP
+                // the old full-size exits (over-sized protection beats none).
+                for (const id of [stopId, tpId]) {
+                    try { api.cancelOrder(id); } catch { /* already dead */ }
+                }
+                return { newStopId: stopId, newTpId: tpId, rejection: `order ${rejected.orderId}: ${rejected.rejection!.reason}` };
+            }
+            return { newStopId: stopId, newTpId: tpId, rejection: null as string | null };
         });
+
+        if (rejection) {
+            logger.error(`[outcome-tracker] ${trade.proposalId} resize pair REJECTED (${rejection}) — old full-size exits left working`);
+            await notifyAutoProtect(
+                `⚠️ ${trade.proposalId} ${trade.symbol}: entry filled ${cum}/${planned} then terminated; the RESIZED exits were ` +
+                `rejected by the broker (${rejection}). The original FULL-SIZE exits were left working as protection — ` +
+                `a fill would over-close and reverse; trim them to ${cum} in TWS or close the position.`,
+            );
+            return;
+        }
 
         const oldTp = trade.takeProfitOrderId;
         const oldStop = trade.stopOrderId;
@@ -1278,6 +1311,11 @@ export function __resetTrackerForTests(): void {
 /** Override the commission-trailing finalize delay; null restores. */
 export function __setFinalizeDelayForTests(ms: number | null): void {
     finalizeDelayMs = ms ?? FINALIZE_DELAY_MS;
+}
+
+/** Override the broker-ack window (fake-API harness); null restores. */
+export function __setAckWindowForTests(ms: number | null): void {
+    ackWindowMs = ms ?? BRACKET_ACK_TIMEOUT_MS;
 }
 
 /** Inject a fake broker attachment (resize path); null detaches. */

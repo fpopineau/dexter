@@ -4,8 +4,15 @@ import { computeQuantity, confidenceMultiplier } from './position-sizer.js';
 
 // The live small-account shape (risk-rules.live.yaml values) — pinned here so
 // the tests don't depend on the yaml files or the active profile.
+// Production defaults are FLAT (1.0/1.0) until the frozen sample proves
+// decile monotonicity (VALIDATION-PROTOCOL.md, review 2026-08-21). Tests
+// that exercise the BANDING MECHANISM opt into explicit non-flat bands —
+// the mechanism stays supported as config; the default policy is flat.
+const BANDED = { sizing_half_mult: 0.6, sizing_low_mult: 0.35 };
+
 const LIVE: RiskRules = {
     ...DEFAULT_RULES,
+    ...BANDED,
     max_position_pct: 20,
     max_risk_per_trade_pct: 1.0,
     min_risk_budget_usd: 15,
@@ -96,7 +103,7 @@ describe('computeQuantity — short proposals', () => {
 });
 
 describe('fractional shares (small live account)', () => {
-    const FRAC: RiskRules = { ...DEFAULT_RULES, max_position_pct: 20, max_risk_per_trade_pct: 1.0, min_risk_budget_usd: 15, fractional_shares: true };
+    const FRAC: RiskRules = { ...DEFAULT_RULES, ...BANDED, max_position_pct: 20, max_risk_per_trade_pct: 1.0, min_risk_budget_usd: 15, fractional_shares: true };
 
     test('isValidQuantity: integers-only off, 0.0001 resolution on', async () => {
         const { isValidQuantity } = await import('./position-sizer.js');

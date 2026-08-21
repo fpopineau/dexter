@@ -24,7 +24,7 @@ import {
     listProposals,
 } from '@/services/trade-proposals.js';
 import { rejectProposal } from '@/services/proposal-executor.js';
-import { currentAgentLane } from '@/agent/lane-context.js';
+import { currentAgentLane, currentAgentModel } from '@/agent/lane-context.js';
 import { fetchDailyRiskContext } from '../ibkr/daily-atr.js';
 import { formatToolResult } from '../types.js';
 import { logger } from '@/utils';
@@ -194,8 +194,15 @@ export function createTradeProposalsTool() {
                             if (netLiq == null || !(netLiq > 0)) {
                                 return formatToolResult({ error: 'auto-sizing needs the live account net liquidation and it is unavailable — retry shortly or pass an explicit quantity' });
                             }
+                            // Review 2026-08-21: STP_LMT sizes at the LIMIT
+                            // cap (the worst permitted fill) — sizing at the
+                            // trigger under-counts risk when the fill lands
+                            // at the cap.
+                            const sizingBasis = input.entryType === 'STP_LMT' && input.entryLimit != null && input.entryLimit > 0
+                                ? input.entryLimit
+                                : input.entry;
                             const sized = computeQuantity({
-                                entry: input.entry, stop: input.stop, score: input.score, netLiquidation: netLiq,
+                                entry: sizingBasis, stop: input.stop, score: input.score, netLiquidation: netLiq,
                                 tradeClass: input.tradeClass, worstCaseGapPct: input.worstCaseGapPct,
                             });
                             if (sized.quantity == null) {
@@ -230,6 +237,8 @@ export function createTradeProposalsTool() {
                             // cron:<name> / whatsapp / agent — read from the
                             // run context, never self-reported by the model.
                             source: currentAgentLane() ?? 'agent',
+                            // Judgment-purity stamp (review 2026-08-21).
+                            model: currentAgentModel() ?? undefined,
                             expiresMinutes: input.expiresMinutes,
                             entryContext,
                         }, {

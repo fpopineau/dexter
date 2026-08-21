@@ -130,3 +130,17 @@ describe('placeBracketOrderCore — acknowledgement outcomes', () => {
         expect(fake.cancelled.length).toBe(3);
     });
 });
+
+describe('ack-window terminal statuses (review 2026-08-21)', () => {
+    test("an immediate 'Inactive' is a rejection, not an acknowledgement", async () => {
+        const fake = new FakeIb();
+        const result = await place(fake, (ids) => {
+            fake.emit(EventName.orderStatus, ids[0], 'Inactive', 0, 10, 0, 0);
+            fake.emit(EventName.orderStatus, ids[1], 'PreSubmitted', 0, 10, 0, 1);
+            fake.emit(EventName.orderStatus, ids[2], 'PreSubmitted', 0, 10, 0, 2);
+        });
+        expect(result.ack.outcome).toBe('rejected');
+        expect(result.ack.rejection?.reason).toContain('Inactive');
+        expect(fake.cancelled.length).toBe(3); // legs swept
+    });
+});

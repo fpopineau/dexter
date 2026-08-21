@@ -13,6 +13,13 @@ positive expectancy after costs, not improved loss control.
   see prerequisites). From the tag: no rule, gate, threshold, scorer, or
   sizing changes. The 2026-08-19 discovery rules and every remediation
   WP are part of what freezes.
+- **The judgment policy freezes too** (review 2026-08-21): the runtime
+  model/provider settings are pinned at tag time and recorded in the
+  validation journal; every proposal stamps its `model` column, and the
+  final evaluation VERIFIES the sample is single-model. A mid-sample
+  model change ends the window like any behavior change.
+- Confidence sizing is FLAT (multipliers 1.0) in both profiles as of
+  2026-08-21 — verified in config, not just mandated here.
 - Bug fixes during the window are allowed ONLY for accounting
   correctness (a fill recorded wrong, a P&L mis-attributed), never for
   behavior, and each is logged in the validation journal

@@ -156,8 +156,12 @@ export const DEFAULT_RULES: RiskRules = {
     profit_trail_pullback_atr_mult: 0.75,
     sizing_full_score: 80,
     sizing_half_score: 60,
-    sizing_half_mult: 0.6,
-    sizing_low_mult: 0.35,
+    // FLAT until calibrated (review 2026-08-21 + VALIDATION-PROTOCOL.md):
+    // confidence-weighted sizing may only leave 1.0 after the frozen
+    // sample shows score-decile monotonicity — the current ledger's 80+
+    // band is 0-for-5, the OPPOSITE of what an up-weight assumes.
+    sizing_half_mult: 1.0,
+    sizing_low_mult: 1.0,
     min_risk_budget_usd: 0,
     profit_trail_replaces_target: true,
     fractional_shares: false,

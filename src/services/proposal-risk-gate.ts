@@ -125,7 +125,13 @@ export function plannedWorstLossUsd(
     },
     rules: RiskRules = getRiskRules(),
 ): number | null {
-    const basis = t.entryFillPrice ?? t.entry ?? t.entryLimit ?? null;
+    // Unfilled rows price at the WORST basis (review 2026-08-21): when both
+    // entry and entryLimit exist (STP_LMT), the one farther from the stop
+    // is the fill the headroom must survive. A real fill overrides both.
+    const worstUnfilled = t.entry != null && t.entryLimit != null && t.entryLimit > 0
+        ? (Math.abs(t.entryLimit - t.stop) > Math.abs(t.entry - t.stop) ? t.entryLimit : t.entry)
+        : t.entry ?? t.entryLimit ?? null;
+    const basis = t.entryFillPrice ?? worstUnfilled;
     if (basis == null || !(basis > 0) || !(t.quantity > 0)) return null;
     if ((t.tradeClass ?? 'intraday') === 'earnings-bet') {
         const perShare = gapRiskPerShare(basis, t.worstCaseGapPct ?? undefined, rules);
@@ -317,12 +323,23 @@ export function checkProposalRisk(
     }
 
     // --- Minimum risk/reward ---
-    const risk = Math.abs(entry - p.stop);
-    const reward = Math.abs(p.target - entry);
+    // Review 2026-08-21: for STP_LMT the WORST permitted fill is the LIMIT
+    // cap, not the trigger — a fill at the cap widens the stop distance and
+    // narrows the reward, so the geometry is judged at the cap (the fill
+    // the trade can actually get). LMT/MKT keep `entry` as the basis (LMT
+    // fills at-or-better; MKT drift is the accept-time chase gate's job).
+    const riskBasis = p.entryType === 'STP_LMT' && p.entryLimit != null && p.entryLimit > 0
+        ? p.entryLimit
+        : entry;
+    const risk = Math.abs(riskBasis - p.stop);
+    const reward = Math.abs(p.target - riskBasis);
     const riskReward = risk > 0 ? Math.round((reward / risk) * 100) / 100 : null;
     const rrFailed = riskReward !== null && riskReward < rules.min_risk_reward;
     if (rrFailed) {
-        violations.push(`risk/reward ${riskReward}:1 is below the minimum ${rules.min_risk_reward}:1`);
+        violations.push(
+            `risk/reward ${riskReward}:1 is below the minimum ${rules.min_risk_reward}:1` +
+            (riskBasis !== entry ? ` (judged at the STP_LMT limit cap ${riskBasis} — the worst permitted fill)` : ''),
+        );
     }
 
     // --- Entry pricing vs the live tape (buy-now chase filter) ---
@@ -576,13 +593,15 @@ export function checkProposalRisk(
     }
 
     // --- Position size vs account (acceptance-time) ---
-    const positionValue = Math.round(p.quantity * entry * 100) / 100;
+    // Same worst-fill basis as the R/R check (review 2026-08-21): an
+    // STP_LMT filling at its cap carries the cap's notional.
+    const positionValue = Math.round(p.quantity * riskBasis * 100) / 100;
     if (ctx.netLiquidation !== undefined && ctx.netLiquidation > 0) {
         const maxValue = (rules.max_position_pct / 100) * ctx.netLiquidation;
         if (positionValue > maxValue) {
-            const maxShares = Math.floor(maxValue / entry);
+            const maxShares = Math.floor(maxValue / riskBasis);
             violations.push(
-                `position $${positionValue.toFixed(0)} (${p.quantity} × $${entry}) exceeds ` +
+                `position $${positionValue.toFixed(0)} (${p.quantity} × $${riskBasis}) exceeds ` +
                 `${rules.max_position_pct}% of net liquidation ($${maxValue.toFixed(0)}) — max ${maxShares} shares`,
             );
         }

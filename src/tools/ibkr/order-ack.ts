@@ -48,11 +48,18 @@ export function watchOrderAcks(api: IBApi, orderIds: number[]): OrderAckWatch {
         [...states.values()].every((s) => s.acked);
     const check = () => { if (onSettled && done()) onSettled(); };
 
-    const onOrderStatus = (id: number, _status: string, _filled: number, _remaining: number, _avg: number, permId?: number) => {
+    const onOrderStatus = (id: number, status: string, _filled: number, _remaining: number, _avg: number, permId?: number) => {
         const s = states.get(id);
         if (!s) return;
-        s.acked = true;
         if (typeof permId === 'number' && permId > 0) s.permId = permId;
+        // Review 2026-08-21: a terminal status INSIDE the ack window is a
+        // rejection-equivalent, not an acknowledgement — IBKR reports some
+        // refusals as 'Inactive'/'Cancelled' without an error event.
+        if (status === 'Cancelled' || status === 'ApiCancelled' || status === 'Inactive') {
+            s.rejection ??= { code: null, reason: `order went ${status} immediately after placement` };
+        } else {
+            s.acked = true;
+        }
         check();
     };
     const onOpenOrder = (id: number, _contract: unknown, order: Order) => {

@@ -18,7 +18,7 @@ import { BarSizeSetting, type Bar } from '@stoqey/ib';
 import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
 import { logger } from '@/utils';
 import { barTimeFrameMs, computeTradeExcursion, etFrameMs } from './outcome-tracker.js';
-import { listClosedMissingExcursion, recordTradeExcursion } from './trade-proposals.js';
+import { listClosedMissingExcursion, markExcursionHorizonExpired, recordTradeExcursion } from './trade-proposals.js';
 
 const ET = 'America/New_York';
 /** 02:17 ET nightly — dead air, after the archive/benchmark windows. */
@@ -56,11 +56,13 @@ export async function sweepExcursionsOnce(): Promise<{ filled: number; skipped: 
         if (p.entryFillPrice == null || p.entryFilledAt == null || p.closedAt == null) { skipped++; continue; }
         const ageDays = Math.ceil((Date.now() - p.entryFilledAt) / 86_400_000);
         if (ageDays > MAX_LOOKBACK_DAYS) {
-            // Beyond the reliable bar horizon: mark 0/0? No — nulls stay
-            // honest, and the ORDER BY oldest-first would re-select the row
-            // forever, so record a sentinel note-free skip via log only.
+            // Beyond the reliable bar horizon: nulls stay honest, and a
+            // permanent note marker stops oldest-first from re-selecting
+            // the row into every future batch (observed live 2026-08-21:
+            // 15 expired rows clogged each 20-row pass).
             skipped++;
-            logger.info(`[excursion-sweeper] ${p.id} ${p.symbol}: fill ${ageDays}d old, past the bar horizon — leaving nulls`);
+            await markExcursionHorizonExpired(p.id);
+            logger.info(`[excursion-sweeper] ${p.id} ${p.symbol}: fill ${ageDays}d old, past the bar horizon — marked expired, nulls stand`);
             continue;
         }
         const holdDays = Math.max(1, Math.ceil((p.closedAt - p.entryFilledAt) / 86_400_000));

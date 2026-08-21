@@ -15,18 +15,28 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 
 interface AgentLaneContext {
     lane: string;
+    /** Model id driving this run (review 2026-08-21): the frozen sample
+     *  must not silently mix judgment policies — every proposal records
+     *  which model proposed it. */
+    model?: string;
 }
 
 const storage = new AsyncLocalStorage<AgentLaneContext>();
 
-/** Run `fn` with `lane` visible to everything it awaits. */
-export function withAgentLane<T>(lane: string, fn: () => Promise<T>): Promise<T> {
-    return storage.run({ lane }, fn);
+/** Run `fn` with `lane` (and optionally the model id) visible to
+ *  everything it awaits. */
+export function withAgentLane<T>(lane: string, fn: () => Promise<T>, model?: string): Promise<T> {
+    return storage.run({ lane, model }, fn);
 }
 
 /** The lane of the run this call sits inside, or null outside any run. */
 export function currentAgentLane(): string | null {
     return storage.getStore()?.lane ?? null;
+}
+
+/** The model id of the run this call sits inside, or null. */
+export function currentAgentModel(): string | null {
+    return storage.getStore()?.model ?? null;
 }
 
 /** Pure: lane from an agent-run request. Explicit lane wins; otherwise the

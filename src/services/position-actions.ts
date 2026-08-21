@@ -15,7 +15,9 @@
  * only blocks risk-increasing actions, and protecting/closing reduces risk.
  */
 
+import { BRACKET_ACK_TIMEOUT_MS } from '@/tools/ibkr/bracket.js';
 import { allocReqId, assertAccountsVerified, getIBApi, getVerifiedSingleAccount, isNonFatalIbkrError } from '@/tools/ibkr/connection.js';
+import { watchOrderAcks } from '@/tools/ibkr/order-ack.js';
 import { withOrderLock } from '@/tools/ibkr/order-lock.js';
 import { getNextValidOrderId } from '@/tools/ibkr/orders.js';
 import { getMarketSession, isTradeableSession } from '@/utils/market-hours.js';
@@ -197,6 +199,11 @@ export async function protectPosition(
             // Identity binding (WP1): account + a stable orderRef on every
             // order this module places.
             const account = getVerifiedSingleAccount();
+            const targetId = targetPrice !== undefined ? stopId + 1 : null;
+            const legIds = targetId !== null ? [stopId, targetId] : [stopId];
+            // Review 2026-08-21: "protected" is a broker fact, not a
+            // handoff — arm the ack watch before placement.
+            const watch = watchOrderAcks(api, legIds);
 
             const stopOrder: Order = {
                 orderId: stopId,
@@ -213,31 +220,56 @@ export async function protectPosition(
                 // the first leg sits untransmitted and the position has no stop.
                 transmit: true,
             };
-            api.placeOrder(stopId, stockContract(symbol), stopOrder);
-
-            if (targetPrice !== undefined) {
-                const targetId = stopId + 1;
-                const targetOrder: Order = {
-                    orderId: targetId,
-                    account,
-                    orderRef: `protect-${symbol}:tp`,
-                    action: exitAction,
-                    totalQuantity: qty,
-                    orderType: OrderType.LMT,
-                    lmtPrice: targetPrice,
-                    tif: TimeInForce.GTC,
-                    ocaGroup,
-                    ocaType: 1,
-                    transmit: true,
-                };
-                api.placeOrder(targetId, stockContract(symbol), targetOrder);
+            try {
+                api.placeOrder(stopId, stockContract(symbol), stopOrder);
+                if (targetId !== null) {
+                    const targetOrder: Order = {
+                        orderId: targetId,
+                        account,
+                        orderRef: `protect-${symbol}:tp`,
+                        action: exitAction,
+                        totalQuantity: qty,
+                        orderType: OrderType.LMT,
+                        lmtPrice: targetPrice,
+                        tif: TimeInForce.GTC,
+                        ocaGroup,
+                        ocaType: 1,
+                        transmit: true,
+                    };
+                    api.placeOrder(targetId, stockContract(symbol), targetOrder);
+                }
+            } catch (err) {
+                watch.dispose();
+                throw err;
+            }
+            const states = await watch.settle(BRACKET_ACK_TIMEOUT_MS);
+            const rejected = states.find((s) => s.rejection !== null);
+            if (rejected) {
+                // A half-armed OCA pair is worse than none: sweep the legs
+                // and report the truth — the position is NOT protected.
+                for (const id of legIds) {
+                    try { api.cancelOrder(id); } catch { /* already dead */ }
+                }
                 return {
-                    msg: `, target ${targetPrice} (orders ${stopId}/${targetId}, OCA ${ocaGroup})`,
-                    ids: { stopOrderId: stopId, targetOrderId: targetId },
+                    rejected: `order ${rejected.orderId}: ${rejected.rejection!.reason}`,
+                    msg: '', ids: { stopOrderId: stopId },
                 };
             }
-            return { msg: ` (order ${stopId})`, ids: { stopOrderId: stopId } };
+            const unconfirmed = states.some((s) => !s.acked);
+            const idsOut = targetId !== null ? { stopOrderId: stopId, targetOrderId: targetId } : { stopOrderId: stopId };
+            const msg = targetId !== null
+                ? `, target ${targetPrice} (orders ${stopId}/${targetId}, OCA ${ocaGroup}${unconfirmed ? ', ack PENDING — verify with \'orders\'' : ''})`
+                : ` (order ${stopId}${unconfirmed ? ', ack PENDING — verify with \'orders\'' : ''})`;
+            return { rejected: null as string | null, msg, ids: idsOut };
         });
+
+        if (placed.rejected) {
+            logger.error(`[position-actions] protect ${symbol} REJECTED: ${placed.rejected}`);
+            return {
+                ok: false,
+                message: `❌ ${symbol} is NOT protected — the broker rejected the protective exits (${placed.rejected}). Fix the levels and retry, or close the position.`,
+            };
+        }
 
         logger.info(`[position-actions] protected ${symbol}: ${exitAction} ${qty} stop ${stopPrice}${targetPrice !== undefined ? ` / target ${targetPrice}` : ''}`);
         return {
@@ -269,8 +301,29 @@ export function wasRecentlyClosed(symbol: string): boolean {
 /** Market-close the full position in a symbol (risk-reducing). `source`
  *  labels who decided (operator command, profit-trail, EOD triage) — it
  *  flows into the outcome tracker so the close gets a real P&L. */
+/** Per-symbol closes in flight — two concurrent callers (operator,
+ *  dashboard, profit-trail, triage) must never each snapshot the full
+ *  position and submit two full-size closing orders: the second is a net
+ *  REVERSAL (review 2026-08-21). */
+const closesInFlight = new Set<string>();
+
 export async function closePosition(symbolRaw: string, source = 'close command'): Promise<PositionActionOutcome> {
     const symbol = symbolRaw.trim().toUpperCase();
+    if (closesInFlight.has(symbol)) {
+        return {
+            ok: false,
+            message: `⏳ A close for ${symbol} is already in flight — not placing a second full-size order (reversal guard). Verify with 'orders'.`,
+        };
+    }
+    if (wasRecentlyClosed(symbol)) {
+        return {
+            ok: false,
+            message:
+                `⏳ ${symbol} was closed less than 10 minutes ago — its close order may still be working ` +
+                `(a second full-size close would REVERSE the position). Verify with 'orders' and 'positions' first.`,
+        };
+    }
+    closesInFlight.add(symbol);
     try {
         // Full identity gate, not the static-only check: these place real
         // orders, and the weaker gate silently passed on an empty account
@@ -306,7 +359,7 @@ export async function closePosition(symbolRaw: string, source = 'close command')
 
         const isLong = pos.quantity > 0;
         const qty = Math.abs(pos.quantity);
-        const { orderId, order } = await withOrderLock(async () => {
+        const { orderId, order, ack } = await withOrderLock(async () => {
             const orderId = await getNextValidOrderId(api);
             const order: Order = {
                 orderId,
@@ -320,9 +373,32 @@ export async function closePosition(symbolRaw: string, source = 'close command')
                 tif: TimeInForce.DAY,
                 transmit: true,
             };
-            api.placeOrder(orderId, stockContract(symbol), order);
-            return { orderId, order };
+            // Review 2026-08-21: a close must be ACKNOWLEDGED before any
+            // protection is removed — armed before placement so a fast
+            // broker reaction cannot slip past the first listener.
+            const watch = watchOrderAcks(api, [orderId]);
+            try {
+                api.placeOrder(orderId, stockContract(symbol), order);
+            } catch (err) {
+                watch.dispose();
+                throw err;
+            }
+            const states = await watch.settle(BRACKET_ACK_TIMEOUT_MS);
+            return { orderId, order, ack: states[0] };
         });
+
+        if (ack?.rejection) {
+            // The close DID NOT go out: protection stays exactly as it was.
+            recentlyClosed.delete(symbol);
+            const r = ack.rejection;
+            logger.error(`[position-actions] close ${symbol} REJECTED by broker (${r.code ?? '?'}: ${r.reason})`);
+            return {
+                ok: false,
+                message:
+                    `❌ Close ${symbol} REJECTED by the broker (${r.reason}). ` +
+                    `Nothing was cancelled — the position keeps its protection. Resolve and retry.`,
+            };
+        }
 
         // Register the close with the outcome tracker BEFORE cancelling the
         // bracket exits: its fill is the exit price that turns the tracked
@@ -334,6 +410,21 @@ export async function closePosition(symbolRaw: string, source = 'close command')
             trackManualExit(symbol, orderId, qty, source);
         } catch (err) {
             logger.warn(`[position-actions] could not register ${symbol} close with the outcome tracker: ${err}`);
+        }
+
+        if (!ack?.acked) {
+            // Unconfirmed close (broker silent through the window): removing
+            // protection now gambles a naked position against a reversal —
+            // the naked side loses. Exits stay; the operator resolves.
+            logger.warn(`[position-actions] close ${symbol}: no broker ack within the window — exits left standing`);
+            return {
+                ok: true,
+                message:
+                    `⚠️ Close ${symbol} handed to the broker but NOT acknowledged yet (order ${orderId}). ` +
+                    `The resting exits were LEFT STANDING — cancelling them against an unconfirmed close risks a ` +
+                    `naked position. Verify with 'orders': close working → cancel the exits ('cancel ${symbol}'); ` +
+                    `close absent → retry.`,
+            };
         }
 
         // Cancel this symbol's tracked bracket/exit orders: a live GTC exit
@@ -395,5 +486,7 @@ export async function closePosition(symbolRaw: string, source = 'close command')
         const msg = err instanceof Error ? err.message : String(err);
         logger.error(`[position-actions] close ${symbol} failed: ${msg}`);
         return { ok: false, message: `❌ Could not close ${symbol} — ${msg}` };
+    } finally {
+        closesInFlight.delete(symbol);
     }
 }
