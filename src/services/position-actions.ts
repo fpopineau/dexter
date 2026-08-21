@@ -351,6 +351,7 @@ const closeDeps = {
     nextOrderId: getNextValidOrderId,
     fillWaitMs: CLOSE_FILL_WAIT_MS,
     cancelConfirmMs: CANCEL_CONFIRM_MS,
+    reconcileWaitMs: 10_000,
 };
 export function __setCloseDepsForTests(overrides: Partial<typeof closeDeps> | null): void {
     if (overrides === null) {
@@ -360,6 +361,7 @@ export function __setCloseDepsForTests(overrides: Partial<typeof closeDeps> | nu
         closeDeps.nextOrderId = getNextValidOrderId;
         closeDeps.fillWaitMs = CLOSE_FILL_WAIT_MS;
         closeDeps.cancelConfirmMs = CANCEL_CONFIRM_MS;
+        closeDeps.reconcileWaitMs = 10_000;
     } else {
         Object.assign(closeDeps, overrides);
     }
@@ -425,9 +427,11 @@ export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, sy
     // Round-6 review: the POST-CONDITION is the book, not the events. A
     // cancel event stream can lie (10147 for a foreign-client id, a missed
     // status) — re-read the open orders and let anything still working
-    // override its classification loudly.
+    // override its classification loudly. Round 7: override the COUNT too,
+    // not just the log — an order the book shows working must never be
+    // reported to the operator as cancelled.
+    const stillOpen = new Set<number>();
     try {
-        const stillOpen = new Set<number>();
         for (const side of [OrderAction.SELL, OrderAction.BUY]) {
             for (const o of await fetchOpenOrdersFor(api, symbol, side)) stillOpen.add(o.orderId);
         }
@@ -443,7 +447,9 @@ export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, sy
         logger.warn(`[position-actions] ${symbol}: post-cleanup book verification failed: ${err}`);
     }
     for (const [oid, outcome] of outcomes) {
-        if (outcome === 'cancelled') {
+        if (stillOpen.has(oid)) {
+            continue; // book truth: working — already loudly reported above
+        } else if (outcome === 'cancelled') {
             cancelledExits++;
         } else if (entryIds.has(oid) && (outcome === 'filled' || outcome === 'not-cancellable')) {
             // The entry that built the position we just closed — complete,
@@ -477,8 +483,28 @@ export async function closePosition(symbolRaw: string, source = 'close command')
     // window. The outcome tracker knows every registered close still
     // working; only when none is live does the 10-minute courtesy window
     // apply (covers the gap between fill and tracker bookkeeping).
+    // Round-7 review: during gateway BOOT the guard's memory is empty until
+    // the broker snapshot rehydrates it — an inbound close in that window
+    // could double a resting pre-restart close. Wait briefly for the first
+    // reconciliation; still pending → refuse, never guess. ('idle' =
+    // tracker not running at all — TUI/standalone keeps its old semantics.)
     try {
-        const { hasWorkingManualExit } = await import('./outcome-tracker.js');
+        const { hasWorkingManualExit, reconciliationState } = await import('./outcome-tracker.js');
+        if (reconciliationState() === 'pending') {
+            const deadline = Date.now() + closeDeps.reconcileWaitMs;
+            while (reconciliationState() === 'pending' && Date.now() < deadline) {
+                await new Promise((r) => setTimeout(r, 250));
+            }
+            if (reconciliationState() === 'pending') {
+                return {
+                    ok: false,
+                    message:
+                        `⏳ Cannot close ${symbol} yet: the gateway just started and broker reconciliation has not ` +
+                        `finished — a resting pre-restart close would not be visible, and a second close REVERSES. ` +
+                        `Retry in a few seconds.`,
+                };
+            }
+        }
         if (hasWorkingManualExit(symbol)) {
             return {
                 ok: false,
@@ -545,16 +571,18 @@ export async function closePosition(symbolRaw: string, source = 'close command')
         let joinOcaGroup: string | null = null;
         try {
             const exitOrders = await fetchOpenOrdersFor(api, symbol, closeAction);
-            const groups = [...new Set(
-                exitOrders
-                    .filter((o) => OUR_REF.test(o.orderRef ?? '') && o.ocaGroup !== null)
-                    .map((o) => o.ocaGroup as string),
-            )];
-            if (groups.length === 1) {
+            const ours = exitOrders.filter((o) => OUR_REF.test(o.orderRef ?? ''));
+            const groups = [...new Set(ours.filter((o) => o.ocaGroup !== null).map((o) => o.ocaGroup as string))];
+            const ungrouped = ours.filter((o) => o.ocaGroup === null).length;
+            // Round-7 review: an UNGROUPED exit next to a grouped pair means
+            // the join would only cover part of the book — the ungrouped
+            // order keeps racing the close. Join only a WHOLLY single-group
+            // book; everything else falls back to fill-gated cleanup.
+            if (groups.length === 1 && ungrouped === 0) {
                 joinOcaGroup = groups[0]!;
                 logger.info(`[position-actions] ${symbol}: close joins exit OCA group '${joinOcaGroup}' — broker-side mutual exclusion with the stop/target`);
-            } else if (groups.length > 1) {
-                logger.warn(`[position-actions] ${symbol}: ${groups.length} distinct exit OCA groups (stacked pairs) — close not OCA-joined; post-fill cleanup covers them`);
+            } else if (groups.length > 1 || ungrouped > 0) {
+                logger.warn(`[position-actions] ${symbol}: exit book not wholly one OCA group (${groups.length} group(s), ${ungrouped} ungrouped) — close not OCA-joined; post-fill cleanup covers them`);
             }
         } catch (err) {
             logger.warn(`[position-actions] ${symbol}: OCA-group probe failed (close proceeds unjoined): ${err}`);

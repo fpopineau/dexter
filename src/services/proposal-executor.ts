@@ -20,7 +20,7 @@ import { createIbkrMarketData } from '@/tools/ibkr/market-data.js';
 import { logger } from '@/utils';
 import { getMarketSession, isTradeableSession } from '@/utils/market-hours.js';
 import { assertDailyLossOk } from './daily-loss-guard.js';
-import { trackExecutedProposal } from './outcome-tracker.js';
+import { replayMissedExecutions, trackExecutedProposal } from './outcome-tracker.js';
 import { getSectorInfo } from './sector-map.js';
 import { assertAcceptContext, assertProposalRisk, checkMicrostructure, checkPriceRun, ENTRY_CONFIRM_FRACTION, plannedWorstLossUsd } from './proposal-risk-gate.js';
 import { fetchDailyRiskContext } from '@/tools/ibkr/daily-atr.js';
@@ -394,6 +394,14 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
             if (residueRow) {
                 try { trackExecutedProposal(residueRow); } catch (err) {
                     logger.warn(`[proposal-executor] outcome tracking failed for residue row ${p.id}: ${err}`);
+                }
+                // Round-7 review: a leg can FILL during the multi-second
+                // cancel sweep — before these ids were registered — and the
+                // permanent listener discarded that event. Replay today's
+                // executions so the fill lands now, not at the next
+                // reconnect.
+                try { await replayMissedExecutions(); } catch (err) {
+                    logger.warn(`[proposal-executor] execution replay after residue registration failed: ${err}`);
                 }
             }
             return {

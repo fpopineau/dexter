@@ -784,6 +784,32 @@ export async function markEntryFilled(id: string, price: number, at = Date.now()
     ).run(price, at, Date.now(), id.trim().toUpperCase());
 }
 
+/** Round-7 review: adopted rows had no resolution lifecycle — the broker
+ *  position disappearing (closed in TWS, stopped out on its own orders)
+ *  left the 'executed' row as phantom exposure and a permanent
+ *  unresolved-adoption anomaly. The reconciliation sweep calls this with
+ *  the symbols the broker actually HOLDS; any open adopted row outside
+ *  that set closes as 'unknown' P&L (the broker owned the exit — we never
+ *  saw its fill). Returns the resolved ids. */
+export async function resolveAdoptedFlat(heldSymbols: string[]): Promise<string[]> {
+    const database = await getDb();
+    const held = new Set(heldSymbols.map((s) => s.trim().toUpperCase()));
+    const open = database.query<{ id: string; symbol: string }>(
+        `SELECT id, symbol FROM proposals WHERE source = 'adopted' AND status = 'executed'`,
+    ).all();
+    const resolved: string[] = [];
+    for (const row of open) {
+        if (held.has(row.symbol.trim().toUpperCase())) continue;
+        await closeProposal(row.id, {
+            exitReason: 'unknown',
+            note: 'adopted position no longer at the broker — resolved by the reconciliation sweep (exit handled outside Dexter; P&L unknown)',
+        });
+        resolved.push(row.id);
+        logger.info(`[proposals] adopted row ${row.id} (${row.symbol}) resolved — broker position gone`);
+    }
+    return resolved;
+}
+
 export interface CloseProposalInput {
     exitReason: ExitReason;
     exitFillPrice?: number;

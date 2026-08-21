@@ -106,10 +106,13 @@ export function decideAdoptions(input: {
 }
 
 /** Open-order snapshot with the fields adoption matches on. */
-export function fetchOpenOrderSnaps(api: IBApi): Promise<BrokerOrderSnap[]> {
+/** Round-7 review: the sweep must KNOW whether the snapshot completed —
+ *  a timeout without openOrderEnd is a partial view, and certifying it
+ *  as a clean book manufactures false confidence. */
+export function fetchOpenOrderSnaps(api: IBApi): Promise<{ orders: BrokerOrderSnap[]; complete: boolean }> {
     const found: BrokerOrderSnap[] = [];
-    return new Promise<BrokerOrderSnap[]>((resolve) => {
-        const timer = setTimeout(() => { cleanup(); resolve(found); }, 10_000);
+    return new Promise<{ orders: BrokerOrderSnap[]; complete: boolean }>((resolve) => {
+        const timer = setTimeout(() => { cleanup(); resolve({ orders: found, complete: false }); }, 10_000);
         const onOpen = (id: number, contract: { symbol?: string }, order: Order) => {
             found.push({
                 orderId: id,
@@ -119,7 +122,7 @@ export function fetchOpenOrderSnaps(api: IBApi): Promise<BrokerOrderSnap[]> {
                 quantity: typeof order.totalQuantity === 'number' ? order.totalQuantity : null,
             });
         };
-        const onEnd = () => { clearTimeout(timer); cleanup(); resolve(found); };
+        const onEnd = () => { clearTimeout(timer); cleanup(); resolve({ orders: found, complete: true }); };
         function cleanup() {
             api.off(EventName.openOrder, onOpen);
             api.off(EventName.openOrderEnd, onEnd);
@@ -179,11 +182,16 @@ export async function runBrokerAdoption(api: IBApi, hooks: AdoptionHooks): Promi
         logger.warn(`[broker-adopt] sweep skipped — account identity unavailable: ${err}`);
         return;
     }
-    const [orders, positions, exposure] = await Promise.all([
+    const [orderSnap, positions, exposure] = await Promise.all([
         fetchOpenOrderSnaps(api),
         fetchPositions(api),
         listExposure(),
     ]);
+    const orders = orderSnap.orders;
+    // Failures during application are REPORT content, not just log lines —
+    // the scorecard's integrity gate must see an unhealthy sweep (round 7).
+    const failures: string[] = [];
+    if (!orderSnap.complete) failures.push('open-orders snapshot INCOMPLETE (no openOrderEnd within 10s) — the book view is partial');
     const plan = decideAdoptions({
         orders,
         positions,
@@ -215,6 +223,7 @@ export async function runBrokerAdoption(api: IBApi, hooks: AdoptionHooks): Promi
             await hooks.repointOrder(a.proposalId, a.leg, a.orderId);
             logger.info(`[broker-adopt] ${a.proposalId}: adopted broker order ${a.orderId} as ${a.leg} (matched by orderRef)`);
         } catch (err) {
+            failures.push(`leg adoption ${a.proposalId}#${a.orderId} failed`);
             logger.error(`[broker-adopt] ${a.proposalId}: order adoption failed: ${err}`);
         }
     }
@@ -235,8 +244,28 @@ export async function runBrokerAdoption(api: IBApi, hooks: AdoptionHooks): Promi
                 `protect or close it yourself ('protect ${p.symbol} …' / 'close ${p.symbol}').`,
             );
         } catch (err) {
+            failures.push(`position adoption ${p.symbol} failed`);
             logger.error(`[broker-adopt] position adoption ${p.symbol} failed: ${err}`);
         }
+    }
+
+    // Round-7 review: the adopted-row lifecycle closes here — an adopted
+    // position the broker no longer holds is resolved, not left as
+    // phantom exposure and a permanent validation anomaly.
+    let resolvedAdoptions: string[] = [];
+    try {
+        const { resolveAdoptedFlat } = await import('./trade-proposals.js');
+        const held = positions.filter((p) => p.quantity !== 0 && p.account === account).map((p) => p.symbol);
+        resolvedAdoptions = await resolveAdoptedFlat(held);
+        if (resolvedAdoptions.length > 0) {
+            await hooks.notify(
+                `✅ Adopted position(s) resolved — no longer at the broker: ${resolvedAdoptions.join(', ')}. ` +
+                `Exit happened outside Dexter; rows closed with P&L unknown.`,
+            );
+        }
+    } catch (err) {
+        failures.push('adopted-row resolution failed');
+        logger.error(`[broker-adopt] adopted-row resolution failed: ${err}`);
     }
 
     const newOrphans = plan.orphanOrders.filter((o) => !notifiedOrphans.has(o.orderId));
@@ -267,6 +296,9 @@ export async function runBrokerAdoption(api: IBApi, hooks: AdoptionHooks): Promi
         const dataDir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
         writeFileSync(join(dataDir, 'reconciliation-status.json'), JSON.stringify({
             at: Date.now(),
+            snapshotComplete: orderSnap.complete,
+            failures,
+            resolvedAdoptions,
             orphanOrders: plan.orphanOrders.map((o) => ({ orderId: o.orderId, symbol: o.symbol, orderRef: o.orderRef })),
             legAdoptions: plan.orderAdoptions.length,
             positionAdoptions: plan.positionAdoptions.length,

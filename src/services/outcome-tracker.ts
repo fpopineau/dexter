@@ -1189,7 +1189,8 @@ async function attach(): Promise<void> {
     // guard must be rehydrated before any close request can race it; the
     // periodic sweep stays best-effort.
     await runAdoptionSweep(api);
-    logger.info(`[outcome-tracker] attached (${byProposalId.size} trade(s) tracked)`);
+    reconciliation = 'done';
+    logger.info(`[outcome-tracker] attached (${byProposalId.size} trade(s) tracked); reconciliation complete — close guard armed`);
 }
 
 /** Reverse-reconciliation sweep (WP3), also on a 15-min interval. */
@@ -1302,9 +1303,34 @@ let unregisterReconnect: (() => void) | null = null;
  * entries, attach IBKR listeners (re-attaching after reconnects).
  * Idempotent; called at gateway startup when IBKR is configured.
  */
+/** Round-7 review: boot-readiness of the close-safety machinery. 'idle' =
+ *  tracker never started (TUI/standalone scripts — no guard promised);
+ *  'pending' = gateway is booting and the broker snapshot has NOT yet
+ *  rehydrated the duplicate-close guard — a close now could double-close
+ *  a resting pre-restart close; 'done' = first replay+reconcile+sweep
+ *  completed. Sticky once done (mid-session reattaches self-heal). */
+let reconciliation: 'idle' | 'pending' | 'done' = 'idle';
+export function reconciliationState(): 'idle' | 'pending' | 'done' {
+    return reconciliation;
+}
+export function __setReconciliationStateForTests(s: 'idle' | 'pending' | 'done' | null): void {
+    reconciliation = s ?? 'idle';
+}
+
+/** Round-7 review: replay today's executions through the permanent
+ *  listener NOW — the recovery for a fill that landed while its order ids
+ *  were not yet registered (e.g. during a rejected-bracket cancel sweep,
+ *  before the residue row reached trackExecutedProposal). Idempotent:
+ *  cumulative-quantity accounting absorbs duplicate events. */
+export async function replayMissedExecutions(): Promise<void> {
+    if (!attachedApi) return;
+    await replayExecutions(attachedApi);
+}
+
 export async function startOutcomeTracker(): Promise<void> {
     if (started) return;
     started = true;
+    reconciliation = 'pending';
 
     const trackable = await listTrackable().catch((err) => {
         logger.error(`[outcome-tracker] could not load executed proposals: ${err}`);
@@ -1344,6 +1370,7 @@ export async function startOutcomeTracker(): Promise<void> {
 /** Stop tracking (gateway shutdown). Tracked state stays in the DB. */
 export function stopOutcomeTracker(): void {
     started = false;
+    reconciliation = 'idle';
     if (retryTimer) {
         clearTimeout(retryTimer);
         retryTimer = null;

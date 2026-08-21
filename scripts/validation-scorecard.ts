@@ -267,14 +267,26 @@ let reconLine = 'reconciliation report: MISSING (.dexter/data/reconciliation-sta
 let reconAnomalies: string[] = ['no reconciliation report'];
 try {
     const rec = JSON.parse(readFileSync(join(dataDir, 'reconciliation-status.json'), 'utf-8')) as {
-        at: number; orphanOrders: Array<{ orderId: number; symbol: string }>; staleCloses: Array<{ orderId: number; symbol: string }>;
+        at: number; snapshotComplete?: boolean; failures?: string[];
+        orphanOrders: Array<{ orderId: number; symbol: string }>; staleCloses: Array<{ orderId: number; symbol: string }>;
+        legAdoptions?: number; positionAdoptions?: number; resolvedAdoptions?: string[];
     };
     const ageH = (Date.now() - rec.at) / 3_600_000;
     reconAnomalies = [];
-    if (ageH > 24) reconAnomalies.push(`reconciliation report is ${ageH.toFixed(0)}h old`);
+    // The sweep runs every 15 min while the gateway is up — a report older
+    // than 2h means the sweep (or the gateway) is not running (round 7:
+    // 24h let a stale clean report outlive a day of failing sweeps).
+    if (ageH > 2) reconAnomalies.push(`reconciliation report is ${ageH.toFixed(1)}h old (sweep runs every 15min)`);
+    if (rec.snapshotComplete === false) reconAnomalies.push('last open-orders snapshot INCOMPLETE — the clean book is unproven');
+    for (const f of rec.failures ?? []) reconAnomalies.push(`sweep failure: ${f}`);
     if (rec.orphanOrders.length > 0) reconAnomalies.push(`${rec.orphanOrders.length} orphan order(s) outstanding: ${rec.orphanOrders.map((o) => `#${o.orderId} ${o.symbol}`).join(', ')}`);
     if ((rec.staleCloses ?? []).length > 0) reconAnomalies.push(`${rec.staleCloses.length} stale close order(s) on flat symbols`);
-    reconLine = `reconciliation report: ${new Date(rec.at).toISOString()} — ${reconAnomalies.length === 0 ? 'clean' : reconAnomalies.join('; ')}`;
+    const info: string[] = [];
+    if ((rec.legAdoptions ?? 0) > 0) info.push(`${rec.legAdoptions} leg adoption(s) last sweep`);
+    if ((rec.positionAdoptions ?? 0) > 0) info.push(`${rec.positionAdoptions} position adoption(s) last sweep`);
+    if ((rec.resolvedAdoptions ?? []).length > 0) info.push(`resolved: ${rec.resolvedAdoptions!.join(', ')}`);
+    reconLine = `reconciliation report: ${new Date(rec.at).toISOString()} — ${reconAnomalies.length === 0 ? 'clean' : reconAnomalies.join('; ')}` +
+        (info.length > 0 ? ` [${info.join('; ')}]` : '');
 } catch { /* reconLine already says MISSING */ }
 console.log(reconLine);
 const missingStamps = rows.filter((r) => r.model === null || r.regime === null || r.regime === 'unknown').length;

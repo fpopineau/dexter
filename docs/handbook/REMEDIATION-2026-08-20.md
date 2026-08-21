@@ -517,6 +517,50 @@ books only); IBKR's dynamic add-to-working-OCA-group behavior is
 harness-unverified — added to the freeze prerequisites as a paper
 observation; weekly scorecard execution remains operator-manual.
 
+## Review 7 triage (2026-08-21, reviewed at 4098dd7)
+
+**Fixed same day:**
+
+- **Residue-fill replay** (P1): after a rejected-with-residues bracket
+  registers with the tracker, the executor immediately replays today's
+  executions (`replayMissedExecutions` → `reqExecutions`) — a leg that
+  filled DURING the multi-second cancel sweep, before its ids were
+  known, now lands instead of waiting for a reconnect. Idempotent by
+  the WP2 cumulative-quantity accounting.
+- **Boot gate on closes** (P1): `closePosition` refuses while the
+  tracker's first replay+reconcile+sweep is still `pending` (waits up
+  to 10s, then refuses honestly) — an inbound WhatsApp `close` can no
+  longer race the guard rehydration regardless of gateway boot order.
+  `'idle'` (tracker never started — TUI/standalone) keeps the old
+  semantics. Tri-state exported + tested.
+- **Book truth overrides the COUNT** (P1/P2): cleanup no longer counts
+  an order the post-condition snapshot shows STILL WORKING as
+  cancelled — it is excluded from the operator-facing count and stays
+  a loud error (the round-6 fix logged the lie but repeated it in the
+  message).
+- **Snapshot completeness is recorded**: `fetchOpenOrderSnaps` reports
+  whether `openOrderEnd` arrived; an incomplete snapshot and every
+  adoption/repoint failure land in `reconciliation-status.json` as
+  failures, and the scorecard treats them (and a report older than 2h —
+  was 24h) as integrity anomalies. Leg/position adoptions and resolved
+  rows print as informational context.
+- **Adopted rows now have a resolution lifecycle**: the sweep calls
+  `resolveAdoptedFlat(heldSymbols)` — an adopted row whose symbol the
+  broker no longer holds closes as exit `unknown` with an honest note
+  (exit happened outside Dexter), notified, reported, tested. No more
+  phantom exposure or permanent unresolved-adoption anomalies.
+- **Mixed exit books do not OCA-join**: a grouped pair next to a
+  legacy ungrouped exit previously joined the one group while the
+  ungrouped order kept racing — the join now requires the book to be
+  WHOLLY one group; tested.
+
+**Accepted/recorded (still open)**: stacked multi-group books remain
+unjoined by design (fallback: fill-gated cleanup + book-truth
+post-condition); the executor residue branch still has no direct test
+(no pipeline seam; residue production and replay are covered at their
+own layers); OCA dynamic-join paper observation stays a freeze
+prerequisite; weekly scorecard execution stays operator-manual.
+
 - **WP9 Backtester: honest replay** (MED — decision point D1)
   Recommended scope (rebuild-lite, ~1 session): process bar i BEFORE
   signals from bar i (kills the same-bar look-ahead); per-symbol bar

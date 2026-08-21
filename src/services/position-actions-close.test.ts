@@ -17,6 +17,7 @@ import {
     __handleOrderStatusForTests,
     __resetTrackerForTests,
     __setFinalizeDelayForTests,
+    __setReconciliationStateForTests,
     hasWorkingManualExit,
     trackExecutedProposal,
 } from './outcome-tracker.js';
@@ -111,12 +112,15 @@ beforeEach(() => {
         nextOrderId: async () => nextId++,
         fillWaitMs: 200,
         cancelConfirmMs: 150,
+        reconcileWaitMs: 300,
     });
+    __setReconciliationStateForTests(null); // 'idle' — standalone semantics
 });
 
 afterAll(() => {
     __resetTrackerForTests();
     __setFinalizeDelayForTests(null);
+    __setReconciliationStateForTests(null);
     __attachApiForTests(null);
     __setCloseDepsForTests(null);
 });
@@ -218,6 +222,40 @@ describe('closePosition lifecycle (round-4 review)', () => {
         fake.openOrders = [exit(9003, 'dexter-CLQG-1'), exit(9004, 'dexter-CLQG-2')];
 
         const out = await closePosition('CLQG', 'test-operator');
+        expect(out.state).toBe('filled');
+        const placed = fake.placed[0]!.order as unknown as { ocaGroup?: string };
+        expect(placed.ocaGroup).toBeUndefined();
+    });
+
+    test('boot gate (round 7): a close during pending reconciliation is refused, not guessed', async () => {
+        fake.position = { symbol: 'CLQH', qty: 10 };
+        __setReconciliationStateForTests('pending');
+        const out = await closePosition('CLQH', 'test-operator');
+        expect(out.ok).toBe(false);
+        expect(out.message).toContain('reconciliation');
+        expect(fake.placed).toHaveLength(0); // nothing reached the broker
+        // Reconciliation completes → the same close proceeds normally.
+        __setReconciliationStateForTests('done');
+        const retry = await closePosition('CLQH', 'test-operator');
+        expect(retry.state).toBe('filled');
+    });
+
+    test('mixed exit book (grouped + ungrouped): close does NOT join — partial coverage is no coverage (round 7)', async () => {
+        fake.position = { symbol: 'CLQI', qty: 10 };
+        fake.openOrders = [
+            {
+                id: 9005,
+                contract: { symbol: 'CLQI' } as Contract,
+                order: { action: 'SELL', orderType: 'STP', tif: 'GTC', orderRef: 'protect-CLQI:stop', ocaGroup: 'dexter-CLQI-1' } as unknown as Order,
+            },
+            {
+                // Legacy stop-only protect order placed before groups existed.
+                id: 9006,
+                contract: { symbol: 'CLQI' } as Contract,
+                order: { action: 'SELL', orderType: 'STP', tif: 'GTC', orderRef: 'protect-CLQI:stop' } as unknown as Order,
+            },
+        ];
+        const out = await closePosition('CLQI', 'test-operator');
         expect(out.state).toBe('filled');
         const placed = fake.placed[0]!.order as unknown as { ocaGroup?: string };
         expect(placed.ocaGroup).toBeUndefined();

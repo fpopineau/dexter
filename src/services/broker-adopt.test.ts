@@ -8,7 +8,7 @@ const prevDataDir = process.env.DEXTER_DATA_DIR;
 process.env.DEXTER_DATA_DIR ??= dir;
 
 import { decideAdoptions, selectManualExitRehydrations, type BrokerOrderSnap, type BrokerPositionSnap } from './broker-adopt.js';
-import { countOpenExecuted, createAdoptedPosition, getProposal } from './trade-proposals.js';
+import { countOpenExecuted, createAdoptedPosition, getProposal, resolveAdoptedFlat } from './trade-proposals.js';
 
 // WP3 (REMEDIATION-2026-08-20): reconciliation used to run strictly DB →
 // broker — unknown broker orders were discarded and unknown positions
@@ -96,6 +96,27 @@ describe('createAdoptedPosition (store)', () => {
         expect(row.note ?? '').toContain('synthetic');
         expect(await countOpenExecuted()).toBe(before + 1);
         expect((await getProposal(row.id))?.tif).toBe('GTC');
+    });
+});
+
+describe('adopted-row resolution lifecycle (round-7 review)', () => {
+    test('an adopted row resolves when the broker no longer holds the symbol, and survives while it does', async () => {
+        const row = await createAdoptedPosition({
+            symbol: 'ADRS', direction: 'long', quantity: 5, avgCost: 80, account: ACCT,
+        });
+        // Broker still holds it → nothing resolves.
+        const kept = await resolveAdoptedFlat(['ADRS', 'NVDA']);
+        expect(kept).not.toContain(row.id);
+        expect((await getProposal(row.id))?.status).toBe('executed');
+        // Broker book no longer shows the symbol → the row closes honestly.
+        const resolved = await resolveAdoptedFlat(['NVDA']);
+        expect(resolved).toContain(row.id);
+        const after = await getProposal(row.id);
+        expect(after?.status).toBe('closed');
+        expect(after?.exitReason).toBe('unknown');
+        expect(after?.note ?? '').toContain('reconciliation sweep');
+        // Idempotent: a second sweep finds nothing to resolve.
+        expect(await resolveAdoptedFlat(['NVDA'])).not.toContain(row.id);
     });
 });
 
