@@ -105,18 +105,27 @@ export interface OpenOrderSummary {
     ocaGroup: string | null;
 }
 
+export interface OpenOrdersView {
+    orders: OpenOrderSummary[];
+    /** Round-8 review: false = openOrderEnd never arrived — the view is
+     *  PARTIAL and must not be treated as the whole book (OCA join and
+     *  double-protection checks fail closed on it). */
+    complete: boolean;
+}
+
 /** Working orders for a symbol on the given side (all API clients). */
 export async function fetchOpenOrdersFor(
     api: import('@stoqey/ib').IBApi,
     symbol: string,
     side: OrderAction,
-): Promise<OpenOrderSummary[]> {
+    timeoutMs = 10_000,
+): Promise<OpenOrdersView> {
     const found: OpenOrderSummary[] = [];
-    return new Promise<OpenOrderSummary[]>((resolve) => {
+    return new Promise<OpenOrdersView>((resolve) => {
         const timeout = setTimeout(() => {
             cleanup();
-            resolve(found);
-        }, 10_000);
+            resolve({ orders: found, complete: false });
+        }, timeoutMs);
         const onOpen = (id: number, contract: Contract, order: Order) => {
             if ((contract.symbol ?? '') !== symbol) return;
             if ((order.action ?? '') !== side) return;
@@ -131,7 +140,7 @@ export async function fetchOpenOrdersFor(
         const onEnd = () => {
             clearTimeout(timeout);
             cleanup();
-            resolve(found);
+            resolve({ orders: found, complete: true });
         };
         function cleanup() {
             api.off(EventName.openOrder, onOpen);
@@ -186,7 +195,16 @@ export async function protectPosition(
         // another risks OVERSELLING (each OCA pair only cancels within
         // itself). DAY exits are fine: they die at the session rollover,
         // which is exactly the gap this command exists to cover.
-        const existing = await fetchOpenOrdersFor(api, symbol, exitAction);
+        const existingView = await fetchOpenOrdersFor(api, symbol, exitAction);
+        if (!existingView.complete) {
+            // Round-8 review: a PARTIAL book view could hide an existing
+            // pair — protecting on top of it oversells. Fail closed.
+            return {
+                ok: false,
+                message: `⛔ Cannot protect ${symbol} right now: the open-orders snapshot did not complete, so an existing exit pair could be hidden. Retry in a moment.`,
+            };
+        }
+        const existing = existingView.orders;
         const existingGtc = existing.filter((o) => o.tif === 'GTC');
         if (existingGtc.length > 0) {
             return {
@@ -352,6 +370,7 @@ const closeDeps = {
     fillWaitMs: CLOSE_FILL_WAIT_MS,
     cancelConfirmMs: CANCEL_CONFIRM_MS,
     reconcileWaitMs: 10_000,
+    probeTimeoutMs: 10_000,
 };
 export function __setCloseDepsForTests(overrides: Partial<typeof closeDeps> | null): void {
     if (overrides === null) {
@@ -362,6 +381,7 @@ export function __setCloseDepsForTests(overrides: Partial<typeof closeDeps> | nu
         closeDeps.fillWaitMs = CLOSE_FILL_WAIT_MS;
         closeDeps.cancelConfirmMs = CANCEL_CONFIRM_MS;
         closeDeps.reconcileWaitMs = 10_000;
+        closeDeps.probeTimeoutMs = 10_000;
     } else {
         Object.assign(closeDeps, overrides);
     }
@@ -409,7 +429,9 @@ export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, sy
     }
     try {
         for (const side of [OrderAction.SELL, OrderAction.BUY]) {
-            for (const o of await fetchOpenOrdersFor(api, symbol, side)) {
+            const sweepView = await fetchOpenOrdersFor(api, symbol, side, closeDeps.probeTimeoutMs);
+            if (!sweepView.complete) logger.warn(`[position-actions] ${symbol}: orphan-sweep book view incomplete — sweeping what was seen; the WP3 sweep retries`);
+            for (const o of sweepView.orders) {
                 if (requested.has(o.orderId) || o.tif !== 'GTC') continue;
                 if (OUR_REF.test(o.orderRef ?? '')) {
                     requestCancel(o.orderId);
@@ -431,9 +453,15 @@ export async function cleanupExitsAfterClose(api: import('@stoqey/ib').IBApi, sy
     // not just the log — an order the book shows working must never be
     // reported to the operator as cancelled.
     const stillOpen = new Set<number>();
+    let verifyComplete = true;
     try {
         for (const side of [OrderAction.SELL, OrderAction.BUY]) {
-            for (const o of await fetchOpenOrdersFor(api, symbol, side)) stillOpen.add(o.orderId);
+            const view = await fetchOpenOrdersFor(api, symbol, side, closeDeps.probeTimeoutMs);
+            if (!view.complete) verifyComplete = false;
+            for (const o of view.orders) stillOpen.add(o.orderId);
+        }
+        if (!verifyComplete) {
+            logger.error(`[position-actions] ${symbol}: post-close book verification INCOMPLETE — the cancelled counts below are event-based only; verify the ${symbol} order book in TWS`);
         }
         for (const [oid, outcome] of outcomes) {
             if (stillOpen.has(oid)) {
@@ -570,8 +598,13 @@ export async function closePosition(symbolRaw: string, source = 'close command')
         // fall back to the fill-gated cleanup.
         let joinOcaGroup: string | null = null;
         try {
-            const exitOrders = await fetchOpenOrdersFor(api, symbol, closeAction);
-            const ours = exitOrders.filter((o) => OUR_REF.test(o.orderRef ?? ''));
+            const exitView = await fetchOpenOrdersFor(api, symbol, closeAction, closeDeps.probeTimeoutMs);
+            if (!exitView.complete) {
+                // A partial view can show one clean group while hiding an
+                // ungrouped exit — joining on it is partial coverage.
+                logger.warn(`[position-actions] ${symbol}: open-orders snapshot incomplete — close not OCA-joined`);
+            }
+            const ours = exitView.complete ? exitView.orders.filter((o) => OUR_REF.test(o.orderRef ?? '')) : [];
             const groups = [...new Set(ours.filter((o) => o.ocaGroup !== null).map((o) => o.ocaGroup as string))];
             const ungrouped = ours.filter((o) => o.ocaGroup === null).length;
             // Round-7 review: an UNGROUPED exit next to a grouped pair means

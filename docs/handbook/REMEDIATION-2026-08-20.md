@@ -561,6 +561,37 @@ post-condition); the executor residue branch still has no direct test
 own layers); OCA dynamic-join paper observation stays a freeze
 prerequisite; weekly scorecard execution stays operator-manual.
 
+## Review 8 triage (2026-08-21, reviewed at 3c3c2e5)
+
+**Fixed same day:**
+
+- **The close gate arms only on a PROVEN sweep** (P1): reconciliation
+  reaches 'done' only when the boot sweep verified the account AND saw
+  the complete open-orders book (`runBrokerAdoption` returns
+  completeness; skipped/partial → the gate stays CLOSED, retried every
+  60s, and any later complete sweep — including the 15-min periodic —
+  arms it). Previously a failed sweep armed the gate without the
+  guard rehydrated.
+- **Order views carry completeness everywhere** (P1):
+  `fetchOpenOrdersFor` returns `{orders, complete}`. On a partial view
+  the OCA join is refused (a hidden ungrouped exit is exactly the
+  partial-coverage trap; tested), the double-protection check FAILS
+  CLOSED (a hidden pair would oversell), the post-close verification
+  says loudly that its counts are event-based only, and the orphan
+  sweep notes it swept a partial view.
+- **Foreign-account positions are integrity anomalies**: the scorecard
+  reads `foreignPositions` from the reconciliation report — D5
+  single-account violations can no longer sit inside a CLEAN verdict.
+
+**Accepted/recorded (still open, with rationale)**: the stacked
+multi-group over-close race stays a design fallback — joining ONE of
+two OCA pairs is worse than joining none (a partial stop fill would
+OCA-cancel the full-size close and leave the remainder unprotected;
+cancelling a pair pre-close opens an unprotected window). Full-size
+protection with fill-gated cleanup + book-truth post-condition is the
+chosen trade-off. OCA dynamic-join paper observation remains a freeze
+prerequisite; weekly scorecard run remains operator-manual.
+
 - **WP9 Backtester: honest replay** (MED — decision point D1)
   Recommended scope (rebuild-lite, ~1 session): process bar i BEFORE
   signals from bar i (kills the same-bar look-ahead); per-symbol bar

@@ -269,7 +269,7 @@ try {
     const rec = JSON.parse(readFileSync(join(dataDir, 'reconciliation-status.json'), 'utf-8')) as {
         at: number; snapshotComplete?: boolean; failures?: string[];
         orphanOrders: Array<{ orderId: number; symbol: string }>; staleCloses: Array<{ orderId: number; symbol: string }>;
-        legAdoptions?: number; positionAdoptions?: number; resolvedAdoptions?: string[];
+        legAdoptions?: number; positionAdoptions?: number; foreignPositions?: number; resolvedAdoptions?: string[];
     };
     const ageH = (Date.now() - rec.at) / 3_600_000;
     reconAnomalies = [];
@@ -281,6 +281,9 @@ try {
     for (const f of rec.failures ?? []) reconAnomalies.push(`sweep failure: ${f}`);
     if (rec.orphanOrders.length > 0) reconAnomalies.push(`${rec.orphanOrders.length} orphan order(s) outstanding: ${rec.orphanOrders.map((o) => `#${o.orderId} ${o.symbol}`).join(', ')}`);
     if ((rec.staleCloses ?? []).length > 0) reconAnomalies.push(`${rec.staleCloses.length} stale close order(s) on flat symbols`);
+    // Round-8 review: foreign-account exposure on the connection violates
+    // the single-account rule (D5) — never part of a CLEAN report.
+    if ((rec.foreignPositions ?? 0) > 0) reconAnomalies.push(`${rec.foreignPositions} position(s) in a FOREIGN account (single-account rule D5)`);
     const info: string[] = [];
     if ((rec.legAdoptions ?? 0) > 0) info.push(`${rec.legAdoptions} leg adoption(s) last sweep`);
     if ((rec.positionAdoptions ?? 0) > 0) info.push(`${rec.positionAdoptions} position adoption(s) last sweep`);

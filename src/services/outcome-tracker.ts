@@ -1188,19 +1188,21 @@ async function attach(): Promise<void> {
     // Round-6 review: the FIRST sweep is awaited — the duplicate-close
     // guard must be rehydrated before any close request can race it; the
     // periodic sweep stays best-effort.
-    await runAdoptionSweep(api);
-    reconciliation = 'done';
-    logger.info(`[outcome-tracker] attached (${byProposalId.size} trade(s) tracked); reconciliation complete — close guard armed`);
+    const swept = await runAdoptionSweep(api);
+    armAfterSweep(swept);
+    logger.info(`[outcome-tracker] attached (${byProposalId.size} trade(s) tracked)`);
 }
 
 /** Reverse-reconciliation sweep (WP3), also on a 15-min interval. */
 const ADOPTION_SWEEP_INTERVAL_MS = 15 * 60_000;
 let adoptionTimer: ReturnType<typeof setInterval> | null = null;
 
-async function runAdoptionSweep(api: IBApi): Promise<void> {
+/** Round-8 review: returns whether the sweep saw the COMPLETE broker
+ *  book — the boot close-gate arms only on a true. */
+async function runAdoptionSweep(api: IBApi): Promise<boolean> {
     try {
         const { getVerifiedSingleAccount: verified } = await import('@/tools/ibkr/connection.js');
-        await runBrokerAdoption(api, {
+        const result = await runBrokerAdoption(api, {
             repointOrder: adoptTrackedOrderId,
             notify: notifyAutoProtect,
             verifiedAccount: verified,
@@ -1212,9 +1214,32 @@ async function runAdoptionSweep(api: IBApi): Promise<void> {
                 trackManualExit(symbol, orderId, quantity, 'rehydrated from broker (restart reconciliation)');
             },
         });
+        return result.complete;
     } catch (err) {
         logger.warn(`[outcome-tracker] adoption sweep failed: ${err}`);
+        return false;
     }
+}
+
+/** Round-8 review: arm the close gate ONLY on a provably complete sweep.
+ *  A skipped/partial sweep leaves the gate closed and retries every 60s —
+ *  'done' on a partial book would open closes against an invisible
+ *  pre-restart close order. */
+let armRetryTimer: ReturnType<typeof setTimeout> | null = null;
+function armAfterSweep(swept: boolean): void {
+    if (reconciliation !== 'pending') return;
+    if (swept) {
+        reconciliation = 'done';
+        logger.info('[outcome-tracker] reconciliation complete — close guard armed');
+        return;
+    }
+    logger.error('[outcome-tracker] reconciliation sweep INCOMPLETE — close gate stays CLOSED; retrying in 60s');
+    if (armRetryTimer) return;
+    armRetryTimer = setTimeout(() => {
+        armRetryTimer = null;
+        if (!started || reconciliation !== 'pending' || !attachedApi) return;
+        void runAdoptionSweep(attachedApi).then(armAfterSweep);
+    }, 60_000);
 }
 
 function attachWithRetry(): void {
@@ -1362,7 +1387,9 @@ export async function startOutcomeTracker(): Promise<void> {
     // mid-session must not stay cap-invisible until the next restart.
     if (process.env.NODE_ENV !== 'test' && !adoptionTimer) {
         adoptionTimer = setInterval(() => {
-            if (attachedApi) void runAdoptionSweep(attachedApi);
+            // A later complete sweep also arms a gate a failed boot left
+            // closed (round 8) — armAfterSweep no-ops once 'done'.
+            if (attachedApi) void runAdoptionSweep(attachedApi).then(armAfterSweep);
         }, ADOPTION_SWEEP_INTERVAL_MS);
     }
 }
@@ -1371,6 +1398,10 @@ export async function startOutcomeTracker(): Promise<void> {
 export function stopOutcomeTracker(): void {
     started = false;
     reconciliation = 'idle';
+    if (armRetryTimer) {
+        clearTimeout(armRetryTimer);
+        armRetryTimer = null;
+    }
     if (retryTimer) {
         clearTimeout(retryTimer);
         retryTimer = null;

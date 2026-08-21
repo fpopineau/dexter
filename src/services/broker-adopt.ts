@@ -173,14 +173,16 @@ export interface AdoptionHooks {
 }
 
 /** One reverse-reconciliation sweep. Best-effort by contract: any failure
- *  logs and returns — the sweep reruns on its interval. */
-export async function runBrokerAdoption(api: IBApi, hooks: AdoptionHooks): Promise<void> {
+ *  logs and returns — the sweep reruns on its interval. Round-8 review:
+ *  the return value says whether the sweep saw the COMPLETE book — the
+ *  boot close-gate must not arm on a partial or skipped sweep. */
+export async function runBrokerAdoption(api: IBApi, hooks: AdoptionHooks): Promise<{ complete: boolean }> {
     let account: string;
     try {
         account = hooks.verifiedAccount();
     } catch (err) {
         logger.warn(`[broker-adopt] sweep skipped — account identity unavailable: ${err}`);
-        return;
+        return { complete: false };
     }
     const [orderSnap, positions, exposure] = await Promise.all([
         fetchOpenOrderSnaps(api),
@@ -308,4 +310,5 @@ export async function runBrokerAdoption(api: IBApi, hooks: AdoptionHooks): Promi
     } catch (err) {
         logger.warn(`[broker-adopt] could not persist reconciliation status: ${err}`);
     }
+    return { complete: orderSnap.complete };
 }

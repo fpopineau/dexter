@@ -63,10 +63,13 @@ class FakeIb extends EventEmitter {
     cancelPositions(): void { /* one-shot fetch cleanup */ }
     /** Open-order book served to the OCA probe and the orphan sweep. */
     openOrders: Array<{ id: number; contract: Contract; order: Order }> = [];
+    /** Round 8: false models a broker that never sends openOrderEnd —
+     *  the view is PARTIAL and must not be trusted as the whole book. */
+    serveOrdersEnd = true;
     reqAllOpenOrders(): void {
         queueMicrotask(() => {
             for (const o of this.openOrders) this.emit(EventName.openOrder, o.id, o.contract, o.order);
-            this.emit(EventName.openOrderEnd);
+            if (this.serveOrdersEnd) this.emit(EventName.openOrderEnd);
         });
     }
 }
@@ -113,6 +116,7 @@ beforeEach(() => {
         fillWaitMs: 200,
         cancelConfirmMs: 150,
         reconcileWaitMs: 300,
+        probeTimeoutMs: 250,
     });
     __setReconciliationStateForTests(null); // 'idle' — standalone semantics
 });
@@ -256,6 +260,20 @@ describe('closePosition lifecycle (round-4 review)', () => {
             },
         ];
         const out = await closePosition('CLQI', 'test-operator');
+        expect(out.state).toBe('filled');
+        const placed = fake.placed[0]!.order as unknown as { ocaGroup?: string };
+        expect(placed.ocaGroup).toBeUndefined();
+    });
+
+    test('incomplete book view (no openOrderEnd): close does NOT join even a clean-looking group (round 8)', async () => {
+        fake.position = { symbol: 'CLQJ', qty: 10 };
+        fake.serveOrdersEnd = false; // partial snapshot — an ungrouped exit could be hidden
+        fake.openOrders = [{
+            id: 9007,
+            contract: { symbol: 'CLQJ' } as Contract,
+            order: { action: 'SELL', orderType: 'STP', tif: 'GTC', orderRef: 'protect-CLQJ:stop', ocaGroup: 'dexter-CLQJ-1' } as unknown as Order,
+        }];
+        const out = await closePosition('CLQJ', 'test-operator');
         expect(out.state).toBe('filled');
         const placed = fake.placed[0]!.order as unknown as { ocaGroup?: string };
         expect(placed.ocaGroup).toBeUndefined();

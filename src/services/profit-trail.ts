@@ -251,7 +251,10 @@ async function releaseTargetLeg(
     api: Awaited<ReturnType<typeof getIBApi>>,
     entry: TrailEntry,
 ): Promise<string | null> {
-    const exits = await fetchOpenOrdersFor(api, entry.symbol, exitActionFor(entry.direction));
+    // A partial view (complete=false) just finds fewer targets — each
+    // release is individually cancel-confirmed, and a missed target means
+    // runner mode is not announced: conservative either way.
+    const exits = (await fetchOpenOrdersFor(api, entry.symbol, exitActionFor(entry.direction))).orders;
     const targets = selectTargetLegs(exits);
     if (targets.length === 0) return null;
     // Round-4 review (2026-08-21): "released" means the broker CONFIRMED
