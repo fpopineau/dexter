@@ -22,8 +22,9 @@ import { getMarketSession, isTradeableSession } from '@/utils/market-hours.js';
 import { assertDailyLossOk } from './daily-loss-guard.js';
 import { replayMissedExecutions, trackExecutedProposal } from './outcome-tracker.js';
 import { getSectorInfo } from './sector-map.js';
-import { assertAcceptContext, assertProposalRisk, checkMicrostructure, checkPriceRun, ENTRY_CONFIRM_FRACTION, plannedWorstLossUsd } from './proposal-risk-gate.js';
+import { assertAcceptContext, assertProposalRisk, checkMicrostructure, checkPriceRun, ENTRY_CONFIRM_FRACTION, formulaTakePct, plannedWorstLossUsd } from './proposal-risk-gate.js';
 import { fetchDailyRiskContext } from '@/tools/ibkr/daily-atr.js';
+import type { RiskRules } from '@/tools/ibkr/risk-rules.js';
 import { fetchShortabilitySnapshot } from '@/tools/ibkr/microstructure.js';
 import { fetchBrokerExposure, unionExposure } from './exposure-snapshot.js';
 import {
@@ -238,6 +239,9 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 target: p.target,
                 quantity: p.quantity,
                 tradeClass: p.tradeClass,
+                // WP-EXIT: the STORED x rides the re-check as an override so
+                // the required target is stable across daily ATR drift.
+                takePct: p.takePct,
                 tif: p.tif,
             },
             {
@@ -634,16 +638,21 @@ export function isChaseContinuationEnabled(): boolean {
  *  and the two must never drift apart. */
 
 /** Pure: fresh continuation levels from the live price, preserving the
- *  original stop distance and re-deriving the target from the ROUNDED
- *  distance so the prescription passes its own gates. The trigger sits
- *  max(0.1%, ENTRY_CONFIRM_FRACTION × stop distance) beyond the
- *  live price — it fills only on continuation beyond noise, not on the
- *  first uptick. Null = degenerate. */
+ *  original stop distance. The trigger sits max(0.1%, ENTRY_CONFIRM_FRACTION
+ *  × stop distance) beyond the live price — it fills only on continuation
+ *  beyond noise, not on the first uptick. Target semantics follow the exit
+ *  style (REQ-EXIT-011): under 'target' the take policy pins the target at
+ *  x% from the limit cap (x inherited from the original's stamped take_pct,
+ *  else the ATR formula — mirroring the gate's arithmetic exactly, so the
+ *  levels pass the gate they are about to face); under 'ratchet' the legacy
+ *  min-R:R target from the rounded stop distance. Null = degenerate (no
+ *  price, no stop distance, or no ATR to price the take under 'target'). */
 export function continuationLevels(
-    p: { direction: 'long' | 'short'; entry: number | null; stop: number },
+    p: { direction: 'long' | 'short'; entry: number | null; stop: number; takePct?: number | null },
     last: number,
-    minRiskReward: number,
-): { entry: number; entryLimit: number; stop: number; target: number } | null {
+    rules: RiskRules,
+    dailyAtr: number | null,
+): { entry: number; entryLimit: number; stop: number; target: number; takePct: number | null } | null {
     if (p.entry == null || !(p.entry > 0) || !(last > 0)) return null;
     const stopDist = Math.abs(p.entry - p.stop);
     if (!(stopDist > 0)) return null;
@@ -655,12 +664,25 @@ export function continuationLevels(
     // stop and target FROM the cap, or every continuation is refused by
     // the very gate it exists to satisfy (~1.56R at the cap when built
     // from the trigger).
+    const takeTarget = (cap: number): { target: number; takePct: number } | null => {
+        const x = p.takePct ?? (dailyAtr !== null && dailyAtr > 0
+            ? formulaTakePct((dailyAtr / cap) * 100, rules)
+            : null);
+        if (x === null) return null;
+        const raw = p.direction === 'long' ? cap * (1 + x / 100) : cap * (1 - x / 100);
+        return { target: Math.round(raw * 100) / 100, takePct: x };
+    };
     if (p.direction === 'long') {
         const trigger = c2(last + confirm);
         const cap = c2(trigger * 1.003);
         const stop = f2(cap - stopDist);
         const dist = Math.round((cap - stop) * 100) / 100;
-        return { entry: trigger, entryLimit: cap, stop, target: c2(cap + minRiskReward * dist) };
+        if (rules.exit_style === 'target') {
+            const take = takeTarget(cap);
+            if (!take) return null;
+            return { entry: trigger, entryLimit: cap, stop, target: take.target, takePct: take.takePct };
+        }
+        return { entry: trigger, entryLimit: cap, stop, target: c2(cap + rules.min_risk_reward * dist), takePct: null };
     }
     const trigger = f2(last - confirm);
     if (!(trigger > 0)) return null;
@@ -668,7 +690,12 @@ export function continuationLevels(
     if (!(cap > 0)) return null;
     const stop = c2(cap + stopDist);
     const dist = Math.round((stop - cap) * 100) / 100;
-    return { entry: trigger, entryLimit: cap, stop, target: f2(cap - minRiskReward * dist) };
+    if (rules.exit_style === 'target') {
+        const take = takeTarget(cap);
+        if (!take) return null;
+        return { entry: trigger, entryLimit: cap, stop, target: take.target, takePct: take.takePct };
+    }
+    return { entry: trigger, entryLimit: cap, stop, target: f2(cap - rules.min_risk_reward * dist), takePct: null };
 }
 
 /** One continuation per original proposal, process-lifetime. */
@@ -685,7 +712,11 @@ async function proposeChaseContinuation(original: TradeProposal): Promise<Execut
     const last = await fetchLastPrice(original.symbol);
     if (last === null) return null;
     const rules = getRiskRules();
-    const levels = continuationLevels(original, last, rules.min_risk_reward);
+    // Daily context BEFORE the levels: under the take policy the target is
+    // priced from the ATR (REQ-EXIT-011) — and the gate will fail closed
+    // without it anyway.
+    const { dailyAtr, ema10, recentEarnings } = await fetchDailyRiskContext(original.symbol);
+    const levels = continuationLevels(original, last, rules, dailyAtr);
     if (!levels) return null;
 
     const { getDailyLossStatus } = await import('./daily-loss-guard.js');
@@ -705,8 +736,6 @@ async function proposeChaseContinuation(original: TradeProposal): Promise<Execut
     }
 
     try {
-        const { fetchDailyRiskContext } = await import('@/tools/ibkr/daily-atr.js');
-        const { dailyAtr, ema10, recentEarnings } = await fetchDailyRiskContext(original.symbol);
         const { createProposal } = await import('./trade-proposals.js');
         const cont = await createProposal({
             symbol: original.symbol,
@@ -727,6 +756,9 @@ async function proposeChaseContinuation(original: TradeProposal): Promise<Execut
             quantity: sized.quantity,
             tif: 'DAY',
             tradeClass: 'intraday',
+            // REQ-EXIT-011: the take level the target was built from rides
+            // as the override so the gate re-derives the SAME target.
+            takePct: levels.takePct ?? undefined,
             score: original.score ?? undefined,
             rationale: `chase continuation of ${original.id} (price ran past ${original.entry} before acceptance): ` +
                 `fills only on continued strength through ${levels.entry}`,

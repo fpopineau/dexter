@@ -46,6 +46,23 @@ max_target_atr: 1.5
 # --- Per-Trade Risk Budget ---
 max_risk_per_trade_pct: 0.25 # Max loss if the stop fills (qty × stop distance), as % of net liquidation
 
+# --- Take-at-x% exit policy (WP-EXIT, operator decision 2026-08-22) ---
+# "Better now than later": the INTRADAY target IS the take level —
+# x = clamp(take_atr_mult × dailyATR%, take_floor_pct, take_cap_pct), with a
+# model take_pct override allowed inside [floor, cap]. The 2:1 gate judged
+# against this target forces stops <= x/2. When the floor pushes the target
+# past the max_target_atr reachability cap, the CAP WINS: the symbol is
+# intraday-ineligible (daily ATR too low for the take band — in practice
+# dailyATR% >= take_floor_pct / take_atr_mult = 2 at defaults).
+take_atr_mult: 1.5 # x as an ATR multiple (matches the reachability evidence)
+take_floor_pct: 3 # Lower clamp on x (%)
+take_cap_pct: 10 # Upper clamp on x (%) — also caps model take_pct overrides
+# 'target' (default): the bracket LMT sits at x% — broker-side, survives a
+# gateway outage. 'ratchet': profit-trail arms at +x%, locks x−1% via the
+# stop, and hands the exit to the runner trail. FLIPPING THIS ENDS A FROZEN
+# VALIDATION SAMPLE (VALIDATION-PROTOCOL.md).
+exit_style: target
+
 # --- Profit Trail (automatic winner protection) ---
 # ATR-aware geometry (2026-08-11): the trail thresholds scale with the
 # symbol's daily ATR so they are uniform in R-space. The old absolute pair
@@ -73,3 +90,4 @@ earnings_bet_enabled: true # Paper profile: the class is live for its burn-in
 max_earnings_bets: 1 # One open earnings bet at a time — training wheels
 earnings_bet_risk_pct: 0.25 # Worst-case gap loss budget (% of NetLiq)
 earnings_bet_gap_floor_pct: 20 # Assume at least a 20% adverse gap when sizing
+earnings_bet_min_verified: 4 # Evidence bar: at least this many CALENDAR-VERIFIED prints (gap-snap inferred prints cannot carry a record alone)

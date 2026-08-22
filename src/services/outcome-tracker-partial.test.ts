@@ -68,12 +68,13 @@ async function trackedProposal(symbol: string, quantity = 10, entry = 100) {
         direction: 'long',
         entryType: 'LMT',
         entry,
-        stop: entry - 5,
-        target: entry + 10,
+        // Take-policy geometry (WP-EXIT): 4%-ATR fixture → x = 6%.
+        stop: Math.round(entry * 0.975 * 100) / 100,
+        target: Math.round(entry * 1.06 * 100) / 100,
         quantity,
         rationale: 'partial-fill scenario',
         source: 'test',
-    });
+    }, { dailyAtr: 0.04 * entry });
     const ids = [seq++, seq++, seq++];
     await setProposalStatus(p.id, 'executed', { orderIds: ids, executedAt: Date.now() });
     const row = await getProposal(p.id);

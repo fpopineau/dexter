@@ -196,3 +196,35 @@ describe('runner mode direction mapping (shorts covered)', () => {
         expect(stpLmt.cancelIds).toEqual([23]);
     });
 });
+
+describe('ratchet mode geometry (REQ-EXIT-008, exit_style: ratchet)', () => {
+    test('arms at the take level and gives back ~1 point of it', async () => {
+        const { ratchetGeometry, observeTrail } = await import('./profit-trail.js');
+        const g = ratchetGeometry(6);
+        expect(g.mode).toBe('ratchet');
+        expect(g.armPct).toBe(6);
+        // Giveback solves (1.06)(1 − g/100) = 1.05 → ≈ 0.94%.
+        expect(g.pullbackPct).toBeCloseTo(0.94, 2);
+        // Worst post-arm exit right at the peak locks ≈ +5%.
+        const worst = (1 + g.armPct / 100) * (1 - g.pullbackPct / 100) - 1;
+        expect(worst * 100).toBeCloseTo(5, 1);
+
+        // End-to-end through the state machine: long from 100, runs to the
+        // arm at 106, then fades — closes at the lock, not at breakeven.
+        const e = { symbol: 'RTCH', direction: 'long' as const, basis: 100, quantity: 10, best: 100, armed: false };
+        expect(observeTrail(e, 105.9, g.armPct, g.pullbackPct)).toBeNull(); // below arm
+        expect(e.armed).toBe(false);
+        expect(observeTrail(e, 106, g.armPct, g.pullbackPct)).toBeNull(); // arms, no pullback yet
+        expect(e.armed).toBe(true);
+        const d = observeTrail(e, 105, g.armPct, g.pullbackPct); // gave back the point
+        expect(d).not.toBeNull();
+        expect(d!.action).toBe('close');
+    });
+
+    test('a tight take never trails inside the noise floor', async () => {
+        const { ratchetGeometry } = await import('./profit-trail.js');
+        // x = 3: exact giveback would be ~0.97% — fine; x extremely small is
+        // clamped by the spread-noise floor.
+        expect(ratchetGeometry(0.5).pullbackPct).toBeGreaterThanOrEqual(0.35);
+    });
+});

@@ -127,6 +127,33 @@ export interface RiskRules {
     /** Minimum assumed adverse gap (%) for earnings-bet sizing. The sizer
      *  uses max(symbol's worst historical post-print move, this floor). */
     earnings_bet_gap_floor_pct: number;
+    /** Minimum VERIFIED (calendar-published) prints in an earnings-bet
+     *  evidence record (REQ-VAL-002). The gap-snap inference manufactures
+     *  older prints; a record built mostly (or entirely) from inferred
+     *  dates must not pass the evidence bar on volume alone. */
+    earnings_bet_min_verified: number;
+    // --- Take-at-x% exit policy (WP-EXIT, operator decision 2026-08-22) ---
+    /** The take target's ATR multiple: x = clamp(take_atr_mult × dailyATR%,
+     *  take_floor_pct, take_cap_pct). "Better now than later": the intraday
+     *  target IS the take level — banked where price actually travels
+     *  (matches the max_target_atr reachability evidence), not manufactured
+     *  from a ratio. */
+    take_atr_mult: number;
+    /** Lower clamp on x (%). When the floor pushes the target past the
+     *  max_target_atr reachability cap, the CAP WINS: the symbol is
+     *  intraday-ineligible (daily ATR too low for the take band). */
+    take_floor_pct: number;
+    /** Upper clamp on x (%) — also the ceiling for a model-supplied
+     *  take_pct override. */
+    take_cap_pct: number;
+    /** Exit style for the intraday class (REQ-EXIT-007/008):
+     *  'target'  — the bracket's LMT leg sits at the take level (broker-side,
+     *              fills with the gateway down). Default.
+     *  'ratchet' — profit-trail arms at +x%, locks x−1% via the stop, and
+     *              releases the target into the runner trail.
+     *  Flipping this is a BEHAVIOR change: it ends a frozen validation
+     *  sample (VALIDATION-PROTOCOL.md). */
+    exit_style: 'target' | 'ratchet';
 }
 
 export const DEFAULT_RULES: RiskRules = {
@@ -171,6 +198,11 @@ export const DEFAULT_RULES: RiskRules = {
     max_earnings_bets: 1,
     earnings_bet_risk_pct: 0.25,
     earnings_bet_gap_floor_pct: 20,
+    earnings_bet_min_verified: 4,
+    take_atr_mult: 1.5,
+    take_floor_pct: 3,
+    take_cap_pct: 10,
+    exit_style: 'target',
 };
 
 export type AccountProfile = 'paper' | 'live';
@@ -189,11 +221,13 @@ const cachedByProfile = new Map<AccountProfile, RiskRules>();
 
 type RuleSpec =
     | { kind: 'number'; min: number; max: number; minExclusive?: boolean; integer?: boolean }
-    | { kind: 'boolean' };
+    | { kind: 'boolean' }
+    | { kind: 'enum'; values: readonly string[] };
 
 const num = (min: number, max: number, opts: { minExclusive?: boolean; integer?: boolean } = {}): RuleSpec =>
     ({ kind: 'number', min, max, ...opts });
 const bool: RuleSpec = { kind: 'boolean' };
+const oneOf = (...values: readonly string[]): RuleSpec => ({ kind: 'enum', values });
 
 /** Bounds are sanity rails, not policy: generous enough for any plausible
  *  profile, tight enough that a unit mistake (500 where 5% belongs, a
@@ -235,6 +269,11 @@ const RULE_SCHEMA: Record<keyof RiskRules, RuleSpec> = {
     max_earnings_bets: num(0, 10, { integer: true }),
     earnings_bet_risk_pct: num(0, 10, { minExclusive: true }),
     earnings_bet_gap_floor_pct: num(0, 100),
+    earnings_bet_min_verified: num(0, 20, { integer: true }),
+    take_atr_mult: num(0, 10, { minExclusive: true }),
+    take_floor_pct: num(0, 50, { minExclusive: true }),
+    take_cap_pct: num(0, 50, { minExclusive: true }),
+    exit_style: oneOf('target', 'ratchet'),
 };
 
 export interface RuleIssues { errors: string[]; warnings: string[] }
@@ -251,6 +290,12 @@ export function validateRuleSet(parsed: Record<string, unknown>, source: string)
         if (spec.kind === 'boolean') {
             if (typeof value !== 'boolean') {
                 errors.push(`${source}: '${key}' must be literally true or false, got ${JSON.stringify(value)}`);
+            }
+            continue;
+        }
+        if (spec.kind === 'enum') {
+            if (typeof value !== 'string' || !spec.values.includes(value)) {
+                errors.push(`${source}: '${key}' must be one of ${spec.values.join(' | ')}, got ${JSON.stringify(value)}`);
             }
             continue;
         }
@@ -284,6 +329,20 @@ export function crossFieldIssues(rules: RiskRules): RuleIssues {
     if (rules.profit_trail_pullback_atr_mult >= rules.profit_trail_arm_atr_mult) {
         errors.push(
             `profit_trail_pullback_atr_mult (${rules.profit_trail_pullback_atr_mult}) >= arm mult (${rules.profit_trail_arm_atr_mult}) — the trail's worst exit would be <= 0R`,
+        );
+    }
+    if (rules.take_floor_pct > rules.take_cap_pct) {
+        errors.push(
+            `take_floor_pct (${rules.take_floor_pct}) > take_cap_pct (${rules.take_cap_pct}) — inverted take band`,
+        );
+    }
+    // The take formula's mid-band slope must fit under the reachability
+    // cap, or every mid-ATR intraday proposal refuses: with
+    // take_atr_mult > max_target_atr, x = mult×ATR% puts the target past
+    // max_target_atr×ATR wherever the clamps don't bind.
+    if (rules.max_target_atr > 0 && rules.take_atr_mult > rules.max_target_atr) {
+        errors.push(
+            `take_atr_mult (${rules.take_atr_mult}) > max_target_atr (${rules.max_target_atr}) — the take target would always exceed the reachability cap`,
         );
     }
     // WARNING, not error: both current profiles run slightly over (paper

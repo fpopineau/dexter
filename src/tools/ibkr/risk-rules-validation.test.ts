@@ -42,6 +42,13 @@ describe('validateRuleSet (schema layer)', () => {
         expect(validateRuleSet({ max_open_positions: 2.5 }, 't').errors.length).toBe(1);
         expect(validateRuleSet({ max_open_positions: 3 }, 't').errors).toEqual([]);
     });
+
+    test('exit_style is a strict enum (WP-EXIT)', () => {
+        expect(validateRuleSet({ exit_style: 'target' }, 't').errors).toEqual([]);
+        expect(validateRuleSet({ exit_style: 'ratchet' }, 't').errors).toEqual([]);
+        expect(validateRuleSet({ exit_style: 'trail' }, 't').errors.length).toBe(1);
+        expect(validateRuleSet({ exit_style: true }, 't').errors.length).toBe(1);
+    });
 });
 
 describe('crossFieldIssues (merged-rules layer)', () => {
@@ -60,6 +67,19 @@ describe('crossFieldIssues (merged-rules layer)', () => {
         const v = crossFieldIssues(DEFAULT_RULES);
         expect(v.errors).toEqual([]);
         expect(v.warnings.some((w) => w.includes('worst-case'))).toBe(true);
+    });
+
+    test('inverted take band is an error (WP-EXIT)', () => {
+        const bad = { ...DEFAULT_RULES, take_floor_pct: 12, take_cap_pct: 10 };
+        expect(crossFieldIssues(bad).errors.some((e) => e.includes('take band'))).toBe(true);
+    });
+
+    test('take slope past the reachability cap is an error (every mid-ATR proposal would refuse)', () => {
+        const bad = { ...DEFAULT_RULES, take_atr_mult: 2.0, max_target_atr: 1.5 };
+        expect(crossFieldIssues(bad).errors.some((e) => e.includes('reachability'))).toBe(true);
+        // Equal is the boundary and legal (target lands exactly on the cap).
+        const equal = { ...DEFAULT_RULES, take_atr_mult: 1.5, max_target_atr: 1.5 };
+        expect(crossFieldIssues(equal).errors).toEqual([]);
     });
 });
 

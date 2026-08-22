@@ -14,11 +14,15 @@ import { classRiskPct, computeQuantity, gapRiskPerShare } from './position-sizer
 import { checkProposalRisk, type RiskGateProposal } from './proposal-risk-gate.js';
 
 // Paper-profile shape with the earnings-bet class unlocked (risk-rules.yaml).
-const PAPER_BETS: RiskRules = { ...DEFAULT_RULES, earnings_bet_enabled: true };
+// exit_style 'ratchet': this suite pins CLASS machinery (budgets, caps,
+// gap sizing) — free-target geometry keeps those fixtures orthogonal to
+// the take-at-x% policy, which has its own gate suite.
+const PAPER_BETS: RiskRules = { ...DEFAULT_RULES, earnings_bet_enabled: true, exit_style: 'ratchet' };
 
 // Live small-account shape (risk-rules.live.yaml): bets locked out.
 const LIVE_SMALL: RiskRules = {
     ...DEFAULT_RULES,
+    exit_style: 'ratchet',
     max_position_pct: 20,
     max_open_positions: 3,
     max_risk_per_trade_pct: 1.0,

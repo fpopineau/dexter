@@ -75,7 +75,9 @@ const CreateSchema = z.object({
     stop: z.coerce.number().positive()
         .describe('Stop-loss price at REAL STRUCTURE (low of day, pullback low, VWAP). The gate refuses stops closer than 0.4× the daily ATR — inside intraday noise, they fill on randomness.'),
     target: z.coerce.number().positive()
-        .describe('Take-profit at a real objective (prior high, measured move). Do NOT derive it as entry + 2× stop distance to satisfy the R/R gate — if an honest target is not ≥2× the stop distance away, skip the trade.'),
+        .describe('Take-profit price. INTRADAY (take-at-x% policy): the target must sit AT the take level — x% from the worst permitted fill, where x defaults to 1.5× the daily ATR% clamped into the configured take band (3–10%), or your takePct override. The gate prescribes the exact required price on a mismatch. Swing/earnings-bet: a real objective (prior high, measured move) at ≥2× the stop distance.'),
+    takePct: z.coerce.number().positive().optional()
+        .describe("Intraday only: override the take percent x within the configured take band (3–10%) when the instrument's potential justifies it (catalyst, structure). The target must then sit AT x% from the worst permitted fill. Omit for the ATR default."),
     quantity: z.coerce.number().positive().optional()
         .describe('Number of shares (decimals allowed when the account profile enables fractional trading). OMIT to auto-size (recommended): the position sizer computes shares from the account risk budget, the confidence score, and the stop distance — this is the only way sizing stays correct across account sizes. Pass explicitly only when the user demanded a specific quantity.'),
     tif: z.enum(['DAY', 'GTC']).default('DAY')
@@ -230,6 +232,7 @@ export function createTradeProposalsTool() {
                             quantity,
                             tif: input.tif,
                             tradeClass: input.tradeClass,
+                            takePct: input.takePct,
                             worstCaseGapPct: input.worstCaseGapPct,
                             score: input.score,
                             rationale: input.rationale,

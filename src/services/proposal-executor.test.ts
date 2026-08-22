@@ -34,18 +34,21 @@ afterAll(() => {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* held by sqlite */ }
 });
 
+// Take-policy fixture (WP-EXIT): ATR 4 → x = 6% → target 106, stop ≤ 3.
+const ATR_CTX = { dailyAtr: 4 };
+
 async function openProposal() {
     return createProposal({
         symbol: 'AAPL',
         direction: 'long',
         entryType: 'LMT',
         entry: 100,
-        stop: 95,
-        target: 110,
+        stop: 97.5,
+        target: 106,
         quantity: 10,
         rationale: 'executor test',
         source: 'test',
-    });
+    }, ATR_CTX);
 }
 
 describe('executor refusal gates (no IBKR needed)', () => {
@@ -125,9 +128,9 @@ describe('cancel by symbol', () => {
         const make = async (symbol: string) => {
             const p = await createProposal({
                 symbol, direction: 'long', entryType: 'LMT',
-                entry: 100, stop: 95, target: 110, quantity: 10,
+                entry: 100, stop: 97.5, target: 106, quantity: 10,
                 rationale: 'cancel-by-symbol test', source: 'test',
-            });
+            }, ATR_CTX);
             await setProposalStatus(p.id, 'executed', { orderIds: [61, 62, 63], executedAt: Date.now() });
             return p;
         };
@@ -150,14 +153,14 @@ describe('cancel by symbol', () => {
         // state can only arise from near-simultaneous creations.)
         const a = await createProposal({
             symbol: 'CBSA', direction: 'long', entryType: 'LMT',
-            entry: 100, stop: 95, target: 110, quantity: 10,
+            entry: 100, stop: 97.5, target: 106, quantity: 10,
             rationale: 'ambiguity test A', source: 'test',
-        });
+        }, ATR_CTX);
         const b = await createProposal({
             symbol: 'CBSA', direction: 'long', entryType: 'LMT',
-            entry: 100, stop: 95, target: 110, quantity: 10,
+            entry: 100, stop: 97.5, target: 106, quantity: 10,
             rationale: 'ambiguity test B', source: 'test',
-        });
+        }, ATR_CTX);
         await setProposalStatus(a.id, 'executed', { orderIds: [61, 62, 63], executedAt: Date.now() });
         await setProposalStatus(b.id, 'executed', { orderIds: [64, 65, 66], executedAt: Date.now() });
         const ambiguous = await cancelProposalForSymbol('CBSA');
@@ -206,9 +209,9 @@ describe('auto-execution gates (paper-only by construction)', () => {
 
             const low = await createProposal({
                 symbol: 'AAPL', direction: 'long', entryType: 'LMT',
-                entry: 100, stop: 95, target: 110, quantity: 10,
+                entry: 100, stop: 97.5, target: 106, quantity: 10,
                 score: 62, rationale: 'low-confidence test', source: 'test',
-            });
+            }, ATR_CTX);
             const refused = await autoExecuteProposal(low.id);
             expect(refused.ok).toBe(false);
             expect(refused.message).toContain('score 62 is below the confidence threshold 80');
@@ -226,9 +229,9 @@ describe('auto-execution gates (paper-only by construction)', () => {
         try {
             const p = await createProposal({
                 symbol: 'AAPL', direction: 'long', entryType: 'LMT',
-                entry: 100, stop: 95, target: 110, quantity: 10,
+                entry: 100, stop: 97.5, target: 106, quantity: 10,
                 score: 90, rationale: 'threshold test', source: 'test',
-            });
+            }, ATR_CTX);
             const refused = await autoExecuteProposal(p.id);
             expect(refused.ok).toBe(false);
             expect(refused.message).toContain('below the confidence threshold 95');

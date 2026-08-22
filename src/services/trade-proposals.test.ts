@@ -46,8 +46,10 @@ function validInput(overrides: Partial<CreateProposalInput> = {}): CreateProposa
         direction: 'long',
         entryType: 'LMT',
         entry: 100,
-        stop: 95,
-        target: 110,
+        // Take-policy fixture (WP-EXIT): a 4%-ATR name has x = 6% → the
+        // target sits AT 106 and the 2:1 gate wants the stop within 3.
+        stop: 97.5,
+        target: 106,
         quantity: 10,
         rationale: 'test proposal',
         source: 'test',
@@ -55,9 +57,20 @@ function validInput(overrides: Partial<CreateProposalInput> = {}): CreateProposa
     };
 }
 
+/** Gate context for the take policy: ATR pinned at 4% of the worst-fill
+ *  basis so x = clamp(1.5×4, 3, 10) = 6% exactly for every fixture. */
+function atrCtx(input: CreateProposalInput) {
+    return { dailyAtr: 0.04 * (input.entryLimit ?? input.entry ?? 100) };
+}
+
+/** createProposal with the standard take-policy context. */
+async function create(input: CreateProposalInput) {
+    return createProposal(input, atrCtx(input));
+}
+
 describe('proposal store lifecycle', () => {
     test('create → get roundtrip, uppercased symbol, open status', async () => {
-        const p = await createProposal(validInput());
+        const p = await create(validInput());
         expect(p.id).toMatch(/^P-[0-9A-F]{4}$/);
         expect(p.status).toBe('open');
         expect(p.symbol).toBe('NVDA');
@@ -69,7 +82,7 @@ describe('proposal store lifecycle', () => {
     });
 
     test('GTC tif persists (overnight/swing brackets)', async () => {
-        const p = await createProposal(validInput({ tif: 'GTC' }));
+        const p = await create(validInput({ tif: 'GTC' }));
         expect((await getProposal(p.id))?.tif).toBe('GTC');
     });
 
@@ -77,30 +90,32 @@ describe('proposal store lifecycle', () => {
         // Regression: createProposal did not forward entryLimit to the risk
         // gate, so EVERY momentum STP_LMT create was refused with
         // "requires entryLimit" even when the caller supplied it.
-        const p = await createProposal(validInput({
+        const p = await create(validInput({
+            // Take policy: basis = the limit cap 100.65, x = 6% → target
+            // round(100.65 × 1.06) = 106.69; stop within 3.02 of the cap.
             symbol: 'QCRH', entryType: 'STP_LMT',
-            entry: 100.35, entryLimit: 100.65, stop: 93.18, target: 116,
+            entry: 100.35, entryLimit: 100.65, stop: 98.00, target: 106.69,
             quantity: 26, tif: 'GTC',
         }));
         const stored = await getProposal(p.id);
         expect(stored?.entryType).toBe('STP_LMT');
         expect(stored?.entryLimit).toBe(100.65);
         // …and it is still refused when the cap is genuinely missing.
-        await expect(createProposal(validInput({
+        await expect(create(validInput({
             symbol: 'QCRH', entryType: 'STP_LMT',
-            entry: 100.35, stop: 93.18, target: 116, quantity: 26,
+            entry: 100.35, stop: 98.00, target: 106.37, quantity: 26,
         }))).rejects.toThrow(/entryLimit/);
     });
 
     test('creation is refused by the risk gate on bad numbers', async () => {
         // R/R 0.8:1 < 2.0 minimum
-        await expect(createProposal(validInput({ target: 104 }))).rejects.toThrow(/risk-gate/);
+        await expect(create(validInput({ target: 104 }))).rejects.toThrow(/risk-gate/);
         // entry required even for MKT
-        await expect(createProposal(validInput({ entryType: 'MKT', entry: undefined }))).rejects.toThrow(/risk-gate/);
+        await expect(create(validInput({ entryType: 'MKT', entry: undefined }))).rejects.toThrow(/risk-gate/);
     });
 
     test('stale open proposals expire', async () => {
-        const p = await createProposal(validInput({ expiresMinutes: 0.001 as unknown as number }));
+        const p = await create(validInput({ expiresMinutes: 0.001 as unknown as number }));
         await new Promise((r) => setTimeout(r, 100));
         const expired = await expireStale();
         expect(expired).toBeGreaterThanOrEqual(1);
@@ -113,7 +128,7 @@ describe('proposal store lifecycle', () => {
         const baseOpen = await countOpenExecuted();
         const baseExecuted = await countExecutedSince(etDayStartMs());
 
-        const p = await createProposal(validInput());
+        const p = await create(validInput());
         await setProposalStatus(p.id, 'executed', { orderIds: [11, 12, 13], executedAt: Date.now() });
 
         expect(await countOpenExecuted()).toBe(baseOpen + 1);
@@ -143,7 +158,7 @@ describe('proposal store lifecycle', () => {
 
     test('EOD-keep transition: a filled DAY position converts instead of closing (orphaned-keep hole)', async () => {
         const baseOpen = await countOpenExecuted();
-        const p = await createProposal(validInput({ symbol: 'KEEP' }));
+        const p = await create(validInput({ symbol: 'KEEP' }));
         await setProposalStatus(p.id, 'executed', { orderIds: [301, 302, 303], executedAt: Date.now() });
         await markEntryFilled(p.id, 100.05);
 
@@ -169,15 +184,15 @@ describe('proposal store lifecycle', () => {
     test('sumRealizedPnlSince nets closed outcomes and ignores unknown P&L', async () => {
         const before = await sumRealizedPnlSince(0);
 
-        const win = await createProposal(validInput({ symbol: 'PNLW' }));
+        const win = await create(validInput({ symbol: 'PNLW' }));
         await setProposalStatus(win.id, 'executed', { orderIds: [501, 502, 503], executedAt: Date.now() });
         await closeProposal(win.id, { exitReason: 'target', realizedPnl: 120.25 });
 
-        const loss = await createProposal(validInput({ symbol: 'PNLL' }));
+        const loss = await create(validInput({ symbol: 'PNLL' }));
         await setProposalStatus(loss.id, 'executed', { orderIds: [511, 512, 513], executedAt: Date.now() });
         await closeProposal(loss.id, { exitReason: 'stop', realizedPnl: -45.75 });
 
-        const unknown = await createProposal(validInput({ symbol: 'PNLU' }));
+        const unknown = await create(validInput({ symbol: 'PNLU' }));
         await setProposalStatus(unknown.id, 'executed', { orderIds: [521, 522, 523], executedAt: Date.now() });
         await closeProposal(unknown.id, { exitReason: 'manual' }); // realizedPnl null — contributes nothing
 
@@ -188,7 +203,7 @@ describe('proposal store lifecycle', () => {
 
     test('sumRealizedPnlSince subtracts commissions — headroom sees NET (audit 2026-08-20)', async () => {
         const before = await sumRealizedPnlSince(0);
-        const p = await createProposal(validInput({ symbol: 'PNLC' }));
+        const p = await create(validInput({ symbol: 'PNLC' }));
         await setProposalStatus(p.id, 'executed', { orderIds: [531, 532, 533], executedAt: Date.now() });
         await closeProposal(p.id, { exitReason: 'target', realizedPnl: 100, commissions: 7.25 });
         expect(await sumRealizedPnlSince(0)).toBeCloseTo(before + 92.75, 2);
@@ -202,7 +217,7 @@ describe('proposal store lifecycle', () => {
         // A claimed ('executing') proposal has executed_at NULL — it must
         // still occupy a daily-trade slot for OTHER concurrent accepts
         // (the original SQL matched it against executed_at and counted 0).
-        const racing = await createProposal(validInput({ symbol: 'RACE' }));
+        const racing = await create(validInput({ symbol: 'RACE' }));
         expect(await claimProposalForExecution(racing.id)).toBe(true);
         expect(await countExecutedSince(etDayStartMs())).toBe(baseExecuted + 1);
         expect(await countOpenExecuted()).toBe(baseOpen + 1);
@@ -217,13 +232,13 @@ describe('proposal store lifecycle', () => {
 
     test('EOD-keep transition refuses unfilled entries and rows a concurrent close already won', async () => {
         // Unfilled entry: there is no position to keep — nothing converts.
-        const unfilled = await createProposal(validInput({ symbol: 'KEEPX' }));
+        const unfilled = await create(validInput({ symbol: 'KEEPX' }));
         await setProposalStatus(unfilled.id, 'executed', { orderIds: [311, 312, 313], executedAt: Date.now() });
         expect(await convertToOvernightHold(unfilled.id, { orderIds: [311, 412, 411] })).toBe(false);
         expect((await getProposal(unfilled.id))?.tif).toBe('DAY'); // untouched
 
         // Already closed: the close wins; the convert must not resurrect it.
-        const gone = await createProposal(validInput({ symbol: 'KEEPY' }));
+        const gone = await create(validInput({ symbol: 'KEEPY' }));
         await setProposalStatus(gone.id, 'executed', { orderIds: [321, 322, 323], executedAt: Date.now() });
         await markEntryFilled(gone.id, 100);
         await closeProposal(gone.id, { exitReason: 'manual' });
@@ -237,7 +252,7 @@ describe('proposal store lifecycle', () => {
 
     test('execution claim is atomic: one winner, release restores open', async () => {
         const { claimProposalForExecution, releaseProposalClaim } = await import('./trade-proposals.js');
-        const p = await createProposal(validInput({ symbol: 'RACE' }));
+        const p = await create(validInput({ symbol: 'RACE' }));
 
         // Fire concurrent claims — exactly one may win.
         const results = await Promise.all(
@@ -256,14 +271,16 @@ describe('proposal store lifecycle', () => {
     });
 
     test('duplicate-setup guard: refuses a near-identical entry against a working bracket', async () => {
-        const a = await createProposal(validInput({ symbol: 'DUPE', entry: 100, stop: 95, target: 110 }));
+        const a = await create(validInput({ symbol: 'DUPE' }));
         await setProposalStatus(a.id, 'executed', { orderIds: [71, 72, 73], executedAt: Date.now() });
 
-        // Same symbol, entry within 2% → refused (the daily re-propose pattern).
-        await expect(createProposal(validInput({ symbol: 'DUPE', entry: 101, stop: 96, target: 111 })))
+        // Same symbol, entry within 2% → refused (the daily re-propose
+        // pattern; the duplicate guard fires BEFORE the risk gate).
+        await expect(create(validInput({ symbol: 'DUPE', entry: 101, stop: 98.5, target: 107.06 })))
             .rejects.toThrow(/duplicate setup/);
-        // A genuinely different level (>2%) is a new trade.
-        const fresh = await createProposal(validInput({ symbol: 'DUPE', entry: 106, stop: 100.7, target: 116.7 }));
+        // A genuinely different level (>2%) is a new trade. Take geometry at
+        // entry 106: target round(106 × 1.06) = 112.36, stop within 3.18.
+        const fresh = await create(validInput({ symbol: 'DUPE', entry: 106, stop: 103.4, target: 112.36 }));
         expect(fresh.status).toBe('open');
 
         await closeProposal(a.id, { exitReason: 'cancelled' }); // free the slot for other tests
@@ -271,11 +288,11 @@ describe('proposal store lifecycle', () => {
 
     test('listStaleUnfilled finds old unfilled entries, not filled or fresh ones', async () => {
         const { listStaleUnfilled } = await import('./trade-proposals.js');
-        const old = await createProposal(validInput({ symbol: 'STAL' }));
+        const old = await create(validInput({ symbol: 'STAL' }));
         await setProposalStatus(old.id, 'executed', { orderIds: [81, 82, 83], executedAt: Date.now() - 4 * 24 * 3600_000 });
-        const fresh = await createProposal(validInput({ symbol: 'STAF' }));
+        const fresh = await create(validInput({ symbol: 'STAF' }));
         await setProposalStatus(fresh.id, 'executed', { orderIds: [84, 85, 86], executedAt: Date.now() });
-        const filled = await createProposal(validInput({ symbol: 'STAG' }));
+        const filled = await create(validInput({ symbol: 'STAG' }));
         await setProposalStatus(filled.id, 'executed', { orderIds: [87, 88, 89], executedAt: Date.now() - 4 * 24 * 3600_000 });
         await markEntryFilled(filled.id, 100.01);
 
@@ -294,21 +311,21 @@ describe('proposal store lifecycle', () => {
 
         // Intraday, 60-min validity, accepted immediately → expired when
         // queried 61 minutes later, grace long since satisfied.
-        const expired = await createProposal(validInput({ symbol: 'EXPA', expiresMinutes: 60 }));
+        const expired = await create(validInput({ symbol: 'EXPA', expiresMinutes: 60 }));
         await setProposalStatus(expired.id, 'executed', { orderIds: [91, 92, 93], executedAt: now });
         // Default 120-min validity → still inside its window at +61min.
-        const unexpired = await createProposal(validInput({ symbol: 'EXPB' }));
+        const unexpired = await create(validInput({ symbol: 'EXPB' }));
         await setProposalStatus(unexpired.id, 'executed', { orderIds: [94, 95, 96], executedAt: now });
         // Swing class: expired long ago but patient by design, never swept.
-        const swing = await createProposal(validInput({ symbol: 'EXPC', tradeClass: 'swing', tif: 'GTC', expiresMinutes: 1 }));
+        const swing = await create(validInput({ symbol: 'EXPC', tradeClass: 'swing', tif: 'GTC', expiresMinutes: 1 }));
         await setProposalStatus(swing.id, 'executed', { orderIds: [97, 98, 99], executedAt: now });
         // Filled entry: nothing resting to cancel.
-        const filled2 = await createProposal(validInput({ symbol: 'EXPD', expiresMinutes: 1 }));
+        const filled2 = await create(validInput({ symbol: 'EXPD', expiresMinutes: 1 }));
         await setProposalStatus(filled2.id, 'executed', { orderIds: [101, 102, 103], executedAt: now });
         await markEntryFilled(filled2.id, 100.01);
         // Expired by the query time but accepted INSIDE the grace window —
         // the deliberate late accept keeps its resting time.
-        const lateAccept = await createProposal(validInput({ symbol: 'EXPE', expiresMinutes: 1 }));
+        const lateAccept = await create(validInput({ symbol: 'EXPE', expiresMinutes: 1 }));
         await setProposalStatus(lateAccept.id, 'executed', { orderIds: [104, 105, 106], executedAt: now });
 
         // 61 minutes on: EXPA expired+past grace; EXPB still valid.
@@ -332,7 +349,7 @@ describe('proposal store lifecycle', () => {
     });
 
     test('closeProposal only transitions executed proposals', async () => {
-        const p = await createProposal(validInput());
+        const p = await create(validInput());
         await closeProposal(p.id, { exitReason: 'manual' });
         expect((await getProposal(p.id))?.status).toBe('open'); // untouched
     });
@@ -344,15 +361,15 @@ describe('performance summary', () => {
         await new Promise((r) => setTimeout(r, 5));
         const since = Date.now();
 
-        const win = await createProposal(validInput({ symbol: 'WIN' }));
+        const win = await create(validInput({ symbol: 'WIN' }));
         await setProposalStatus(win.id, 'executed', { orderIds: [1, 2, 3], executedAt: Date.now() });
         await closeProposal(win.id, { exitReason: 'target', realizedPnl: 100, commissions: 1 });
 
-        const loss = await createProposal(validInput({ symbol: 'LOSS' }));
+        const loss = await create(validInput({ symbol: 'LOSS' }));
         await setProposalStatus(loss.id, 'executed', { orderIds: [4, 5, 6], executedAt: Date.now() });
         await closeProposal(loss.id, { exitReason: 'stop', realizedPnl: -50, commissions: 1 });
 
-        const unlabeled = await createProposal(validInput({ symbol: 'MANL' }));
+        const unlabeled = await create(validInput({ symbol: 'MANL' }));
         await setProposalStatus(unlabeled.id, 'executed', { orderIds: [7, 8, 9], executedAt: Date.now() });
         await closeProposal(unlabeled.id, { exitReason: 'manual' });
 
@@ -386,7 +403,7 @@ describe('performance baseline (non-destructive reset)', () => {
     test('a reset hides earlier closes from default reports but keeps them in the DB', async () => {
         const since = Date.now() - 60_000; // covers everything this file closed
 
-        const before = await createProposal(validInput({ symbol: 'OLDL' }));
+        const before = await create(validInput({ symbol: 'OLDL' }));
         await setProposalStatus(before.id, 'executed', { orderIds: [21, 22, 23], executedAt: Date.now() });
         await closeProposal(before.id, { exitReason: 'stop', realizedPnl: -500, commissions: 1 });
 
@@ -395,7 +412,7 @@ describe('performance baseline (non-destructive reset)', () => {
         expect(getPerformanceBaseline()?.epochMs).toBe(baseline.epochMs);
         await new Promise((r) => setTimeout(r, 5));
 
-        const after = await createProposal(validInput({ symbol: 'NEWW' }));
+        const after = await create(validInput({ symbol: 'NEWW' }));
         await setProposalStatus(after.id, 'executed', { orderIds: [24, 25, 26], executedAt: Date.now() });
         await closeProposal(after.id, { exitReason: 'target', realizedPnl: 200, commissions: 1 });
 
@@ -434,7 +451,7 @@ describe('recordLateExitFill (P&L attribution after the fact)', () => {
     test('patches a closed manual row, and only that', async () => {
         // The 'close outside RTH' shape: proposal finalized as manual/unknown,
         // the MKT close fills at the next open.
-        const p = await createProposal(validInput({ symbol: 'LATE' }));
+        const p = await create(validInput({ symbol: 'LATE' }));
         await setProposalStatus(p.id, 'executed', { orderIds: [31, 32, 33], executedAt: Date.now() });
         await markEntryFilled(p.id, 100);
         await closeProposal(p.id, { exitReason: 'manual', note: 'both bracket exits terminated without filling' });
@@ -453,7 +470,7 @@ describe('recordLateExitFill (P&L attribution after the fact)', () => {
     });
 
     test('rows with a real P&L (e.g. stop exits) are never touched', async () => {
-        const s = await createProposal(validInput({ symbol: 'STOPD' }));
+        const s = await create(validInput({ symbol: 'STOPD' }));
         await setProposalStatus(s.id, 'executed', { orderIds: [34, 35, 36], executedAt: Date.now() });
         await closeProposal(s.id, { exitReason: 'stop', realizedPnl: -50 });
         await recordLateExitFill(s.id, { exitFillPrice: 1, realizedPnl: 999 });
@@ -467,9 +484,9 @@ describe('recordLateExitFill (P&L attribution after the fact)', () => {
 
 describe('trade classes', () => {
     test('tradeClass persists and defaults to intraday', async () => {
-        const plain = await createProposal(validInput({ symbol: 'CLSA' }));
+        const plain = await create(validInput({ symbol: 'CLSA' }));
         expect(plain.tradeClass).toBe('intraday');
-        const swing = await createProposal(validInput({
+        const swing = await create(validInput({
             symbol: 'CLSB', tradeClass: 'swing', tif: 'GTC',
         }));
         expect(swing.tradeClass).toBe('swing');
@@ -479,8 +496,8 @@ describe('trade classes', () => {
     });
 
     test('countOpenByClass counts executing/executed only, and can exclude one id', async () => {
-        const a = await createProposal(validInput({ symbol: 'CLSC', tradeClass: 'swing', tif: 'GTC' }));
-        const b = await createProposal(validInput({ symbol: 'CLSD', tradeClass: 'swing', tif: 'GTC' }));
+        const a = await create(validInput({ symbol: 'CLSC', tradeClass: 'swing', tif: 'GTC' }));
+        const b = await create(validInput({ symbol: 'CLSD', tradeClass: 'swing', tif: 'GTC' }));
         const before = await countOpenByClass('swing');
         await setProposalStatus(a.id, 'executed', { executedAt: Date.now() });
         await setProposalStatus(b.id, 'executed', { executedAt: Date.now() });
@@ -497,23 +514,23 @@ describe('trade classes', () => {
         const syms = ['CLSE', 'CLSF', 'CLSG'];
         const ids: string[] = [];
         for (const sym of syms) {
-            const p = await createProposal(validInput({ symbol: sym, tradeClass: 'swing', tif: 'GTC' }));
+            const p = await create(validInput({ symbol: sym, tradeClass: 'swing', tif: 'GTC' }));
             await setProposalStatus(p.id, 'executed', { executedAt: Date.now() });
             ids.push(p.id);
         }
         // Fourth swing: the store counts 3 executing/executed swings itself —
         // no caller-supplied context can understate the book.
         await expect(
-            createProposal(validInput({ symbol: 'CLSH', tradeClass: 'swing', tif: 'GTC' })),
+            create(validInput({ symbol: 'CLSH', tradeClass: 'swing', tif: 'GTC' })),
         ).rejects.toThrow(/max 3/);
         // An intraday proposal is unaffected by the full swing book.
-        const ok = await createProposal(validInput({ symbol: 'CLSI' }));
+        const ok = await create(validInput({ symbol: 'CLSI' }));
         expect(ok.tradeClass).toBe('intraday');
         for (const id of ids) await closeProposal(id, { exitReason: 'manual', realizedPnl: 0 });
     });
 
     test('per-class ledger appears in the performance summary', async () => {
-        const p = await createProposal(validInput({ symbol: 'CLSJ', tradeClass: 'swing', tif: 'GTC' }));
+        const p = await create(validInput({ symbol: 'CLSJ', tradeClass: 'swing', tif: 'GTC' }));
         await setProposalStatus(p.id, 'executed', { executedAt: Date.now() });
         await closeProposal(p.id, { exitReason: 'target', realizedPnl: 25 });
         const s = await getPerformanceSummary(Date.now() - 60_000, { includeAllHistory: true });

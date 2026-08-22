@@ -35,6 +35,11 @@ export interface RiskGateProposal {
     /** Trade class; omitted = 'intraday'. Selects the risk budget and the
      *  class-specific checks (swing cap, earnings-bet cap/switch/gap math). */
     tradeClass?: TradeClass;
+    /** Take-at-x% override (REQ-EXIT-002): the model's x, validated into
+     *  [take_floor_pct, take_cap_pct]. Omitted = the ATR formula. At the
+     *  accept-time re-check the STORED take_pct rides here so the required
+     *  target stays stable across daily ATR drift. */
+    takePct?: number | null;
     /** Bracket time-in-force. GTC = the position is MEANT to survive the
      *  close → the overnight caps apply at acceptance. Omitted = DAY. */
     tif?: 'DAY' | 'GTC';
@@ -178,6 +183,151 @@ export interface RiskGateResult {
     /** Informational values computed along the way. */
     riskReward: number | null;
     positionValue: number | null;
+    /** Effective take percent under the take-at-x% policy (REQ-EXIT-001);
+     *  null when the policy did not apply (class exempt, ratchet mode) or
+     *  the proposal was refused before x could be priced. Persisted on the
+     *  proposal so the accept-time re-check reuses the SAME x (an override)
+     *  instead of re-deriving from drifted ATR. */
+    takePct: number | null;
+    takePctSource: 'formula' | 'model' | null;
+}
+
+// ---------------------------------------------------------------------------
+// Take-at-x% exit policy (WP-EXIT, operator decision 2026-08-22)
+// ---------------------------------------------------------------------------
+
+export interface TakeTargetCheck {
+    violations: string[];
+    notes: string[];
+    takePct: number | null;
+    takePctSource: 'formula' | 'model' | null;
+    /** The tick-aligned target the policy demands; null when refused
+     *  before a target could be priced (no ATR, band violation, symbol
+     *  ineligible). */
+    requiredTarget: number | null;
+}
+
+/** The formula half of REQ-EXIT-001: x = clamp(mult × ATR%, floor, cap).
+ *  Exported for the ratchet-mode trail (REQ-EXIT-008 formula fallback). */
+export function formulaTakePct(atrPct: number, rules: RiskRules): number {
+    return Math.min(rules.take_cap_pct, Math.max(rules.take_floor_pct, rules.take_atr_mult * atrPct));
+}
+
+/**
+ * Pure (REQ-EXIT-001..005): the intraday target IS the take level —
+ * "better now than later" (operator, 2026-08-22). x comes from the model's
+ * take_pct override inside [floor, cap], else from the ATR formula; the
+ * target must sit at x% from the WORST permitted fill. The max_target_atr
+ * reachability cap WINS over the floor: a symbol whose ATR is too low (or
+ * too high) for the band is intraday-ineligible, with no target
+ * prescription — two contradictory prescriptions teach surrender.
+ */
+export function checkTakeTarget(
+    input: {
+        symbol: string;
+        direction: 'long' | 'short';
+        /** Worst permitted fill (STP_LMT limit cap when present, else entry). */
+        basis: number;
+        target: number;
+        dailyAtr: number | undefined;
+        takePctOverride: number | null | undefined;
+        recentEarnings: boolean;
+    },
+    rules: RiskRules,
+): TakeTargetCheck {
+    const none: Omit<TakeTargetCheck, 'violations' | 'notes'> = { takePct: null, takePctSource: null, requiredTarget: null };
+    const violations: string[] = [];
+    const notes: string[] = [];
+
+    // REQ-EXIT-005: no ATR, no take target — fail closed for the class.
+    if (input.dailyAtr === undefined || !(input.dailyAtr > 0)) {
+        violations.push(
+            `daily ATR unavailable for ${input.symbol} — the intraday take target cannot be priced (fail-closed): ` +
+            `retry when daily bars are available, make it a swing with swing-class vetting, or skip`,
+        );
+        return { ...none, violations, notes };
+    }
+    const atrPct = (input.dailyAtr / input.basis) * 100;
+
+    // REQ-EXIT-002: a model override lives inside the band or dies.
+    let x: number;
+    let source: 'formula' | 'model';
+    if (input.takePctOverride !== null && input.takePctOverride !== undefined) {
+        if (!(input.takePctOverride >= rules.take_floor_pct) || !(input.takePctOverride <= rules.take_cap_pct)) {
+            violations.push(
+                `take_pct ${input.takePctOverride} is outside the take band [${rules.take_floor_pct}%, ${rules.take_cap_pct}%] — ` +
+                `resubmit inside the band or omit take_pct for the ATR default`,
+            );
+            return { ...none, violations, notes };
+        }
+        x = input.takePctOverride;
+        source = 'model';
+    } else {
+        x = formulaTakePct(atrPct, rules);
+        source = 'formula';
+    }
+
+    // The narrowest honest take: the noise-stop floor and min R/R together
+    // demand x ≥ min_risk_reward × min_stop_atr_fraction × ATR%. Below it
+    // no stop placement can satisfy both — refuse with the reason, not two
+    // contradictory prescriptions later.
+    const minViableX = rules.min_risk_reward * rules.min_stop_atr_fraction * atrPct;
+    if (x < minViableX - 1e-9) {
+        violations.push(source === 'model'
+            ? `take_pct ${x}% is too tight for a ${atrPct.toFixed(1)}%-ATR symbol: the noise-stop floor × ` +
+              `${rules.min_risk_reward}:1 needs at least ${minViableX.toFixed(1)}% — raise take_pct or skip`
+            : `${input.symbol} is intraday-ineligible: daily ATR ${atrPct.toFixed(1)}% of price is too HIGH for the ` +
+              `take band (cap ${rules.take_cap_pct}% < the ${minViableX.toFixed(1)}% the noise-stop floor demands) — ` +
+              `make it a swing with swing-class vetting, or skip`);
+        return { ...none, violations, notes };
+    }
+
+    // REQ-EXIT-004: reachability. The cap wins over the floor — and over a
+    // model override. Waived on post-print repricing days like the other
+    // ATR-yardstick checks.
+    const requiredRewardUsd = (input.basis * x) / 100;
+    if (rules.max_target_atr > 0 && input.recentEarnings !== true
+        && requiredRewardUsd > rules.max_target_atr * input.dailyAtr + 1e-9) {
+        const maxXpct = ((rules.max_target_atr * input.dailyAtr) / input.basis) * 100;
+        if (source === 'model' && maxXpct >= rules.take_floor_pct - 1e-9) {
+            violations.push(
+                `take_pct ${x}% exceeds reachability at this ATR — the ${rules.max_target_atr}×ATR cap allows at ` +
+                `most ${(Math.floor(maxXpct * 10) / 10).toFixed(1)}%; lower take_pct or omit it for the ATR default`,
+            );
+        } else {
+            // Formula floor bound (or an override the cap forbids entirely):
+            // the symbol does not move enough for the take band. REQ-EXIT-004.
+            violations.push(
+                `${input.symbol} is intraday-ineligible: daily ATR ${atrPct.toFixed(1)}% of price is too low for the ` +
+                `take band — the ${rules.take_floor_pct}% floor sits ${(rules.take_floor_pct / atrPct).toFixed(1)}×ATR away, ` +
+                `past the ${rules.max_target_atr}×ATR reachability cap (intraday needs dailyATR ≳ ` +
+                `${(rules.take_floor_pct / rules.take_atr_mult).toFixed(1)}%). SKIP it for intraday, or make it a swing`,
+            );
+        }
+        return { ...none, violations, notes };
+    }
+    if (rules.max_target_atr > 0 && input.recentEarnings === true
+        && requiredRewardUsd > rules.max_target_atr * input.dailyAtr + 1e-9) {
+        notes.push(
+            `take-target reachability waived for ${input.symbol}: ${(requiredRewardUsd / input.dailyAtr).toFixed(1)}×ATR ` +
+            `take, but the symbol reported earnings within the last session (repricing day)`,
+        );
+    }
+
+    // REQ-EXIT-001/003: the target sits AT the take level, tick-aligned.
+    const raw = input.direction === 'long' ? input.basis * (1 + x / 100) : input.basis * (1 - x / 100);
+    const requiredTarget = Math.round(raw * 100) / 100;
+    const tolerance = Math.max(0.01, input.basis * 0.0005);
+    if (Math.abs(input.target - requiredTarget) > tolerance + 1e-9) {
+        violations.push(
+            `target ${input.target} does not sit at the take level: the intraday exit policy places the target AT ` +
+            `x = ${x.toFixed(2)}% (${source}${source === 'formula' ? `, ${rules.take_atr_mult}×ATR clamped to [${rules.take_floor_pct}, ${rules.take_cap_pct}]` : ''}) ` +
+            `from the worst permitted fill $${input.basis} — use target $${requiredTarget.toFixed(2)}`,
+        );
+        return { takePct: x, takePctSource: source, requiredTarget, violations, notes };
+    }
+    notes.push(`take target: ${x.toFixed(2)}% (${source}) → $${requiredTarget.toFixed(2)} (${(requiredRewardUsd / input.dailyAtr).toFixed(2)}×ATR)`);
+    return { takePct: x, takePctSource: source, requiredTarget, violations, notes };
 }
 
 /**
@@ -268,7 +418,7 @@ export function checkProposalRisk(
         violations.push(
             'entry price is required — for MKT proposals pass the current price as an indicative entry for risk validation',
         );
-        return { ok: false, violations, notes, riskReward: null, positionValue: null };
+        return { ok: false, violations, notes, riskReward: null, positionValue: null, takePct: null, takePctSource: null };
     }
 
     // --- Price coherence: stop and target on the correct sides ---
@@ -340,6 +490,27 @@ export function checkProposalRisk(
             `risk/reward ${riskReward}:1 is below the minimum ${rules.min_risk_reward}:1` +
             (riskBasis !== entry ? ` (judged at the STP_LMT limit cap ${riskBasis} — the worst permitted fill)` : ''),
         );
+    }
+
+    // --- Take-at-x% exit policy (WP-EXIT): the intraday target IS the take
+    // level. Active only in 'target' exit style — 'ratchet' keeps the free
+    // target with the legacy reachability cap below. Runs even when the
+    // side-coherence checks above already flagged the target (their
+    // violations coexist; the take prescription names the exact price).
+    const takeActive = tradeClass === 'intraday' && rules.exit_style === 'target';
+    let take: TakeTargetCheck | null = null;
+    if (takeActive) {
+        take = checkTakeTarget({
+            symbol: p.symbol,
+            direction: p.direction,
+            basis: riskBasis,
+            target: p.target,
+            dailyAtr: ctx.dailyAtr,
+            takePctOverride: p.takePct,
+            recentEarnings: ctx.recentEarnings === true,
+        }, rules);
+        violations.push(...take.violations);
+        notes.push(...take.notes);
     }
 
     // --- Entry pricing vs the live tape (buy-now chase filter) ---
@@ -423,7 +594,10 @@ export function checkProposalRisk(
     // target further; a post-print repricing day gets the same waiver as the
     // extension guard (the pre-gap ATR is the wrong yardstick there too).
     let targetCapFailed = false;
-    const targetCapEligible = tradeClass === 'intraday'
+    // Subsumed by the take-target check when the take policy is active
+    // (reachability is folded into checkTakeTarget, REQ-EXIT-004) — this
+    // legacy form remains the ratchet-mode reachability cap.
+    const targetCapEligible = tradeClass === 'intraday' && !takeActive
         && ctx.dailyAtr !== undefined && ctx.dailyAtr > 0 && rules.max_target_atr > 0;
     const targetCapActive = targetCapEligible && ctx.recentEarnings !== true;
     if (targetCapEligible && ctx.dailyAtr !== undefined && reward > rules.max_target_atr * ctx.dailyAtr + 1e-9) {
@@ -453,7 +627,28 @@ export function checkProposalRisk(
     // executed record ended up with ratio-manufactured targets (2026-08-18
     // audit). The honest-objective question comes first; the numbers only
     // matter if the answer is yes.
-    if ((noiseStopFailed || rrFailed || targetCapFailed) && ctx.dailyAtr !== undefined && ctx.dailyAtr > 0) {
+    if ((noiseStopFailed || rrFailed) && takeActive && take?.requiredTarget != null && ctx.dailyAtr !== undefined && ctx.dailyAtr > 0) {
+        // Take-policy prescription (WP-EXIT): the target is FIXED — the only
+        // free variable is the stop. Solve its band: the noise floor bounds
+        // it from below, the take reward / min R:R from above (inner-rounded
+        // so obeying verbatim passes both ends).
+        const gEntry = riskBasis;
+        const minStop = rules.min_stop_atr_fraction * ctx.dailyAtr;
+        const maxStop = Math.abs(take.requiredTarget - gEntry) / rules.min_risk_reward;
+        const nearBound = p.direction === 'long'
+            ? Math.floor((gEntry - minStop) * 100) / 100
+            : Math.ceil((gEntry + minStop) * 100) / 100;
+        const farBound = p.direction === 'long'
+            ? Math.ceil((gEntry - maxStop) * 100) / 100
+            : Math.floor((gEntry + maxStop) * 100) / 100;
+        violations.push(
+            `VIABLE GEOMETRY for ${p.direction} ${p.symbol} at $${gEntry}${gEntry !== entry ? ' (the STP_LMT limit cap — the worst permitted fill)' : ''}: ` +
+            `the target is FIXED at $${take.requiredTarget.toFixed(2)} by the take policy (${take.takePct?.toFixed(2)}%). ` +
+            `Place the stop at real structure between $${farBound.toFixed(2)} and $${nearBound.toFixed(2)} ` +
+            `(noise floor ${rules.min_stop_atr_fraction}×ATR to take/${rules.min_risk_reward} — ${rules.min_risk_reward}:1 at the take level). ` +
+            `If no honest stop structure sits in that band, SKIP the symbol`,
+        );
+    } else if ((noiseStopFailed || rrFailed || targetCapFailed) && ctx.dailyAtr !== undefined && ctx.dailyAtr > 0) {
         // Review 2026-08-21: prescribe from the WORST-FILL basis (the
         // STP_LMT limit cap when present) — trigger-based guidance built
         // levels that failed again at the cap on the very next retry.
@@ -694,7 +889,11 @@ export function checkProposalRisk(
         violations.push(`${ctx.executedToday} trades already executed today — max ${rules.max_daily_trades}`);
     }
 
-    return { ok: violations.length === 0, violations, notes, riskReward, positionValue };
+    return {
+        ok: violations.length === 0, violations, notes, riskReward, positionValue,
+        takePct: take?.takePct ?? null,
+        takePctSource: take?.takePctSource ?? null,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -882,12 +1081,14 @@ export function checkPriceRun(
     return { ok: true };
 }
 
-/** Throw with all violations joined unless the proposal passes the gate. */
+/** Throw with all violations joined unless the proposal passes the gate.
+ *  Returns the passing result so callers can persist derived values
+ *  (take_pct / take_pct_source — WP-EXIT). */
 export function assertProposalRisk(
     p: RiskGateProposal,
     ctx: RiskGateContext = {},
     rules: RiskRules = getRiskRules(),
-): void {
+): RiskGateResult {
     const result = checkProposalRisk(p, ctx, rules);
     for (const note of result.notes) {
         logger.info(`[risk-gate] ${note}`);
@@ -895,4 +1096,5 @@ export function assertProposalRisk(
     if (!result.ok) {
         throw new Error(`[risk-gate] REFUSED ${p.symbol}: ${result.violations.join('; ')}`);
     }
+    return result;
 }

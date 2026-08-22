@@ -113,6 +113,24 @@ export interface TradeProposal {
     dayMovePct: number | null;
     /** Minutes since 09:30 ET at creation (negative = pre-market). */
     minutesSinceOpen: number | null;
+    // --- Take-at-x% exit policy (WP-EXIT) ---
+    /** Effective take percent the gate enforced (target sits at x% from the
+     *  worst permitted fill). Null on classes/modes the policy exempts. */
+    takePct: number | null;
+    /** 'model' = the proposal supplied take_pct; 'formula' = ATR default. */
+    takePctSource: 'formula' | 'model' | null;
+    /** Post-exit same-day favorable excursion, % of the EXIT fill (≥ 0) —
+     *  what was left on the table after the take (REQ-EXIT-012). */
+    postExitMfePct: number | null;
+    /** Post-exit same-day adverse excursion, % of the exit fill (≥ 0). */
+    postExitMaePct: number | null;
+    /** Legacy-geometry counterfactual (REQ-EXIT-013): from the same entry,
+     *  would a 1×ATR stop / 2×ATR target have hit target-first, stop-first,
+     *  or neither within the ~3-trading-day horizon. */
+    takeCounterfactual: 'target-first' | 'stop-first' | 'neither' | null;
+    /** Daily ATR (USD) at creation — the take formula's and the
+     *  counterfactual's yardstick. Null on pre-policy rows. */
+    dailyAtrAtCreation: number | null;
 }
 
 const DEFAULT_EXPIRY_MIN = 120;
@@ -410,6 +428,23 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     // >=2 regime labels ACROSS THE SAMPLE — recorded at creation, from the
     // market-regime service's tag, or the criterion is unevaluable.
     ['regime', 'TEXT'],
+    // WP-EXIT (2026-08-22): the take-at-x% policy. take_pct is the
+    // effective x the gate enforced (model override or ATR formula —
+    // take_pct_source says which); the accept-time re-check reuses it so
+    // the required target survives daily ATR drift.
+    ['take_pct', 'REAL'],
+    ['take_pct_source', 'TEXT'],
+    // REQ-EXIT-012/013: the "benefits tracked" half of the policy —
+    // post-exit same-day excursions (what was left on the table after the
+    // take) and the bounded legacy-geometry counterfactual verdict
+    // ('target-first' | 'stop-first' | 'neither').
+    ['post_exit_mfe_pct', 'REAL'],
+    ['post_exit_mae_pct', 'REAL'],
+    ['take_counterfactual', 'TEXT'],
+    // Creation-time daily ATR (USD) — the counterfactual's yardstick
+    // (legacy stop 1×ATR / target 2×ATR must use the ATR the trade was
+    // priced against, not a later one).
+    ['daily_atr', 'REAL'],
 ];
 
 /** Replay/instrumentation columns added after the refusals-table release. */
@@ -478,6 +513,12 @@ interface Row {
     vwap_dist_pct: number | null;
     day_move_pct: number | null;
     minutes_since_open: number | null;
+    take_pct: number | null;
+    take_pct_source: string | null;
+    post_exit_mfe_pct: number | null;
+    post_exit_mae_pct: number | null;
+    take_counterfactual: string | null;
+    daily_atr: number | null;
 }
 
 function fromRow(r: Row): TradeProposal {
@@ -522,6 +563,13 @@ function fromRow(r: Row): TradeProposal {
         vwapDistPct: r.vwap_dist_pct ?? null,
         dayMovePct: r.day_move_pct ?? null,
         minutesSinceOpen: r.minutes_since_open ?? null,
+        takePct: r.take_pct ?? null,
+        takePctSource: r.take_pct_source === 'model' ? 'model' : r.take_pct_source === 'formula' ? 'formula' : null,
+        postExitMfePct: r.post_exit_mfe_pct ?? null,
+        postExitMaePct: r.post_exit_mae_pct ?? null,
+        takeCounterfactual: (r.take_counterfactual === 'target-first' || r.take_counterfactual === 'stop-first' || r.take_counterfactual === 'neither')
+            ? r.take_counterfactual : null,
+        dailyAtrAtCreation: r.daily_atr ?? null,
     };
 }
 
@@ -547,6 +595,9 @@ export interface CreateProposalInput {
     tif?: 'DAY' | 'GTC';
     /** Trade class; defaults to 'intraday'. */
     tradeClass?: TradeClass;
+    /** Take-at-x% override (WP-EXIT): the model's x within the take band;
+     *  omitted = the ATR formula. Gate-validated, then stamped. */
+    takePct?: number;
     /** Earnings bets: worst historical adverse post-print move (%). */
     worstCaseGapPct?: number;
     score?: number;
@@ -608,7 +659,7 @@ export async function createProposal(
     // Class caps count real commitments (executing/executed) server-side;
     // callers cannot understate them.
     const tradeClass: TradeClass = input.tradeClass ?? 'intraday';
-    assertProposalRisk({
+    const gateResult = assertProposalRisk({
         symbol: input.symbol,
         direction: input.direction,
         entryType: input.entryType,
@@ -618,6 +669,7 @@ export async function createProposal(
         target: input.target,
         quantity: input.quantity,
         tradeClass,
+        takePct: input.takePct ?? null,
         tif: input.tif === 'GTC' ? 'GTC' : 'DAY',
     }, {
         ...gateContext,
@@ -664,6 +716,17 @@ export async function createProposal(
     }
     if (input.regime) {
         database.query<void>(`UPDATE proposals SET regime = ? WHERE id = ?`).run(input.regime, id);
+    }
+    // WP-EXIT: persist the enforced take level — the accept-time re-check
+    // reuses the STORED x (as an override) so the required target survives
+    // daily ATR drift between creation and acceptance.
+    if (gateResult.takePct !== null) {
+        database.query<void>(`UPDATE proposals SET take_pct = ?, take_pct_source = ? WHERE id = ?`)
+            .run(gateResult.takePct, gateResult.takePctSource, id);
+    }
+    // Creation-time ATR: the counterfactual's yardstick (REQ-EXIT-013).
+    if (gateContext.dailyAtr !== undefined && gateContext.dailyAtr > 0) {
+        database.query<void>(`UPDATE proposals SET daily_atr = ? WHERE id = ?`).run(gateContext.dailyAtr, id);
     }
 
     logger.info(`[proposals] created ${id}: ${input.direction} ${input.quantity} ${input.symbol} (source: ${input.source})`);
@@ -1033,6 +1096,51 @@ export async function markExcursionHorizonExpired(id: string): Promise<void> {
     const database = await getDb();
     database.query<void>(
         `UPDATE proposals SET note = COALESCE(note || ' — ', '') || 'excursion-horizon-expired (fill older than the IBKR intraday bar horizon)', updated_at = ? WHERE id = ?`,
+    ).run(Date.now(), id.trim().toUpperCase());
+}
+
+/** Closed INTRADAY rows still owed the take-tracking data (REQ-EXIT-012/
+ *  013): post-exit same-day excursions, or a counterfactual verdict where
+ *  the creation ATR makes one computable. Cancelled rows never held. */
+export async function listClosedMissingPostExit(limit: number): Promise<TradeProposal[]> {
+    const database = await getDb();
+    const rows = database.query<Row>(
+        `SELECT * FROM proposals
+         WHERE status = 'closed'
+           AND (trade_class IS NULL OR trade_class NOT IN ('swing', 'earnings-bet'))
+           AND exit_fill_price IS NOT NULL AND entry_filled_at IS NOT NULL
+           AND closed_at IS NOT NULL
+           AND (exit_reason IS NULL OR exit_reason != 'cancelled')
+           AND (note IS NULL OR note NOT LIKE '%post-exit-horizon-expired%')
+           AND (post_exit_mfe_pct IS NULL
+                OR (take_counterfactual IS NULL AND daily_atr IS NOT NULL))
+         ORDER BY closed_at ASC LIMIT ?`,
+    ).all(limit);
+    return rows.map(fromRow);
+}
+
+export async function recordPostExitExcursion(id: string, mfePct: number, maePct: number): Promise<void> {
+    const database = await getDb();
+    database.query<void>(
+        `UPDATE proposals SET post_exit_mfe_pct = ?, post_exit_mae_pct = ?, updated_at = ? WHERE id = ?`,
+    ).run(mfePct, maePct, Date.now(), id.trim().toUpperCase());
+}
+
+export async function recordTakeCounterfactual(
+    id: string,
+    verdict: 'target-first' | 'stop-first' | 'neither',
+): Promise<void> {
+    const database = await getDb();
+    database.query<void>(
+        `UPDATE proposals SET take_counterfactual = ?, updated_at = ? WHERE id = ?`,
+    ).run(verdict, Date.now(), id.trim().toUpperCase());
+}
+
+/** Permanently retire a row from the post-exit sweep (bars out of reach). */
+export async function markPostExitHorizonExpired(id: string): Promise<void> {
+    const database = await getDb();
+    database.query<void>(
+        `UPDATE proposals SET note = COALESCE(note || ' — ', '') || 'post-exit-horizon-expired (exit older than the IBKR intraday bar horizon)', updated_at = ? WHERE id = ?`,
     ).run(Date.now(), id.trim().toUpperCase());
 }
 

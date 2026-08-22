@@ -11,7 +11,12 @@ import {
     type RiskGateProposal,
 } from './proposal-risk-gate.js';
 
-const RULES = { ...DEFAULT_RULES }; // min_rr 2.0, min_price 5, max_position 5%, max_open 10, max_daily 20
+// min_rr 2.0, min_price 5, max_position 5%, max_open 10, max_daily 20.
+// exit_style 'ratchet': these suites pin the FREE-TARGET geometry checks
+// (side coherence, R/R, noise stop, legacy reachability cap, budgets…) —
+// the mode that retains them. The take-at-x% policy (exit_style 'target',
+// the production default) pins its own suite below ('take-at-x% policy').
+const RULES = { ...DEFAULT_RULES, exit_style: 'ratchet' as const };
 
 function longProposal(overrides: Partial<RiskGateProposal> = {}): RiskGateProposal {
     return {
@@ -641,7 +646,7 @@ describe('earnings-gap exception (Jul 30 MSFT failure)', () => {
 });
 
 describe('fractional quantities at the gate', () => {
-    const FRAC_RULES = { ...DEFAULT_RULES, fractional_shares: true };
+    const FRAC_RULES = { ...RULES, fractional_shares: true }; // ratchet: sizing math, not exit policy
 
     test('decimal quantity refused under whole-share rules (paper default)', () => {
         const r = checkProposalRisk(longProposal({ quantity: 1.48 }), {}, RULES);
@@ -708,7 +713,7 @@ describe('plannedWorstLossUsd (per-proposal planned worst case)', () => {
 
 describe('daily-loss headroom gate (the kill-switch is a budget, not a tripwire)', () => {
     // Live-profile shaped numbers: €3.7K account, 3% halt = $111 limit.
-    const LIVE_ISH = { ...DEFAULT_RULES, max_daily_loss_pct: 3, max_risk_per_trade_pct: 1.0, max_position_pct: 20 };
+    const LIVE_ISH = { ...RULES, max_daily_loss_pct: 3, max_risk_per_trade_pct: 1.0, max_position_pct: 20 }; // ratchet: headroom math, not exit policy
 
     test('a book whose planned stops would breach the halt is refused', () => {
         // Open book already commits $80 of planned stops; this trade plans
@@ -1124,5 +1129,119 @@ describe('STP_LMT worst-fill risk basis (review 2026-08-21)', () => {
             { quantity: 10, entry: 100, entryLimit: 104, stop: 95 },
             RULES,
         )).toBe(90);
+    });
+});
+
+describe('take-at-x% policy (WP-EXIT — the intraday target IS the take level)', () => {
+    // Production default rules: exit_style 'target', take 1.5×ATR% in [3, 10],
+    // max_target_atr 1.5, min_stop 0.4×ATR, min_rr 2.
+    const TAKE = { ...DEFAULT_RULES };
+    // 4%-ATR name at $100: x = clamp(1.5×4, 3, 10) = 6 → target 106.
+    const base = (over: Partial<RiskGateProposal> = {}): RiskGateProposal => ({
+        symbol: 'MOVR', direction: 'long', entryType: 'LMT',
+        entry: 100, stop: 97.5, target: 106, quantity: 10, ...over,
+    });
+
+    test('formula target passes and the result carries the enforced x (REQ-EXIT-001)', () => {
+        const r = checkProposalRisk(base(), { dailyAtr: 4 }, TAKE);
+        expect(r.ok).toBe(true);
+        expect(r.takePct).toBeCloseTo(6, 10);
+        expect(r.takePctSource).toBe('formula');
+    });
+
+    test('a target off the take level is refused with the exact required price (REQ-EXIT-003)', () => {
+        const r = checkProposalRisk(base({ target: 110 }), { dailyAtr: 4 }, TAKE);
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('use target $106.00');
+    });
+
+    test('model take_pct override moves the required target; out-of-band overrides are refused (REQ-EXIT-002)', () => {
+        // Override 8% at ATR 6 (cap allows up to 9%) → target 108; stop ≤ 4 for 2:1.
+        const ok = checkProposalRisk(base({ takePct: 8, target: 108, stop: 96.5 }), { dailyAtr: 6 }, TAKE);
+        expect(ok.ok).toBe(true);
+        expect(ok.takePct).toBe(8);
+        expect(ok.takePctSource).toBe('model');
+        const low = checkProposalRisk(base({ takePct: 2 }), { dailyAtr: 4 }, TAKE);
+        expect(low.ok).toBe(false);
+        expect(low.violations.join(' ')).toContain('outside the take band');
+        const high = checkProposalRisk(base({ takePct: 12 }), { dailyAtr: 4 }, TAKE);
+        expect(high.ok).toBe(false);
+        expect(high.violations.join(' ')).toContain('outside the take band');
+    });
+
+    test('an in-band override past the reachability cap is refused with the max x (REQ-EXIT-004)', () => {
+        // ATR 4: the 1.5×ATR cap allows at most x = 6 — an 8% override asks
+        // for travel the session does not have.
+        const r = checkProposalRisk(base({ takePct: 8, target: 108, stop: 96.5 }), { dailyAtr: 4 }, TAKE);
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('exceeds reachability');
+        expect(r.violations.join(' ')).toContain('6.0%');
+    });
+
+    test('low-ATR symbol is intraday-ineligible — the cap wins over the floor, no prescription ping-pong (REQ-EXIT-004)', () => {
+        // 1.2%-ATR mega-cap: formula x floors at 3% = 2.5×ATR > 1.5×ATR cap.
+        const r = checkProposalRisk(
+            base({ symbol: 'MEGA', stop: 99.4, target: 103 }),
+            { dailyAtr: 1.2 }, TAKE,
+        );
+        expect(r.ok).toBe(false);
+        const msg = r.violations.join(' ');
+        expect(msg).toContain('intraday-ineligible');
+        expect(msg).not.toContain('use target $');
+    });
+
+    test('missing daily ATR fails closed for intraday (REQ-EXIT-005)', () => {
+        const r = checkProposalRisk(base(), {}, TAKE);
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('daily ATR unavailable');
+    });
+
+    test('the 2:1 gate at the take level forces stops to x/2 (REQ-EXIT-006)', () => {
+        // Stop 5 away with a 6% take: R/R 1.2 — refused, with the fixed-target
+        // prescription solving the stop band instead of inviting a farther target.
+        const r = checkProposalRisk(base({ stop: 95 }), { dailyAtr: 4 }, TAKE);
+        expect(r.ok).toBe(false);
+        const msg = r.violations.join(' ');
+        expect(msg).toContain('risk/reward');
+        expect(msg).toContain('target is FIXED at $106.00');
+        expect(msg).not.toContain('target at/beyond');
+    });
+
+    test('swing and earnings-bet classes are exempt (REQ-EXIT-009)', () => {
+        const swing = checkProposalRisk(
+            base({ tradeClass: 'swing', target: 110, tif: 'GTC' }),
+            { dailyAtr: 4, openSwingPositions: 0 }, TAKE,
+        );
+        expect(swing.ok).toBe(true);
+        expect(swing.takePct).toBeNull();
+    });
+
+    test('STP_LMT: the take target is priced from the LIMIT CAP (worst permitted fill)', () => {
+        // Cap 100.5, x = 6 → target = round(100.5 × 1.06) = 106.53.
+        const r = checkProposalRisk(base({
+            entryType: 'STP_LMT', entry: 100.2, entryLimit: 100.5,
+            stop: 98.0, target: 106.53,
+        }), { dailyAtr: 4 }, TAKE);
+        expect(r.ok).toBe(true);
+        expect(r.takePct).toBeCloseTo(6, 1);
+    });
+
+    test('accept-time stability: the stored x rides as the override, so ATR drift cannot move the target', () => {
+        // Created at ATR 4 (x=6, target 106); re-checked at drifted ATR 4.2
+        // with the stored override → still requires exactly 106, still passes.
+        const r = checkProposalRisk(base({ takePct: 6 }), { dailyAtr: 4.2 }, TAKE);
+        expect(r.ok).toBe(true);
+        expect(r.takePct).toBe(6);
+        // An ATR COLLAPSE re-judges reachability and refuses (fail-closed):
+        // at ATR 3.5 the cap allows only 5.25% — the stored 6% no longer fits.
+        const collapsed = checkProposalRisk(base({ takePct: 6 }), { dailyAtr: 3.5 }, TAKE);
+        expect(collapsed.ok).toBe(false);
+        expect(collapsed.violations.join(' ')).toContain('exceeds reachability');
+    });
+
+    test('ratchet mode leaves targets free (legacy checks bind instead)', () => {
+        const r = checkProposalRisk(base({ target: 105 }), { dailyAtr: 4 }, RULES);
+        expect(r.ok).toBe(true);
+        expect(r.takePct).toBeNull();
     });
 });

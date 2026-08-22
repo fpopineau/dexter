@@ -37,6 +37,7 @@ import { confirmCancel } from '@/tools/ibkr/order-ack.js';
 import { fetchDailyRiskContext } from '@/tools/ibkr/daily-atr.js';
 import { createIbkrMarketData } from '@/tools/ibkr/market-data.js';
 import { getRiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
+import { formulaTakePct } from './proposal-risk-gate.js';
 import { logger } from '@/utils';
 import { getMarketSession, MarketSession } from '@/utils/market-hours.js';
 import { closePosition, fetchOpenOrdersFor, fetchPositions, isOurOrderRef, wasRecentlyClosed } from './position-actions.js';
@@ -81,8 +82,29 @@ export interface TrailGeometry {
     armPct: number;
     pullbackPct: number;
     /** 'atr' when derived from the symbol's daily ATR; 'absolute' when the
-     *  ATR was unavailable and the fallback percentages apply. */
-    mode: 'atr' | 'absolute';
+     *  ATR was unavailable and the fallback percentages apply; 'ratchet'
+     *  when exit_style: ratchet arms at the take level (REQ-EXIT-008). */
+    mode: 'atr' | 'absolute' | 'ratchet';
+}
+
+/**
+ * Ratchet-mode geometry (REQ-EXIT-008, exit_style: 'ratchet'): arm at the
+ * take level x and give back ~1 point of it — the worst post-arm exit is
+ * ≈ (x−1)%. RECORDED DEVIATION from the SPEC's stop-modification wording:
+ * the lock is enforced by the trail's own close (60s poll, RTH), not by
+ * moving the broker STP leg — the original bracket stop stays as the
+ * disaster backstop. Broker-side ratcheting is order-mutation machinery
+ * this mode does not yet justify while it is config-off.
+ */
+export function ratchetGeometry(xPct: number): TrailGeometry {
+    // Giveback that exits at exactly (x−1)% when closed right at the peak:
+    // (1 + x/100) × (1 − g/100) = 1 + (x−1)/100  ⇒  g = 100·(1 − (99+x)/(100+x)).
+    const giveback = 100 * (1 - (99 + xPct) / (100 + xPct));
+    return {
+        armPct: Math.round(xPct * 100) / 100,
+        pullbackPct: Math.max(PULLBACK_FLOOR_PCT, Math.round(giveback * 100) / 100),
+        mode: 'ratchet',
+    };
 }
 
 /**
@@ -327,9 +349,14 @@ async function runCycle(state: Map<string, TrailEntry>): Promise<void> {
     // Fail-open to trailing (empty map) if the store is unreadable —
     // protecting an orphan beats exempting a swing.
     const classesBySymbol = new Map<string, TradeClass[]>();
+    // Ratchet mode (REQ-EXIT-008): the arm level is the row's stamped take
+    // percent; positions without one (adopted, pre-policy) fall back to the
+    // ATR formula, then to the standard trail geometry.
+    const takeBySymbol = new Map<string, number>();
     try {
         for (const t of await listTrackable()) {
             classesBySymbol.set(t.symbol, [...(classesBySymbol.get(t.symbol) ?? []), t.tradeClass]);
+            if (t.takePct !== null && !takeBySymbol.has(t.symbol)) takeBySymbol.set(t.symbol, t.takePct);
         }
     } catch (err) {
         logger.warn(`[profit-trail] trackable lookup failed (all positions trailed this cycle): ${err}`);
@@ -366,8 +393,15 @@ async function runCycle(state: Map<string, TrailEntry>): Promise<void> {
         // Daily ATR (10-min cache in daily-atr) → ATR-relative thresholds;
         // null falls back to the absolute pair.
         const atr = (await fetchDailyRiskContext(pos.symbol)).dailyAtr;
-        const geometry = trailGeometry({
-            atrPct: atr !== null && entry.basis > 0 ? (atr / entry.basis) * 100 : null,
+        const atrPct = atr !== null && entry.basis > 0 ? (atr / entry.basis) * 100 : null;
+        // exit_style 'ratchet' (REQ-EXIT-008): arm AT the take level and
+        // lock x−1 via the trail. 'target' keeps the standard geometry —
+        // there the take is the bracket's own LMT leg, broker-side.
+        const ratchetX = rules.exit_style === 'ratchet'
+            ? takeBySymbol.get(pos.symbol) ?? (atrPct !== null ? formulaTakePct(atrPct, rules) : null)
+            : null;
+        const geometry = ratchetX !== null ? ratchetGeometry(ratchetX) : trailGeometry({
+            atrPct,
             armAtrMult: rules.profit_trail_arm_atr_mult,
             pullbackAtrMult: rules.profit_trail_pullback_atr_mult,
             armPctFallback: rules.profit_trail_arm_pct,
@@ -383,9 +417,11 @@ async function runCycle(state: Map<string, TrailEntry>): Promise<void> {
             try {
                 const released = await releaseTargetLeg(api, entry);
                 if (released) {
-                    const how = geometry.mode === 'atr'
-                        ? `${rules.profit_trail_pullback_atr_mult}×ATR = ${geometry.pullbackPct}%`
-                        : `${geometry.pullbackPct}% (absolute fallback — ATR unavailable)`;
+                    const how = geometry.mode === 'ratchet'
+                        ? `${geometry.pullbackPct}% (ratchet — locks ≈ +${(geometry.armPct - 1).toFixed(1)}%)`
+                        : geometry.mode === 'atr'
+                            ? `${rules.profit_trail_pullback_atr_mult}×ATR = ${geometry.pullbackPct}%`
+                            : `${geometry.pullbackPct}% (absolute fallback — ATR unavailable)`;
                     const msg =
                         `🏃 RUNNER ${pos.symbol}: trail armed at +${geometry.armPct}% (best ${entry.best}) — ` +
                         `target order ${released} released; the exit is now the ${how} trail. The stop stays.`;

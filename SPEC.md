@@ -54,9 +54,15 @@ along because all behavior changes must precede the freeze tag.
 - REQ-EXIT-007: `exit_style: 'target'` keeps current bracket semantics (the
   LMT leg sits at the take target, broker-side).
 - REQ-EXIT-008: `exit_style: 'ratchet'`: profit-trail arms at +x% (the
-  row's `take_pct`, formula fallback when absent), modifies the stop to
-  lock x−1%, then releases the target leg into the existing runner
-  machinery. Inert when `exit_style: 'target'`.
+  row's `take_pct`, formula fallback when absent), locks ≈x−1%, then
+  releases the target leg into the existing runner machinery. Inert when
+  `exit_style: 'target'`.
+  **Recorded deviation (2026-08-22):** the x−1 lock is enforced by the
+  trail's own close (giveback geometry, 60s poll, RTH) rather than by
+  modifying the broker STP leg; the original bracket stop stays as the
+  disaster backstop. Broker-side stop ratcheting is order-mutation
+  machinery a config-off mode does not yet justify — revisit with
+  operator approval before any freeze that runs `exit_style: ratchet`.
 - REQ-EXIT-009: Swing, earnings-bet, and adopted rows are exempt from
   take-target enforcement and ratchet arming.
 - REQ-EXIT-010: EOD conversion keeps the take target (the protect pair uses

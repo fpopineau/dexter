@@ -18,7 +18,15 @@ import { BarSizeSetting, type Bar } from '@stoqey/ib';
 import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
 import { logger } from '@/utils';
 import { barTimeFrameMs, computeTradeExcursion, etFrameMs } from './outcome-tracker.js';
-import { listClosedMissingExcursion, markExcursionHorizonExpired, recordTradeExcursion } from './trade-proposals.js';
+import {
+    listClosedMissingExcursion,
+    listClosedMissingPostExit,
+    markExcursionHorizonExpired,
+    markPostExitHorizonExpired,
+    recordPostExitExcursion,
+    recordTakeCounterfactual,
+    recordTradeExcursion,
+} from './trade-proposals.js';
 
 const ET = 'America/New_York';
 /** 02:17 ET nightly — dead air, after the archive/benchmark windows. */
@@ -46,6 +54,47 @@ export function barsWithinHold(
         // bar stamped with its own time, not the one before.
         return t !== null && t > fillFrameMs - barMs && t <= closeFrameMs;
     });
+}
+
+/** REQ-EXIT-013 constants: the legacy geometry the take policy replaced —
+ *  a 1×ATR stop with a 2×ATR target, judged over ≈3 trading days (a
+ *  5-calendar-day window; a holiday-heavy week can shave a session, which
+ *  a research instrument tolerates). Never a gate input. */
+export const COUNTERFACTUAL_STOP_ATR = 1;
+export const COUNTERFACTUAL_TARGET_ATR = 2;
+export const COUNTERFACTUAL_WINDOW_MS = 5 * 86_400_000;
+
+/** Pure (REQ-EXIT-013): from the same entry fill, would the legacy
+ *  geometry have hit target-first, stop-first, or neither over the given
+ *  bars? A bar touching BOTH levels is scored stop-first — the
+ *  conservative read of intrabar ambiguity. */
+export function legacyCounterfactual(
+    direction: 'long' | 'short',
+    entryFill: number,
+    dailyAtr: number,
+    bars: Bar[],
+): 'target-first' | 'stop-first' | 'neither' {
+    const target = direction === 'long'
+        ? entryFill + COUNTERFACTUAL_TARGET_ATR * dailyAtr
+        : entryFill - COUNTERFACTUAL_TARGET_ATR * dailyAtr;
+    const stop = direction === 'long'
+        ? entryFill - COUNTERFACTUAL_STOP_ATR * dailyAtr
+        : entryFill + COUNTERFACTUAL_STOP_ATR * dailyAtr;
+    for (const b of bars) {
+        const hi = b.high, lo = b.low;
+        if (hi == null || lo == null) continue;
+        const hitTarget = direction === 'long' ? hi >= target : lo <= target;
+        const hitStop = direction === 'long' ? lo <= stop : hi >= stop;
+        if (hitStop) return 'stop-first';
+        if (hitTarget) return 'target-first';
+    }
+    return 'neither';
+}
+
+/** Pure: end of the ET calendar day containing the given ET-frame instant,
+ *  at 20:00 (extended hours close) — the post-exit window's right edge. */
+export function endOfEtDayFrame(frameMs: number): number {
+    return Math.floor(frameMs / 86_400_000) * 86_400_000 + 20 * 3_600_000;
 }
 
 /** One sweep pass. Returns counts for logging/tests. */
@@ -94,6 +143,60 @@ export async function sweepExcursionsOnce(): Promise<{ filled: number; skipped: 
     }
     if (rows.length > 0) {
         logger.info(`[excursion-sweeper] pass done: ${filled} backfilled, ${skipped} skipped, ${failed} failed of ${rows.length}`);
+    }
+
+    // --- Take-tracking pass (REQ-EXIT-012/013) ---
+    // Same pacing budget, separate selection: closed intraday rows owed the
+    // post-exit excursions and/or the legacy-geometry counterfactual.
+    const takeRows = await listClosedMissingPostExit(BATCH_LIMIT);
+    let takeFilled = 0;
+    for (const p of takeRows) {
+        if (p.exitFillPrice == null || p.entryFilledAt == null || p.closedAt == null) continue;
+        const ageDays = Math.ceil((Date.now() - p.entryFilledAt) / 86_400_000);
+        if (ageDays > MAX_LOOKBACK_DAYS) {
+            await markPostExitHorizonExpired(p.id);
+            logger.info(`[excursion-sweeper] ${p.id} ${p.symbol}: take-tracking window past the bar horizon — marked expired`);
+            continue;
+        }
+        const barSize = ageDays <= 2 ? BarSizeSetting.MINUTES_ONE
+            : ageDays <= 7 ? BarSizeSetting.MINUTES_FIVE
+            : BarSizeSetting.MINUTES_FIFTEEN;
+        const barMs = barSize === BarSizeSetting.MINUTES_ONE ? 60_000
+            : barSize === BarSizeSetting.MINUTES_FIVE ? 300_000 : 900_000;
+        try {
+            const bars = await fetchBars(p.symbol, barSize, `${Math.min(ageDays + 1, 30)} D`, false);
+            // REQ-EXIT-012: what the day did AFTER the exit, vs the exit fill.
+            if (p.postExitMfePct === null) {
+                const exitFrame = etFrameMs(p.closedAt);
+                const after = barsWithinHold(bars, exitFrame, endOfEtDayFrame(exitFrame), barMs);
+                const { mfePct, maePct } = computeTradeExcursion(p.direction, p.exitFillPrice, after);
+                if (mfePct !== null && maePct !== null) {
+                    await recordPostExitExcursion(p.id, mfePct, maePct);
+                    takeFilled++;
+                    logger.info(`[excursion-sweeper] ${p.id} ${p.symbol}: post-exit MFE ${mfePct}% MAE ${maePct}% (${after.length} bars)`);
+                }
+            }
+            // REQ-EXIT-013: the legacy-geometry replay. 'neither' is only
+            // final once the window has fully elapsed — an early sweep
+            // leaves it null for a later pass.
+            if (p.takeCounterfactual === null && p.dailyAtrAtCreation !== null && p.entryFillPrice != null) {
+                const startFrame = etFrameMs(p.entryFilledAt);
+                const endFrame = startFrame + COUNTERFACTUAL_WINDOW_MS;
+                const window = barsWithinHold(bars, startFrame, endFrame, barMs);
+                const verdict = legacyCounterfactual(p.direction, p.entryFillPrice, p.dailyAtrAtCreation, window);
+                if (verdict !== 'neither' || etFrameMs(Date.now()) > endFrame) {
+                    await recordTakeCounterfactual(p.id, verdict);
+                    takeFilled++;
+                    logger.info(`[excursion-sweeper] ${p.id} ${p.symbol}: counterfactual ${verdict} (legacy 1×/2×ATR over ${window.length} bars)`);
+                }
+            }
+        } catch (err) {
+            logger.warn(`[excursion-sweeper] ${p.id} ${p.symbol}: take-tracking bar fetch failed — ${err}`);
+        }
+        await new Promise((r) => setTimeout(r, PACING_DELAY_MS));
+    }
+    if (takeRows.length > 0) {
+        logger.info(`[excursion-sweeper] take-tracking pass: ${takeFilled} field(s) filled over ${takeRows.length} row(s)`);
     }
     return { filled, skipped, failed };
 }

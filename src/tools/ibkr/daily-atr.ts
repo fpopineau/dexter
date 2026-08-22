@@ -45,10 +45,18 @@ function lastValid(series: number[]): number | null {
     return null;
 }
 
+// Test seam (WP-EXIT): the take policy fails intraday creation CLOSED
+// without an ATR, so tool-level tests need to supply one — NONE would
+// refuse every create they exercise.
+let testOverride: DailyRiskContext | null = null;
+export function __setDailyRiskContextForTests(ctx: DailyRiskContext | null): void {
+    testOverride = ctx;
+}
+
 export async function fetchDailyRiskContext(symbol: string): Promise<DailyRiskContext> {
     // Unit tests run without a Gateway — never let them (or a dead
     // connection) block proposal creation.
-    if (process.env.NODE_ENV === 'test') return NONE;
+    if (process.env.NODE_ENV === 'test') return testOverride ?? NONE;
 
     const sym = symbol.toUpperCase();
     const hit = cache.get(sym);
