@@ -100,6 +100,21 @@ export async function fetchLastPrice(symbol: string): Promise<number | null> {
     return (await fetchLiveQuote(symbol)).last;
 }
 
+/** Pure (REQ-EXPO-001): the notional an open row contributes to the
+ *  exposure caps. Filled rows price at the fill. Unfilled STP_LMT rows
+ *  price at the WORST basis — the larger of trigger and limit cap is the
+ *  fill the caps must survive (the risk gate adopted this doctrine in
+ *  review-2; the notional valuer had kept pricing at the trigger). */
+export function worstEntryNotional(t: {
+    quantity: number;
+    entryFillPrice: number | null;
+    entry: number | null;
+    entryLimit: number | null;
+}): number {
+    if (t.entryFillPrice !== null && t.entryFillPrice > 0) return t.quantity * t.entryFillPrice;
+    return t.quantity * Math.max(t.entry ?? 0, t.entryLimit ?? 0);
+}
+
 export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
     await expireStale();
     const p = await getProposal(id);
@@ -177,8 +192,7 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         // Risk gate with live account context. Re-runs the static checks too:
         // rules may have been tightened since the proposal was created.
         const exposure = (await listExposure()).filter((t) => t.id !== p.id);
-        const exposureValue = (t: { quantity: number; entryFillPrice: number | null; entry: number | null; entryLimit: number | null }) =>
-            t.quantity * (t.entryFillPrice ?? t.entry ?? t.entryLimit ?? 0);
+        const exposureValue = worstEntryNotional;
 
         // WP4: the broker book is canonical — the caps see the MAX of what
         // the DB believes and what the broker actually holds. FAIL CLOSED:

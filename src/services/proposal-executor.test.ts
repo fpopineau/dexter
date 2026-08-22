@@ -252,3 +252,22 @@ describe('auto-exec score floor (D6, review 2026-08-21 round 3)', () => {
         delete process.env.AUTO_EXECUTE_MIN_SCORE;
     });
 });
+
+describe('worstEntryNotional (REQ-EXPO-001 — caps price unfilled rows at the worst basis)', () => {
+    test('filled rows price at the fill; unfilled at max(trigger, limit cap)', async () => {
+        const { worstEntryNotional } = await import('./proposal-executor.js');
+        // Filled: fill price wins regardless of planned levels.
+        expect(worstEntryNotional({ quantity: 10, entryFillPrice: 101.5, entry: 100, entryLimit: 100.3 })).toBe(1015);
+        // Unfilled long STP_LMT: the limit cap (above the trigger) is the
+        // worst permitted fill — the larger notional the caps must survive.
+        expect(worstEntryNotional({ quantity: 10, entryFillPrice: null, entry: 100, entryLimit: 100.3 })).toBe(1003);
+        // Unfilled short STP_LMT (trigger above the limit): the trigger is
+        // the larger price — still the larger notional basis.
+        expect(worstEntryNotional({ quantity: 10, entryFillPrice: null, entry: 95, entryLimit: 94.7 })).toBe(950);
+        // Plain LMT (no cap field): the entry itself.
+        expect(worstEntryNotional({ quantity: 10, entryFillPrice: null, entry: 100, entryLimit: null })).toBe(1000);
+        // Nothing priceable: zero (the accept gate refuses null-risk rows
+        // separately — WP0.3).
+        expect(worstEntryNotional({ quantity: 10, entryFillPrice: null, entry: null, entryLimit: null })).toBe(0);
+    });
+});

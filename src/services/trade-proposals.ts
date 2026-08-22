@@ -944,6 +944,27 @@ export async function listStaleUnfilled(maxAgeMs: number): Promise<TradeProposal
     return rows.map(fromRow);
 }
 
+/** Executed INTRADAY proposals whose entry never filled and whose validity
+ *  window has passed (REQ-ENTRY-001) — the thesis expired, so the resting
+ *  broker entry must not outlive it. `nowMs` is injected for determinism;
+ *  `graceMs` protects a deliberate late accept: an operator who accepts two
+ *  minutes before expiry still gets that much resting time. Swing and
+ *  earnings-bet entries are patient by design (3-day sweep only); adopted
+ *  rows were never proposed and are excluded defensively. */
+export async function listExpiredUnfilledEntries(nowMs: number, graceMs: number): Promise<TradeProposal[]> {
+    const database = await getDb();
+    const rows = database.query<Row>(
+        `SELECT * FROM proposals
+         WHERE status = 'executed' AND entry_fill_price IS NULL
+           AND (trade_class IS NULL OR trade_class NOT IN ('swing', 'earnings-bet'))
+           AND source != 'adopted'
+           AND expires_at < ?
+           AND executed_at < ?
+         ORDER BY executed_at ASC`,
+    ).all(nowMs, nowMs - graceMs);
+    return rows.map(fromRow);
+}
+
 /** Open exposure count: executed positions PLUS acceptances mid-flight
  *  ('executing') — two concurrent accepts must see each other, or both
  *  slip under max_open_positions (audit 2026-08-06, finding 5).

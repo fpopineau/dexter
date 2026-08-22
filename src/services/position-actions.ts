@@ -375,6 +375,13 @@ const CANCEL_CONFIRM_MS = 5_000;
  *  these. Unknown refs are never touched. */
 const OUR_REF = /^(protect-|close-|reduce-|BRKT-|P-[0-9A-F]{4}:)/;
 
+/** The one shared ownership predicate (REQ-TRAIL-001): every service that
+ *  considers cancelling a broker order must test identity through this —
+ *  cancelling by order TYPE alone is how a manual TWS order gets killed. */
+export function isOurOrderRef(ref: string | null | undefined): boolean {
+    return OUR_REF.test(ref ?? '');
+}
+
 const closeDeps = {
     getApi: getIBApi,
     verifyAccounts: assertAccountsVerified,

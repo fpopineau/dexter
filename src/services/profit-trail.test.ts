@@ -138,21 +138,61 @@ describe('runner mode direction mapping (shorts covered)', () => {
         expect(exitActionFor('short')).toBe(OrderAction.BUY);
     });
 
-    test('target selection picks the LMT leg and never the stop, both directions', async () => {
-        const { selectTargetLegs } = await import('./profit-trail.js');
-        // Long bracket exits: SELL LMT (target) + SELL STP (stop)
+    test('release decision cancels only OUR LMT leg, never the stop, both directions (REQ-TRAIL-001)', async () => {
+        const { decideTargetRelease } = await import('./profit-trail.js');
+        // Long bracket exits: SELL LMT (target) + SELL STP (stop), both ours
         const longExits = [
-            { orderId: 1, orderType: 'LMT', tif: 'GTC' },
-            { orderId: 2, orderType: 'STP', tif: 'GTC' },
+            { orderId: 1, orderType: 'LMT', orderRef: 'P-1A2B:tp' },
+            { orderId: 2, orderType: 'STP', orderRef: 'P-1A2B:stop' },
         ];
-        expect(selectTargetLegs(longExits).map((o) => o.orderId)).toEqual([1]);
-        // Short bracket exits: BUY LMT (target below) + BUY STP (stop above)
+        const long = decideTargetRelease(longExits);
+        expect(long.cancelIds).toEqual([1]);
+        expect(long.blockedReason).toBeNull();
+        // Short auto-protect exits: BUY STP (stop above) + BUY LMT (target below)
         const shortExits = [
-            { orderId: 3, orderType: 'STP', tif: 'GTC' },
-            { orderId: 4, orderType: 'LMT', tif: 'GTC' },
+            { orderId: 3, orderType: 'STP', orderRef: 'protect-XYZ:stop' },
+            { orderId: 4, orderType: 'LMT', orderRef: 'protect-XYZ:tp' },
         ];
-        expect(selectTargetLegs(shortExits).map((o) => o.orderId)).toEqual([4]);
-        // STP LMT stops (momentum-style) are never targets
-        expect(selectTargetLegs([{ orderId: 5, orderType: 'STP LMT', tif: 'GTC' }])).toEqual([]);
+        expect(decideTargetRelease(shortExits).cancelIds).toEqual([4]);
+        // STP LMT stops (momentum-style) are never targets — nothing to cancel
+        expect(decideTargetRelease([{ orderId: 5, orderType: 'STP LMT', orderRef: 'P-1A2B:stop' }]).blockedReason)
+            .toBe('no-targets');
+    });
+
+    test('a foreign (manual TWS) LMT is never a cancel candidate (REQ-TRAIL-001)', async () => {
+        const { decideTargetRelease } = await import('./profit-trail.js');
+        const d = decideTargetRelease([
+            { orderId: 10, orderType: 'LMT', orderRef: null },            // manual TWS limit
+            { orderId: 11, orderType: 'LMT', orderRef: 'my-own-note' },   // non-Dexter ref
+            { orderId: 12, orderType: 'LMT', orderRef: 'P-9F00:tp' },     // ours
+            { orderId: 13, orderType: 'STP', orderRef: 'P-9F00:stop' },
+        ]);
+        expect(d.cancelIds).toEqual([12]);
+        expect(d.foreignRefs).toEqual(['#10 <no ref>', '#11 my-own-note']);
+        expect(d.blockedReason).toBeNull();
+    });
+
+    test('no surviving Dexter STP leg blocks the release entirely (REQ-TRAIL-002)', async () => {
+        const { decideTargetRelease } = await import('./profit-trail.js');
+        // Our target but only a FOREIGN stop: releasing would hand protection
+        // to an order we do not own — blocked.
+        const foreignStop = decideTargetRelease([
+            { orderId: 20, orderType: 'LMT', orderRef: 'P-9F01:tp' },
+            { orderId: 21, orderType: 'STP', orderRef: null },
+        ]);
+        expect(foreignStop.blockedReason).toBe('no-own-stop');
+        expect(foreignStop.cancelIds).toEqual([]);
+        // No stop at all (partial book view, or stop already gone): blocked.
+        const noStop = decideTargetRelease([
+            { orderId: 22, orderType: 'LMT', orderRef: 'P-9F02:tp' },
+        ]);
+        expect(noStop.blockedReason).toBe('no-own-stop');
+        // A Dexter STP LMT counts as the protective leg.
+        const stpLmt = decideTargetRelease([
+            { orderId: 23, orderType: 'LMT', orderRef: 'P-9F03:tp' },
+            { orderId: 24, orderType: 'STP LMT', orderRef: 'P-9F03:stop' },
+        ]);
+        expect(stpLmt.blockedReason).toBeNull();
+        expect(stpLmt.cancelIds).toEqual([23]);
     });
 });

@@ -39,7 +39,7 @@ import { createIbkrMarketData } from '@/tools/ibkr/market-data.js';
 import { getRiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
 import { logger } from '@/utils';
 import { getMarketSession, MarketSession } from '@/utils/market-hours.js';
-import { closePosition, fetchOpenOrdersFor, fetchPositions, wasRecentlyClosed } from './position-actions.js';
+import { closePosition, fetchOpenOrdersFor, fetchPositions, isOurOrderRef, wasRecentlyClosed } from './position-actions.js';
 
 /** Broker-confirmation window for a cancel request (round-4 review). */
 const CANCEL_CONFIRM_MS = 5_000;
@@ -232,11 +232,34 @@ export function exitActionFor(direction: 'long' | 'short'): OrderAction {
     return direction === 'long' ? OrderAction.SELL : OrderAction.BUY;
 }
 
-/** Pure: the target legs among a position's exit-side orders. The target
- *  is always the LMT leg regardless of direction; the STP leg is the stop
- *  and must never be selected. */
-export function selectTargetLegs<T extends { orderType: string }>(exitOrders: T[]): T[] {
-    return exitOrders.filter((o) => o.orderType === 'LMT');
+export interface ReleaseDecision {
+    /** Dexter-owned LMT target legs — the only orders a release may cancel. */
+    cancelIds: number[];
+    /** Exit-side LMTs NOT ours (manual TWS, other clients) — reported, never touched. */
+    foreignRefs: string[];
+    /** Why nothing may be cancelled: no target to release, or no surviving
+     *  Dexter STP leg to hand protection to. null = release may proceed. */
+    blockedReason: 'no-targets' | 'no-own-stop' | null;
+}
+
+/** Pure: the release decision over a position's exit-side orders. The
+ *  target is always the LMT leg regardless of direction; the STP/STP LMT
+ *  leg is the stop and must never be selected. Ownership (REQ-TRAIL-001):
+ *  only OUR_REF-stamped LMTs are cancel candidates — cancelling by order
+ *  type alone killed manual TWS limits. Protection (REQ-TRAIL-002): the
+ *  release is blocked unless a Dexter-owned stop survives — a partial book
+ *  view that misses the stop blocks conservatively. */
+export function decideTargetRelease<T extends { orderId: number; orderType: string; orderRef: string | null }>(
+    exitOrders: T[],
+): ReleaseDecision {
+    const foreignRefs = exitOrders
+        .filter((o) => o.orderType === 'LMT' && !isOurOrderRef(o.orderRef))
+        .map((o) => `#${o.orderId} ${o.orderRef ?? '<no ref>'}`);
+    const targets = exitOrders.filter((o) => o.orderType === 'LMT' && isOurOrderRef(o.orderRef));
+    if (targets.length === 0) return { cancelIds: [], foreignRefs, blockedReason: 'no-targets' };
+    const hasOwnStop = exitOrders.some((o) => o.orderType.startsWith('STP') && isOurOrderRef(o.orderRef));
+    if (!hasOwnStop) return { cancelIds: [], foreignRefs, blockedReason: 'no-own-stop' };
+    return { cancelIds: targets.map((o) => o.orderId), foreignRefs, blockedReason: null };
 }
 
 /**
@@ -251,27 +274,37 @@ async function releaseTargetLeg(
     api: Awaited<ReturnType<typeof getIBApi>>,
     entry: TrailEntry,
 ): Promise<string | null> {
-    // A partial view (complete=false) just finds fewer targets — each
-    // release is individually cancel-confirmed, and a missed target means
-    // runner mode is not announced: conservative either way.
     const exits = (await fetchOpenOrdersFor(api, entry.symbol, exitActionFor(entry.direction))).orders;
-    const targets = selectTargetLegs(exits);
-    if (targets.length === 0) return null;
+    const decision = decideTargetRelease(exits);
+    if (decision.foreignRefs.length > 0) {
+        logger.warn(
+            `[profit-trail] ${entry.symbol}: ${decision.foreignRefs.length} foreign exit-side LMT order(s) ` +
+            `left untouched (not ours to cancel — review in TWS): ${decision.foreignRefs.join(', ')}`,
+        );
+    }
+    if (decision.blockedReason === 'no-targets') return null;
+    if (decision.blockedReason === 'no-own-stop') {
+        logger.error(
+            `[profit-trail] ${entry.symbol}: no Dexter-owned STP leg survives — target NOT released ` +
+            `(runner mode would leave the position without broker-side protection we control)`,
+        );
+        return null;
+    }
     // Round-4 review (2026-08-21): "released" means the broker CONFIRMED
     // the cancel — announcing runner mode while the fixed target may still
     // be working promises an exit management that is not in effect.
     const released: string[] = [];
-    for (const t of targets) {
-        const outcome = await confirmCancel(api, t.orderId, CANCEL_CONFIRM_MS);
+    for (const orderId of decision.cancelIds) {
+        const outcome = await confirmCancel(api, orderId, CANCEL_CONFIRM_MS);
         if (outcome === 'cancelled') {
-            released.push(`#${t.orderId}`);
-            logger.info(`[profit-trail] ${entry.symbol}: runner mode — target order #${t.orderId} cancelled (confirmed), trail manages the exit`);
+            released.push(`#${orderId}`);
+            logger.info(`[profit-trail] ${entry.symbol}: runner mode — target order #${orderId} cancelled (confirmed), trail manages the exit`);
         } else if (outcome === 'filled') {
             // The target won the race: profit banked at the fixed target.
             // The tracker handles the fill; runner mode is moot.
-            logger.warn(`[profit-trail] ${entry.symbol}: target #${t.orderId} FILLED during runner-mode release — exit already taken at the fixed target`);
+            logger.warn(`[profit-trail] ${entry.symbol}: target #${orderId} FILLED during runner-mode release — exit already taken at the fixed target`);
         } else {
-            logger.error(`[profit-trail] ${entry.symbol}: target #${t.orderId} cancel NOT CONFIRMED — the fixed target may still be working; runner mode not announced`);
+            logger.error(`[profit-trail] ${entry.symbol}: target #${orderId} cancel NOT CONFIRMED — the fixed target may still be working; runner mode not announced`);
         }
     }
     return released.length > 0 ? released.join(', ') : null;

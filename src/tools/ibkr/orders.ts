@@ -18,7 +18,6 @@ import { z } from 'zod';
 import { formatToolResult } from '../types.js';
 import { assertAccountsVerified, getIBApi, getVerifiedSingleAccount, isNonFatalIbkrError } from './connection.js';
 import { withOrderLock } from './order-lock.js';
-import { assertDailyLossOk } from '@/services/daily-loss-guard.js';
 import { fetchPositions } from '@/services/position-actions.js';
 
 // ---------------------------------------------------------------------------
@@ -169,13 +168,18 @@ export function createIbkrOrders() {
                     // codes are still unknown. Cancel and list stay
                     // available in all cases (they only reduce risk).
                     await assertAccountsVerified();
-                    // Daily-loss kill-switch applies to EVERY risk-increasing
-                    // order path, not only proposals (review finding #2).
-                    await assertDailyLossOk();
                     // Reduce-only: this path may only shrink an existing
                     // position. Entries and adds go through trade_proposals
                     // (create) -> human accept, where the gate, the sizer,
                     // and the mandatory bracket protect them.
+                    //
+                    // REQ-ORD-001: the daily-loss kill-switch deliberately
+                    // does NOT gate this path. checkReduceOnly proves the
+                    // order shrinks an existing position, and a latched halt
+                    // (or an unverifiable P&L feed, which fails the gate
+                    // safe) must never block the one emergency action the
+                    // agent has — trimming risk. Risk-INCREASING orders
+                    // never reach placeOrder here: they are refused below.
                     {
                         const sym = input.ticker.trim().toUpperCase();
                         const pos = (await fetchPositions(api)).find((q) => q.symbol === sym);

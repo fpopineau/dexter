@@ -287,6 +287,50 @@ describe('proposal store lifecycle', () => {
         for (const id of [old.id, fresh.id, filled.id]) await closeProposal(id, { exitReason: 'cancelled' });
     });
 
+    test('listExpiredUnfilledEntries: expired intraday entries only, grace honored (REQ-ENTRY-001)', async () => {
+        const { listExpiredUnfilledEntries } = await import('./trade-proposals.js');
+        const now = Date.now();
+        const grace = 30 * 60_000;
+
+        // Intraday, 60-min validity, accepted immediately → expired when
+        // queried 61 minutes later, grace long since satisfied.
+        const expired = await createProposal(validInput({ symbol: 'EXPA', expiresMinutes: 60 }));
+        await setProposalStatus(expired.id, 'executed', { orderIds: [91, 92, 93], executedAt: now });
+        // Default 120-min validity → still inside its window at +61min.
+        const unexpired = await createProposal(validInput({ symbol: 'EXPB' }));
+        await setProposalStatus(unexpired.id, 'executed', { orderIds: [94, 95, 96], executedAt: now });
+        // Swing class: expired long ago but patient by design, never swept.
+        const swing = await createProposal(validInput({ symbol: 'EXPC', tradeClass: 'swing', tif: 'GTC', expiresMinutes: 1 }));
+        await setProposalStatus(swing.id, 'executed', { orderIds: [97, 98, 99], executedAt: now });
+        // Filled entry: nothing resting to cancel.
+        const filled2 = await createProposal(validInput({ symbol: 'EXPD', expiresMinutes: 1 }));
+        await setProposalStatus(filled2.id, 'executed', { orderIds: [101, 102, 103], executedAt: now });
+        await markEntryFilled(filled2.id, 100.01);
+        // Expired by the query time but accepted INSIDE the grace window —
+        // the deliberate late accept keeps its resting time.
+        const lateAccept = await createProposal(validInput({ symbol: 'EXPE', expiresMinutes: 1 }));
+        await setProposalStatus(lateAccept.id, 'executed', { orderIds: [104, 105, 106], executedAt: now });
+
+        // 61 minutes on: EXPA expired+past grace; EXPB still valid.
+        const at61 = (await listExpiredUnfilledEntries(now + 61 * 60_000, grace)).map((p) => p.id);
+        expect(at61).toContain(expired.id);
+        expect(at61).not.toContain(unexpired.id);
+        expect(at61).not.toContain(swing.id);
+        expect(at61).not.toContain(filled2.id);
+
+        // 5 minutes on: EXPE's window (1 min) has passed but the 30-min
+        // accept grace has not — the deliberate late accept keeps resting.
+        const at5 = (await listExpiredUnfilledEntries(now + 5 * 60_000, grace)).map((p) => p.id);
+        expect(at5).not.toContain(lateAccept.id);
+        // …and once the grace passes, it is swept like any expired entry.
+        const at40 = (await listExpiredUnfilledEntries(now + 40 * 60_000, grace)).map((p) => p.id);
+        expect(at40).toContain(lateAccept.id);
+
+        for (const id of [expired.id, unexpired.id, swing.id, filled2.id, lateAccept.id]) {
+            await closeProposal(id, { exitReason: 'cancelled' });
+        }
+    });
+
     test('closeProposal only transitions executed proposals', async () => {
         const p = await createProposal(validInput());
         await closeProposal(p.id, { exitReason: 'manual' });

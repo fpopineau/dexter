@@ -81,10 +81,14 @@ function buildBreadthPrompt(event: BreadthEvent, tapeLine: string): string {
         up
             ? '   Prefer a pullback entry (VWAP / prior high) over hitting the offer at the high of day.'
             : '   Prefer a bounce entry (VWAP retest / broken support from below) over hitting bids at the low of day.',
-        '   PRE-MARKET is actionable: a DAY bracket cannot rest before the open, so use tif GTC with a',
+        // REQ-ENTRY-002: pre-open DAY orders legally rest until the open
+        // (market-hours doctrine; the old "cannot rest" claim was wrong and
+        // steered intraday setups onto GTC — the TIF with no natural expiry).
+        '   PRE-MARKET is actionable: a DAY bracket placed pre-open RESTS until the open — use tif DAY with a',
         `   STP_LMT trigger just ${up ? 'above the pre-market high' : 'below the pre-market low'} (entryLimit ~0.3% beyond,`,
         '   stop at prior-session structure 0.4-0.75x the daily ATR away, target <= 1.5x ATR) — it arms at',
-        '   the open and fills only on continuation. "It is pre-market" is NOT a decline reason.',
+        '   the open and fills only on continuation. Reserve tif GTC for setups meant to OUTLIVE the day.',
+        '   "It is pre-market" is NOT a decline reason.',
         '3. Decision:',
         `   - NOT actionable → reply ${HEARTBEAT_OK_TOKEN} plus ONE line naming the decisive reason. ` +
         "The reason is LEDGERED and scored against the day's tape — a decline is a recorded decision, " +

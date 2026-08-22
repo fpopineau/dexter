@@ -202,3 +202,103 @@ RULES.md rule 7. Rule 4 (never through the print) stays absolute until phase 3.
 - Worst-case-gap floor set at -20% pending real data; revisit after first bets.
 - Swing budget 0.5% on a €3.7K account still produces small positions; acceptable
   during burn-in, revisit at live switch.
+
+---
+
+# Discovery: profit-taking policy ("better now than later") + €10K live account
+
+Started: 2026-08-22
+
+Context: reassessment of the 2026-08-21 review-challenge action list under two
+new operator requirements: (1) the profit trail / early profit-taking prevails
+over target-holding — anything up ~4-5% intraday is taken immediately, with the
+threshold scaled to the instrument's potential (3-10%) and the benefit tracked;
+(2) the live account will be €10,000 (not €3.7K as previously planned, not the
+$250K paper scale); operator can reset the paper account equity if useful.
+
+## Questions Asked
+
+## Answers Received
+
+## Emerging Requirements
+
+### Round 1 (2026-08-22)
+
+Q1 Take semantics at +x%: **target sits at x%** — the bracket's LMT leg is
+placed at x% from entry at creation (broker-side). Ratchet-stop+trail mode
+(lock x−1%, trail the rest) kept as a CONFIGURABLE alternative.
+Q2 x% source: **ATR default + LLM override** — deterministic default
+clamp(k×dailyATR%, 3%, 10%); judgment may override within the band; gate
+clamps/refuses outside it.
+Q3 R:R gate: **stops must tighten** — keep 2:1 but judge it against the take
+level: x% ≥ 2× stop distance is the geometry bar. Wide-stop chases refused.
+Q4 €10K shadow-live: **reset paper NetLiq to ≈€10K AND run live rules on
+paper** (profile override). Scorecard ×4 scaling dropped; new stats epoch.
+
+### Round 2 (2026-08-22)
+
+Q5 Ratchet toggle: **global config, default target@x%** (exit_style: target |
+ratchet, whole intraday class; flipping is a freeze-relevant behavior change).
+Q6 Scope: **intraday + its overnight conversions** keep the x% target; swings
+keep structural targets; earnings bets keep gap exits.
+Q7 Earnings bets under shadow-live: **enabled as the one documented deviation**
+from live.yaml (sized by live 1% gap budget); recorded in the protocol.
+Q8 €10K rules: **Claude drafts a revised risk-rules.live.yaml for review**
+(slots/trades/caps re-derived for €10K), operator ratifies before the reset.
+
+### Round 3 (2026-08-22)
+
+Q9 Tracking: **both counterfactuals + scorecard lane** — same-day MFE/MAE
+after the take (excursion machinery) AND a bounded replay of whether the old
+structural 2:1 target would have hit before the stop; scorecard gains a
+take-vs-target comparison line.
+Q10 k default: **k = 1.5** — x = clamp(1.5 × dailyATR%, 3%, 10%).
+Q11 Reset: **$11,700 (≈€10K) AFTER the code lands** — exit-policy WP + shadow
+profile + before-tag fixes → operator resets paper account → 'performance
+reset' → one clean epoch at the right scale.
+Q12 Adopted rows: **exempt** — take policy governs only Dexter-underwritten
+positions; adopted rows keep auto-protect + operator ownership.
+
+### Round 4 (2026-08-22)
+
+Q13 Floor-vs-cap conflict: **cap wins** — max_target_atr 1.5 retained; when
+the 3% floor pushes x past 1.5×ATR the proposal is refused. Implicit intraday
+eligibility: dailyATR% ≥ ~2. Low-vol names out of the intraday class.
+Q14 Prior before-tag fix list: **all stand**, sequenced with the two new WPs.
+
+## Emerging Requirements (final synthesis)
+
+**WP-EXIT — take-at-x% exit policy (intraday class + its conversions)**
+- Target IS the take level: bracket LMT at x% from entry, broker-side.
+- x = clamp(1.5 × dailyATR%, 3%, 10%); LLM may override within [3,10]
+  citing instrument potential; gate clamps/refuses outside; take_pct +
+  take_pct_source recorded on the proposal.
+- Reachability cap max_target_atr 1.5 retained and WINS over the 3% floor
+  (refusal, not waiver) → intraday requires dailyATR% ≥ ~2 in practice.
+- Geometry bar: 2:1 judged against the take level at worst fill ⇒
+  stopDist ≤ x/2 (≈ ≤0.75×ATR unclamped — matches the entry-audit stops).
+- exit_style: target (default) | ratchet — global config, whole class;
+  ratchet = at +x% tighten stop to lock ≈x−1%, trail the rest (runner
+  machinery). Flipping exit_style is freeze-relevant (new sample).
+- EOD conversions keep the x% target overnight (protect pair re-placed at
+  x-target + stop). Swings, earnings bets, adopted rows exempt.
+- dailyATR unavailable at creation → fail-closed refusal (intraday).
+- Tracking: per closed take — same-day post-exit MFE/MAE (excursion
+  machinery) + bounded replay "would the structural 2:1 target have hit
+  before the stop"; scorecard gains a take-vs-target comparison line.
+
+**WP-SHADOW — €10K shadow-live**
+- Live target account: €10,000 (supersedes €3.7K plan).
+- Profile override so PAPER runs risk-rules.live.yaml; ONE documented
+  deviation: earnings_bet_enabled: true (class keeps building its record
+  at live-scale 1% gap sizing); deviation recorded in the protocol.
+- Claude drafts a €10K revision of risk-rules.live.yaml (slots, daily
+  trades, caps, whole-share affordability re-derived) → operator ratifies.
+- Scorecard: ×4 drawdown scaling REMOVED; drawdown judged at live scale
+  against the new epoch's frozen NetLiq.
+- Sequence: all code lands → operator resets paper NetLiq to $11,700
+  (≈€10K) in IBKR Account Management → 'performance reset' → clean boot →
+  remaining freeze prereqs → tag validation-freeze-1.
+
+**Prior before-tag fix list: all stand** (profit-trail ownership now more
+important — ratchet mode leans on that service).

@@ -292,6 +292,28 @@ describe('vetOvernightBook (WP5 — the conversion book earns the night)', () =>
         expect(withOverride.trims).toEqual([]);
     });
 
+    test('overridden unpriceable position still COUNTS at its cost basis (REQ-EOD-001)', () => {
+        // NOPX has no market price but a 25k avgCost notional; the override
+        // holds it, but its exposure must still weigh on the book cap — the
+        // old valueUsd:0 hole let it vanish and the book read compliant.
+        const v = vetOvernightBook(
+            [{ ...k('NOPX', null, null), fallbackValueUsd: 25_000 }, k('OTHER', 9_000, 1)],
+            100_000, RULES, new Set(['NOPX']),
+        );
+        // 25k + 9k = 34% > 30% book cap → OTHER (the only trimmable) goes.
+        expect(v.trims.map((t) => t.symbol)).toEqual(['OTHER']);
+        expect(v.warnings.some((w) => w.includes('NOPX') && w.includes('cost basis'))).toBe(true);
+    });
+
+    test('overridden unpriceable position with no fallback is loudly uncounted (REQ-EOD-001)', () => {
+        const v = vetOvernightBook(
+            [{ ...k('NOPX', null, null), fallbackValueUsd: null }],
+            100_000, RULES, new Set(['NOPX']),
+        );
+        expect(v.trims).toEqual([]);
+        expect(v.warnings.some((w) => w.includes('NOPX') && w.includes('NOT counted'))).toBe(true);
+    });
+
     test("operator override survives both caps, and the cap line says the excess is owned", () => {
         // KEEP breaches the per-name cap AND alone exceeds the book cap —
         // the override holds it through both; nothing else to trim, so the
@@ -314,6 +336,33 @@ describe('vetOvernightBook (WP5 — the conversion book earns the night)', () =>
         const v = vetOvernightBook([k('AAA', 5_000, 1)], null, RULES, NONE);
         expect(v.trims).toEqual([]);
         expect(v.capLine).toContain('UNVETTED');
+    });
+});
+
+describe('applyLookupFailurePolicy (REQ-EOD-002 — a failed calendar cannot silently wave keeps through)', () => {
+    const keep = { action: 'keep' as const, reason: 'winning 2.00%' };
+    const close = { action: 'close' as const, reason: 'losing and fading' };
+
+    test('lookup fine: decisions pass through untouched', async () => {
+        const { applyLookupFailurePolicy } = await import('./eod-triage.js');
+        expect(applyLookupFailurePolicy(keep, false, false)).toEqual(keep);
+        expect(applyLookupFailurePolicy(close, false, true)).toEqual(close);
+    });
+
+    test('lookup failed: a keep without an override fails closed', async () => {
+        const { applyLookupFailurePolicy } = await import('./eod-triage.js');
+        const d = applyLookupFailurePolicy(keep, true, false);
+        expect(d.action).toBe('close');
+        expect(d.reason).toContain('lookup failed');
+        expect(d.reason).toContain("keep");
+    });
+
+    test('lookup failed: closes stay closes; an override holds the keep with the risk named', async () => {
+        const { applyLookupFailurePolicy } = await import('./eod-triage.js');
+        expect(applyLookupFailurePolicy(close, true, false).action).toBe('close');
+        const held = applyLookupFailurePolicy(keep, true, true);
+        expect(held.action).toBe('keep');
+        expect(held.reason).toContain('unverifiable');
     });
 });
 

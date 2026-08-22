@@ -140,6 +140,10 @@ export interface OvernightVetCandidate {
     marketValueUsd: number | null;
     /** Signed P&L% in the trade's direction; null = unknown (trims first). */
     pnlPct: number | null;
+    /** |qty| × avgCost — the cost-basis notional an overridden unpriceable
+     *  position counts at (REQ-EOD-001). Understates a winner, but exposure
+     *  that the caps cannot see is how a book breaches silently. */
+    fallbackValueUsd?: number | null;
 }
 
 export interface OvernightVetResult {
@@ -147,6 +151,9 @@ export interface OvernightVetResult {
     trims: Array<{ symbol: string; label: string; reason: string }>;
     /** Cap-usage line for the report (null = inside the caps). */
     capLine: string | null;
+    /** Loud anomalies for the report (REQ-EOD-001): exposure counted at
+     *  cost basis, or not countable at all. */
+    warnings: string[];
 }
 
 /**
@@ -165,20 +172,32 @@ export function vetOvernightBook(
     rules: { max_overnight_exposure_pct: number; max_overnight_position_pct: number },
     overrides: ReadonlySet<string>,
 ): OvernightVetResult {
-    if (keeps.length === 0) return { trims: [], capLine: null };
+    if (keeps.length === 0) return { trims: [], capLine: null, warnings: [] };
     if (netLiq === null || !(netLiq > 0)) {
         return {
             trims: [],
             capLine: '⚠ overnight caps could NOT be verified (NetLiq unavailable) — the conversion book rides UNVETTED.',
+            warnings: [],
         };
     }
     const trims: OvernightVetResult['trims'] = [];
+    const warnings: string[] = [];
     const surviving: Array<OvernightVetCandidate & { valueUsd: number }> = [];
 
     for (const k of keeps) {
         if (k.marketValueUsd === null || !(k.marketValueUsd >= 0)) {
             if (overrides.has(k.symbol)) {
-                surviving.push({ ...k, valueUsd: 0 }); // unpriceable but operator-owned
+                // REQ-EOD-001: operator-owned but the exposure must still
+                // weigh on the book cap — count it at cost basis; only when
+                // even that is unknown does it ride uncounted, and loudly.
+                const fallback = k.fallbackValueUsd;
+                if (fallback !== null && fallback !== undefined && fallback > 0) {
+                    warnings.push(`⚠ ${k.symbol}: unpriceable — counted at cost basis ($${fallback.toFixed(0)}) for the overnight caps.`);
+                    surviving.push({ ...k, valueUsd: fallback });
+                } else {
+                    warnings.push(`⚠ ${k.symbol}: unpriceable and no cost basis — its exposure is NOT counted in the overnight caps.`);
+                    surviving.push({ ...k, valueUsd: 0 });
+                }
                 continue;
             }
             trims.push({ symbol: k.symbol, label: k.label, reason: 'position value unknown — cannot vet against the overnight caps (fail-closed)' });
@@ -219,7 +238,31 @@ export function vetOvernightBook(
         : trims.length
             ? `overnight book ${finalPct.toFixed(1)}% of NetLiq after ${trims.length} cap trim(s).`
             : null;
-    return { trims, capLine };
+    return { trims, capLine, warnings };
+}
+
+/**
+ * REQ-EOD-002: when the earnings calendar lookup FAILED outright, no keep
+ * decision is backed by a verified print-free window — a would-keep fails
+ * closed unless the operator armed a pre-bell override (an UNKNOWN print
+ * status is overridable; a KNOWN print never is). Closes pass through.
+ */
+export function applyLookupFailurePolicy(
+    decision: { action: 'keep' | 'close'; reason: string },
+    lookupFailed: boolean,
+    hasOverride: boolean,
+): { action: 'keep' | 'close'; reason: string } {
+    if (!lookupFailed || decision.action === 'close') return decision;
+    if (hasOverride) {
+        return {
+            action: 'keep',
+            reason: `${decision.reason} (earnings lookup FAILED — the override holds it through an unverifiable print risk)`,
+        };
+    }
+    return {
+        action: 'close',
+        reason: `earnings guard could not verify a print ahead (lookup failed) — closing (fail-closed; pre-bell 'keep SYMBOL' overrides)`,
+    };
 }
 
 // --- Pre-bell operator overrides (decision D2) ---
@@ -496,6 +539,10 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
     // out in the report so a KEEP is never mistaken for "verified safe".
     let earningsBySymbol = new Map<string, UpcomingEarnings>();
     let earningsUnknownDays: string[] = [];
+    // REQ-EOD-002: a TOTAL lookup failure is not "no earnings" — it makes
+    // every DAY keep unverifiable, and unverifiable keeps fail closed.
+    // Per-day partial gaps stay fail-open (recorded decision), reported.
+    let earningsLookupFailed = false;
     if (isEarningsGuardEnabled()) {
         try {
             const symbols = [...new Set([...dayCandidates, ...gtcCandidates, ...unfilledGtc].map((t) => t.symbol))];
@@ -503,8 +550,9 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
             earningsBySymbol = new Map(hits.map((h) => [h.symbol, h]));
             earningsUnknownDays = unknownDays;
         } catch (err) {
-            logger.warn(`[eod-triage] earnings lookup failed (guard skipped this run): ${err}`);
+            logger.warn(`[eod-triage] earnings lookup FAILED — DAY keeps fail closed this run (REQ-EOD-002): ${err}`);
             earningsUnknownDays = ['lookup failed'];
+            earningsLookupFailed = true;
         }
     }
 
@@ -547,7 +595,8 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
         const afterOverride = base.action === 'close' && overrides.has(t.symbol)
             ? { action: 'keep' as const, reason: `operator override ('keep ${t.symbol}') — would otherwise close: ${base.reason}` }
             : base;
-        const decision = applyEarningsGuard(afterOverride, earningsBySymbol.get(t.symbol) ?? null, today);
+        const guarded = applyEarningsGuard(afterOverride, earningsBySymbol.get(t.symbol) ?? null, today);
+        const decision = applyLookupFailurePolicy(guarded, earningsLookupFailed, overrides.has(t.symbol));
 
         const label = t.keptOvernightAt != null ? `${t.id}, kept-overnight` : t.id;
         logger.info(`[eod-triage] ${t.id} ${t.symbol}: ${decision.action} — ${decision.reason}${dryRun ? ' (preview)' : ''}`);
@@ -576,6 +625,9 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
                 label,
                 marketValueUsd: last !== null ? Math.abs(pos.quantity) * last : null,
                 pnlPct,
+                // REQ-EOD-001: the cost-basis notional an overridden
+                // unpriceable position still counts at in the vet.
+                fallbackValueUsd: pos.avgCost > 0 ? Math.abs(pos.quantity) * pos.avgCost : null,
                 pos,
             });
         }
@@ -695,11 +747,12 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
     const macroEvents = isMacroWarningEnabled() ? await getMacroEventsWithin(macroHorizonDays) : [];
     const macroLine = macroNightWarning(macroEvents, macroHorizonDays);
 
-    if (lines.length || (macroLine && macroEvents !== null) || capLine || vet.capLine) {
+    if (lines.length || (macroLine && macroEvents !== null) || capLine || vet.capLine || vet.warnings.length) {
         const footer =
             (earningsUnknownDays.length
                 ? `\n⚠ earnings calendar unavailable (${earningsUnknownDays.join(', ')}) — keeps and resting entries are NOT verified print-free.`
                 : '') +
+            (vet.warnings.length ? `\n${vet.warnings.join('\n')}` : '') +
             (vet.capLine ? `\n${vet.capLine}` : '') +
             (capLine ? `\n${capLine}` : '') +
             (macroLine ? `\n${macroLine}` : '');
