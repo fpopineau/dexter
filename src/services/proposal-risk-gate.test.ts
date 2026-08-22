@@ -888,6 +888,7 @@ describe('earnings-bet LIVE-GATE (the evidence bar stops being advisory)', () =>
         reportsWithinWindow: true as boolean | null,
         meetsBar: true as boolean | null,
         nPrints: 9,
+        nVerified: 5 as number | null,
         consistencyPct: 78,
         recordWorstAdversePct: 12 as number | null,
     };
@@ -921,10 +922,25 @@ describe('earnings-bet LIVE-GATE (the evidence bar stops being advisory)', () =>
 
     test('no record at all → refused (no evidence base, no bet)', () => {
         const r = checkProposalRisk(bet(), {
-            earningsBetEvidence: { reportsWithinWindow: true, meetsBar: null, nPrints: null, consistencyPct: null, recordWorstAdversePct: null },
+            earningsBetEvidence: { reportsWithinWindow: true, meetsBar: null, nPrints: null, nVerified: null, consistencyPct: null, recordWorstAdversePct: null },
         }, BET_RULES);
         expect(r.ok).toBe(false);
         expect(r.violations.join(' ')).toContain('no evidence base');
+    });
+
+    test('a record carried by gap-snap inference is refused (REQ-VAL-002)', () => {
+        // 9 prints but only 3 calendar-verified — below earnings_bet_min_verified 4.
+        const r = checkProposalRisk(bet(), {
+            earningsBetEvidence: { ...goodEvidence, nVerified: 3 },
+            worstCaseGapPct: 20,
+        }, BET_RULES);
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('calendar-verified');
+        // A TOTAL calendar failure yields nVerified null → refused by construction.
+        const nulled = checkProposalRisk(bet(), {
+            earningsBetEvidence: { ...goodEvidence, nVerified: null },
+        }, BET_RULES);
+        expect(nulled.ok).toBe(false);
     });
 
     test('a flattering worstCaseGapPct is refused against the record (the 45%-gap undersizing hole)', () => {

@@ -1,64 +1,75 @@
-# Risk rules — LIVE ACCOUNT OVERRIDES (small account, ~€3-5K)
+# Risk rules — LIVE ACCOUNT OVERRIDES (target account €10,000 ≈ $11.7K)
 #
 # Loaded ON TOP of risk-rules.yaml when the IBKR connection verifies a
-# non-paper account. Keys absent here inherit the base file.
+# non-paper account — or on the PAPER account under DEXTER_RISK_PROFILE=live
+# (shadow-live: the validation runs the exact live policy; the paper account
+# gets reset to ~$11,700 so absolute numbers are real too).
 #
-# Rationale: the base percentages are tuned for the $1M paper account and
-# produce unusable absolute numbers on a small account (5% position = ~€185,
-# 0.25% risk = ~€9 — inside commission noise). These values trade fewer,
-# larger positions with a real but bounded per-trade risk.
+# Rationale: the base percentages are tuned for a large paper account and
+# produce unusable absolute numbers on a small account. These values trade
+# fewer, larger positions with a real but bounded per-trade risk.
 #
-# >>> REVIEW THESE BEFORE GOING LIVE — they are risk-appetite decisions. <<<
+# >>> RE-DERIVED FOR €10K 2026-08-22 — REVIEW EVERY LINE BEFORE THE PAPER
+# >>> RESET AND AGAIN BEFORE GOING LIVE: these are risk-appetite decisions.
+# >>> (Previous revision was reviewed for €3.7K.)
 
 # --- Position Sizing ---
-max_position_pct: 20 # ~€740 per position on €3.7K — one liquid mega-cap share or a few mid-caps
-max_open_positions: 3 # concentration beats dust at this size
+# REVIEW: was 20% × 3 slots (€3.7K era — concentration beat dust at ~€740/
+# position). At €10K a position slot is real money: 15% ≈ $1,755 each, and a
+# fourth slot adds diversification without dust (4 × 15% = 60% max deployed
+# vs the old 3 × 20% = 60% — same book ceiling, thinner single-name risk).
+# Prefer the old concentration? Set 20 / 3 back.
+max_position_pct: 15 # ≈$1,755 per position on $11.7K
+max_open_positions: 4
 
 # --- Daily Limits ---
-max_daily_trades: 4 # commissions are a real tax at this size
-# Kill-switch, sized to the book the caps above authorize (audit
-# 2026-08-11: the base 2% was breachable by planned stops alone — 3 slots
-# x 1.0-1.5% budgets = 3.0-4.5% worst case, so two ordinary stop-outs
-# latched the halt). At 3.0%: a full 3-intraday book (3 x 1.0%) fits
-# exactly; swing-heavy mixes (up to 4.5%) hit the acceptance-time
-# daily-loss HEADROOM gate before the position caps do — deliberately
-# conservative. Raise to 4.5 only if the caps should always bind first.
-# ~E111 on E3.7K. >>> REVIEW before go-live. <<<
+# REVIEW: was 4 (commissions were a real tax on €3.7K). The take-at-x%
+# policy cycles winners faster; at ~$2 round-trip against $60-200 takes,
+# commissions are 1-3% of a typical win — 6 trades/day is affordable.
+max_daily_trades: 6
+# Kill-switch, sized to the book the caps above authorize: 4 slots × 1.0%
+# intraday budgets = 4.0% worst case > 3.0%, so the acceptance-time
+# daily-loss HEADROOM gate binds before the position caps do — deliberately
+# conservative (same posture as the €3.7K revision). ≈$351 on $11.7K.
+# >>> REVIEW before the reset. <<<
 max_daily_loss_pct: 3
 
 # --- Overnight ---
-max_overnight_position_pct: 15
+max_overnight_position_pct: 15 # ≈$1,755 riding a gap — one 20% adverse gap ≈ the whole daily halt; the overnight-gap stress model stays on the live-gate backlog
 
 # --- Per-Trade Risk Budget ---
-max_risk_per_trade_pct: 1.0 # ~€37 max loss per stop-out at full confidence
+max_risk_per_trade_pct: 1.0 # ≈$117 max loss per stop-out at full confidence
 
 # --- Confidence-weighted sizing (position-sizer) ---
 sizing_full_score: 80 # score >= 80 -> full risk budget
 sizing_half_score: 60 # 60-79 -> sizing_half_mult x budget
-sizing_half_mult: 1.0 # FLAT until the frozen sample proves decile monotonicity (VALIDATION-PROTOCOL.md) — the 80+ band is 0-for-5 on the current ledger
+sizing_half_mult: 1.0 # FLAT until the frozen sample proves decile monotonicity (VALIDATION-PROTOCOL.md)
 sizing_low_mult: 1.0 # FLAT until calibrated — see above
 
 # --- Small-account floor ---
-min_risk_budget_usd: 15 # refuse trades whose weighted budget is below this — commissions/spread would eat the edge
+min_risk_budget_usd: 15 # refuse trades whose weighted budget is below this — inert at $117 budgets, kept as the floor
 
 # --- Trade Classes ---
 # Swings scale with the live intraday budget (1.0%): 1.5% keeps a 3-swing
-# book's total stop-out cost under ~5% of the account.
-swing_risk_pct: 1.5 # ~€55 max loss per swing stop-out on €3.7K — REVIEW before go-live
+# book's total stop-out cost under ~4.5% of the account.
+swing_risk_pct: 1.5 # ≈$175 max loss per swing stop-out on $11.7K — REVIEW
 max_swing_positions: 3
-# Earnings bets are PAPER-ONLY until the class has its own track record
-# (~10 bets with acceptable outcomes on paper). Flip earnings_bet_enabled
-# only after that review — the budget below is pre-set for that day.
+# Earnings bets are LIVE-DISABLED until the class has its own track record
+# (~10 bets with acceptable outcomes). The SHADOW-LIVE run forces this true
+# as its single documented deviation (DEXTER_RISK_PROFILE=live on paper) so
+# the record can accrue at live-scale sizing; a real live account keeps
+# false until the per-class review.
 earnings_bet_enabled: false
 max_earnings_bets: 1
-earnings_bet_risk_pct: 1.0 # worst-case gap loss ~€37 on €3.7K, once enabled
+earnings_bet_risk_pct: 1.0 # worst-case gap loss ≈$117, once enabled
 earnings_bet_gap_floor_pct: 20
 
 # --- Fractional shares ---
 # KEEP FALSE: IBKR hard-blocks fractional EQUITY orders via the TWS API
 # (error 10243 "use the desktop version", verified live on paper
 # 2026-08-05 — a server-side policy, not a permission or setting). The
-# sizer therefore trades whole shares: symbols above the position cap
-# per share (~€740 at 20% of €3.7K) are refused as unaffordable. The
-# fractional code path stays ready should IBKR ever lift the block.
+# sizer therefore trades whole shares: symbols above the per-position cap
+# per share (≈$1,755 at 15% of $11.7K) are refused as unaffordable — at
+# €10K that excludes almost nothing (vs the €740 cap that shut out every
+# mega-priced name at €3.7K).
 fractional_shares: false

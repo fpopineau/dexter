@@ -16,16 +16,30 @@
  *   - Net P&L: realized_pnl − commissions. A NULL commission is NOT zero:
  *     it is an accounting hole, counted against the integrity gate.
  *   - Profit factor: Σ net wins ÷ |Σ net losses|.
- *   - Drawdown: worst peak-to-trough of the cumulative-net-P&L series in
- *     close order, as % of the CAPTURED paper NetLiq baseline
- *     (netliq-baseline.json — round-4 review: the old hardcoded 1M was 4×
- *     the real paper account and understated drawdown 4×), scaled by
- *     (live max_risk_per_trade_pct ÷ paper max_risk_per_trade_pct);
- *     PASS bar: ≤ 2 × live max_daily_loss_pct.
- *   - Score deciles: trades bucketed by score into 10 equal-width bins
- *     0–100; Spearman rank correlation computed over PER-TRADE
- *     (score, net P&L) pairs; monotonicity claim needs rho > 0 AND
- *     p < 0.05 (t-approximation).
+ *   - Expectancy LCB (REQ-VAL-003, added pre-freeze 2026-08-22): day-block
+ *     bootstrap (resample trading DAYS with replacement, 1000 replicates,
+ *     seed 42) — the 95% one-sided lower confidence bound of mean net P&L
+ *     per trade must be > 0. A positive sample mean carried by one fat day
+ *     is not expectancy.
+ *   - Drawdown (REQ-SHADOW-004, revised pre-freeze 2026-08-22): worst
+ *     peak-to-trough of the cumulative-net-P&L series in close order, as %
+ *     of the FROZEN epoch NetLiq, judged DIRECTLY against 2 × the live
+ *     max_daily_loss_pct — the shadow-live sample runs the live policy at
+ *     live scale, so the old ×4 risk-ratio extrapolation is retired. An
+ *     epoch NetLiq above $50K means the paper account was not reset to the
+ *     live scale: the sample is not the live portfolio → FAIL.
+ *   - Score deciles: trades bucketed by score into 10 bins; scores above
+ *     100 (composite-rank boosts) CLAMP into the top bin and are counted
+ *     (REQ-VAL-001 — they used to fall out of every bucket); Spearman rank
+ *     correlation computed over PER-TRADE (score, net P&L) pairs;
+ *     monotonicity claim needs rho > 0 AND p < 0.05 (t-approximation).
+ *   - Take-vs-target (REQ-EXIT-014): take-policy exits (exit_reason
+ *     'target' with a stamped take_pct) report realized net, post-exit
+ *     same-day MFE (left on the table), and the legacy-geometry
+ *     counterfactual tally. Informational — the aggregate criteria judge.
+ *   - Epoch fingerprint (REQ-VAL-004): SHA-256 of performance-epoch.json —
+ *     the journal records it at tag time so the window's pin cannot drift
+ *     silently (the epoch file is mutable JSON, not a git object).
  *   - Top/bottom band: score ≥ 80th percentile vs ≤ 20th percentile of
  *     the SAMPLE's scores, each needing n ≥ 10 to be evaluable.
  *   - Judgment purity: exactly one distinct non-null `model` across the
@@ -41,8 +55,10 @@
  */
 
 import 'dotenv/config';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { dayBlockBootstrapLcb } from '../src/utils/day-bootstrap.js';
 
 const UNTRUSTWORTHY = '%NOT trustworthy%';
 const dataDir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
@@ -51,6 +67,8 @@ interface Row {
     id: string; symbol: string; trade_class: string | null; source: string;
     score: number | null; model: string | null; regime: string | null;
     realized_pnl: number; commissions: number | null; closed_at: number;
+    exit_reason: string | null; take_pct: number | null;
+    post_exit_mfe_pct: number | null; take_counterfactual: string | null;
 }
 
 interface SqliteQuery<T> { all(...params: unknown[]): T[] }
@@ -212,17 +230,33 @@ if (paperNetliq === null) {
     } catch { /* reported below */ }
 }
 
-const rows = db.query<Row>(`
-    SELECT id, symbol, trade_class, source, score, model, regime,
-           realized_pnl, commissions, closed_at
-    FROM proposals
+const SAMPLE_WHERE = `
     WHERE status = 'closed' AND created_at >= ? AND closed_at >= ?
       AND entry_fill_price IS NOT NULL AND realized_pnl IS NOT NULL
       AND (exit_reason IS NULL OR exit_reason != 'cancelled')
       AND source != 'adopted'
       AND (note IS NULL OR note NOT LIKE '${UNTRUSTWORTHY}')
-    ORDER BY closed_at ASC
-`).all(sinceMs, sinceMs);
+    ORDER BY closed_at ASC`;
+let rows: Row[];
+try {
+    rows = db.query<Row>(`
+        SELECT id, symbol, trade_class, source, score, model, regime,
+               realized_pnl, commissions, closed_at,
+               exit_reason, take_pct, post_exit_mfe_pct, take_counterfactual
+        FROM proposals ${SAMPLE_WHERE}
+    `).all(sinceMs, sinceMs);
+} catch {
+    // Pre-WP-EXIT database: the take-tracking columns land with the store's
+    // idempotent migration on the next gateway boot. Read-only here — fall
+    // back honestly rather than crash or migrate out-of-band.
+    console.log('note: take-tracking columns absent (DB pre-dates WP-EXIT — restart the gateway to migrate); take-vs-target reports n/a');
+    rows = db.query<Row>(`
+        SELECT id, symbol, trade_class, source, score, model, regime,
+               realized_pnl, commissions, closed_at, exit_reason,
+               NULL AS take_pct, NULL AS post_exit_mfe_pct, NULL AS take_counterfactual
+        FROM proposals ${SAMPLE_WHERE}
+    `).all(sinceMs, sinceMs);
+}
 // created_at >= window start (round-5 review): "never count pre-freeze
 // rows" means rows PROPOSED under the frozen policy — a pre-freeze trade
 // that merely closes inside the window was judged by the old policy.
@@ -324,15 +358,39 @@ console.log(`win rate ${(100 * wins.length / n).toFixed(1)}% (${wins.length}W/${
 if (expectancy <= 0) verdictFails.push(`expectancy ${expectancy.toFixed(2)} <= 0`);
 if (pf < 1.3) verdictFails.push(`profit factor ${pf.toFixed(2)} < 1.3`);
 
-// Drawdown (protocol formula)
+// Expectancy lower confidence bound (REQ-VAL-003): day-block bootstrap —
+// same-day trades share the tape, so days are the independence unit.
+const byDay = new Map<string, number[]>();
+for (const r of rows) {
+    const day = new Date(r.closed_at).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    (byDay.get(day) ?? byDay.set(day, []).get(day)!).push(net(r));
+}
+const boot = dayBlockBootstrapLcb(byDay);
+if (boot) {
+    console.log(`expectancy 95% LCB ${boot.lcb.toFixed(2)}/trade (day-block bootstrap, ${boot.days} days × ${boot.replicates} replicates, seed 42) (${boot.lcb > 0 ? 'PASS' : 'FAIL'} — must be > 0)`);
+    if (boot.lcb <= 0) verdictFails.push(`expectancy LCB ${boot.lcb.toFixed(2)} <= 0 (mean may be outlier-carried)`);
+} else {
+    console.log(`expectancy LCB: not evaluable (< 5 distinct trading days)`);
+    verdictFails.push('expectancy LCB not evaluable (< 5 trading days)');
+}
+
+// Drawdown (protocol formula — REQ-SHADOW-004: judged at LIVE SCALE).
+// The shadow-live sample trades the live rules on a paper account reset to
+// the live equity, so drawdown reads directly — the retired ×4 risk-ratio
+// extrapolation could not model slots, caps, whole shares, or selection.
 let equity = 0, peak = 0, maxDd = 0;
 for (const v of nets) { equity += v; if (equity > peak) peak = equity; maxDd = Math.max(maxDd, peak - equity); }
-const liveRisk = 1.0, paperRisk = 0.25, liveDailyLoss = 3.0; // risk-rules.live.yaml pins
+const liveDailyLoss = 3.0; // risk-rules.live.yaml pin
+const LIVE_SCALE_MAX_NETLIQ = 50_000;
 if (paperNetliq !== null) {
-    const ddPct = (maxDd / paperNetliq) * 100 * (liveRisk / paperRisk);
-    console.log(`max drawdown ${maxDd.toFixed(2)} on paper NetLiq ${paperNetliq.toFixed(0)} [${netliqSource}] → scaled ${ddPct.toFixed(2)}% of live equity (${ddPct <= 2 * liveDailyLoss ? 'PASS' : 'FAIL'} — must be <= ${2 * liveDailyLoss}%)`);
+    const ddPct = (maxDd / paperNetliq) * 100;
+    console.log(`max drawdown ${maxDd.toFixed(2)} on epoch NetLiq ${paperNetliq.toFixed(0)} [${netliqSource}] = ${ddPct.toFixed(2)}% (${ddPct <= 2 * liveDailyLoss ? 'PASS' : 'FAIL'} — must be <= ${2 * liveDailyLoss}%)`);
     if (netliqSource !== 'frozen at epoch') verdictFails.push('drawdown denominator not frozen (epoch has no netLiq)');
-    if (ddPct > 2 * liveDailyLoss) verdictFails.push(`scaled drawdown ${ddPct.toFixed(2)}% > ${2 * liveDailyLoss}%`);
+    if (ddPct > 2 * liveDailyLoss) verdictFails.push(`drawdown ${ddPct.toFixed(2)}% > ${2 * liveDailyLoss}%`);
+    if (paperNetliq > LIVE_SCALE_MAX_NETLIQ) {
+        console.log(`⚠ epoch NetLiq ${paperNetliq.toFixed(0)} is NOT live scale — the sample is not the live portfolio (reset the paper account to ~$11.7K ≈ €10K before the freeze)`);
+        verdictFails.push(`epoch NetLiq ${paperNetliq.toFixed(0)} > ${LIVE_SCALE_MAX_NETLIQ} (sample not at live scale)`);
+    }
 } else {
     console.log(`max drawdown ${maxDd.toFixed(2)} — NOT EVALUABLE: netliq-baseline.json missing/unreadable`);
     verdictFails.push('drawdown not evaluable (no netliq baseline)');
@@ -358,16 +416,45 @@ const byLane = new Map<string, number[]>();
 for (const r of rows) (byLane.get(r.source) ?? byLane.set(r.source, []).get(r.source)!).push(net(r));
 for (const [k, vs] of byLane) console.log(`  ${k}: n=${vs.length} net ${vs.reduce((s, v) => s + v, 0).toFixed(2)}`);
 
+// Take-vs-target (REQ-EXIT-014, informational): what the take policy
+// banked vs what it left on the table, plus the legacy-geometry replay.
+const takes = rows.filter((r) => r.exit_reason === 'target' && r.take_pct !== null);
+if (takes.length > 0) {
+    const takeNet = takes.reduce((s, r) => s + net(r), 0);
+    const withPost = takes.filter((r) => r.post_exit_mfe_pct !== null);
+    const meanPost = withPost.length
+        ? withPost.reduce((s, r) => s + (r.post_exit_mfe_pct ?? 0), 0) / withPost.length
+        : null;
+    const cf = { 'target-first': 0, 'stop-first': 0, neither: 0, pending: 0 };
+    for (const r of takes) {
+        if (r.take_counterfactual === 'target-first') cf['target-first']++;
+        else if (r.take_counterfactual === 'stop-first') cf['stop-first']++;
+        else if (r.take_counterfactual === 'neither') cf.neither++;
+        else cf.pending++;
+    }
+    console.log(
+        `\ntake-vs-target (take-policy exits): n=${takes.length} net ${takeNet.toFixed(2)} mean ${(takeNet / takes.length).toFixed(2)}` +
+        `\n  left on the table: mean post-exit MFE ${meanPost !== null ? `${meanPost.toFixed(2)}%` : 'n/a'} (${withPost.length}/${takes.length} measured)` +
+        `\n  legacy 1×/2×ATR counterfactual: target-first ${cf['target-first']}, stop-first ${cf['stop-first']}, neither ${cf.neither}, pending ${cf.pending}`,
+    );
+} else {
+    console.log('\ntake-vs-target: no take-policy exits in the sample yet');
+}
+
 // Score deciles + Spearman (confidence-sizing gate — NOT part of the
 // go-live verdict; it decides flat-vs-banded sizing separately).
 const scored = rows.filter((r) => r.score !== null) as Array<Row & { score: number }>;
-console.log(`\nscore deciles (scored n=${scored.length}):`);
+// REQ-VAL-001: composite-rank boosts push some scores past 100 — they
+// clamp into the top bin (and are counted) instead of silently escaping
+// every bucket and biasing the decile table toward the unboosted lanes.
+const over100 = scored.filter((r) => r.score > 100).length;
+console.log(`\nscore deciles (scored n=${scored.length}${over100 > 0 ? `, ${over100} score(s) > 100 clamped into 90+` : ''}):`);
 for (let d = 0; d < 10; d++) {
     const lo = d * 10, hi = lo + 10;
-    const rs = scored.filter((r) => r.score >= lo && (d === 9 ? r.score <= 100 : r.score < hi));
+    const rs = scored.filter((r) => r.score >= lo && (d === 9 ? true : r.score < hi));
     if (rs.length) {
         const t = rs.reduce((s, r) => s + net(r), 0);
-        console.log(`  ${lo}-${hi}: n=${rs.length} net ${t.toFixed(2)} mean ${(t / rs.length).toFixed(2)}`);
+        console.log(`  ${lo}-${d === 9 ? '100+' : hi}: n=${rs.length} net ${t.toFixed(2)} mean ${(t / rs.length).toFixed(2)}`);
     }
 }
 const sp = spearman(scored.map((r) => [r.score, net(r)]));
@@ -384,6 +471,15 @@ if (sp) {
         `${top.length >= 10 && bot.length >= 10 ? (wr(top) > wr(bot) ? ' — band check PASS' : ' — band check FAIL') : ' — bands not evaluable (n<10)'}`);
 } else {
     console.log('Spearman: not evaluable (scored n < 10) — confidence sizing stays FLAT');
+}
+
+// Epoch fingerprint (REQ-VAL-004): the window is pinned by a mutable JSON
+// file — hash it so the journal can prove the pin never drifted.
+try {
+    const raw = readFileSync(join(dataDir, 'performance-epoch.json'));
+    console.log(`\nepoch fingerprint: sha256 ${createHash('sha256').update(raw).digest('hex')} (record in the validation journal at tag time)`);
+} catch {
+    console.log('\nepoch fingerprint: performance-epoch.json unreadable');
 }
 
 // Purity + breadth

@@ -419,20 +419,79 @@ function loadRules(profile: AccountProfile): RiskRules {
     return merged;
 }
 
+// ---------------------------------------------------------------------------
+// Shadow-live (WP-SHADOW, operator decision 2026-08-22): the validation
+// runs the EXACT live policy on the paper account. DEXTER_RISK_PROFILE=live
+// escalates a paper account onto risk-rules.live.yaml; it can NEVER
+// de-escalate a live account onto paper rules — the override is ignored
+// loudly there (REQ-SHADOW-001).
+// ---------------------------------------------------------------------------
+
+let shadowMode = false;
+
+/** Pure: how an env override combines with the account-derived profile.
+ *  Only the paper→live escalation exists; everything else is a no-op or an
+ *  ignored (reported) request. */
+export function resolveProfileOverride(
+    accountProfile: AccountProfile,
+    envValue: string | undefined,
+): { profile: AccountProfile; shadow: boolean; ignored: string | null } {
+    const v = (envValue ?? '').trim().toLowerCase();
+    if (v === '') return { profile: accountProfile, shadow: false, ignored: null };
+    if (v !== 'paper' && v !== 'live') {
+        return { profile: accountProfile, shadow: false, ignored: `unknown value '${envValue}' (use paper|live)` };
+    }
+    if (accountProfile === 'live') {
+        // A LIVE account never trades on the tiny paper percentages — and a
+        // live account "shadowing" anything is a category error.
+        return v === 'live'
+            ? { profile: 'live', shadow: false, ignored: null }
+            : { profile: 'live', shadow: false, ignored: `cannot run a LIVE account on the paper profile — override refused` };
+    }
+    return v === 'live'
+        ? { profile: 'live', shadow: true, ignored: null }
+        : { profile: 'paper', shadow: false, ignored: null };
+}
+
 /**
  * Select the active rules profile. Called by the IBKR connection when the
  * managed accounts are verified: all-paper accounts ('D…') → 'paper',
- * anything else → 'live'. Idempotent.
+ * anything else → 'live'. Idempotent. The DEXTER_RISK_PROFILE override is
+ * resolved HERE, against the account truth — never trusted on its own.
  */
 export function setAccountProfile(profile: AccountProfile): void {
-    activeProfile = profile;
+    const r = resolveProfileOverride(profile, process.env.DEXTER_RISK_PROFILE);
+    if (r.ignored) {
+        logger.error(`[risk-rules] DEXTER_RISK_PROFILE ignored: ${r.ignored}`);
+    }
+    if (r.shadow && (!shadowMode || activeProfile !== r.profile)) {
+        logger.warn(
+            '[risk-rules] SHADOW-LIVE: paper account running the LIVE rule profile ' +
+            '(DEXTER_RISK_PROFILE=live) — one documented deviation: earnings_bet_enabled ' +
+            'forced true so the class keeps building its record (VALIDATION-PROTOCOL.md)',
+        );
+    }
+    activeProfile = r.profile;
+    shadowMode = r.shadow;
 }
 
 export function getAccountProfile(): AccountProfile {
     return activeProfile;
 }
 
-/** Public accessor for the risk rules (active profile). */
+/** True when a paper account is running the live rules (REQ-SHADOW-001). */
+export function isShadowLive(): boolean {
+    return shadowMode;
+}
+
+/** Public accessor for the risk rules (active profile). In shadow-live the
+ *  single documented deviation applies (REQ-SHADOW-002): earnings bets stay
+ *  enabled — the live profile locks them out until the class has a record,
+ *  and the shadow run is precisely where that record accrues. */
 export function getRiskRules(): RiskRules {
-    return loadRules(activeProfile);
+    const rules = loadRules(activeProfile);
+    if (shadowMode && activeProfile === 'live' && !rules.earnings_bet_enabled) {
+        return { ...rules, earnings_bet_enabled: true };
+    }
+    return rules;
 }

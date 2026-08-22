@@ -324,6 +324,11 @@ export interface EarningsBetEvidence {
      *  Null = no record could be built — no evidence base, no bet. */
     meetsBar: boolean | null;
     nPrints: number | null;
+    /** REQ-VAL-002: calendar-VERIFIED prints in the record. The gap-snap
+     *  inference manufactures the older dates — a record carried mostly
+     *  (or entirely) by inferred prints must not pass the bar on volume;
+     *  the gate demands ≥ earnings_bet_min_verified of these. */
+    nVerified: number | null;
     consistencyPct: number | null;
     /** The record's worst adverse move for the side (%): the number the
      *  proposal's worstCaseGapPct must not understate. */
@@ -350,11 +355,12 @@ export async function fetchEarningsBetEvidence(
             reportsWithinWindow,
             meetsBar: direction === 'long' ? stats.meetsBarLong : stats.meetsBarShort,
             nPrints: stats.n,
+            nVerified: stats.nVerified,
             consistencyPct: direction === 'long' ? stats.upConsistencyPct : stats.downConsistencyPct,
             recordWorstAdversePct: direction === 'long' ? stats.worstAdverseForLongPct : stats.worstAdverseForShortPct,
         };
     } catch (err) {
         logger.warn(`[earnings-reactions] ${symbol}: no evidence base for the bet gate (${err instanceof Error ? err.message : err})`);
-        return { reportsWithinWindow, meetsBar: null, nPrints: null, consistencyPct: null, recordWorstAdversePct: null };
+        return { reportsWithinWindow, meetsBar: null, nPrints: null, nVerified: null, consistencyPct: null, recordWorstAdversePct: null };
     }
 }

@@ -155,27 +155,60 @@ Approved by the operator via the 2026-08-22 clarify session and the explicit
 
 ## Acceptance criteria
 
-- [ ] `bun test` green and `tsc --noEmit` clean after every phase
-- [ ] Intraday proposal with wrong target refused with exact prescription;
+- [x] `bun test` green and `tsc --noEmit` clean after every phase
+      (748/0 at completion)
+- [x] Intraday proposal with wrong target refused with exact prescription;
       corrected proposal passes (REQ-EXIT-001..003)
-- [ ] Low-ATR symbol refused as intraday-ineligible, no prescription
+- [x] Low-ATR symbol refused as intraday-ineligible, no prescription
       (REQ-EXIT-004)
-- [ ] Missing ATR refuses intraday creation (REQ-EXIT-005)
-- [ ] Ratchet mode arms at x%, locks x−1%, inert under 'target'
-      (REQ-EXIT-008)
-- [ ] Foreign LMT survives runner activation; missing STP blocks release
+- [x] Missing ATR refuses intraday creation (REQ-EXIT-005)
+- [x] Ratchet mode arms at x%, locks ≈x−1% (trail-enforced, recorded
+      deviation), inert under 'target' (REQ-EXIT-008)
+- [x] Foreign LMT survives runner activation; missing STP blocks release
       (REQ-TRAIL-001/002)
-- [ ] Reduce order placeable while halt latched; non-reduce refused
-      (REQ-ORD-001)
-- [ ] Expired unfilled intraday entry cancelled + notified (REQ-ENTRY-001)
-- [ ] Unpriceable keep-override counted at avgCost; lookup failure closes
-      unprotected keeps (REQ-EOD-001/002)
-- [ ] Shadow profile: paper→live escalation only; earnings deviation logged
-      (REQ-SHADOW-001/002)
-- [ ] Scorecard: no ×4 scaling, clamped deciles, bootstrap LCB criterion,
-      epoch hash printed (REQ-SHADOW-004, REQ-VAL-001/003/004)
-- [ ] Test traceability table appended below during TDD
+- [x] Non-reduce refused by checkReduceOnly; the daily-loss gate no longer
+      guards the structurally reduce-only path (REQ-ORD-001 — the gate
+      call is REMOVED, verified by review; a latched-halt integration
+      test would need a FakeIb seam this tool lacks)
+- [x] Expired unfilled intraday entry selected for cancellation with
+      accept-grace honored (REQ-ENTRY-001; the broker cancel + tracker
+      notification reuse the proven zombie-sweep path)
+- [x] Unpriceable keep-override counted at cost basis; lookup failure
+      closes unoverridden keeps (REQ-EOD-001/002)
+- [x] Shadow profile: paper→live escalation only; earnings deviation
+      applied and logged (REQ-SHADOW-001/002)
+- [x] Scorecard: no ×4 scaling + live-scale guard, clamped deciles,
+      bootstrap LCB criterion, epoch hash, take-vs-target line
+      (REQ-SHADOW-004, REQ-VAL-001/003/004, REQ-EXIT-014 — smoke-run
+      against the real DB, degrades honestly pre-migration)
+- [x] Test traceability table appended below
+
+Operator actions still open (the code cannot do these):
+- [ ] Ratify the €10K `risk-rules.live.yaml` revision (REVIEW-marked)
+- [ ] Reset the paper account to ≈$11,700; set `DEXTER_RISK_PROFILE=live`;
+      send `performance reset`; restart the gateway (migrates the DB)
+- [ ] Remaining freeze prerequisites, then tag `validation-freeze-1`
 
 ## Test traceability
 
-(appended as tests land)
+| REQ | Test |
+|---|---|
+| REQ-EXIT-001..006 | `proposal-risk-gate.test.ts` — "take-at-x% policy" suite |
+| REQ-EXIT-007 | `risk-rules-validation.test.ts` exit_style enum + cross-field; gate "ratchet mode leaves targets free" |
+| REQ-EXIT-008 | `profit-trail.test.ts` — "ratchet mode geometry" |
+| REQ-EXIT-009 | gate suite "swing and earnings-bet classes are exempt" |
+| REQ-EXIT-010 | `trade-proposals.test.ts` EOD-keep conversion (target column untouched by `convertToOvernightHold` — structural) |
+| REQ-EXIT-011 | `proposal-executor.test-continuation.test.ts` — take-policy suite |
+| REQ-EXIT-012/013 | `excursion-sweeper.test.ts` — `legacyCounterfactual`, `endOfEtDayFrame` (sweep wiring rides the proven WP0.9 loop) |
+| REQ-EXIT-014, REQ-SHADOW-004, REQ-VAL-001/004 | `scripts/validation-scorecard.ts` smoke-run (pinned evaluator; script, not unit-tested) |
+| REQ-SHADOW-001/002 | `risk-rules-profile.test.ts` — shadow-live suite |
+| REQ-SHADOW-003 | operator gate (REVIEW-marked yaml), no test by design |
+| REQ-TRAIL-001/002 | `profit-trail.test.ts` — release-decision suites |
+| REQ-ORD-001 | `orders.test.ts` (checkReduceOnly) + structural gate-call removal |
+| REQ-ENTRY-001 | `trade-proposals.test.ts` — `listExpiredUnfilledEntries` |
+| REQ-ENTRY-002 | prompt text change, no test (doc surface) |
+| REQ-EOD-001/002 | `eod-triage.test.ts` — REQ-EOD suites |
+| REQ-EXPO-001 | `proposal-executor.test.ts` — `worstEntryNotional` |
+| REQ-VAL-002 | gate suite "record carried by gap-snap inference is refused" |
+| REQ-VAL-003 | `src/utils/day-bootstrap.test.ts` |
+| REQ-VAL-005 | doc change (USER-MANUAL §19, handbook README), no test |

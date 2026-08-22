@@ -773,22 +773,30 @@ P&L math, market-hours. Live-socket behavior is exercised by
 | Dashboard action returns `forbidden — reload the dashboard page` | the CSRF token rotated with a gateway restart — reload the tab |
 | jest: `better_sqlite3.node not found` | `cd node_modules/better-sqlite3 && npx prebuild-install` (bun installs skip node prebuilds) |
 
-## 19. Going live — checklist
+## 19. Going live — the protocol decides, not this page
 
-Do not rush this. The system is deliberately paper-locked in three
-independent places.
+**The acceptance contract for going live is
+[VALIDATION-PROTOCOL.md](VALIDATION-PROTOCOL.md)** — a pre-registered,
+frozen-sample evaluation (≥100 shadow-live trades, ≥6 weeks, ≥2 regimes,
+positive net expectancy with a positive bootstrap lower bound, profit
+factor ≥ 1.3, drawdown inside the live math, per-class discipline) whose
+pinned evaluator is `scripts/validation-scorecard.ts`. No summary here is
+authoritative; an earlier revision of this section said "2–4 positive
+weeks may be enough" — it is superseded, and following it would be
+exactly the peeking the protocol forbids.
 
-1. **Evidence first:** ≥ 2–4 weeks of paper trading with real fills;
-   `performance 30` shows a positive net P&L and an exit distribution you
-   understand (few `manual`/`unknown`).
-2. Review every `[risk-gate]` and `[daily-loss-guard]` refusal in the
-   logs — each one is a story about behavior under stress.
-3. Calibrate the scorer on recent data; re-run the backtests.
-4. Decide sizing for live (`max_position_pct` deliberately small at first).
-5. Switch IB Gateway to the live account, port 4001, and set
+What remains this page's business — the mechanics once the protocol
+PASSES:
+
+1. Re-read `risk-rules.live.yaml` line by line (risk-appetite decisions,
+   REVIEW-marked).
+2. Switch IB Gateway to the live account, port 4001, and set
    `IBKR_PORT=4001`, `IBKR_ALLOW_LIVE=true` — manual acceptance only:
    **auto-execution cannot go live by construction.**
-6. First live day: smallest sizes, every accept manual, `halt status`
+3. First live day: smallest sizes, every accept manual, `halt status`
    checked before each accept.
-7. Keep the kill-switch threshold conservative; never clear a halt on the
+4. Keep the kill-switch threshold conservative; never clear a halt on the
    same day it fired.
+5. No scorer calibration, rule change, or backtest-driven adjustment
+   between the protocol's PASS and the flip — a behavior change ends the
+   validated sample (see the protocol's freeze section).

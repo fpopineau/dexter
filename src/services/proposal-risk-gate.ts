@@ -390,6 +390,16 @@ export function checkProposalRisk(
                   `need ≥${EVIDENCE_MIN_PRINTS} prints and ≥${EVIDENCE_MIN_CONSISTENCY_PCT}%) — no bet`
                 : 'no post-print record could be built for the symbol — no evidence base, no bet');
         }
+        // REQ-VAL-002: the record must stand on calendar-VERIFIED prints,
+        // not the gap-snap inference that manufactures the older dates —
+        // on a total calendar failure the record is 100% inferred and this
+        // refuses by construction (null counts as zero).
+        if ((ev.nVerified ?? 0) < rules.earnings_bet_min_verified) {
+            violations.push(
+                `only ${ev.nVerified ?? 0} of ${ev.nPrints ?? '?'} prints in the record are calendar-verified ` +
+                `(need ≥${rules.earnings_bet_min_verified}) — a record carried by gap-snap inference is not evidence; no bet`,
+            );
+        }
         if (ev.recordWorstAdversePct !== null && ev.recordWorstAdversePct > 0) {
             const assumed = Math.max(ctx.worstCaseGapPct ?? 0, rules.earnings_bet_gap_floor_pct);
             if (assumed < ev.recordWorstAdversePct - 1e-9) {

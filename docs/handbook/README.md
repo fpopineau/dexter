@@ -8,7 +8,9 @@ mission of this fork — built on [Dexter](https://github.com/virattt/dexter)
 |---|---|
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | The full system design: layers, components, data flow, the proposal lifecycle, the safety model, storage layout, and the design rationale behind each choice. |
 | **[DATA-SOURCES.md](DATA-SOURCES.md)** | Every data source the system uses or plans to use: what is wired, what it feeds, how to configure it, what is still missing and why it matters. |
-| **[USER-MANUAL.md](USER-MANUAL.md)** | Day-to-day operations: setup, running the gateway, the WhatsApp command reference, scheduled briefs, calibration, backtesting, monitoring, troubleshooting, and the go-live checklist. |
+| **[USER-MANUAL.md](USER-MANUAL.md)** | Day-to-day operations: setup, running the gateway, the WhatsApp command reference, scheduled briefs, calibration, backtesting, monitoring, troubleshooting, and the go-live mechanics. |
+| **[VALIDATION-PROTOCOL.md](VALIDATION-PROTOCOL.md)** | **The acceptance contract for going live** — the pre-registered frozen-sample evaluation (shadow-live, ≥100 trades, expectancy + bootstrap LCB, profit factor, drawdown, breadth) and its pinned evaluator. Nothing goes live on any other basis. |
+| **[REMEDIATION-2026-08-20.md](REMEDIATION-2026-08-20.md)** | The audit-closure program (WP0–WP11), its landed state, review-round triages, and the recorded accepted-backlog decisions. |
 
 Companion documents (design history, kept for context):
 

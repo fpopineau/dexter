@@ -11,8 +11,18 @@ positive expectancy after costs, not improved loss control.
 
 - The freeze starts at git tag `validation-freeze-1` (NOT YET TAGGED —
   see prerequisites). From the tag: no rule, gate, threshold, scorer, or
-  sizing changes. The 2026-08-19 discovery rules and every remediation
-  WP are part of what freezes.
+  sizing changes. The 2026-08-19 discovery rules, every remediation WP,
+  and the 2026-08-22 take-at-x% exit policy (WP-EXIT — `exit_style` is
+  pinned at tag time; flipping it ends the window) are part of what
+  freezes.
+- **The sample is SHADOW-LIVE** (WP-SHADOW, operator decision
+  2026-08-22): the paper account is reset to ≈$11,700 (≈€10K, the live
+  target) and runs `risk-rules.live.yaml` via `DEXTER_RISK_PROFILE=live`
+  — the validation trades the exact live policy at the live scale, so no
+  cross-profile extrapolation survives in the evaluator. ONE documented
+  deviation: `earnings_bet_enabled` is forced true in shadow so the
+  class keeps building its per-class record (criterion 4 still keeps it
+  paper-only after go-live until its own ≥10-trade record passes).
 - **The judgment policy freezes too** (review 2026-08-21): the runtime
   model/provider settings are pinned at tag time and recorded in the
   validation journal; every proposal stamps its `model` column, and the
@@ -27,9 +37,12 @@ positive expectancy after costs, not improved loss control.
   selection stage, it does not make sampling unbiased; the monotonicity
   result is conditional on the proposed-score range.
 - At tag time the journal also records: the model AND provider strings,
-  a SHA-256 of `.dexter/RULES.md` (mutable judgment input), and the
-  scorer-weights provenance line — `model` column homogeneity alone
-  does not prove a homogeneous judgment policy.
+  a SHA-256 of `.dexter/RULES.md` (mutable judgment input), a SHA-256 of
+  `.dexter/data/performance-epoch.json` (the window's pin is a mutable
+  JSON file — the fingerprint proves it never drifted; the scorecard
+  prints it), the active `exit_style`, and the scorer-weights provenance
+  line — `model` column homogeneity alone does not prove a homogeneous
+  judgment policy.
 - **The evaluator is `scripts/validation-scorecard.ts`** — its pinned
   definitions ARE this protocol's machine-readable form (sample filter,
   net P&L, profit factor, the drawdown scaling formula, per-trade
@@ -66,6 +79,12 @@ positive expectancy after costs, not improved loss control.
 3. One clean gateway boot: YAML validation passes, calendar coverage ok,
    no adoption-sweep surprises. (The rules/calendar halves passed in the
    2026-08-21 script run; confirm on the next real gateway start.)
+4. **Shadow-live in place (2026-08-22)**: operator ratifies the €10K
+   revision of `risk-rules.live.yaml` (REVIEW-marked), resets the paper
+   account NetLiq to ≈$11,700 in IBKR Account Management, sets
+   `DEXTER_RISK_PROFILE=live` in the gateway environment, then sends
+   `performance reset` — one clean epoch at the live scale. The scorecard
+   fails any sample whose epoch NetLiq is not live-scale.
 
 ## Sample definition
 
@@ -84,16 +103,25 @@ positive expectancy after costs, not improved loss control.
 
 ## Acceptance criteria (ALL must hold)
 
+(Revised 2026-08-22, BEFORE the tag — the sample does not exist yet, so
+these are still pre-registered numbers, not fitted ones.)
+
 1. **Net expectancy > 0**: mean net P&L per trade (gross − commissions)
    strictly positive.
-2. **Profit factor ≥ 1.3**: gross wins / |gross losses| on net-of-
+2. **Expectancy lower bound > 0**: the 95% one-sided lower confidence
+   bound of mean net P&L per trade, from a day-block bootstrap (trading
+   days resampled with replacement, 1000 replicates, seed 42 — same-day
+   trades share the tape and are not independent), strictly positive. A
+   sample mean carried by one fat day is not expectancy.
+3. **Profit factor ≥ 1.3**: gross wins / |gross losses| on net-of-
    commission trade P&L.
-3. **Drawdown inside the live math**: the sample's worst peak-to-trough
-   drawdown, scaled to the live account's risk profile
-   (`risk-rules.live.yaml`), must not exceed 2× the live
-   `max_daily_loss_pct` — a strategy whose normal drawdown eats two
-   kill-switch days is not deployable on a €3.7K account.
-4. **Class discipline**: every trade class that traded ≥10 times must
+4. **Drawdown inside the live math**: the sample's worst peak-to-trough
+   drawdown as % of the frozen epoch NetLiq must not exceed 2× the live
+   `max_daily_loss_pct`. The shadow-live sample runs at live scale, so
+   this reads DIRECTLY — the former ×4 risk-ratio scaling is retired;
+   an epoch NetLiq above $50K fails the criterion outright (the sample
+   was not collected at the live scale).
+5. **Class discipline**: every trade class that traded ≥10 times must
    individually satisfy (1); a class below 10 trades stays paper-only
    after go-live regardless of the aggregate.
 
@@ -131,4 +159,4 @@ Fails → sizing stays flat on live; the scorer keeps collecting.
 - Never widen a criterion to fit the sample after the fact.
 - Never count adopted, cancelled-annotated, or pre-freeze rows.
 - Never flip `earnings_bet_enabled` on live from this protocol alone —
-  the class needs its own ≥10-trade paper record per criterion (4).
+  the class needs its own ≥10-trade paper record per criterion (5).
