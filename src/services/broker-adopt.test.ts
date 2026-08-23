@@ -19,7 +19,7 @@ import { countOpenExecuted, createAdoptedPosition, getProposal, resolveAdoptedFl
 
 const ACCT = 'DU7777777';
 const order = (o: Partial<BrokerOrderSnap>): BrokerOrderSnap =>
-    ({ orderId: 1, symbol: 'NVDA', orderRef: null, account: ACCT, quantity: null, action: null, orderType: null, auxPrice: null, ...o });
+    ({ orderId: 1, symbol: 'NVDA', orderRef: null, account: ACCT, quantity: null, action: null, orderType: null, auxPrice: null, lmtPrice: null, ocaGroup: null, tif: null, ...o });
 const position = (p: Partial<BrokerPositionSnap>): BrokerPositionSnap =>
     ({ account: ACCT, symbol: 'NVDA', quantity: 10, avgCost: 100, ...p });
 

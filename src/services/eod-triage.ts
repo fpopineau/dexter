@@ -163,6 +163,87 @@ export interface OvernightVetResult {
  * NetLiq unavailable: per-position vetting impossible — LOUD warning, no
  * blind mass-close (recorded deviation from pure fail-closed).
  */
+
+/**
+ * Review-19, pure: rebuild the overnight book for the POSTCONDITION
+ * re-vet from BROKER TRUTH — fresh positions plus the actual working
+ * `P-XXXX:entry` parents in the open-order snapshot. A partial fill is
+ * counted BOTH ways (the position AND the still-working remainder ride
+ * the night); the DB never decides what is resting, only what class a
+ * resting parent belongs to. Conservative: an entry order counts at its
+ * full totalQuantity (the snapshot cannot see the remaining quantity —
+ * overstating a partially filled parent overstates stress, never
+ * understates it). DAY-parent entries die at the bell and are skipped;
+ * an entry whose row is gone (orphan) counts anyway. Symbols that
+ * cannot be priced are returned in `unpriced` — the caller must alarm,
+ * not pass.
+ */
+export function buildRevetBook(input: {
+    positions: Array<{ symbol: string; quantity: number; avgCost: number }>;
+    orders: Array<{ symbol: string; orderRef: string | null; quantity: number | null; auxPrice: number | null; lmtPrice: number | null; tif: string | null }>;
+    rows: Array<Pick<TradeProposal, 'id' | 'symbol' | 'tradeClass' | 'worstCaseGapPct' | 'entry' | 'entryLimit' | 'tif' | 'quantity'>>;
+    lastBySymbol: Map<string, number>;
+    baseStress: number;
+}): { candidates: OvernightVetCandidate[]; unpriced: string[] } {
+    const candidates: OvernightVetCandidate[] = [];
+    const unpriced: string[] = [];
+    const rowById = new Map(input.rows.map((r) => [r.id.toUpperCase(), r]));
+    const rowBySymbol = new Map<string, (typeof input.rows)[number]>();
+    for (const r of input.rows) if (!rowBySymbol.has(r.symbol)) rowBySymbol.set(r.symbol, r);
+
+    for (const pos of input.positions) {
+        if (pos.quantity === 0) continue;
+        const row = rowBySymbol.get(pos.symbol);
+        const isBet = row?.tradeClass === 'earnings-bet';
+        const last = input.lastBySymbol.get(pos.symbol) ?? null;
+        const mv = last !== null ? Math.abs(pos.quantity) * last
+            : pos.avgCost > 0 ? Math.abs(pos.quantity) * pos.avgCost : null;
+        if (mv === null) unpriced.push(pos.symbol);
+        candidates.push({
+            symbol: pos.symbol,
+            label: 're-vet position',
+            marketValueUsd: mv,
+            pnlPct: null,
+            fallbackValueUsd: pos.avgCost > 0 ? Math.abs(pos.quantity) * pos.avgCost : null,
+            // Bets stress at their own gap and are never trimmed; a
+            // position with no row (adopted/manual) stays counted-but-
+            // exempt exactly as in the first vet — only failed actions on
+            // managed rows should alarm.
+            ...(isBet ? { trimExempt: true, stressPctOverride: Math.max(input.baseStress, row?.worstCaseGapPct ?? 0) }
+                : row === undefined ? { trimExempt: true }
+                : {}),
+        });
+    }
+
+    for (const o of input.orders) {
+        const m = /^(P-[0-9A-F]{4}):entry$/.exec(o.orderRef ?? '');
+        if (!m) continue;
+        const row = rowById.get(m[1]) ?? null;
+        // A DAY parent dies at the bell — no overnight exposure. Broker
+        // truth decides when it speaks; the row only fills its silence;
+        // fully unknown counts (conservative).
+        if (o.tif === 'DAY') continue;
+        if (o.tif === null && row !== null && row.tif !== 'GTC') continue;
+        const qty = o.quantity ?? row?.quantity ?? null;
+        if (qty === null || !(qty > 0)) { unpriced.push(o.symbol); continue; }
+        const basisOrder = Math.max(o.auxPrice ?? 0, o.lmtPrice ?? 0);
+        const basisRow = row ? Math.max(row.entry ?? 0, row.entryLimit ?? 0) : 0;
+        const basis = basisOrder > 0 ? basisOrder
+            : basisRow > 0 ? basisRow
+            : input.lastBySymbol.get(o.symbol) ?? 0;
+        if (!(basis > 0)) { unpriced.push(o.symbol); continue; }
+        const isBet = row?.tradeClass === 'earnings-bet';
+        candidates.push({
+            symbol: o.symbol,
+            label: row ? `re-vet resting entry (${row.id})` : 're-vet ORPHAN resting entry',
+            marketValueUsd: basis * qty,
+            pnlPct: null,
+            ...(isBet ? { trimExempt: true, stressPctOverride: Math.max(input.baseStress, row?.worstCaseGapPct ?? 0) } : {}),
+        });
+    }
+    return { candidates, unpriced };
+}
+
 export function vetOvernightBook(
     keeps: OvernightVetCandidate[],
     netLiq: number | null,
@@ -818,9 +899,6 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
 
     const vet = vetOvernightBook(vetCandidates, await getNetLiquidation(), getRiskRules(), overrides);
     const candidateBySymbol = new Map(vetCandidates.map((k) => [k.symbol, k]));
-    // Review-18 P1: entries whose cancel was broker-CONFIRMED this run —
-    // the post-action re-vet must not count them as still resting.
-    const confirmedEntryCancels = new Set<string>();
     for (const trim of vet.trims) {
         if (closedSymbols.has(trim.symbol)) continue; // WP11: already flat this run
         const cand = candidateBySymbol.get(trim.symbol);
@@ -831,7 +909,6 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
         if (cand?.restingEntry) {
             const cancelled = await cancelEntryLeg(cand.restingEntry, `overnight vet — ${trim.reason}`)
                 .catch((err: unknown) => { logger.warn(`[eod-triage] ${trim.symbol}: resting-entry cancel failed — ${err}`); return false; });
-            if (cancelled) confirmedEntryCancels.add(cand.restingEntry.id);
             lines.push(`• ${trim.symbol} (${trim.label}): overnight vet — ${trim.reason}. ${cancelled ? 'Resting entry cancelled (broker-confirmed).' : 'Entry cancel NOT confirmed — check orders.'}`);
             continue;
         }
@@ -872,7 +949,6 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
         const cancelled = await cancelEntryLeg(t, `EOD earnings guard — ${reason}`)
             .catch((err: unknown) => { logger.warn(`[eod-triage] ${t.symbol}: guard entry cancel failed — ${err}`); return false; });
         if (cancelled) {
-            confirmedEntryCancels.add(t.id);
             lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} entry UNFILLED): ${reason}. Resting entry cancelled (broker-confirmed; children die with the parent).`);
             continue;
         }
@@ -899,62 +975,52 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
         ? overnightCapWarning(holds, await getNetLiquidation(), getRiskRules())
         : null;
 
-    // Review-18 P1: the trims above were REQUESTS, not outcomes. A close
-    // that did not confirm flat, or an entry cancel that lost to a fill,
-    // leaves the book still carrying the excess the vet ordered removed —
-    // and the first vet's math is now stale. Reconstruct the book from the
-    // FRESH snapshot (positions at market-or-cost, entries still resting
-    // after the cancels, classes re-attached for their own gap severity)
-    // and re-run the vet REPORT-ONLY: residual trim demand is an
-    // UNRESOLVED EXCESS the operator must fix by hand before the bell —
-    // a second blind close loop here would risk doubling an in-flight
-    // close, so the postcondition alerts loudly instead of re-firing.
+    // Review-18/19 P1: the trims above were REQUESTS, not outcomes. A
+    // close that did not confirm flat, or an entry cancel that lost to a
+    // fill, leaves the book still carrying the excess the vet ordered
+    // removed — and the first vet's math is now stale. The postcondition
+    // re-vet is rebuilt ENTIRELY from broker truth: fresh positions PLUS
+    // the actual working `:entry` parents in a complete open-order
+    // snapshot (a partial fill counts BOTH ways — the position and the
+    // still-working remainder both ride the night; the DB only supplies
+    // classes). Report-only: residual trim demand, an incomplete
+    // snapshot, or an unpriceable symbol is an UNRESOLVED EXCESS the
+    // operator must fix by hand — a second blind close loop here would
+    // risk doubling an in-flight close, so the postcondition alerts
+    // loudly instead of re-firing.
     let excessLine: string | null = null;
     if (!dryRun) {
-        const classBySymbol = new Map(trackable.map((t) => [t.symbol, t]));
-        const recheck: OvernightVetCandidate[] = finalPositions
-            .filter((pos) => pos.quantity !== 0)
-            .map((pos) => {
-                const row = classBySymbol.get(pos.symbol);
-                const isBet = row?.tradeClass === 'earnings-bet';
-                const last = lastBySymbol.get(pos.symbol) ?? null;
-                return {
-                    symbol: pos.symbol,
-                    label: 're-vet',
-                    marketValueUsd: last !== null ? Math.abs(pos.quantity) * last
-                        : pos.avgCost > 0 ? Math.abs(pos.quantity) * pos.avgCost : null,
-                    pnlPct: null,
-                    fallbackValueUsd: pos.avgCost > 0 ? Math.abs(pos.quantity) * pos.avgCost : null,
-                    // Bets stress at their own gap and are never trimmed;
-                    // adopted/manual positions (no trackable row) stay
-                    // counted-but-exempt exactly as in the first vet —
-                    // only FAILED ACTIONS on managed rows should alarm.
-                    ...(isBet ? { trimExempt: true, stressPctOverride: Math.max(baseStress, row?.worstCaseGapPct ?? 0) }
-                        : row === undefined ? { trimExempt: true }
-                        : {}),
-                };
-            });
-        for (const t of unfilledGtc) {
-            if (confirmedEntryCancels.has(t.id)) continue; // gone from the book
-            if (recheck.some((k) => k.symbol === t.symbol)) continue; // filled → counted as a position above
-            const basis = Math.max(t.entry ?? 0, t.entryLimit ?? 0);
-            if (!(basis > 0) || !(t.quantity > 0)) continue;
-            recheck.push({
-                symbol: t.symbol, label: 're-vet (still-resting entry)',
-                marketValueUsd: basis * t.quantity, pnlPct: null,
-                ...(t.tradeClass === 'earnings-bet'
-                    ? { trimExempt: true, stressPctOverride: Math.max(baseStress, t.worstCaseGapPct ?? 0) }
-                    : {}),
-            });
+        const { fetchOpenOrderSnaps } = await import('./broker-adopt.js');
+        const snap = await fetchOpenOrderSnaps(api).catch(() => ({ orders: [], complete: false }));
+        // Fresh marks for held symbols the run has not priced yet
+        // (adopted/manual books never enter the day loops).
+        const markGaps: string[] = [];
+        for (const pos of finalPositions) {
+            if (pos.quantity === 0 || lastBySymbol.has(pos.symbol)) continue;
+            const last = await import('./proposal-executor.js')
+                .then((m) => m.fetchLastPrice(pos.symbol)).catch(() => null);
+            if (last !== null && last > 0) lastBySymbol.set(pos.symbol, last);
+            else markGaps.push(pos.symbol);
         }
-        const revet = recheck.length
-            ? vetOvernightBook(recheck, await getNetLiquidation(), getRiskRules(), overrides)
+        const built = buildRevetBook({
+            positions: finalPositions,
+            orders: snap.orders,
+            rows: trackable,
+            lastBySymbol,
+            baseStress,
+        });
+        const revet = built.candidates.length
+            ? vetOvernightBook(built.candidates, await getNetLiquidation(), getRiskRules(), overrides)
             : null;
+        const problems: string[] = [];
+        if (!snap.complete) problems.push('the open-orders snapshot was INCOMPLETE — resting-entry exposure is unproven');
+        const unpriceable = [...new Set([...markGaps, ...built.unpriced])];
+        if (unpriceable.length > 0) problems.push(`unpriceable at market: ${unpriceable.join(', ')} (cost basis counted where available)`);
         if (revet && revet.trims.length > 0) {
-            excessLine =
-                `🚨 UNRESOLVED OVERNIGHT EXCESS — after all EOD actions the book STILL fails the gap-stress vet: ` +
-                revet.trims.map((tr) => `${tr.symbol} (${tr.reason})`).join('; ') +
-                `. A close or cancel failed (or lost a race) above — act in TWS before the bell.`;
+            problems.push(`the book STILL fails the gap-stress vet: ${revet.trims.map((tr) => `${tr.symbol} (${tr.reason})`).join('; ')}`);
+        }
+        if (problems.length > 0) {
+            excessLine = `🚨 UNRESOLVED OVERNIGHT EXCESS — ${problems.join('; ')}. A close or cancel may have failed or lost a race — act in TWS before the bell.`;
             logger.error(`[eod-triage] ${excessLine}`);
         }
     }

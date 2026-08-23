@@ -547,3 +547,56 @@ Still untested (honest ledger): the EOD cancel-loses-to-fill close glue,
 the broker-only/manual-only triage early-return glue, and the accept
 path's missing-mark/orphan/adopted refusal WIRING — all are thin glue
 over tested cores, and all sit behind the paper-observation phase.
+
+## Review-19 response (2026-08-24) — the pair bug fixed, direction-aware risk, broker-truth postcondition, fail-closed identity
+
+- REQ-EXPO-004 CORRECTED (my review-18 implementation had two real
+  defects the reviewer caught): (a) it rejected the NORMAL
+  protectPosition output — the `protect-SYM:stop` + `protect-SYM:tp` OCA
+  pair counted as "2 protect- orders, incoherent", so every correctly
+  protected adopted position blocked all new accepts; (b) it accepted an
+  OVERSIZED stop (quantity > position), which REVERSES the position on
+  trigger. Now: the `:stop` leg is selected specifically (exactly one),
+  must be plain STP (an STP LMT's fill is not assured through a gap),
+  quantity EQUAL to the position, account/side/price verified; a `:tp`
+  leg, when present, must mirror the stop (account/side/size) and share
+  its OCA group; unrecognized `protect-` refs refuse.
+- REQ-EXPO-005: the planned-risk basis is DIRECTION-AWARE
+  (`directionalBasis`): long → max(cost, mark), short → min(cost, mark).
+  max() for both hid a profitable short's current-to-stop downside as
+  zero risk (short from $100 marked $80 with a $90 stop = $10/share of
+  real risk the old basis erased).
+- REQ-EOD-005 CORRECTED: the postcondition re-vet is rebuilt from BROKER
+  TRUTH, not the DB's unfilledGtc list — `buildRevetBook` (pure) takes
+  fresh positions plus the actual working `P-XXXX:entry` parents from a
+  COMPLETE open-order snapshot, so a partial fill counts BOTH ways (the
+  position and the still-working remainder), at the order's full
+  totalQuantity (conservative: the snapshot cannot see remaining).
+  Broker TIF decides bell-death; the row only fills broker silence;
+  fully unknown counts. Fresh marks are fetched for held symbols the run
+  has not priced (adopted/manual books). An INCOMPLETE snapshot, an
+  unpriceable symbol, or residual trim demand each emit the 🚨
+  UNRESOLVED OVERNIGHT EXCESS alert — the postcondition can no longer
+  pass on missing data.
+- REQ-VAL-019 CORRECTED (fail-open → fail-closed): required identity
+  surfaces — effective rules, code identity, provider:model — no longer
+  hash as the string 'absent' into a valid-looking digest. Any of them
+  unresolvable → `strategyFingerprint()` returns NULL → the row/sample
+  is stamped NOTHING → the scorecard reads ABSENT and refuses the
+  window. Code identity is now `git rev-parse HEAD` + a digest of
+  `git status --porcelain` via the git BINARY (worktrees/submodules
+  where `.git` is a file resolve correctly; a DIRTY checkout is a
+  distinct suspect identity, `<sha>+dirty.<hash>`, not "clean").
+  SOUL.md/RULES.md/skills stay optional-by-design: absence hashes as a
+  sentinel so appearance/disappearance still moves the digest.
+  `fingerprintPurity` is STRICT: only 12-hex values count; malformed
+  stamps normalize to ABSENT. Residual gap (recorded): the fingerprint
+  pins the CONFIGURED provider:model; a per-run model override is
+  caught by the per-trade `model` column, not the sampler-side stamp.
+
+| REQ | Test |
+|---|---|
+| REQ-EXPO-004 | executor suite: the standard :stop+:tp OCA pair PASSES; oversized stop, STP LMT, un-joined/wrong-size/wrong-account/wrong-side targets, stray protect- refs all refuse |
+| REQ-EXPO-005 | directionalBasis suite incl. the reviewer's exact short case (riskUsd 100, was 0) |
+| REQ-EOD-005 | buildRevetBook suite: partial-fill counts both ways; broker TIF beats row TIF; orphan entries count; bets at own severity; unpriced returned — the wiring glue remains integration-untested (honest ledger) |
+| REQ-VAL-019 | fingerprintFromSurfaces (each required null → null; optional absence changes digest, never nulls it); codeIdentity (sha or sha+dirty in a checkout, null outside); readGitHeadSha follows a `.git` FILE; fingerprintPurity strict-format (malformed → ABSENT) |

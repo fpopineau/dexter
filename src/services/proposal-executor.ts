@@ -118,7 +118,7 @@ export function worstEntryNotional(t: {
 }
 
 /** The snapshot fields the structural checks below read (BrokerOrderSnap
- *  shape, review-18). */
+ *  shape, review-18/19). */
 export interface WorkingOrderView {
     orderId: number;
     symbol: string;
@@ -128,6 +128,18 @@ export interface WorkingOrderView {
     action: string | null;
     orderType: string | null;
     auxPrice: number | null;
+    lmtPrice: number | null;
+    ocaGroup: string | null;
+}
+
+/** Review-19, pure: the conservative planned-risk basis is
+ *  DIRECTION-AWARE. max(cost, mark) is conservative only for a LONG; a
+ *  short from $100 marked $80 with a $90 stop has $10/share of
+ *  current-to-stop downside that a $100 basis hides as "zero risk".
+ *  Long → max(cost, mark); short → min(cost, mark); no mark → cost. */
+export function directionalBasis(positionQty: number, avgCost: number, mark: number | null): number {
+    if (mark === null || !(mark > 0)) return avgCost;
+    return positionQty > 0 ? Math.max(avgCost, mark) : Math.min(avgCost, mark);
 }
 
 /** Review-17/18, pure: Dexter-ref orders whose proposal row is not
@@ -147,36 +159,58 @@ export function classifyOrphanBracketRefs<T extends { orderRef: string | null }>
     });
 }
 
-/** Review-18, pure: is an adopted position ACTUALLY protected? A
- *  `protect-` ref alone proves nothing — the stop is verified with the
- *  same structural rigor the profit trail applies to its pair: exactly
- *  one stop, right account, exit side, STP-family type, sized to cover
- *  the whole position, priced. Unknown fields fail closed. On success,
- *  returns the planned worst loss priced from the REAL broker stop
- *  against the conservative basis (zero for a stop already locking
- *  profit) — never the row's synthetic ±5% level. */
+/** Review-18/19, pure: is an adopted position ACTUALLY protected? A
+ *  `protect-` ref alone proves nothing — and the NORMAL protectPosition
+ *  output is an OCA PAIR (`protect-SYM:stop` + `protect-SYM:tp`), so the
+ *  check selects the `:stop` leg specifically and validates any `:tp`
+ *  leg separately. The stop must be: exactly one `:stop`, right account,
+ *  exit side, plain STP (an STP LMT's fill is NOT assured through a
+ *  gap), quantity EQUAL to the position (an oversized stop REVERSES on
+ *  trigger), priced. A target, when present, must mirror the stop
+ *  (account/side/size) and share its OCA group — otherwise both could
+ *  fill. Unknown fields fail closed. On success, returns the planned
+ *  worst loss priced from the REAL broker stop against the
+ *  direction-aware basis (zero for a stop already locking profit) —
+ *  never the row's synthetic ±5% level. */
 export function verifyAdoptedProtection(input: {
     symbol: string;
     /** Signed broker quantity — its sign IS the position's direction. */
     positionQty: number;
-    /** max(avgCost, mark): the basis the worst loss prices from. */
+    /** directionalBasis(qty, avgCost, mark) — see above. */
     basisPrice: number;
     account: string;
     orders: WorkingOrderView[];
 }): { ok: true; riskUsd: number } | { ok: false; reason: string } {
     const sym = input.symbol.toUpperCase();
     const long = input.positionQty > 0;
+    const exitSide = long ? 'SELL' : 'BUY';
     const qty = Math.abs(input.positionQty);
     if (!(qty > 0)) return { ok: false, reason: 'no broker position to protect' };
-    const stops = input.orders.filter((o) => o.symbol.toUpperCase() === sym && /^protect-/.test(o.orderRef ?? ''));
-    if (stops.length === 0) return { ok: false, reason: 'no working protective stop' };
-    if (stops.length > 1) return { ok: false, reason: `${stops.length} protect- orders — incoherent protection` };
-    const s = stops[0];
+    const protects = input.orders.filter((o) => o.symbol.toUpperCase() === sym && /^protect-/.test(o.orderRef ?? ''));
+    const stopLegs = protects.filter((o) => /:stop$/.test(o.orderRef ?? ''));
+    const tpLegs = protects.filter((o) => /:tp$/.test(o.orderRef ?? ''));
+    const strays = protects.filter((o) => !/:(stop|tp)$/.test(o.orderRef ?? ''));
+    if (strays.length > 0) {
+        return { ok: false, reason: `unrecognized protect- order(s) ${strays.map((o) => `#${o.orderId} '${o.orderRef}'`).join(', ')} — re-protect with the current :stop/:tp convention` };
+    }
+    if (stopLegs.length === 0) return { ok: false, reason: 'no working protective stop' };
+    if (stopLegs.length > 1) return { ok: false, reason: `${stopLegs.length} :stop legs — incoherent protection` };
+    const s = stopLegs[0];
     if (s.account !== input.account) return { ok: false, reason: `stop #${s.orderId} in account ${s.account ?? 'unknown'}, not ${input.account}` };
-    if (s.action !== (long ? 'SELL' : 'BUY')) return { ok: false, reason: `stop #${s.orderId} is ${s.action ?? 'unknown'}-side — not an exit for this ${long ? 'long' : 'short'}` };
-    if (!/^STP/.test(s.orderType ?? '')) return { ok: false, reason: `order #${s.orderId} is ${s.orderType ?? 'unknown'}, not a stop` };
-    if (s.quantity === null || s.quantity < qty) return { ok: false, reason: `stop #${s.orderId} covers ${s.quantity ?? '?'} of ${qty} shares` };
+    if (s.action !== exitSide) return { ok: false, reason: `stop #${s.orderId} is ${s.action ?? 'unknown'}-side — not an exit for this ${long ? 'long' : 'short'}` };
+    if (s.orderType !== 'STP') return { ok: false, reason: `stop #${s.orderId} is ${s.orderType ?? 'unknown'} — only a plain STP assures an exit through a gap` };
+    if (s.quantity === null || s.quantity !== qty) return { ok: false, reason: `stop #${s.orderId} covers ${s.quantity ?? '?'} of ${qty} shares — must match exactly (an oversized stop reverses on trigger)` };
     if (s.auxPrice === null || !(s.auxPrice > 0)) return { ok: false, reason: `stop #${s.orderId} has no stop price` };
+    if (tpLegs.length > 1) return { ok: false, reason: `${tpLegs.length} :tp legs — incoherent protection` };
+    if (tpLegs.length === 1) {
+        const t = tpLegs[0];
+        if (t.account !== input.account) return { ok: false, reason: `target #${t.orderId} in account ${t.account ?? 'unknown'}, not ${input.account}` };
+        if (t.action !== exitSide) return { ok: false, reason: `target #${t.orderId} is ${t.action ?? 'unknown'}-side — not an exit for this ${long ? 'long' : 'short'}` };
+        if (t.quantity === null || t.quantity !== qty) return { ok: false, reason: `target #${t.orderId} covers ${t.quantity ?? '?'} of ${qty} shares — must match exactly` };
+        if (s.ocaGroup === null || t.ocaGroup === null || s.ocaGroup !== t.ocaGroup) {
+            return { ok: false, reason: `stop #${s.orderId} and target #${t.orderId} are not OCA-joined — both could fill and reverse the position` };
+        }
+    }
     const riskUsd = long
         ? Math.max(0, input.basisPrice - s.auxPrice) * qty
         : Math.max(0, s.auxPrice - input.basisPrice) * qty;
@@ -377,10 +411,13 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                         `stale reconciliation; wait for the adoption sweep to resolve it, then retry`,
                     );
                 }
+                // Review-19: direction-aware basis — max(cost, mark) hid a
+                // profitable short's current-to-stop downside as zero risk.
+                // The mark is guaranteed by the unmarked-refusal above.
                 const check = verifyAdoptedProtection({
                     symbol: sym,
                     positionQty: pos.quantity,
-                    basisPrice: Math.max(pos.avgCost, marks.get(sym) ?? 0),
+                    basisPrice: directionalBasis(pos.quantity, pos.avgCost, marks.get(sym) ?? null),
                     account,
                     orders: snap.orders,
                 });

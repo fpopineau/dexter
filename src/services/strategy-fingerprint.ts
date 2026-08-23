@@ -1,51 +1,88 @@
 /**
- * Strategy fingerprint (review-17/18, freeze integrity).
+ * Strategy fingerprint (review-17/18/19, freeze integrity).
  *
  * The freeze manifest records what the strategy WAS at tag time, but a
  * document cannot detect drift — the sample itself must carry the
  * identity. Every proposal row and every equity sample is stamped with a
- * 12-hex digest of the behavioral surfaces:
+ * 12-hex digest of the behavioral surfaces; the scorecard refuses a
+ * window containing more than one fingerprint, so a mid-sample edit on
+ * ANY surface ends the window DETECTABLY instead of silently.
  *
- *   - the EFFECTIVE risk rules (post profile override — a profile flip
- *     or a yaml edit changes the JSON and with it the digest);
- *   - the judgment documents the agent actually loads (SOUL.md
- *     user-or-bundled, `.dexter/RULES.md`);
- *   - every discovered skill's SKILL.md content (review-18: built-in and
- *     `.dexter/skills/*` instructions steer live judgment too);
- *   - the configured provider:model pair (settings.json — the per-trade
- *     `model` column pins what proposed each trade; this pins what the
- *     RUNTIME was set to, covering samples with no trades);
- *   - the running code commit (git HEAD, read from the repo the gateway
- *     runs from — a deploy mid-sample changes the digest).
+ * REQUIRED surfaces — when one cannot be resolved the fingerprint is
+ * NULL and the caller stamps NOTHING, which the scorecard reads as
+ * ABSENT and refuses (review-19: hashing 'absent' into a valid digest
+ * let a whole identity-less window pass purity):
+ *   - the EFFECTIVE risk rules (post profile override);
+ *   - the code identity: git HEAD SHA plus a dirty-state digest, read
+ *     via the git BINARY (`rev-parse` + `status --porcelain`), which
+ *     also resolves worktrees and submodules where `.git` is a file —
+ *     a dirty checkout is a distinct (and suspect) identity, not clean;
+ *   - the configured provider:model pair (settings.json — the runtime's
+ *     configured identity; the per-trade `model` column separately pins
+ *     what actually proposed each trade).
  *
- * The scorecard refuses a window containing more than one fingerprint —
- * a mid-sample edit on ANY of these surfaces ends the window DETECTABLY
- * instead of silently.
+ * OPTIONAL surfaces — legitimately absent by design; absence hashes as
+ * a sentinel so their APPEARANCE or DISAPPEARANCE still changes the
+ * digest: SOUL.md (user-or-bundled), `.dexter/RULES.md`, and every
+ * discovered skill's SKILL.md content.
  */
 
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { loadRulesDocument, loadSoulDocument } from '@/agent/prompts.js';
 import { discoverSkills } from '../skills/index.js';
 import { getSetting } from '../utils/config.js';
 import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
 
-/** The running code commit, from .git in the working directory (the
- *  gateway runs from the repo checkout — bun executes the TS in place,
- *  so HEAD IS the running code). 'absent' outside a repo; absence is a
- *  fingerprintable state, not an error. */
+const execFileAsync = promisify(execFile);
+
+async function execGit(args: string[], cwd: string): Promise<string | null> {
+    try {
+        const { stdout } = await execFileAsync('git', args, { cwd, timeout: 10_000 });
+        return stdout.replace(/\r/g, '').trim();
+    } catch {
+        return null;
+    }
+}
+
+/** The running code identity: `<HEAD sha>` for a clean checkout,
+ *  `<sha>+dirty.<digest>` when tracked files differ from HEAD (the
+ *  digest is over `git status --porcelain`, so WHICH files are dirty is
+ *  part of the identity). Null when git cannot prove either half —
+ *  required surface, so null fails the whole fingerprint closed. */
+export async function codeIdentity(cwd = process.cwd()): Promise<string | null> {
+    const sha = await execGit(['rev-parse', 'HEAD'], cwd);
+    if (sha === null || !/^[0-9a-f]{40}$/.test(sha)) return null;
+    const status = await execGit(['status', '--porcelain'], cwd);
+    if (status === null) return null; // a clean state we cannot PROVE is not clean
+    return status.length === 0
+        ? sha
+        : `${sha}+dirty.${createHash('sha256').update(status).digest('hex').slice(0, 12)}`;
+}
+
+/** Diagnostic fallback: HEAD sha by parsing .git directly (no dirty
+ *  proof — never used for the fingerprint itself). Follows a `.git`
+ *  FILE (worktree/submodule gitdir pointer) one level. */
 export async function readGitHeadSha(cwd = process.cwd()): Promise<string> {
     try {
-        const head = (await readFile(join(cwd, '.git', 'HEAD'), 'utf-8')).trim();
+        let gitDir = join(cwd, '.git');
+        const asFile = await readFile(gitDir, 'utf-8').catch(() => null);
+        if (asFile !== null) {
+            const m = /^gitdir:\s*(.+)$/m.exec(asFile);
+            if (!m) return 'absent';
+            gitDir = join(cwd, m[1].trim());
+        }
+        const head = (await readFile(join(gitDir, 'HEAD'), 'utf-8')).trim();
         const m = /^ref:\s*(.+)$/.exec(head);
         if (!m) return /^[0-9a-f]{40}$/.test(head) ? head : 'absent'; // detached HEAD
         const ref = m[1].trim();
         try {
-            return (await readFile(join(cwd, '.git', ref), 'utf-8')).trim();
+            return (await readFile(join(gitDir, ref), 'utf-8')).trim();
         } catch {
-            // Packed ref: scan .git/packed-refs for "<sha> <ref>".
-            const packed = await readFile(join(cwd, '.git', 'packed-refs'), 'utf-8');
+            const packed = await readFile(join(gitDir, 'packed-refs'), 'utf-8');
             for (const line of packed.split('\n')) {
                 const [sha, name] = line.trim().split(/\s+/);
                 if (name === ref && /^[0-9a-f]{40}$/.test(sha ?? '')) return sha;
@@ -58,8 +95,9 @@ export async function readGitHeadSha(cwd = process.cwd()): Promise<string> {
 }
 
 /** Sorted-by-name digest input of every discovered skill's SKILL.md.
- *  Unreadable content hashes as 'absent' — a skill dir appearing or
- *  vanishing mid-sample must change the digest, never crash. */
+ *  Optional surface: unreadable content hashes as a sentinel — a skill
+ *  appearing or vanishing mid-sample must change the digest, never
+ *  crash. */
 async function skillsDigestInput(): Promise<string> {
     let metas: Array<{ name: string; path: string }>;
     try {
@@ -78,32 +116,53 @@ async function skillsDigestInput(): Promise<string> {
     return parts.join('\u0000');
 }
 
-/** 12-hex digest of the effective rules + judgment documents + skills +
- *  provider:model + code SHA. Never throws: an unreadable surface hashes
- *  as 'absent' — absence is itself a fingerprintable state (deleting
- *  RULES.md mid-sample must change the digest, not crash the sampler). */
-export async function strategyFingerprint(): Promise<string> {
-    const [soul, rules, skills, codeSha] = await Promise.all([
+export interface FingerprintSurfaces {
+    /** REQUIRED — null means the runtime cannot prove this identity and
+     *  the fingerprint as a whole must be null (stamped as ABSENT). */
+    effectiveRules: string | null;
+    codeIdentity: string | null;
+    providerModel: string | null;
+    /** Optional by design — null hashes as a sentinel. */
+    soul: string | null;
+    rules: string | null;
+    skills: string;
+}
+
+/** Pure core: null when any REQUIRED surface is null; else the 12-hex
+ *  digest. Exported for the harness — the required/optional split is
+ *  the review-19 contract under test. */
+export function fingerprintFromSurfaces(s: FingerprintSurfaces): string | null {
+    if (s.effectiveRules === null || s.codeIdentity === null || s.providerModel === null) return null;
+    return createHash('sha256')
+        .update(s.effectiveRules).update('\u0000')
+        .update(s.codeIdentity).update('\u0000')
+        .update(s.providerModel).update('\u0000')
+        .update(s.soul ?? 'absent').update('\u0000')
+        .update(s.rules ?? 'absent').update('\u0000')
+        .update(s.skills)
+        .digest('hex')
+        .slice(0, 12);
+}
+
+/** Gather all surfaces and digest them. NULL when a required surface is
+ *  unavailable — callers stamp nothing, the scorecard refuses the
+ *  window (fail closed). Never throws. */
+export async function strategyFingerprint(): Promise<string | null> {
+    const [soul, rules, skills, code] = await Promise.all([
         loadSoulDocument().catch(() => null),
         loadRulesDocument().catch(() => null),
         skillsDigestInput(),
-        readGitHeadSha(),
+        codeIdentity(),
     ]);
-    let effectiveRules = 'absent';
+    let effectiveRules: string | null = null;
     try {
         effectiveRules = JSON.stringify(getRiskRules());
-    } catch { /* rules unreadable — 'absent' is the fingerprint of that state */ }
-    let providerModel = 'absent';
+    } catch { /* required surface unavailable → null fingerprint */ }
+    let providerModel: string | null = null;
     try {
-        providerModel = `${getSetting('provider', 'absent')}:${getSetting('modelId', 'absent')}`;
-    } catch { /* settings unreadable */ }
-    return createHash('sha256')
-        .update(effectiveRules).update('\u0000')
-        .update(soul ?? 'absent').update('\u0000')
-        .update(rules ?? 'absent').update('\u0000')
-        .update(skills).update('\u0000')
-        .update(providerModel).update('\u0000')
-        .update(codeSha)
-        .digest('hex')
-        .slice(0, 12);
+        const provider = getSetting<string | null>('provider', null);
+        const modelId = getSetting<string | null>('modelId', null);
+        if (provider && modelId) providerModel = `${provider}:${modelId}`;
+    } catch { /* required surface unavailable → null fingerprint */ }
+    return fingerprintFromSurfaces({ effectiveRules, codeIdentity: code, providerModel, soul, rules, skills });
 }

@@ -757,15 +757,21 @@ export async function createProposal(
     if (input.model) {
         database.query<void>(`UPDATE proposals SET model = ? WHERE id = ?`).run(input.model, id);
     }
-    // Review-17 freeze integrity: stamp the strategy fingerprint (effective
-    // rules + judgment docs) — the scorecard refuses a sample that mixes
-    // fingerprints, so a mid-sample rules edit ends the window detectably.
-    // Best-effort by design: a stamp failure must not lose a proposal, and
-    // an ABSENT fingerprint in the sample is itself flagged by the scorecard.
+    // Review-17/19 freeze integrity: stamp the strategy fingerprint — the
+    // scorecard refuses a sample that mixes fingerprints, so a mid-sample
+    // edit on any behavioral surface ends the window detectably. A NULL
+    // fingerprint (a REQUIRED identity surface — rules, code, provider —
+    // could not be resolved) stamps NOTHING: the row reads ABSENT and the
+    // scorecard refuses the window, fail closed. A stamp failure must not
+    // lose a proposal — same outcome.
     try {
         const { strategyFingerprint } = await import('./strategy-fingerprint.js');
-        database.query<void>(`UPDATE proposals SET strategy_fingerprint = ? WHERE id = ?`)
-            .run(await strategyFingerprint(), id);
+        const fp = await strategyFingerprint();
+        if (fp !== null) {
+            database.query<void>(`UPDATE proposals SET strategy_fingerprint = ? WHERE id = ?`).run(fp, id);
+        } else {
+            logger.warn(`[proposals] ${id}: strategy identity UNRESOLVED (rules/code/provider) — row left unstamped; the scorecard will refuse the window`);
+        }
     } catch (err) {
         logger.warn(`[proposals] ${id}: strategy fingerprint stamp failed — ${err instanceof Error ? err.message : err}`);
     }

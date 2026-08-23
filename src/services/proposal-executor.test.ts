@@ -303,7 +303,13 @@ describe('classifyOrphanBracketRefs (review-17/18 — the ownership prefix is no
 describe('verifyAdoptedProtection (review-18 — a protect- REF alone is not protection)', () => {
     const stop = (over: Record<string, unknown> = {}) => ({
         orderId: 900, symbol: 'ADPT', orderRef: 'protect-ADPT:stop', account: 'DU1',
-        quantity: 10, action: 'SELL', orderType: 'STP', auxPrice: 95, ...over,
+        quantity: 10, action: 'SELL', orderType: 'STP', auxPrice: 95,
+        lmtPrice: null, ocaGroup: 'dexter-protect-ADPT-900', ...over,
+    });
+    const tp = (over: Record<string, unknown> = {}) => ({
+        orderId: 901, symbol: 'ADPT', orderRef: 'protect-ADPT:tp', account: 'DU1',
+        quantity: 10, action: 'SELL', orderType: 'LMT', auxPrice: null,
+        lmtPrice: 110, ocaGroup: 'dexter-protect-ADPT-900', ...over,
     });
     const check = async (orders: unknown[], input: Record<string, unknown> = {}) => {
         const { verifyAdoptedProtection } = await import('./proposal-executor.js');
@@ -345,8 +351,56 @@ describe('verifyAdoptedProtection (review-18 — a protect- REF alone is not pro
         expect((reasons[5] as { reason: string }).reason).toContain('covers 5 of 10');
     });
 
-    test('STP LMT counts as a stop; a stop on ANOTHER symbol does not', async () => {
-        expect((await check([stop({ orderType: 'STP LMT' })])).ok).toBe(true);
+    test('the NORMAL protectPosition pair (:stop + :tp, OCA-joined) passes — review-19: it was rejected as two stops', async () => {
+        const r = await check([stop(), tp()]);
+        expect(r).toEqual({ ok: true, riskUsd: 50 });
+    });
+
+    test('review-19 tightenings: oversized stop, STP LMT, and a broken pair all refuse', async () => {
+        // Oversized: 20 shares against a 10-share position REVERSES on trigger.
+        const oversized = await check([stop({ quantity: 20 })]);
+        expect(oversized.ok).toBe(false);
+        expect((oversized as { reason: string }).reason).toContain('must match exactly');
+        // STP LMT: its fill is not assured through a gap — not protection.
+        expect((await check([stop({ orderType: 'STP LMT' })])).ok).toBe(false);
+        // A target that is not OCA-joined to the stop: both could fill.
+        const unjoined = await check([stop(), tp({ ocaGroup: 'some-other-group' })]);
+        expect(unjoined.ok).toBe(false);
+        expect((unjoined as { reason: string }).reason).toContain('OCA');
+        // A target covering the wrong size.
+        expect((await check([stop(), tp({ quantity: 5 })])).ok).toBe(false);
+        // A target in the wrong account or on the entry side.
+        expect((await check([stop(), tp({ account: 'DU2' })])).ok).toBe(false);
+        expect((await check([stop(), tp({ action: 'BUY' })])).ok).toBe(false);
+        // A protect- ref that is neither :stop nor :tp is unrecognized.
+        const stray = await check([stop(), tp({ orderRef: 'protect-ADPT' })]);
+        expect(stray.ok).toBe(false);
+        expect((stray as { reason: string }).reason).toContain('unrecognized');
+    });
+
+    test('a stop on ANOTHER symbol does not protect this one', async () => {
         expect((await check([stop({ symbol: 'OTHER', orderRef: 'protect-OTHER:stop' })])).ok).toBe(false);
+    });
+});
+
+describe('directionalBasis (review-19 — max(cost, mark) hid short-side risk)', () => {
+    test('long → max(cost, mark); short → min(cost, mark); no mark → cost', async () => {
+        const { directionalBasis, verifyAdoptedProtection } = await import('./proposal-executor.js');
+        expect(directionalBasis(10, 100, 150)).toBe(150);  // rallied long marks up
+        expect(directionalBasis(10, 100, 80)).toBe(100);   // crashed long keeps cost floor
+        expect(directionalBasis(-10, 100, 80)).toBe(80);   // profitable short marks DOWN
+        expect(directionalBasis(-10, 100, 120)).toBe(100); // losing short keeps cost
+        expect(directionalBasis(-10, 100, null)).toBe(100);
+        // The reviewer's exact case: short from $100, mark $80, stop $90 —
+        // the old $100 basis reported ZERO risk; the real current-to-stop
+        // downside is $10/share.
+        const r = verifyAdoptedProtection({
+            symbol: 'SHRT', positionQty: -10, basisPrice: directionalBasis(-10, 100, 80), account: 'DU1',
+            orders: [{
+                orderId: 950, symbol: 'SHRT', orderRef: 'protect-SHRT:stop', account: 'DU1',
+                quantity: 10, action: 'BUY', orderType: 'STP', auxPrice: 90, lmtPrice: null, ocaGroup: null,
+            }],
+        });
+        expect(r).toEqual({ ok: true, riskUsd: 100 });
     });
 });

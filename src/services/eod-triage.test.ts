@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { applyEarningsGuard, decideEodAction, decideGtcEarningsGuard, decideUnfilledEntryGuard, isUpcomingPrint, overnightCapWarning, priceMinutesBack, splitTriageCandidates, triageCatchUpAction, vetOvernightBook } from './eod-triage.js';
+import { applyEarningsGuard, buildRevetBook, decideEodAction, decideGtcEarningsGuard, decideUnfilledEntryGuard, isUpcomingPrint, overnightCapWarning, priceMinutesBack, splitTriageCandidates, triageCatchUpAction, vetOvernightBook } from './eod-triage.js';
 
 describe('triageCatchUpAction (missed 15:52 slot — SECZ post-mortem 2026-08-13)', () => {
     const min = (h: number, m: number) => h * 60 + m;
@@ -424,5 +424,78 @@ describe('gap-stress vet (review 2026-08-23 — the book is bounded by LOSS, not
             100_000, { ...RULES, overnight_gap_stress_pct: 0 }, NONE,
         );
         expect(v.trims).toEqual([]);
+    });
+});
+
+describe('buildRevetBook (review-19 — the postcondition book is broker truth)', () => {
+    const row = (id: string, symbol: string, over: Record<string, unknown> = {}) => ({
+        id, symbol, tradeClass: 'swing', worstCaseGapPct: null,
+        entry: 100, entryLimit: null, tif: 'GTC', quantity: 10, ...over,
+    }) as never;
+    const ord = (symbol: string, orderRef: string, over: Record<string, unknown> = {}) => ({
+        symbol, orderRef, quantity: 10, auxPrice: null, lmtPrice: 100, tif: 'GTC', ...over,
+    });
+
+    test('a partial fill counts BOTH ways: the position AND the still-working remainder', () => {
+        const b = buildRevetBook({
+            positions: [{ symbol: 'PART', quantity: 4, avgCost: 100 }],
+            orders: [ord('PART', 'P-AB12:entry')],
+            rows: [row('P-AB12', 'PART')],
+            lastBySymbol: new Map([['PART', 102]]),
+            baseStress: 20,
+        });
+        expect(b.candidates.map((c) => c.label)).toEqual(['re-vet position', 're-vet resting entry (P-AB12)']);
+        expect(b.candidates[0].marketValueUsd).toBeCloseTo(4 * 102, 6);
+        // The full order size — the snapshot cannot see the remaining
+        // quantity, and overstating stress never understates it.
+        expect(b.candidates[1].marketValueUsd).toBeCloseTo(10 * 100, 6);
+        expect(b.unpriced).toEqual([]);
+    });
+
+    test('broker TIF decides; row fills its silence; full silence counts as an orphan (conservative)', () => {
+        const b = buildRevetBook({
+            positions: [],
+            orders: [
+                ord('DDD', 'P-DD01:entry', { tif: 'DAY' }),  // broker says DAY → dies at the bell
+                ord('EEE', 'P-EE01:entry', { tif: null }),   // broker silent, row says DAY → skip
+                ord('FFF', 'P-FF01:entry', { tif: null }),   // broker silent, NO row → count
+            ],
+            rows: [row('P-DD01', 'DDD'), row('P-EE01', 'EEE', { tif: 'DAY' })],
+            lastBySymbol: new Map(),
+            baseStress: 20,
+        });
+        expect(b.candidates.map((c) => c.symbol)).toEqual(['FFF']);
+        expect(b.candidates[0].label).toContain('ORPHAN');
+    });
+
+    test('bets count at their own gap severity, never trimmable; no-row positions stay counted-but-exempt', () => {
+        const b = buildRevetBook({
+            positions: [{ symbol: 'MANL', quantity: 5, avgCost: 50 }],
+            orders: [ord('BETX', 'P-BE01:entry', { auxPrice: 200, lmtPrice: 201 })],
+            rows: [row('P-BE01', 'BETX', { tradeClass: 'earnings-bet', worstCaseGapPct: 35 })],
+            lastBySymbol: new Map(),
+            baseStress: 20,
+        });
+        const manl = b.candidates.find((c) => c.symbol === 'MANL')!;
+        expect(manl.trimExempt).toBe(true); // adopted/manual — only failed MANAGED actions alarm
+        const bet = b.candidates.find((c) => c.symbol === 'BETX')!;
+        expect(bet.trimExempt).toBe(true);
+        expect(bet.stressPctOverride).toBe(35);
+        expect(bet.marketValueUsd).toBeCloseTo(10 * 201, 6); // worst basis: max(aux, lmt)
+    });
+
+    test('unpriceable symbols are RETURNED for the alarm, never silently dropped', () => {
+        const b = buildRevetBook({
+            positions: [{ symbol: 'NOPX', quantity: 5, avgCost: 0 }], // no mark, no cost
+            orders: [ord('NOQY', 'P-A0F1:entry', { auxPrice: null, lmtPrice: null })],
+            rows: [row('P-A0F1', 'NOQY', { entry: null, entryLimit: null })], // no basis anywhere
+            lastBySymbol: new Map(),
+            baseStress: 20,
+        });
+        expect(b.unpriced.sort()).toEqual(['NOPX', 'NOQY']);
+        // The unpriceable POSITION still enters the book (null mv → the
+        // vet's own fail-closed handling); the unpriceable ENTRY cannot
+        // even be sized, so the alarm is its only representation.
+        expect(b.candidates.map((c) => c.symbol)).toEqual(['NOPX']);
     });
 });

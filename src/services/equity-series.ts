@@ -85,13 +85,17 @@ export async function sampleEquityOnce(): Promise<EquitySample | null> {
         shadowMarkComplete = false;
         logger.warn(`[equity-series] shadow-position enumeration failed — sample flagged incomplete: ${err}`);
     }
-    // Review-17 freeze integrity: every sample carries the strategy
-    // fingerprint — a mid-sample rules/judgment edit shows up as a mixed
-    // window and the scorecard refuses it. Best-effort (absent is flagged
-    // by the scorecard, never invented here).
+    // Review-17/19 freeze integrity: every sample carries the strategy
+    // fingerprint — a mid-sample edit on any behavioral surface shows up
+    // as a mixed window and the scorecard refuses it. NULL (a required
+    // identity surface unresolved) writes NO fingerprint field: the
+    // sample reads ABSENT and the window is refused, fail closed.
     const fingerprint = await import('./strategy-fingerprint.js')
         .then((m) => m.strategyFingerprint())
         .catch(() => null);
+    if (fingerprint === null) {
+        logger.warn('[equity-series] strategy identity UNRESOLVED (rules/code/provider) — sample unstamped; the scorecard will refuse the window');
+    }
     const sample: EquitySample = {
         ts: Date.now(),
         netLiq,
