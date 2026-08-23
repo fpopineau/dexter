@@ -48,6 +48,17 @@ export function parseEquitySeries(text: string): EquitySample[] {
     return out.sort((a, b) => a.ts - b.ts);
 }
 
+/** Review-18, pure: the freeze-purity decision over every fingerprint
+ *  seen in the window (proposal rows AND equity samples). Null/empty
+ *  values normalize to 'ABSENT'; the window passes only when exactly one
+ *  real fingerprint survives. An empty input has nothing to certify —
+ *  not ok (fail closed), distinct []. */
+export function fingerprintPurity(values: Iterable<string | null | undefined>): { ok: boolean; distinct: string[] } {
+    const set = new Set<string>();
+    for (const v of values) set.add(v && v.length > 0 ? v : 'ABSENT');
+    return { ok: set.size === 1 && !set.has('ABSENT'), distinct: [...set].sort() };
+}
+
 export interface PortfolioDrawdown {
     /** Worst peak-to-trough of marked equity inside the window, % of the peak
      *  (rounded to 0.01%). */

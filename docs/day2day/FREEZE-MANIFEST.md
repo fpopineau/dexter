@@ -11,22 +11,26 @@ The manifest cannot contain the SHA of the commit that contains it. The
 freeze identity is therefore split:
 
 1. **Behavioral baseline commit** — the last commit that changes ANY
-   runtime behavior (src/, scripts/, config yamls, SOUL.md,
+   runtime behavior (src/, scripts/, config yamls, SOUL.md, skills,
    `.dexter/RULES.md`). Recorded below by SHA; it exists BEFORE the
    manifest commit.
-2. **Manifest commit** — a docs-only commit on top of the baseline that
-   fills this file. `git diff <baseline>..<tag> -- ':!docs' ':!*.md'`
+2. **Manifest commit** — a commit on top of the baseline that changes
+   ONLY this file (review-18: excluding all Markdown would hide SOUL.md
+   and skill edits).
+   `git diff <baseline>..<tag> -- ':!docs/day2day/FREEZE-MANIFEST.md'`
    must be EMPTY (verify before tagging; a non-empty diff means the
    baseline is wrong).
 3. **Tag** — `validation-freeze-1` placed on the manifest commit.
 4. **Strategy fingerprint** — the machine-checked half. Every proposal
-   row and equity sample is stamped with a 12-hex digest of the effective
-   risk rules + SOUL.md + `.dexter/RULES.md`
+   row and equity sample is stamped with a 12-hex digest of: the
+   effective risk rules, SOUL.md, `.dexter/RULES.md`, every discovered
+   skill's SKILL.md (built-in and project), the configured
+   provider:model pair, and the running code commit (git HEAD)
    (src/services/strategy-fingerprint.ts). The scorecard REFUSES a
-   window that mixes fingerprints or contains absent stamps, so runtime
-   rule/judgment drift mid-sample is detected without trusting this
-   document. Code drift is git's job (baseline SHA); model drift is the
-   per-trade `model` column's job.
+   window that mixes fingerprints or contains absent stamps, so a
+   mid-sample edit on ANY of those surfaces — including a code deploy —
+   is detected without trusting this document. The per-trade `model`
+   column additionally pins which model proposed each trade.
 
 | Field | Value |
 |---|---|

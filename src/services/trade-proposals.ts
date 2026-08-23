@@ -1519,6 +1519,17 @@ export async function __dropOneThesisIndexForTests(): Promise<void> {
     (await getDb()).exec('DROP INDEX IF EXISTS ux_one_working_thesis');
 }
 
+/** Test hook counterpart: restore the index (suites share one store, so a
+ *  legacy-DB simulation must not leak into the suites that test the LAW).
+ *  Throws if working duplicates exist — the caller's fixtures are dirty. */
+export async function __recreateOneThesisIndexForTests(): Promise<void> {
+    if (process.env.NODE_ENV !== 'test') throw new Error('[proposals] __recreateOneThesisIndexForTests is test-only');
+    (await getDb()).exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS ux_one_working_thesis
+         ON proposals(symbol) WHERE status IN ('executing', 'executed')`,
+    );
+}
+
 /** Return a claimed proposal to 'open' (gate refusal — retry allowed). */
 export async function releaseProposalClaim(id: string): Promise<void> {
     const database = await getDb();

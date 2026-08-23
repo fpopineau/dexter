@@ -15,7 +15,7 @@
  */
 
 import { placeBracketOrder } from '@/tools/ibkr/bracket.js';
-import { assertOrderingAllowed, getIBApi, getManagedAccounts, isLivePort } from '@/tools/ibkr/connection.js';
+import { assertOrderingAllowed, getIBApi, getManagedAccounts, getVerifiedSingleAccount, isLivePort } from '@/tools/ibkr/connection.js';
 import { createIbkrMarketData } from '@/tools/ibkr/market-data.js';
 import { logger } from '@/utils';
 import { getMarketSession, isTradeableSession } from '@/utils/market-hours.js';
@@ -115,6 +115,72 @@ export function worstEntryNotional(t: {
 }): number {
     if (t.entryFillPrice !== null && t.entryFillPrice > 0) return t.quantity * t.entryFillPrice;
     return t.quantity * Math.max(t.entry ?? 0, t.entryLimit ?? 0);
+}
+
+/** The snapshot fields the structural checks below read (BrokerOrderSnap
+ *  shape, review-18). */
+export interface WorkingOrderView {
+    orderId: number;
+    symbol: string;
+    orderRef: string | null;
+    account: string | null;
+    quantity: number | null;
+    action: string | null;
+    orderType: string | null;
+    auxPrice: number | null;
+}
+
+/** Review-17/18, pure: Dexter-ref orders whose proposal row is not
+ *  working (zombie brackets) plus legacy `BRKT-` fallback refs — both
+ *  are unreconciled exposure-in-waiting the accept refuses. protect-/
+ *  close-/reduce- refs are transient risk-REDUCING orders and stay
+ *  owned. */
+export function classifyOrphanBracketRefs<T extends { orderRef: string | null }>(
+    orders: T[],
+    workingIds: ReadonlySet<string>,
+): T[] {
+    return orders.filter((o) => {
+        const ref = o.orderRef ?? '';
+        const m = /^(P-[0-9A-F]{4}):/.exec(ref);
+        if (m) return !workingIds.has(m[1]);
+        return /^BRKT-/.test(ref);
+    });
+}
+
+/** Review-18, pure: is an adopted position ACTUALLY protected? A
+ *  `protect-` ref alone proves nothing — the stop is verified with the
+ *  same structural rigor the profit trail applies to its pair: exactly
+ *  one stop, right account, exit side, STP-family type, sized to cover
+ *  the whole position, priced. Unknown fields fail closed. On success,
+ *  returns the planned worst loss priced from the REAL broker stop
+ *  against the conservative basis (zero for a stop already locking
+ *  profit) — never the row's synthetic ±5% level. */
+export function verifyAdoptedProtection(input: {
+    symbol: string;
+    /** Signed broker quantity — its sign IS the position's direction. */
+    positionQty: number;
+    /** max(avgCost, mark): the basis the worst loss prices from. */
+    basisPrice: number;
+    account: string;
+    orders: WorkingOrderView[];
+}): { ok: true; riskUsd: number } | { ok: false; reason: string } {
+    const sym = input.symbol.toUpperCase();
+    const long = input.positionQty > 0;
+    const qty = Math.abs(input.positionQty);
+    if (!(qty > 0)) return { ok: false, reason: 'no broker position to protect' };
+    const stops = input.orders.filter((o) => o.symbol.toUpperCase() === sym && /^protect-/.test(o.orderRef ?? ''));
+    if (stops.length === 0) return { ok: false, reason: 'no working protective stop' };
+    if (stops.length > 1) return { ok: false, reason: `${stops.length} protect- orders — incoherent protection` };
+    const s = stops[0];
+    if (s.account !== input.account) return { ok: false, reason: `stop #${s.orderId} in account ${s.account ?? 'unknown'}, not ${input.account}` };
+    if (s.action !== (long ? 'SELL' : 'BUY')) return { ok: false, reason: `stop #${s.orderId} is ${s.action ?? 'unknown'}-side — not an exit for this ${long ? 'long' : 'short'}` };
+    if (!/^STP/.test(s.orderType ?? '')) return { ok: false, reason: `order #${s.orderId} is ${s.orderType ?? 'unknown'}, not a stop` };
+    if (s.quantity === null || s.quantity < qty) return { ok: false, reason: `stop #${s.orderId} covers ${s.quantity ?? '?'} of ${qty} shares` };
+    if (s.auxPrice === null || !(s.auxPrice > 0)) return { ok: false, reason: `stop #${s.orderId} has no stop price` };
+    const riskUsd = long
+        ? Math.max(0, input.basisPrice - s.auxPrice) * qty
+        : Math.max(0, s.auxPrice - input.basisPrice) * qty;
+    return { ok: true, riskUsd: Math.round(riskUsd * 100) / 100 };
 }
 
 export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
@@ -220,14 +286,24 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         // Review-17 P1: FRESH (no 10s cache — this decision places real
         // orders) and MARKED — every exposure sum below prices at
         // max(basis, |qty|×mark), so a position that ran since entry
-        // cannot hide behind its cost. A missing mark falls back to basis
-        // (already fail-closed vs the broker's own cost view); it never
-        // shrinks a sum.
+        // cannot hide behind its cost. Review-18 P1: a MISSING mark
+        // REFUSES the accept — cost basis is a floor under a live mark,
+        // never the answer for an unknown one (a $100-cost position at
+        // $150 would be understated 33% through a quote outage). The
+        // proposal can wait; unpriced exposure cannot pass.
         const brokerBookRaw = await fetchBrokerExposure({ fresh: true });
         const marks = new Map<string, number>();
-        for (const sym of new Set([...brokerBookRaw.map((b) => b.symbol), ...exposure.map((t) => t.symbol.toUpperCase())])) {
+        const exposureSymbols = new Set([...brokerBookRaw.map((b) => b.symbol), ...exposure.map((t) => t.symbol.toUpperCase())]);
+        for (const sym of exposureSymbols) {
             const m = await fetchLastPrice(sym).catch(() => null);
             if (m !== null && m > 0) marks.set(sym, m);
+        }
+        const unmarked = [...exposureSymbols].filter((sym) => !marks.has(sym));
+        if (unmarked.length > 0) {
+            throw new Error(
+                `[exposure-gate] no trustworthy market mark for ${unmarked.join(', ')} — held exposure cannot ` +
+                `be priced at market (cost basis is only a floor); retry when quotes return`,
+            );
         }
         const brokerBook = brokerBookRaw.map((b) => ({ ...b, markPrice: marks.get(b.symbol) ?? null }));
         const exposureValue = (t: { symbol: string; quantity: number } & Parameters<typeof worstEntryNotional>[0]): number =>
@@ -249,6 +325,10 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         // Foreign working orders (item 5): an order Dexter does not own is
         // exposure-in-waiting the caps cannot classify. Complete view
         // required; any non-Dexter ref refuses the accept.
+        // Review-18: adopted rows' planned risk comes from their VERIFIED
+        // broker stop (built here, consumed by the headroom sum below) —
+        // the synthetic ±5% level never prices headroom again.
+        const adoptedRiskUsd = new Map<string, number>();
         {
             const { fetchOpenOrderSnaps } = await import('./broker-adopt.js');
             const { isOurOrderRef } = await import('./position-actions.js');
@@ -271,12 +351,7 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
             // refuse. protect-/close-/reduce- refs are transient
             // risk-REDUCING orders on existing positions and stay owned.
             const workingIds = new Set([p.id, ...exposure.map((t) => t.id)]);
-            const orphans = snap.orders.filter((o) => {
-                const ref = o.orderRef ?? '';
-                const m = /^(P-[0-9A-F]{4}):/.exec(ref);
-                if (m) return !workingIds.has(m[1]);
-                return /^BRKT-/.test(ref);
-            });
+            const orphans = classifyOrphanBracketRefs(snap.orders, workingIds);
             if (orphans.length > 0) {
                 throw new Error(
                     `[exposure-gate] ${orphans.length} working Dexter-ref order(s) with no live proposal row ` +
@@ -284,22 +359,39 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                     `orphaned exposure-in-waiting; cancel them in TWS or wait for the sweeps, then retry`,
                 );
             }
-            // Review-17 P1: an adopted row's synthetic ±5% stop is
-            // BOOKKEEPING, not protection — no order enforces it. While an
-            // adopted position has no working protective stop broker-side,
-            // its real downside is unbounded and the synthetic headroom it
-            // grants must not admit NEW risk on top.
+            // Review-17/18 P1: an adopted row's synthetic ±5% stop is
+            // BOOKKEEPING, not protection — and a same-symbol `protect-`
+            // REF is not verification. The stop is checked structurally
+            // (account, exit side, STP type, full size, priced); only
+            // then does its REAL level price the adopted row's planned
+            // risk in the headroom sum below. Anything less refuses.
+            const account = getVerifiedSingleAccount();
+            const brokerPosBySym = new Map(brokerBookRaw.map((b) => [b.symbol, b]));
             for (const t of exposure) {
                 if (t.source !== 'adopted') continue;
-                const hasStop = snap.orders.some((o) =>
-                    o.symbol.toUpperCase() === t.symbol.toUpperCase() && /^protect-/.test(o.orderRef ?? ''));
-                if (!hasStop) {
+                const sym = t.symbol.toUpperCase();
+                const pos = brokerPosBySym.get(sym);
+                if (!pos || pos.quantity === 0) {
                     throw new Error(
-                        `[exposure-gate] adopted position ${t.symbol} (${t.id}) has NO working protective stop — ` +
-                        `its synthetic ±5% level prices headroom but bounds nothing; ` +
-                        `'protect ${t.symbol}' or close it before accepting new risk`,
+                        `[exposure-gate] adopted row ${t.id} (${sym}) has no broker position behind it — ` +
+                        `stale reconciliation; wait for the adoption sweep to resolve it, then retry`,
                     );
                 }
+                const check = verifyAdoptedProtection({
+                    symbol: sym,
+                    positionQty: pos.quantity,
+                    basisPrice: Math.max(pos.avgCost, marks.get(sym) ?? 0),
+                    account,
+                    orders: snap.orders,
+                });
+                if (!check.ok) {
+                    throw new Error(
+                        `[exposure-gate] adopted position ${sym} (${t.id}) is NOT verifiably protected: ${check.reason} — ` +
+                        `its synthetic ±5% level prices headroom but bounds nothing; ` +
+                        `'protect ${sym}' (or fix the stop) or close it before accepting new risk`,
+                    );
+                }
+                adoptedRiskUsd.set(sym, check.riskUsd);
             }
         }
 
@@ -370,6 +462,17 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 // refuses the accept instead of granting free headroom
                 // (WP0.3; the refusal clears once the row prices or dies).
                 openPlannedRiskUsd: exposure.reduce((sum, t) => {
+                    // Review-18: adopted rows price at their VERIFIED
+                    // broker stop (built above; a row that failed the
+                    // verification never reaches this sum) — the
+                    // synthetic ±5% level is bookkeeping, not risk.
+                    if (t.source === 'adopted') {
+                        const real = adoptedRiskUsd.get(t.symbol.toUpperCase());
+                        if (real === undefined) {
+                            throw new Error(`[risk-gate] adopted row ${t.id} (${t.symbol}) missed protection verification — refuse`);
+                        }
+                        return sum + real;
+                    }
                     const usd = plannedWorstLossUsd(t);
                     if (usd === null) {
                         throw new Error(

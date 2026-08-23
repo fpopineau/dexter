@@ -392,6 +392,57 @@ describe('closePosition lifecycle (round-4 review)', () => {
     });
 });
 
+describe('entry-side neutralization before a close (review-17/18)', () => {
+    const entryOrder = (id: number, symbol: string, ref: string) => ({
+        id,
+        contract: { symbol } as Contract,
+        order: { action: 'BUY', orderType: 'LMT', tif: 'DAY', orderRef: ref } as unknown as Order,
+    });
+
+    test('clean neutralization: the :entry parent confirm-cancels, the re-probe sees an empty book, the close proceeds', async () => {
+        fake.position = { symbol: 'CLQN', qty: 10 };
+        fake.openOrders = [entryOrder(9101, 'CLQN', 'P-AB10:entry')];
+        const origCancel = fake.cancelOrder.bind(fake);
+        fake.cancelOrder = (id: number) => {
+            // A real broker REMOVES a cancelled order from the book — the
+            // post-cancel re-probe must then see it gone.
+            fake.openOrders = fake.openOrders.filter((o) => o.id !== id);
+            origCancel(id);
+        };
+        const out = await closePosition('CLQN', 'test-operator');
+        expect(out.state).toBe('filled');
+        expect(fake.cancelled).toContain(9101);
+    });
+
+    test("'not-cancellable' is NOT settled: the close refuses — the entry may be held and still execute", async () => {
+        fake.position = { symbol: 'CLQO', qty: 10 };
+        fake.openOrders = [entryOrder(9102, 'CLQO', 'P-AB11:entry')];
+        fake.cancelOrder = (id: number) => {
+            fake.cancelled.push(id);
+            // 'Inactive' = invalid, rejected OR HELD — a held order can
+            // resume; confirmCancel settles it as not-cancellable.
+            queueMicrotask(() => fake.emit(EventName.orderStatus, id, 'Inactive', 0, 0, 0));
+        };
+        const out = await closePosition('CLQO', 'test-operator');
+        expect(out.ok).toBe(false);
+        expect(out.message).toContain('not-cancellable');
+        expect(fake.placed).toHaveLength(0); // no close order went out beside a possibly-live entry
+    });
+
+    test('a Dexter entry-side order NOT ending :entry survives the cancel loop — the re-probe refuses', async () => {
+        fake.position = { symbol: 'CLQP', qty: 10 };
+        // Ours by prefix (passes the ownership check) but not an entry
+        // parent — the cancel loop skips it, so only the re-probe stands
+        // between it and a fill beside the close.
+        fake.openOrders = [entryOrder(9103, 'CLQP', 'reduce-CLQP')];
+        const out = await closePosition('CLQP', 'test-operator');
+        expect(out.ok).toBe(false);
+        expect(out.message).toContain('still working after neutralization');
+        expect(fake.cancelled).toHaveLength(0); // never blind-cancelled either
+        expect(fake.placed).toHaveLength(0);
+    });
+});
+
 describe('boot-gate arming transitions (round-9 review)', () => {
     test('a failed/partial sweep never arms; a complete one does; done never regresses', async () => {
         const { __armAfterSweepForTests, reconciliationState, stopOutcomeTracker } = await import('./outcome-tracker.js');

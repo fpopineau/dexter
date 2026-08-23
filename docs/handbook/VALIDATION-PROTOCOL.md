@@ -78,15 +78,20 @@ positive expectancy after costs, not improved loss control.
   `performance-epoch.json`, the active `exit_style`, the scorer-weights
   provenance line, the ratified `risk-rules.live.yaml` numbers, the
   broker-behavior observation records and any recorded waivers.
-- **Strategy fingerprint — the machine-checked freeze** (2026-08-24):
-  every proposal row and every equity sample is stamped with a 12-hex
-  digest of the effective risk rules + SOUL.md + `.dexter/RULES.md`
+- **Strategy fingerprint — the machine-checked freeze** (2026-08-24,
+  widened by review-18): every proposal row and every equity sample is
+  stamped with a 12-hex digest of the effective risk rules + SOUL.md +
+  `.dexter/RULES.md` + every discovered skill's SKILL.md + the
+  configured provider:model pair + the running code commit (git HEAD)
   (`src/services/strategy-fingerprint.ts`). The scorecard REFUSES a
-  window that mixes fingerprints or contains absent stamps — a mid-sample
-  rules edit, profile flip or judgment-doc rewrite is detected by the
-  sample itself, not by trusting the manifest. The manifest records the
-  single fingerprint the scorecard prints. (Code drift is pinned by the
-  baseline SHA; model drift by the per-trade `model` column.)
+  window that mixes fingerprints or contains absent stamps — a
+  mid-sample rules edit, profile flip, judgment-doc or skill rewrite,
+  model switch or code deploy is detected by the sample itself, not by
+  trusting the manifest. The manifest records the single fingerprint the
+  scorecard prints; the per-trade `model` column additionally pins which
+  model proposed each trade. The scorecard also verifies the one-thesis
+  unique index exists (`PRAGMA index_list`) — a legacy DB where it could
+  not be created has no DB-level accept exclusion and is called out.
 - **The shadow swing record is EXPLORATORY** (2026-08-23): no official
   macro calendar exists yet, and adding one later changes the judgment
   inputs swings depend on. Enabling `swing_enabled` live therefore

@@ -28,6 +28,12 @@ export interface BrokerOrderSnap {
      *  rehydrate the duplicate-close guard; its quantity sizes the
      *  re-registered manual exit. */
     quantity: number | null;
+    /** Review-18: the structural fields the adopted-protection check
+     *  verifies — a `protect-` REF alone proves nothing about direction,
+     *  type, size or level. Null = the broker did not say = fail closed. */
+    action: string | null;
+    orderType: string | null;
+    auxPrice: number | null;
 }
 
 export interface BrokerPositionSnap {
@@ -120,6 +126,9 @@ export function fetchOpenOrderSnaps(api: IBApi): Promise<{ orders: BrokerOrderSn
                 orderRef: typeof order.orderRef === 'string' ? order.orderRef : null,
                 account: typeof order.account === 'string' ? order.account : null,
                 quantity: typeof order.totalQuantity === 'number' ? order.totalQuantity : null,
+                action: typeof order.action === 'string' ? order.action : null,
+                orderType: typeof order.orderType === 'string' ? order.orderType : null,
+                auxPrice: typeof order.auxPrice === 'number' && Number.isFinite(order.auxPrice) ? order.auxPrice : null,
             });
         };
         const onEnd = () => { clearTimeout(timer); cleanup(); resolve({ orders: found, complete: true }); };

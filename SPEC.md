@@ -490,3 +490,60 @@ finding; all are implemented.
 | REQ-PROP-001 | outcome-tracker-partial + executor ambiguity tests via `__dropOneThesisIndexForTests` (legacy-DB simulation) |
 | REQ-VAL-019 | scorecard smoke-run prints the fingerprint line and FAILS on ABSENT (verified against the pre-migration DB) |
 | REQ-BRACKET-002 | `bracket-ack.test.ts` TIF-pinning tests |
+
+## Review-18 response (2026-08-24) — postconditions verified, marks fail closed, protection proven, fingerprint widened
+
+- REQ-EOD-005: EOD actions have a VERIFIED postcondition. After every
+  mutation loop the book is reconstructed from the fresh broker snapshot
+  (positions at market-or-cost with classes re-attached; entries still
+  resting after non-confirmed cancels) and `vetOvernightBook` re-runs
+  REPORT-ONLY: residual trim demand emits a 🚨 UNRESOLVED OVERNIGHT
+  EXCESS line + error log naming the symbols — a failed close or a
+  cancel that lost to a fill can no longer ride the night silently.
+  (No second blind close loop: re-firing could double an in-flight
+  close; adopted/manual and bets stay counted-but-exempt so only failed
+  actions on managed rows alarm.)
+- REQ-EXPO-003: a missing market mark REFUSES the accept. Cost basis is
+  a FLOOR under a live mark (max(basis, |qty|×mark)), never the answer
+  for an unknown one — a $100-cost position at $150 was understated 33%
+  through a quote outage. Unpriced exposure never passes.
+- REQ-EXPO-004: adopted protection is VERIFIED, not pattern-matched.
+  `verifyAdoptedProtection` (pure): exactly one same-symbol `protect-`
+  order, verified account, exit side, STP-family type, quantity covering
+  the whole position, priced stop — unknown fields fail closed
+  (snapshot now carries action/orderType/auxPrice). On success the REAL
+  broker stop prices the adopted row's planned risk in the headroom sum
+  (zero for a profit-locked stop); the synthetic ±5% level never grants
+  headroom again. An adopted row with no broker position behind it also
+  refuses (stale reconciliation).
+- REQ-VAL-019 widened: the fingerprint now covers every discovered
+  skill's SKILL.md (built-in + project), the configured provider:model
+  pair, and the RUNNING CODE COMMIT (git HEAD read from the checkout —
+  bun executes the TS in place, so HEAD is the running code; packed and
+  detached refs handled, non-repo = 'absent'). Manifest diff-check
+  narrowed to exclude ONLY the manifest file (`:!docs/day2day/
+  FREEZE-MANIFEST.md`) — excluding all Markdown could hide SOUL.md and
+  skill edits between baseline and tag.
+- REQ-VAL-020: the scorecard verifies `ux_one_working_thesis` exists via
+  `PRAGMA index_list` — migration deliberately survives a legacy DB
+  where creation failed, so the evaluator must check, not assume.
+  `fingerprintPurity` extracted pure into equity-series-math.
+- Traceability CORRECTIONS (review-18 F6 — the review-17 table
+  overstated): the not-cancellable and re-probe close paths were NOT
+  then exercised (now they are, below); "orphan/adopted refusals
+  exercised at accept" was false (the pure decision cores are now
+  tested; the accept-path WIRING still has no broker-fake test).
+
+| REQ | Test |
+|---|---|
+| REQ-CLOSE-001 | position-actions-close.test.ts "entry-side neutralization": clean neutralization proceeds; 'Inactive'→not-cancellable refuses with no close placed; non-`:entry` Dexter order survives the loop and the re-probe refuses |
+| REQ-EOD-005 | vetOvernightBook purity (re-vet is a second call on a rebuilt book); the rebuild glue in runEodTriageOnce is UNTESTED (integration; flagged honestly) |
+| REQ-EXPO-003 | UNTESTED at the accept-path level (needs a broker fake); the max(basis, mark) floor rides unionExposure tests |
+| REQ-EXPO-004 | proposal-executor.test.ts verifyAdoptedProtection suite (pass/zero-risk/short + 8 structural defects + STP LMT/other-symbol); classifyOrphanBracketRefs suite |
+| REQ-PROP-001 | trade-proposals.test.ts "one-thesis DB law": same-symbol claims → exactly one survivor, loser stays open (index recreated first — legacy-simulation suites drop it) |
+| REQ-VAL-019/020 | strategy-fingerprint.test.ts (12-hex, deterministic, git HEAD resolves, non-repo absent; fingerprintPurity mixed/absent/empty fail closed); scorecard smoke-run prints both new lines against the pre-migration DB |
+
+Still untested (honest ledger): the EOD cancel-loses-to-fill close glue,
+the broker-only/manual-only triage early-return glue, and the accept
+path's missing-mark/orphan/adopted refusal WIRING — all are thin glue
+over tested cores, and all sit behind the paper-observation phase.

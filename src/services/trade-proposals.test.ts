@@ -271,6 +271,28 @@ describe('proposal store lifecycle', () => {
         await releaseProposalClaim(p.id); // cleanup for cross-file counts
     });
 
+    test('one-thesis DB law: same-symbol claims leave exactly one survivor (review-18, ux_one_working_thesis)', async () => {
+        const { claimProposalForExecution, releaseProposalClaim, __recreateOneThesisIndexForTests } =
+            await import('./trade-proposals.js');
+        // Suites simulating a legacy DB drop the index — restore the law
+        // before testing it (shared store across suite files).
+        await __recreateOneThesisIndexForTests();
+        // Two OPEN rows on one symbol are legal (the creation guard counts
+        // only WORKING rows); the race is both reaching for 'executing'.
+        const a = await create(validInput({ symbol: 'THLAW' }));
+        const b = await create(validInput({ symbol: 'THLAW' }));
+        const results = await Promise.all([claimProposalForExecution(a.id), claimProposalForExecution(b.id)]);
+        expect(results.filter(Boolean).length).toBe(1); // the INDEX decides, not app-level courtesy
+        const statuses = [(await getProposal(a.id))?.status, (await getProposal(b.id))?.status].sort();
+        expect(statuses).toEqual(['executing', 'open']); // the loser is untouched and retryable
+        // Cleanup for cross-file counts: release the winner back to open,
+        // then expire both out of the working set.
+        await releaseProposalClaim(a.id);
+        await releaseProposalClaim(b.id);
+        await setProposalStatus(a.id, 'expired');
+        await setProposalStatus(b.id, 'expired');
+    });
+
     test('one active thesis per symbol: ANY working row refuses a new proposal (review 2026-08-23)', async () => {
         const a = await create(validInput({ symbol: 'DUPE' }));
         await setProposalStatus(a.id, 'executed', { orderIds: [71, 72, 73], executedAt: Date.now() });

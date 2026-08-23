@@ -280,3 +280,73 @@ describe('worstEntryNotional (REQ-EXPO-001 — caps price unfilled rows at the w
         expect(worstEntryNotional({ quantity: 10, entryFillPrice: null, entry: null, entryLimit: null })).toBe(0);
     });
 });
+
+describe('classifyOrphanBracketRefs (review-17/18 — the ownership prefix is not reconciliation)', () => {
+    test('a P-ref maps to a working row or refuses; BRKT- always refuses; risk-reducing refs stay owned', async () => {
+        const { classifyOrphanBracketRefs } = await import('./proposal-executor.js');
+        const working = new Set(['P-AB12', 'P-CD34']);
+        const o = (orderRef: string | null) => ({ orderRef });
+        const orphans = classifyOrphanBracketRefs([
+            o('P-AB12:entry'),   // claimed row → owned
+            o('P-CD34:stop2'),   // resized leg of a working row → owned
+            o('P-9F00:tp'),      // ZOMBIE: no live row behind the bracket
+            o('BRKT-501:entry'), // legacy fallback ref — maps to no row ever
+            o('protect-NVDA:stop'), // risk-reducing, position-tied → owned
+            o('close-NVDA'),
+            o('reduce-NVDA'),
+            o(null),             // foreign — handled by the isOurOrderRef gate, not here
+        ], working);
+        expect(orphans.map((x) => x.orderRef)).toEqual(['P-9F00:tp', 'BRKT-501:entry']);
+    });
+});
+
+describe('verifyAdoptedProtection (review-18 — a protect- REF alone is not protection)', () => {
+    const stop = (over: Record<string, unknown> = {}) => ({
+        orderId: 900, symbol: 'ADPT', orderRef: 'protect-ADPT:stop', account: 'DU1',
+        quantity: 10, action: 'SELL', orderType: 'STP', auxPrice: 95, ...over,
+    });
+    const check = async (orders: unknown[], input: Record<string, unknown> = {}) => {
+        const { verifyAdoptedProtection } = await import('./proposal-executor.js');
+        return verifyAdoptedProtection({
+            symbol: 'ADPT', positionQty: 10, basisPrice: 100, account: 'DU1',
+            orders: orders as never, ...input,
+        } as never);
+    };
+
+    test('a structurally coherent stop passes and prices the REAL planned risk', async () => {
+        const r = await check([stop()]);
+        expect(r).toEqual({ ok: true, riskUsd: 50 }); // (100 - 95) × 10
+    });
+
+    test('a stop already locking profit passes with ZERO planned risk', async () => {
+        const r = await check([stop({ auxPrice: 110 })]);
+        expect(r).toEqual({ ok: true, riskUsd: 0 });
+    });
+
+    test('short position: BUY-side stop above basis prices the risk', async () => {
+        const r = await check([stop({ action: 'BUY', auxPrice: 105 })], { positionQty: -10 });
+        expect(r).toEqual({ ok: true, riskUsd: 50 }); // (105 - 100) × 10
+    });
+
+    test('every structural defect fails closed with its reason', async () => {
+        const reasons = await Promise.all([
+            check([]),                                        // nothing
+            check([stop(), stop({ orderId: 901 })]),          // stacked protects
+            check([stop({ account: 'DU2' })]),                // wrong account
+            check([stop({ action: 'BUY' })]),                 // entry-side "stop" on a long
+            check([stop({ orderType: 'LMT' })]),              // a limit is not a stop
+            check([stop({ quantity: 5 })]),                   // covers half the position
+            check([stop({ quantity: null })]),                // unknown size = fail closed
+            check([stop({ auxPrice: null })]),                // no stop price
+        ]);
+        expect(reasons.every((r) => r.ok === false)).toBe(true);
+        expect((reasons[0] as { reason: string }).reason).toContain('no working protective stop');
+        expect((reasons[1] as { reason: string }).reason).toContain('incoherent');
+        expect((reasons[5] as { reason: string }).reason).toContain('covers 5 of 10');
+    });
+
+    test('STP LMT counts as a stop; a stop on ANOTHER symbol does not', async () => {
+        expect((await check([stop({ orderType: 'STP LMT' })])).ok).toBe(true);
+        expect((await check([stop({ symbol: 'OTHER', orderRef: 'protect-OTHER:stop' })])).ok).toBe(false);
+    });
+});

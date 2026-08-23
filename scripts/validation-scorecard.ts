@@ -66,7 +66,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dayBlockBootstrapLcb } from '../src/utils/day-bootstrap.js';
-import { etDayOf, exposureCoverageGaps, parseEquitySeries, portfolioDrawdown, type SessionWindow } from '../src/utils/equity-series-math.js';
+import { etDayOf, exposureCoverageGaps, fingerprintPurity, parseEquitySeries, portfolioDrawdown, type SessionWindow } from '../src/utils/equity-series-math.js';
 import { calendarCoverageStatus, isMarketHalfDay, isMarketHoliday } from '../src/utils/market-hours.js';
 import { DEFAULT_RULES, parseFlatYaml, type RiskRules } from '../src/tools/ibkr/risk-rules.js';
 
@@ -479,10 +479,10 @@ let seriesLine: string;
 // Review-17 freeze integrity: fingerprints seen on IN-WINDOW equity
 // samples, folded into the purity check below (null = no series at all —
 // the drawdown criterion already fails on that separately).
-let seriesFingerprints: Set<string> | null = null;
+let seriesFingerprints: Array<string | undefined> | null = null;
 try {
     const series = parseEquitySeries(readFileSync(join(dataDir, 'equity-series.jsonl'), 'utf-8'));
-    seriesFingerprints = new Set(series.filter((s) => s.ts >= sinceMs).map((s) => s.fingerprint ?? 'ABSENT'));
+    seriesFingerprints = series.filter((s) => s.ts >= sinceMs).map((s) => s.fingerprint);
     // Seeded with the FROZEN epoch NetLiq (review 2026-08-23): the curve
     // starts where the sample started — a loss before the first real sample
     // must not vanish.
@@ -750,18 +750,33 @@ if (!purityOk) verdictFails.push('judgment purity (multiple or NULL models)');
 if (regimes.size < 2) verdictFails.push(`regime breadth ${regimes.size} < 2`);
 if (weeks.size < 6) verdictFails.push(`calendar breadth ${weeks.size} < 6 ISO weeks`);
 
-// Review-17 freeze integrity: exactly ONE strategy fingerprint across the
-// sample rows AND the in-window equity samples. A mid-sample rules edit,
-// profile flip or judgment-doc rewrite is a DIFFERENT strategy, not more
-// data — and an absent stamp means the instrumentation cannot prove
-// otherwise. The single surviving value is what the freeze manifest
-// records.
-const fps = new Set(rows.map((r) => r.strategy_fingerprint ?? 'ABSENT'));
-if (seriesFingerprints) for (const f of seriesFingerprints) fps.add(f);
-if (fps.size > 0) {
-    const fpOk = fps.size === 1 && !fps.has('ABSENT');
-    console.log(`strategy fingerprint: [${[...fps].join(', ')}] (${fpOk ? 'PASS' : 'FAIL — the window must carry exactly one fingerprint, no ABSENT stamps'}; record it in the freeze manifest)`);
-    if (!fpOk) verdictFails.push('strategy fingerprint mixed or absent (rules/judgment changed mid-sample, or pre-fingerprint rows in the cohort)');
+// Review-17/18 freeze integrity: exactly ONE strategy fingerprint across
+// the sample rows AND the in-window equity samples. A mid-sample rules
+// edit, profile flip, judgment-doc/skill rewrite, model switch or code
+// deploy is a DIFFERENT strategy, not more data — and an absent stamp
+// means the instrumentation cannot prove otherwise. The single surviving
+// value is what the freeze manifest records.
+const fpValues = [...rows.map((r) => r.strategy_fingerprint), ...(seriesFingerprints ?? [])];
+if (fpValues.length > 0) {
+    const fp = fingerprintPurity(fpValues);
+    console.log(`strategy fingerprint: [${fp.distinct.join(', ')}] (${fp.ok ? 'PASS' : 'FAIL — the window must carry exactly one fingerprint, no ABSENT stamps'}; record it in the freeze manifest)`);
+    if (!fp.ok) verdictFails.push('strategy fingerprint mixed or absent (rules/judgment/skills/model/code changed mid-sample, or pre-fingerprint rows in the cohort)');
+}
+
+// Review-18: the DB-level one-thesis guarantee is real only when its
+// partial unique index actually exists — migration deliberately survives
+// a legacy DB with duplicates (loudly), so the evaluator must check.
+try {
+    const idx = db.query<{ name: string }>(`PRAGMA index_list('proposals')`).all();
+    if (!idx.some((i) => i.name === 'ux_one_working_thesis')) {
+        console.log('one-thesis index: ABSENT (FAIL — the DB pre-dates the migration (restart the gateway), or duplicate working rows blocked creation (resolve them); the DB-level accept exclusion is unproven either way)');
+        verdictFails.push('one-thesis unique index absent — restart the gateway to migrate, or resolve duplicate executing/executed rows');
+    } else {
+        console.log('one-thesis index: present (DB-enforced single working thesis per symbol)');
+    }
+} catch (err) {
+    console.log(`one-thesis index: UNVERIFIABLE (${err instanceof Error ? err.message : err})`);
+    verdictFails.push('one-thesis unique index unverifiable');
 }
 
 // One unambiguous line (round-4 review: the criteria were printed but

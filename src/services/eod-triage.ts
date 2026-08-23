@@ -818,6 +818,9 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
 
     const vet = vetOvernightBook(vetCandidates, await getNetLiquidation(), getRiskRules(), overrides);
     const candidateBySymbol = new Map(vetCandidates.map((k) => [k.symbol, k]));
+    // Review-18 P1: entries whose cancel was broker-CONFIRMED this run —
+    // the post-action re-vet must not count them as still resting.
+    const confirmedEntryCancels = new Set<string>();
     for (const trim of vet.trims) {
         if (closedSymbols.has(trim.symbol)) continue; // WP11: already flat this run
         const cand = candidateBySymbol.get(trim.symbol);
@@ -828,6 +831,7 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
         if (cand?.restingEntry) {
             const cancelled = await cancelEntryLeg(cand.restingEntry, `overnight vet — ${trim.reason}`)
                 .catch((err: unknown) => { logger.warn(`[eod-triage] ${trim.symbol}: resting-entry cancel failed — ${err}`); return false; });
+            if (cancelled) confirmedEntryCancels.add(cand.restingEntry.id);
             lines.push(`• ${trim.symbol} (${trim.label}): overnight vet — ${trim.reason}. ${cancelled ? 'Resting entry cancelled (broker-confirmed).' : 'Entry cancel NOT confirmed — check orders.'}`);
             continue;
         }
@@ -868,6 +872,7 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
         const cancelled = await cancelEntryLeg(t, `EOD earnings guard — ${reason}`)
             .catch((err: unknown) => { logger.warn(`[eod-triage] ${t.symbol}: guard entry cancel failed — ${err}`); return false; });
         if (cancelled) {
+            confirmedEntryCancels.add(t.id);
             lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} entry UNFILLED): ${reason}. Resting entry cancelled (broker-confirmed; children die with the parent).`);
             continue;
         }
@@ -894,6 +899,66 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
         ? overnightCapWarning(holds, await getNetLiquidation(), getRiskRules())
         : null;
 
+    // Review-18 P1: the trims above were REQUESTS, not outcomes. A close
+    // that did not confirm flat, or an entry cancel that lost to a fill,
+    // leaves the book still carrying the excess the vet ordered removed —
+    // and the first vet's math is now stale. Reconstruct the book from the
+    // FRESH snapshot (positions at market-or-cost, entries still resting
+    // after the cancels, classes re-attached for their own gap severity)
+    // and re-run the vet REPORT-ONLY: residual trim demand is an
+    // UNRESOLVED EXCESS the operator must fix by hand before the bell —
+    // a second blind close loop here would risk doubling an in-flight
+    // close, so the postcondition alerts loudly instead of re-firing.
+    let excessLine: string | null = null;
+    if (!dryRun) {
+        const classBySymbol = new Map(trackable.map((t) => [t.symbol, t]));
+        const recheck: OvernightVetCandidate[] = finalPositions
+            .filter((pos) => pos.quantity !== 0)
+            .map((pos) => {
+                const row = classBySymbol.get(pos.symbol);
+                const isBet = row?.tradeClass === 'earnings-bet';
+                const last = lastBySymbol.get(pos.symbol) ?? null;
+                return {
+                    symbol: pos.symbol,
+                    label: 're-vet',
+                    marketValueUsd: last !== null ? Math.abs(pos.quantity) * last
+                        : pos.avgCost > 0 ? Math.abs(pos.quantity) * pos.avgCost : null,
+                    pnlPct: null,
+                    fallbackValueUsd: pos.avgCost > 0 ? Math.abs(pos.quantity) * pos.avgCost : null,
+                    // Bets stress at their own gap and are never trimmed;
+                    // adopted/manual positions (no trackable row) stay
+                    // counted-but-exempt exactly as in the first vet —
+                    // only FAILED ACTIONS on managed rows should alarm.
+                    ...(isBet ? { trimExempt: true, stressPctOverride: Math.max(baseStress, row?.worstCaseGapPct ?? 0) }
+                        : row === undefined ? { trimExempt: true }
+                        : {}),
+                };
+            });
+        for (const t of unfilledGtc) {
+            if (confirmedEntryCancels.has(t.id)) continue; // gone from the book
+            if (recheck.some((k) => k.symbol === t.symbol)) continue; // filled → counted as a position above
+            const basis = Math.max(t.entry ?? 0, t.entryLimit ?? 0);
+            if (!(basis > 0) || !(t.quantity > 0)) continue;
+            recheck.push({
+                symbol: t.symbol, label: 're-vet (still-resting entry)',
+                marketValueUsd: basis * t.quantity, pnlPct: null,
+                ...(t.tradeClass === 'earnings-bet'
+                    ? { trimExempt: true, stressPctOverride: Math.max(baseStress, t.worstCaseGapPct ?? 0) }
+                    : {}),
+            });
+        }
+        const revet = recheck.length
+            ? vetOvernightBook(recheck, await getNetLiquidation(), getRiskRules(), overrides)
+            : null;
+        if (revet && revet.trims.length > 0) {
+            excessLine =
+                `🚨 UNRESOLVED OVERNIGHT EXCESS — after all EOD actions the book STILL fails the gap-stress vet: ` +
+                revet.trims.map((tr) => `${tr.symbol} (${tr.reason})`).join('; ') +
+                `. A close or cancel failed (or lost a race) above — act in TWS before the bell.`;
+            logger.error(`[eod-triage] ${excessLine}`);
+        }
+    }
+
     // Macro-night check (advisory, never closes): the earnings guard covers
     // single-name prints, but a keep on CPI/FOMC-eve rides a macro binary no
     // stop can protect against — the report must say so. The horizon runs to
@@ -907,7 +972,7 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
     const macroEvents = isMacroWarningEnabled() ? await getMacroEventsWithin(macroHorizonDays) : [];
     const macroLine = macroNightWarning(macroEvents, macroHorizonDays);
 
-    if (lines.length || (macroLine && macroEvents !== null) || capLine || vet.capLine || vet.warnings.length) {
+    if (lines.length || (macroLine && macroEvents !== null) || capLine || vet.capLine || vet.warnings.length || excessLine) {
         const footer =
             (earningsUnknownDays.length
                 ? `\n⚠ earnings calendar unavailable (${earningsUnknownDays.join(', ')}) — keeps and resting entries are NOT verified print-free.`
@@ -915,6 +980,7 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
             (vet.warnings.length ? `\n${vet.warnings.join('\n')}` : '') +
             (vet.capLine ? `\n${vet.capLine}` : '') +
             (capLine ? `\n${capLine}` : '') +
+            (excessLine ? `\n${excessLine}` : '') +
             (macroLine ? `\n${macroLine}` : '');
         const body = lines.length
             ? lines.join('\n')
