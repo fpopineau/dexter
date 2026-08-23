@@ -264,22 +264,31 @@ export interface ReleaseDecision {
     blockedReason: 'no-targets' | 'no-own-stop' | null;
 }
 
+/** Semantic leg identity (REQ-TRAIL-003, review 2026-08-23): Dexter stamps
+ *  bracket/protect/resize legs `<base>:tp|:stop` (`:tp2|:stop2` for the
+ *  WP2 resized pair). Ownership alone is too broad — `reduce-SYM` and
+ *  `close-SYM` are Dexter-owned too, and a separately authorized reduction
+ *  limit is NOT a target to release. */
+const TARGET_LEG_REF = /:tp2?$/;
+const STOP_LEG_REF = /:stop2?$/;
+
 /** Pure: the release decision over a position's exit-side orders. The
- *  target is always the LMT leg regardless of direction; the STP/STP LMT
- *  leg is the stop and must never be selected. Ownership (REQ-TRAIL-001):
- *  only OUR_REF-stamped LMTs are cancel candidates — cancelling by order
- *  type alone killed manual TWS limits. Protection (REQ-TRAIL-002): the
- *  release is blocked unless a Dexter-owned stop survives — a partial book
- *  view that misses the stop blocks conservatively. */
+ *  target is the Dexter-owned LMT leg whose ref names it a target — not
+ *  any LMT (manual TWS limits, REQ-TRAIL-001) and not any Dexter LMT (a
+ *  `reduce-` limit, REQ-TRAIL-003). Protection (REQ-TRAIL-002): the
+ *  release is blocked unless a Dexter-owned STOP leg (`:stop`) survives —
+ *  a partial book view that misses it blocks conservatively. */
 export function decideTargetRelease<T extends { orderId: number; orderType: string; orderRef: string | null }>(
     exitOrders: T[],
 ): ReleaseDecision {
     const foreignRefs = exitOrders
         .filter((o) => o.orderType === 'LMT' && !isOurOrderRef(o.orderRef))
         .map((o) => `#${o.orderId} ${o.orderRef ?? '<no ref>'}`);
-    const targets = exitOrders.filter((o) => o.orderType === 'LMT' && isOurOrderRef(o.orderRef));
+    const targets = exitOrders.filter((o) =>
+        o.orderType === 'LMT' && isOurOrderRef(o.orderRef) && TARGET_LEG_REF.test(o.orderRef ?? ''));
     if (targets.length === 0) return { cancelIds: [], foreignRefs, blockedReason: 'no-targets' };
-    const hasOwnStop = exitOrders.some((o) => o.orderType.startsWith('STP') && isOurOrderRef(o.orderRef));
+    const hasOwnStop = exitOrders.some((o) =>
+        o.orderType.startsWith('STP') && isOurOrderRef(o.orderRef) && STOP_LEG_REF.test(o.orderRef ?? ''));
     if (!hasOwnStop) return { cancelIds: [], foreignRefs, blockedReason: 'no-own-stop' };
     return { cancelIds: targets.map((o) => o.orderId), foreignRefs, blockedReason: null };
 }

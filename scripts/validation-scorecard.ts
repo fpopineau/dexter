@@ -16,18 +16,24 @@
  *   - Net P&L: realized_pnl − commissions. A NULL commission is NOT zero:
  *     it is an accounting hole, counted against the integrity gate.
  *   - Profit factor: Σ net wins ÷ |Σ net losses|.
- *   - Expectancy LCB (REQ-VAL-003, added pre-freeze 2026-08-22): day-block
- *     bootstrap (resample trading DAYS with replacement, 1000 replicates,
+ *   - Deployable subset (REQ-VAL-008, 2026-08-23): every verdict criterion
+ *     is computed over the classes enabled on live day one (intraday +
+ *     swing). Shadow-only earnings bets are reported apart and never
+ *     carry the aggregate.
+ *   - Expectancy LCB (REQ-VAL-003/009): day-block bootstrap clustered by
+ *     ENTRY cohort (resample entry days with replacement, 1000 replicates,
  *     seed 42) — the 95% one-sided lower confidence bound of mean net P&L
  *     per trade must be > 0. A positive sample mean carried by one fat day
  *     is not expectancy.
- *   - Drawdown (REQ-SHADOW-004, revised pre-freeze 2026-08-22): worst
- *     peak-to-trough of the cumulative-net-P&L series in close order, as %
- *     of the FROZEN epoch NetLiq, judged DIRECTLY against 2 × the live
- *     max_daily_loss_pct — the shadow-live sample runs the live policy at
- *     live scale, so the old ×4 risk-ratio extrapolation is retired. An
- *     epoch NetLiq above $50K means the paper account was not reset to the
- *     live scale: the sample is not the live portfolio → FAIL.
+ *   - Live-scale band (REQ-VAL-007): the frozen epoch NetLiq must sit
+ *     inside ±10% of the $11,700 live target — the sample must have been
+ *     collected at the scale it is meant to predict.
+ *   - Portfolio drawdown (REQ-VAL-006, the criterion): peak-to-trough of
+ *     MARKED NetLiq from equity-series.jsonl (gateway sampler, 15 min) ≤
+ *     2 × live max_daily_loss_pct, with coverage on every trade-close day
+ *     (else NOT EVALUABLE). The closed-trade curve is informational only —
+ *     it misses unrealized troughs and correlated open exposure. The old
+ *     ×4 risk-ratio extrapolation is retired (REQ-SHADOW-004).
  *   - Score deciles: trades bucketed by score into 10 bins; scores above
  *     100 (composite-rank boosts) CLAMP into the top bin and are counted
  *     (REQ-VAL-001 — they used to fall out of every bucket); Spearman rank
@@ -59,14 +65,28 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { dayBlockBootstrapLcb } from '../src/utils/day-bootstrap.js';
+import { etDayOf, parseEquitySeries, portfolioDrawdown } from '../src/utils/equity-series-math.js';
 
 const UNTRUSTWORTHY = '%NOT trustworthy%';
 const dataDir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
+
+// Pins (VALIDATION-PROTOCOL.md). The live target is €10K ≈ $11,700; the
+// epoch NetLiq must sit inside ±10% of it (REQ-VAL-007) — FX drift and a
+// round-number reset fit, a $49K or $4K account does not. Whole-share
+// selection, concentration and commission burden all change with scale.
+const TARGET_NETLIQ_USD = 11_700;
+const TARGET_NETLIQ_TOLERANCE = 0.10;
+const LIVE_DAILY_LOSS_PCT = 3.0; // risk-rules.live.yaml max_daily_loss_pct
+/** Classes enabled on live day one (REQ-VAL-008). Earnings bets are
+ *  live-DISABLED (shadow forces them on only to build their record), so
+ *  they must not carry the go-live verdict — they get their own section. */
+const DEPLOYABLE_CLASSES = new Set(['intraday', 'swing']);
 
 interface Row {
     id: string; symbol: string; trade_class: string | null; source: string;
     score: number | null; model: string | null; regime: string | null;
     realized_pnl: number; commissions: number | null; closed_at: number;
+    entry_filled_at: number | null;
     exit_reason: string | null; take_pct: number | null;
     post_exit_mfe_pct: number | null; take_counterfactual: string | null;
 }
@@ -237,11 +257,11 @@ const SAMPLE_WHERE = `
       AND source != 'adopted'
       AND (note IS NULL OR note NOT LIKE '${UNTRUSTWORTHY}')
     ORDER BY closed_at ASC`;
-let rows: Row[];
+let allRows: Row[];
 try {
-    rows = db.query<Row>(`
+    allRows = db.query<Row>(`
         SELECT id, symbol, trade_class, source, score, model, regime,
-               realized_pnl, commissions, closed_at,
+               realized_pnl, commissions, closed_at, entry_filled_at,
                exit_reason, take_pct, post_exit_mfe_pct, take_counterfactual
         FROM proposals ${SAMPLE_WHERE}
     `).all(sinceMs, sinceMs);
@@ -250,13 +270,18 @@ try {
     // idempotent migration on the next gateway boot. Read-only here — fall
     // back honestly rather than crash or migrate out-of-band.
     console.log('note: take-tracking columns absent (DB pre-dates WP-EXIT — restart the gateway to migrate); take-vs-target reports n/a');
-    rows = db.query<Row>(`
+    allRows = db.query<Row>(`
         SELECT id, symbol, trade_class, source, score, model, regime,
-               realized_pnl, commissions, closed_at, exit_reason,
+               realized_pnl, commissions, closed_at, entry_filled_at, exit_reason,
                NULL AS take_pct, NULL AS post_exit_mfe_pct, NULL AS take_counterfactual
         FROM proposals ${SAMPLE_WHERE}
     `).all(sinceMs, sinceMs);
 }
+// REQ-VAL-008: the go-live verdict judges the DEPLOYABLE book — the classes
+// enabled on live day one. Shadow-only classes (earnings bets) are reported
+// apart and never carry the aggregate.
+const rows = allRows.filter((r) => DEPLOYABLE_CLASSES.has(r.trade_class ?? 'intraday'));
+const shadowOnlyRows = allRows.filter((r) => !DEPLOYABLE_CLASSES.has(r.trade_class ?? 'intraday'));
 // created_at >= window start (round-5 review): "never count pre-freeze
 // rows" means rows PROPOSED under the frozen policy — a pre-freeze trade
 // that merely closes inside the window was judged by the old policy.
@@ -264,8 +289,8 @@ try {
 const net = (r: Row) => r.realized_pnl - (r.commissions ?? 0);
 const n = rows.length;
 console.log(`\n=== VALIDATION SCORECARD — ${windowLabel} ===`);
-console.log(`sample n = ${n} (protocol needs >= 100)`);
-if (n < 100) verdictFails.push(`sample n=${n} < 100`);
+console.log(`deployable sample n = ${n} (intraday + swing — protocol needs >= 100)${shadowOnlyRows.length ? `; ${shadowOnlyRows.length} shadow-only earnings-bet row(s) reported separately` : ''}`);
+if (n < 100) verdictFails.push(`deployable sample n=${n} < 100`);
 
 // Integrity gate — anomalies freeze the evaluation (protocol: "zero
 // unresolved fill/reconciliation anomalies at evaluation time").
@@ -358,43 +383,76 @@ console.log(`win rate ${(100 * wins.length / n).toFixed(1)}% (${wins.length}W/${
 if (expectancy <= 0) verdictFails.push(`expectancy ${expectancy.toFixed(2)} <= 0`);
 if (pf < 1.3) verdictFails.push(`profit factor ${pf.toFixed(2)} < 1.3`);
 
-// Expectancy lower confidence bound (REQ-VAL-003): day-block bootstrap —
-// same-day trades share the tape, so days are the independence unit.
+// Expectancy lower confidence bound (REQ-VAL-003/009): day-block bootstrap
+// clustered by ENTRY cohort — trades entered the same session share the
+// tape, the regime and often the catalyst; a close date is an accident of
+// holding time (review 2026-08-23). Rows without an entry stamp fall back
+// to their close day, reported.
 const byDay = new Map<string, number[]>();
+let entryStampMissing = 0;
 for (const r of rows) {
-    const day = new Date(r.closed_at).toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    const anchor = r.entry_filled_at ?? r.closed_at;
+    if (r.entry_filled_at === null) entryStampMissing++;
+    const day = etDayOf(anchor);
     (byDay.get(day) ?? byDay.set(day, []).get(day)!).push(net(r));
 }
 const boot = dayBlockBootstrapLcb(byDay);
 if (boot) {
-    console.log(`expectancy 95% LCB ${boot.lcb.toFixed(2)}/trade (day-block bootstrap, ${boot.days} days × ${boot.replicates} replicates, seed 42) (${boot.lcb > 0 ? 'PASS' : 'FAIL'} — must be > 0)`);
+    console.log(`expectancy 95% LCB ${boot.lcb.toFixed(2)}/trade (entry-cohort day-block bootstrap, ${boot.days} cohorts × ${boot.replicates} replicates, seed 42${entryStampMissing ? `; ${entryStampMissing} row(s) anchored on close day — no entry stamp` : ''}) (${boot.lcb > 0 ? 'PASS' : 'FAIL'} — must be > 0)`);
     if (boot.lcb <= 0) verdictFails.push(`expectancy LCB ${boot.lcb.toFixed(2)} <= 0 (mean may be outlier-carried)`);
 } else {
-    console.log(`expectancy LCB: not evaluable (< 5 distinct trading days)`);
-    verdictFails.push('expectancy LCB not evaluable (< 5 trading days)');
+    console.log(`expectancy LCB: not evaluable (< 5 distinct entry cohorts)`);
+    verdictFails.push('expectancy LCB not evaluable (< 5 entry cohorts)');
 }
 
-// Drawdown (protocol formula — REQ-SHADOW-004: judged at LIVE SCALE).
-// The shadow-live sample trades the live rules on a paper account reset to
-// the live equity, so drawdown reads directly — the retired ×4 risk-ratio
-// extrapolation could not model slots, caps, whole shares, or selection.
+// Live-scale band (REQ-VAL-007): the epoch NetLiq IS the scale the sample
+// was collected at — it must be the live scale, inside a narrow band.
+if (paperNetliq !== null) {
+    const lo = TARGET_NETLIQ_USD * (1 - TARGET_NETLIQ_TOLERANCE);
+    const hi = TARGET_NETLIQ_USD * (1 + TARGET_NETLIQ_TOLERANCE);
+    const inBand = paperNetliq >= lo && paperNetliq <= hi;
+    console.log(`epoch NetLiq ${paperNetliq.toFixed(0)} [${netliqSource}] vs live target ${TARGET_NETLIQ_USD} ±${TARGET_NETLIQ_TOLERANCE * 100}% [${lo.toFixed(0)}, ${hi.toFixed(0)}] (${inBand ? 'PASS' : 'FAIL'} — the sample must be collected at the live scale)`);
+    if (netliqSource !== 'frozen at epoch') verdictFails.push('epoch NetLiq not frozen (epoch has no netLiq)');
+    if (!inBand) verdictFails.push(`epoch NetLiq ${paperNetliq.toFixed(0)} outside the live-scale band [${lo.toFixed(0)}, ${hi.toFixed(0)}] — reset the paper account to ≈$${TARGET_NETLIQ_USD} before the freeze`);
+} else {
+    console.log('epoch NetLiq: NOT EVALUABLE — performance-epoch.json / netliq-baseline.json missing');
+    verdictFails.push('epoch NetLiq not evaluable');
+}
+
+// Portfolio drawdown (REQ-VAL-006 — the verdict criterion): peak-to-trough
+// of MARKED NetLiq from equity-series.jsonl, which sees the intraday and
+// overnight troughs a closed-trade curve cannot. Coverage is part of the
+// proof: every ET day a sample trade closed must carry at least one
+// sample, or the criterion is not evaluable (fail-closed).
+const closeDays = new Set(rows.map((r) => etDayOf(r.closed_at)));
+let seriesLine: string;
+try {
+    const series = parseEquitySeries(readFileSync(join(dataDir, 'equity-series.jsonl'), 'utf-8'));
+    const pdd = portfolioDrawdown(series, sinceMs);
+    if (!pdd) {
+        seriesLine = 'portfolio drawdown: NOT EVALUABLE — no equity samples inside the window (is the gateway sampler running?)';
+        verdictFails.push('portfolio drawdown not evaluable (no equity samples in window)');
+    } else {
+        const uncovered = [...closeDays].filter((d) => !pdd.days.has(d));
+        const ok = pdd.maxDdPct <= 2 * LIVE_DAILY_LOSS_PCT;
+        seriesLine = `portfolio drawdown ${pdd.maxDdPct.toFixed(2)}% of marked NetLiq (peak ${pdd.peak.toFixed(0)} → trough ${pdd.trough.toFixed(0)}, ${pdd.samples} samples over ${pdd.days.size} day(s)) (${ok ? 'PASS' : 'FAIL'} — must be <= ${2 * LIVE_DAILY_LOSS_PCT}%)`;
+        if (!ok) verdictFails.push(`portfolio drawdown ${pdd.maxDdPct.toFixed(2)}% > ${2 * LIVE_DAILY_LOSS_PCT}%`);
+        if (uncovered.length > 0) {
+            seriesLine += `\n  ⚠ equity series has NO sample on ${uncovered.length} trade-close day(s) (${uncovered.slice(0, 5).join(', ')}${uncovered.length > 5 ? ', …' : ''}) — coverage incomplete, criterion NOT EVALUABLE`;
+            verdictFails.push(`portfolio drawdown coverage incomplete (${uncovered.length} day(s) unsampled)`);
+        }
+    }
+} catch {
+    seriesLine = 'portfolio drawdown: NOT EVALUABLE — equity-series.jsonl missing (the gateway sampler writes it every 15 min; REQ-VAL-006)';
+    verdictFails.push('portfolio drawdown not evaluable (no equity series)');
+}
+console.log(seriesLine);
+
+// Closed-trade drawdown — INFORMATIONAL since 2026-08-23 (it was the
+// criterion; it misses unrealized troughs and correlated open exposure).
 let equity = 0, peak = 0, maxDd = 0;
 for (const v of nets) { equity += v; if (equity > peak) peak = equity; maxDd = Math.max(maxDd, peak - equity); }
-const liveDailyLoss = 3.0; // risk-rules.live.yaml pin
-const LIVE_SCALE_MAX_NETLIQ = 50_000;
-if (paperNetliq !== null) {
-    const ddPct = (maxDd / paperNetliq) * 100;
-    console.log(`max drawdown ${maxDd.toFixed(2)} on epoch NetLiq ${paperNetliq.toFixed(0)} [${netliqSource}] = ${ddPct.toFixed(2)}% (${ddPct <= 2 * liveDailyLoss ? 'PASS' : 'FAIL'} — must be <= ${2 * liveDailyLoss}%)`);
-    if (netliqSource !== 'frozen at epoch') verdictFails.push('drawdown denominator not frozen (epoch has no netLiq)');
-    if (ddPct > 2 * liveDailyLoss) verdictFails.push(`drawdown ${ddPct.toFixed(2)}% > ${2 * liveDailyLoss}%`);
-    if (paperNetliq > LIVE_SCALE_MAX_NETLIQ) {
-        console.log(`⚠ epoch NetLiq ${paperNetliq.toFixed(0)} is NOT live scale — the sample is not the live portfolio (reset the paper account to ~$11.7K ≈ €10K before the freeze)`);
-        verdictFails.push(`epoch NetLiq ${paperNetliq.toFixed(0)} > ${LIVE_SCALE_MAX_NETLIQ} (sample not at live scale)`);
-    }
-} else {
-    console.log(`max drawdown ${maxDd.toFixed(2)} — NOT EVALUABLE: netliq-baseline.json missing/unreadable`);
-    verdictFails.push('drawdown not evaluable (no netliq baseline)');
-}
+console.log(`closed-trade drawdown ${maxDd.toFixed(2)}${paperNetliq !== null ? ` = ${((maxDd / paperNetliq) * 100).toFixed(2)}% of epoch NetLiq` : ''} (informational — the portfolio series is the criterion)`);
 
 // Per-class discipline
 console.log('\nper-class (each class with n>=10 must be net-positive alone):');
@@ -408,6 +466,24 @@ for (const [k, rs] of byClass) {
     const evaluable = rs.length >= 10;
     console.log(`  ${k}: n=${rs.length} net ${t.toFixed(2)} ${evaluable ? (t > 0 ? 'PASS' : 'FAIL') : '(below 10 — stays paper-only)'}`);
     if (evaluable && t <= 0) verdictFails.push(`class ${k} net ${t.toFixed(2)} <= 0 at n=${rs.length}`);
+}
+
+// Shadow-only classes (REQ-VAL-008): earnings bets run in shadow-live only
+// to build the per-class record the live enable decision needs. They are
+// NEVER in the verdict above — a profitable experimental class must not
+// carry a negative deployable book, and an unprofitable one must not sink
+// it. Their own bar: the protocol's class discipline (≥10 trades, net>0).
+if (shadowOnlyRows.length > 0) {
+    const bNets = shadowOnlyRows.map(net);
+    const bTotal = bNets.reduce((s, v) => s + v, 0);
+    const bWins = bNets.filter((v) => v > 0), bLosses = bNets.filter((v) => v < 0);
+    const bPf = bLosses.length ? bWins.reduce((s, v) => s + v, 0) / Math.abs(bLosses.reduce((s, v) => s + v, 0)) : Infinity;
+    console.log(
+        `\nshadow-only earnings-bet record (NOT in the verdict): n=${shadowOnlyRows.length} net ${bTotal.toFixed(2)} ` +
+        `expectancy ${(bTotal / shadowOnlyRows.length).toFixed(2)} PF ${Number.isFinite(bPf) ? bPf.toFixed(2) : '∞'} ` +
+        `win ${(100 * bWins.length / shadowOnlyRows.length).toFixed(1)}% — ` +
+        `${shadowOnlyRows.length >= 10 ? (bTotal > 0 ? 'class record POSITIVE at n>=10 (live enable is a separate operator decision)' : 'class record NEGATIVE at n>=10 — stays disabled') : 'below 10 trades — class stays live-disabled regardless'}`,
+    );
 }
 
 // Per-lane split (informational)

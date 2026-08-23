@@ -103,27 +103,46 @@ positive expectancy after costs, not improved loss control.
 
 ## Acceptance criteria (ALL must hold)
 
-(Revised 2026-08-22, BEFORE the tag — the sample does not exist yet, so
+(Revised 2026-08-22/23, BEFORE the tag — the sample does not exist yet, so
 these are still pre-registered numbers, not fitted ones.)
 
+**Scope — the deployable book.** Every criterion below is computed over
+the classes enabled on live day one: intraday and swing. Earnings bets
+run in shadow-live only to build their per-class record; they are
+reported apart by the scorecard and NEVER carry (or sink) the verdict.
+
+0. **Live scale**: the frozen epoch NetLiq must sit inside ±10% of the
+   $11,700 live target — the sample must have been collected at the scale
+   it predicts (whole-share selection, concentration, commissions all
+   change with scale). A $49K or $4K sample fails outright.
 1. **Net expectancy > 0**: mean net P&L per trade (gross − commissions)
    strictly positive.
 2. **Expectancy lower bound > 0**: the 95% one-sided lower confidence
-   bound of mean net P&L per trade, from a day-block bootstrap (trading
-   days resampled with replacement, 1000 replicates, seed 42 — same-day
-   trades share the tape and are not independent), strictly positive. A
-   sample mean carried by one fat day is not expectancy.
+   bound of mean net P&L per trade, from a day-block bootstrap clustered
+   by ENTRY cohort (entry days resampled with replacement, 1000
+   replicates, seed 42 — trades entered the same session share the tape,
+   the regime and the catalyst), strictly positive. A sample mean carried
+   by one fat day is not expectancy.
 3. **Profit factor ≥ 1.3**: gross wins / |gross losses| on net-of-
    commission trade P&L.
-4. **Drawdown inside the live math**: the sample's worst peak-to-trough
-   drawdown as % of the frozen epoch NetLiq must not exceed 2× the live
-   `max_daily_loss_pct`. The shadow-live sample runs at live scale, so
-   this reads DIRECTLY — the former ×4 risk-ratio scaling is retired;
-   an epoch NetLiq above $50K fails the criterion outright (the sample
-   was not collected at the live scale).
-5. **Class discipline**: every trade class that traded ≥10 times must
-   individually satisfy (1); a class below 10 trades stays paper-only
-   after go-live regardless of the aggregate.
+4. **Portfolio drawdown inside the live math**: the worst peak-to-trough
+   of MARKED NetLiq (the gateway's 15-minute equity series) over the
+   window must not exceed 2× the live `max_daily_loss_pct`, with a sample
+   on every day a trade closed — else NOT EVALUABLE. Closed-trade drawdown
+   is informational only (it cannot see unrealized troughs, correlated open
+   exposure, or overnight gaps that later recover). The former ×4
+   risk-ratio scaling is retired.
+5. **Class discipline**: every deployable class that traded ≥10 times
+   must individually satisfy (1); a class below 10 trades stays
+   paper-only after go-live regardless of the aggregate. Earnings bets
+   earn their enable decision on their own ≥10-trade shadow record.
+
+**Hypothesis, not fix.** The take-at-x% exit policy that freezes with this
+sample is an explicit experimental hypothesis ("better now than later",
+2026-08-22), not a demonstrated improvement: it replaces a ratio-derived
+target with an ATR-derived one. The post-exit MFE and legacy-geometry
+counterfactual columns exist so the sample can say whether it paid;
+the multiplier is not to be retuned mid-sample.
 
 ## Score calibration (separate switch)
 
@@ -159,4 +178,5 @@ Fails → sizing stays flat on live; the scorer keeps collecting.
 - Never widen a criterion to fit the sample after the fact.
 - Never count adopted, cancelled-annotated, or pre-freeze rows.
 - Never flip `earnings_bet_enabled` on live from this protocol alone —
-  the class needs its own ≥10-trade paper record per criterion (5).
+  the class needs its own ≥10-trade shadow record per criterion (5), and
+  it is never part of the deployable verdict.

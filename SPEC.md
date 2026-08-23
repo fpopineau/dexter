@@ -130,6 +130,34 @@ along because all behavior changes must precede the freeze tag.
 - REQ-VAL-005: USER-MANUAL §19 becomes a pointer to VALIDATION-PROTOCOL.md;
   the handbook README indexes the protocol.
 
+### Review 2026-08-23 response (append-only)
+
+- REQ-ENTRY-003: The stale-entry sweep cancels ONLY the proposal's parent
+  entry leg, identified on a fresh, COMPLETE broker book by its
+  `<id>:entry` orderRef, under the global order lock, broker-confirmed
+  (`confirmCancel`); a 'filled' / 'not-cancellable' outcome leaves the
+  children (the position's protection) untouched and the tracker owns the
+  position; an incomplete book cancels nothing; expiry and zombie
+  candidates are deduplicated so a row is never raced against itself.
+- REQ-TRAIL-003: Runner-mode release candidates are Dexter-owned LMTs whose
+  ref names a TARGET leg (`:tp` / `:tp2`); a Dexter-owned `reduce-`/`close-`
+  limit is never a candidate; the protection check requires a Dexter-owned
+  STOP leg (`:stop` / `:stop2`).
+- REQ-VAL-006: The gateway persists a marked NetLiq series (15-minute
+  samples, `equity-series.jsonl`); the scorecard's drawdown criterion is
+  the peak-to-trough of that series over the window, ≤ 2 × live
+  `max_daily_loss_pct`, NOT EVALUABLE unless every trade-close day carries
+  a sample. Closed-trade drawdown becomes informational.
+- REQ-VAL-007: The frozen epoch NetLiq must sit inside ±10% of the
+  $11,700 live target; outside the band the verdict fails (a generic
+  upper bound accepted $49K or $4K samples).
+- REQ-VAL-008: Every verdict criterion is computed over the DEPLOYABLE
+  classes (intraday + swing); shadow-only earnings bets are reported in
+  their own section and never carry the aggregate.
+- REQ-VAL-009: The expectancy bootstrap clusters trades by ENTRY cohort
+  (entry-filled day), falling back to close day only for rows without an
+  entry stamp (reported).
+
 ## Invariants
 
 - No change weakens the paper/live locks: `assertPaperOnly` and
@@ -212,3 +240,15 @@ Operator actions still open (the code cannot do these):
 | REQ-VAL-002 | gate suite "record carried by gap-snap inference is refused" |
 | REQ-VAL-003 | `src/utils/day-bootstrap.test.ts` |
 | REQ-VAL-005 | doc change (USER-MANUAL §19, handbook README), no test |
+| REQ-ENTRY-003 | `stale-entry-sweeper.test.ts` — `selectEntryLegToCancel` (parent-only, identity, incomplete-view refusal); cancel/lock/confirm wiring reuses proven primitives |
+| REQ-TRAIL-003 | `profit-trail.test.ts` — "Dexter-owned LMT that is not a TARGET leg" |
+| REQ-VAL-006 | `equity-series.test.ts` (`portfolioDrawdown`, parse); scorecard smoke-run (criterion + coverage) |
+| REQ-VAL-007/008/009 | scorecard smoke-run (pinned evaluator) |
+
+Open items recorded 2026-08-23 (operator decisions / backlog, not code
+defects): broker-side GTD entry deadline (the safe sweeper stands in;
+GTD needs a live-verified `goodTillDate` format); continuous kill-switch
+guardian; EOD keep-by-default vs flat-by-close (a strategy decision the
+operator ratified 2026-08-22 and may wish to revisit under the "profit as
+surely as possible" lens); `take_atr_mult` sits at the reachability cap by
+design — tune only from the sample's MFE evidence.

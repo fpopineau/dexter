@@ -172,6 +172,37 @@ describe('runner mode direction mapping (shorts covered)', () => {
         expect(d.blockedReason).toBeNull();
     });
 
+    test('a Dexter-owned LMT that is not a TARGET leg is never a candidate (REQ-TRAIL-003)', async () => {
+        const { decideTargetRelease } = await import('./profit-trail.js');
+        // An agent-authorized reduction limit shares the position's exit side
+        // and our ownership — it is not the bracket target and must survive.
+        const d = decideTargetRelease([
+            { orderId: 30, orderType: 'LMT', orderRef: 'reduce-XYZ' },
+            { orderId: 31, orderType: 'LMT', orderRef: 'P-9F04:tp' },
+            { orderId: 32, orderType: 'STP', orderRef: 'P-9F04:stop' },
+        ]);
+        expect(d.cancelIds).toEqual([31]);
+        expect(d.foreignRefs).toEqual([]); // ours — just not a target
+        // Only a reduce- limit and our stop: no target to release at all.
+        const onlyReduce = decideTargetRelease([
+            { orderId: 33, orderType: 'LMT', orderRef: 'reduce-XYZ' },
+            { orderId: 34, orderType: 'STP', orderRef: 'P-9F05:stop' },
+        ]);
+        expect(onlyReduce.blockedReason).toBe('no-targets');
+        // The WP2 resized pair (:tp2/:stop2) is recognized on both sides.
+        const resized = decideTargetRelease([
+            { orderId: 35, orderType: 'LMT', orderRef: 'P-9F06:tp2' },
+            { orderId: 36, orderType: 'STP', orderRef: 'P-9F06:stop2' },
+        ]);
+        expect(resized.cancelIds).toEqual([35]);
+        // A reduce- STP is not bracket protection: release stays blocked.
+        const reduceStop = decideTargetRelease([
+            { orderId: 37, orderType: 'LMT', orderRef: 'P-9F07:tp' },
+            { orderId: 38, orderType: 'STP', orderRef: 'reduce-XYZ' },
+        ]);
+        expect(reduceStop.blockedReason).toBe('no-own-stop');
+    });
+
     test('no surviving Dexter STP leg blocks the release entirely (REQ-TRAIL-002)', async () => {
         const { decideTargetRelease } = await import('./profit-trail.js');
         // Our target but only a FOREIGN stop: releasing would hand protection
