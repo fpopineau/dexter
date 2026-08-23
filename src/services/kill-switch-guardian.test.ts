@@ -1,22 +1,33 @@
 import { describe, expect, test } from 'bun:test';
-import { decideGuardianStep } from './kill-switch-guardian.js';
+import { decideGuardianStep, FAILSAFE_PERSIST_TICKS } from './kill-switch-guardian.js';
 
-describe('kill-switch guardian (review 2026-08-23 — continuous observation IS enforcement)', () => {
-    test('a LATCHED halt is handled exactly once per ET day', () => {
-        expect(decideGuardianStep({ halted: true, latched: true }, null, '2026-08-24')).toBe('handle');
-        expect(decideGuardianStep({ halted: true, latched: true }, '2026-08-24', '2026-08-24')).toBe('none');
-        // A new day with a new latch handles again.
-        expect(decideGuardianStep({ halted: true, latched: true }, '2026-08-24', '2026-08-25')).toBe('handle');
+describe('kill-switch guardian (review 2026-08-23 — cleanup repeats until the book is clean)', () => {
+    const D = '2026-08-24';
+
+    test('a LATCHED halt alerts once per ET day but cleans up EVERY tick', () => {
+        const latched = { halted: true, latched: true };
+        expect(decideGuardianStep(latched, null, D, 0)).toEqual({ alert: true, cleanup: true });
+        // Same day, already alerted: no second alert — cleanup continues
+        // (the old one-shot marked the day handled before cancels landed).
+        expect(decideGuardianStep(latched, D, D, 0)).toEqual({ alert: false, cleanup: true });
+        // A new day's latch alerts again.
+        expect(decideGuardianStep(latched, D, '2026-08-25', 0)).toEqual({ alert: true, cleanup: true });
     });
 
-    test('halted-but-NOT-latched (unverifiable P&L, missing FX) never cancels working orders', () => {
-        // The gates already refuse new risk on this status; stripping working
-        // entries on a broker hiccup would turn an outage into forced churn.
-        expect(decideGuardianStep({ halted: true, latched: false }, null, '2026-08-24')).toBe('none');
-        expect(decideGuardianStep({ halted: true }, null, '2026-08-24')).toBe('none');
+    test('a TRANSIENT unverifiable account never cancels; a PERSISTENT one does', () => {
+        const failsafe = { halted: true, latched: false };
+        // One hiccup — the gates already refuse new risk; stripping working
+        // orders on a 60-second outage would turn a hiccup into churn.
+        expect(decideGuardianStep(failsafe, null, D, 1)).toEqual({ alert: false, cleanup: false });
+        expect(decideGuardianStep(failsafe, null, D, FAILSAFE_PERSIST_TICKS - 1)).toEqual({ alert: false, cleanup: false });
+        // Persistently unverifiable: pending entries are FUTURE RISK on an
+        // account whose losses cannot be observed — clean them up.
+        expect(decideGuardianStep(failsafe, null, D, FAILSAFE_PERSIST_TICKS)).toEqual({ alert: true, cleanup: true });
+        expect(decideGuardianStep(failsafe, D, D, FAILSAFE_PERSIST_TICKS + 3)).toEqual({ alert: false, cleanup: true });
     });
 
     test('healthy status does nothing', () => {
-        expect(decideGuardianStep({ halted: false }, null, '2026-08-24')).toBe('none');
+        expect(decideGuardianStep({ halted: false }, null, D, 0)).toEqual({ alert: false, cleanup: false });
+        expect(decideGuardianStep({ halted: false }, D, D, 99)).toEqual({ alert: false, cleanup: false });
     });
 });

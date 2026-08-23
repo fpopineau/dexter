@@ -206,8 +206,28 @@ describe('resize timeout fails CLOSED (review 2026-08-21 round 3)', () => {
 
 describe('manual-exit attribution allocates by quantity (WP2)', () => {
     test('a 10-share close cannot pay P&L on 15 shares of proposals', async () => {
-        const a = await trackedProposal('WPE', 10, 100);
-        const b = await trackedProposal('WPE', 5, 104); // >2% apart: clears the dup gate
+        // One-thesis-per-symbol (2026-08-23) forbids CREATING a stack, but
+        // stacked rows still exist in the wild (near-simultaneous accepts,
+        // legacy data) — the tracker's allocation must stay honest on them.
+        // Build the stack the only way production can: both rows created
+        // while OPEN (the guard checks working rows), then both executed.
+        const mk = async (qty: number, entry: number) => createProposal({
+            symbol: 'WPE', direction: 'long', entryType: 'LMT', entry,
+            stop: Math.round(entry * 0.975 * 100) / 100,
+            target: Math.round(entry * 1.06 * 100) / 100,
+            quantity: qty, rationale: 'partial-fill scenario', source: 'test',
+        }, { dailyAtr: 0.04 * entry });
+        const pa = await mk(10, 100);
+        const pb = await mk(5, 104);
+        const exec = async (p: { id: string }) => {
+            const ids = [seq++, seq++, seq++];
+            await setProposalStatus(p.id, 'executed', { orderIds: ids, executedAt: Date.now() });
+            const row = await getProposal(p.id);
+            trackExecutedProposal(row!);
+            return { id: p.id, entryId: ids[0], tpId: ids[1], stopId: ids[2] };
+        };
+        const a = await exec(pa);
+        const b = await exec(pb);
         __handleOrderStatusForTests(a.entryId, 'Filled', 10, 0, 100);
         __handleOrderStatusForTests(b.entryId, 'Filled', 5, 0, 104);
         await sleep(20);

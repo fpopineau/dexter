@@ -294,12 +294,68 @@ Operator actions still open (the code cannot do these):
 | REQ-EOD-003 | `eod-triage.test.ts` — gap-stress suite |
 | REQ-TRAIL-004 | `profit-trail.test.ts` — bracket-atomic suite |
 
-Open items recorded 2026-08-23 (operator decisions / backlog, not code
-defects): broker-side GTD entry deadline (the safe sweeper stands in;
-GTD needs a live-verified `goodTillDate` format); EOD keep-by-default vs
-flat-by-close (operator decision, "surely as possible" lens); account
-separation for shadow bets vs the NetLiq caveat; sector/index correlated
-stress; same-symbol stacking prevention (the trail now refuses stacked
-releases; the close already refuses non-atomic books); chase continuation
-stays default-on by operator decision; `take_atr_mult` tunes only from
-the sample's MFE evidence.
+### Review-15 response (2026-08-23 night, append-only)
+
+Operator-directed policy (the conversion question, "profit as surely as
+possible"):
+- REQ-EOD-004: intraday is FLAT BY CLOSE — `decideEodAction` closes every
+  DAY position at 15:52; the momentum-keep is deleted. The only overnight
+  path is the explicit pre-bell `keep SYMBOL` (earnings guard, whole-book
+  vet and gap-stress still apply); a planned overnight is a swing.
+- REQ-PROP-001: ONE ACTIVE THESIS PER SYMBOL — any working row (entry
+  working or filled, adopted included) refuses a new proposal on the
+  symbol; amendments replace (`cancel` then re-propose). Replaces the 2%
+  duplicate tolerance.
+- Chase continuation defaults OFF (`CHASE_CONTINUATION=true` re-enables).
+- First-tranche live risk halved in the REVIEW-marked yaml: 0.5%
+  intraday / 0.75% swing / 0.5% bet budgets, 1.5% daily stop.
+
+Review findings:
+- REQ-GUARD-002 (P1): guardian cleanup repeats EVERY tick until the
+  working-entry book is empty (alert stays once/day); startup tick;
+  overlap guard; a fail-safe halted state persisting ≥5 min cleans up too
+  (a transient hiccup never strips orders).
+- REQ-EOD-005 (P1): the gap-stress vet covers the WHOLE surviving book —
+  conversions AND deliberate GTC positions (market-marked, cost-basis
+  fallback on a data hiccup, never fail-closed-closing a swing on missing
+  bars); earnings bets counted at max(own worst gap, base stress), never
+  trimmed. The same stress also gates GTC ACCEPTANCE.
+- REQ-LOCK-001 (P1): snapshot→decision→mutation hold the global order
+  lock in the trail release AND in closePosition (probe + OCA-join +
+  placement inside one lock; refusals surface from the closure).
+- REQ-VAL-013 (P1): every ENABLED class — bets included the day their
+  flag flips — is scored in the main loop against n≥30, net>0, PF≥1.3
+  and a positive entry-cohort LCB; shadow-only classes report PER CLASS
+  against the same bar; the '~10-trade' texts are gone.
+- REQ-VAL-014 (P1): cohort completeness — the verdict refuses while any
+  in-cohort trade remains open (right-censoring).
+- REQ-VAL-015 (P1): coverage spans the EXTENDED session (04:00–20:00 ET)
+  with a 20-min max gap; the drawdown curve is epoch-seeded and adjusted
+  by realized shadow-class P&L.
+- REQ-VAL-016 (P1): `swing_enabled: false` in the live config — every
+  class beyond intraday is fail-closed until its own shadow record
+  passes; the shadow deviation force-enables BOTH classes on paper so the
+  records accrue.
+- REQ-TRAIL-005 (P2): release requires the ENTIRE Dexter exit book to be
+  exactly one coherent pair — same ref base/generation, same OCA group,
+  same account, stop quantity covering the position (unknowns fail
+  closed); ANY foreign exit-side order blocks (round-10 close doctrine).
+
+| REQ | Test |
+|---|---|
+| REQ-EOD-004 | `eod-triage.test.ts` — flat-by-close suite |
+| REQ-PROP-001 | `trade-proposals.test.ts` — one-active-thesis test |
+| REQ-GUARD-002 | `kill-switch-guardian.test.ts` — decideGuardianStep matrix |
+| REQ-EOD-005 | `eod-triage.test.ts` gap-stress (trimExempt/stress-override paths); `proposal-risk-gate.test.ts` acceptance-stress |
+| REQ-LOCK-001 | close-lifecycle suite green under the restructure (lock composition is structural) |
+| REQ-VAL-013..016 | scorecard smoke-run; `equity-series.test.ts` extended-session coverage; `risk-rules-profile.test.ts` dual deviation |
+| REQ-TRAIL-005 | `profit-trail.test.ts` — pair-identity suites |
+
+Open items (backlog, not code defects): broker-side GTD entry deadline
+(the safe sweeper stands in; enforcement is absent while the gateway is
+down — GTD needs a live-verified `goodTillDate` format); dedicated
+account or deployable-only marked ledger for shadow classes (the
+realized-P&L adjustment closes the biggest hole; unrealized in-flight
+distortion is bounded and recorded); sector/index correlated stress;
+market-calendar-aware coverage (holidays/half-days can false-flag);
+`take_atr_mult` tunes only from the sample's MFE evidence.

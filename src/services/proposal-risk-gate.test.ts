@@ -830,11 +830,14 @@ describe('overnight caps (GTC proposals — formerly phantom)', () => {
     });
 
     test('the total overnight book cap refuses stacking past max_overnight_exposure_pct', () => {
+        // Stress zeroed here: this test isolates the NOTIONAL cap (the
+        // gap-stress criterion binds far earlier and has its own test).
+        const NOSTRESS = { ...RULES, overnight_gap_stress_pct: 0 };
         // $2,500 new + $28,000 already surviving the close > 30% ($30,000).
         const r = checkProposalRisk(
             longProposal({ quantity: 25, tif: 'GTC' }),
             { netLiquidation: 100_000, overnightExposureUsd: 28_000 },
-            RULES,
+            NOSTRESS,
         );
         expect(r.ok).toBe(false);
         expect(r.violations.join(' ')).toContain('overnight book cap');
@@ -842,7 +845,7 @@ describe('overnight caps (GTC proposals — formerly phantom)', () => {
         const ok = checkProposalRisk(
             longProposal({ quantity: 25, tif: 'GTC' }),
             { netLiquidation: 100_000, overnightExposureUsd: 27_000 },
-            RULES,
+            NOSTRESS,
         );
         expect(ok.ok).toBe(true);
     });
@@ -1259,5 +1262,25 @@ describe('take-at-x% policy (WP-EXIT — the intraday target IS the take level)'
         const r = checkProposalRisk(base({ target: 105 }), { dailyAtr: 4 }, RULES);
         expect(r.ok).toBe(true);
         expect(r.takePct).toBeNull();
+    });
+});
+
+describe('acceptance-time gap stress (review 2026-08-23 — the GTC book is bounded by LOSS)', () => {
+    test('a GTC accept whose stressed book exceeds one daily-loss budget is refused', () => {
+        // Budget: 2% of 100k = $2,000. Stressed: (2,500 + 8,000) × 20% = $2,100.
+        const r = checkProposalRisk(
+            longProposal({ quantity: 25, tif: 'GTC' }),
+            { netLiquidation: 100_000, overnightExposureUsd: 8_000 },
+            RULES,
+        );
+        expect(r.ok).toBe(false);
+        expect(r.violations.join(' ')).toContain('adverse overnight gap');
+        // Inside the budget: (2,500 + 7,000) × 20% = $1,900 ≤ $2,000 → passes.
+        const ok = checkProposalRisk(
+            longProposal({ quantity: 25, tif: 'GTC' }),
+            { netLiquidation: 100_000, overnightExposureUsd: 7_000 },
+            RULES,
+        );
+        expect(ok.ok).toBe(true);
     });
 });

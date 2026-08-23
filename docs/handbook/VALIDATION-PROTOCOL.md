@@ -19,10 +19,19 @@ positive expectancy after costs, not improved loss control.
   2026-08-22): the paper account is reset to ≈$11,700 (≈€10K, the live
   target) and runs `risk-rules.live.yaml` via `DEXTER_RISK_PROFILE=live`
   — the validation trades the exact live policy at the live scale, so no
-  cross-profile extrapolation survives in the evaluator. ONE documented
-  deviation: `earnings_bet_enabled` is forced true in shadow so the
-  class keeps building its per-class record (criterion 5 still keeps it
-  paper-only after go-live until its own ≥30-trade record passes).
+  cross-profile extrapolation survives in the evaluator. TWO documented
+  deviations (2026-08-23): the fail-closed class switches
+  (`swing_enabled`, `earnings_bet_enabled` — false in the live config
+  until each class's own ≥30-trade record passes) are forced TRUE in
+  shadow, on a paper account only, so those records can accrue.
+- **Frozen policy additions (operator, 2026-08-23)**: intraday is FLAT BY
+  CLOSE — the momentum-keep is gone; the only overnight path for an
+  intraday position is the explicit pre-bell `keep SYMBOL` (still subject
+  to the earnings guard, the whole-book overnight vet and the gap-stress
+  budget), and a planned overnight is a swing proposal. One active thesis
+  per symbol (any working row refuses a new proposal). Chase continuation
+  defaults OFF. The whole surviving book — conversions AND deliberate GTC
+  positions — is gap-stress vetted at the bell and at GTC acceptance.
 - **The judgment policy freezes too** (review 2026-08-21): the runtime
   model/provider settings are pinned at tag time and recorded in the
   validation journal; every proposal stamps its `model` column, and the
@@ -135,20 +144,28 @@ isolate unconditionally with a temp-dir-only guard, REQ-TEST-001.)
    commission trade P&L.
 4. **Portfolio drawdown inside the live math**: the worst peak-to-trough
    of MARKED NetLiq (the gateway's 5-minute equity series, SEEDED with the
-   frozen epoch NetLiq so a loss before the first sample cannot vanish)
-   must not exceed 2× the live `max_daily_loss_pct` — with the series
-   proving it WATCHED every exposure interval (first/last-sample and
-   max-gap requirements inside each exposed RTH window; violations make
-   the criterion NOT EVALUABLE). Closed-trade drawdown is informational
-   only. Recorded caveat: NetLiq marks the whole account — shadow-bet P&L
-   rides inside it, bounded by the 1-bet/1%-budget cap; account separation
-   stays on the live-gate backlog.
+   frozen epoch NetLiq so a loss before the first sample cannot vanish,
+   and ADJUSTED by cumulative realized shadow-class P&L so an experimental
+   winner cannot mask a deployable trough) must not exceed 2× the live
+   `max_daily_loss_pct` — with the series proving it WATCHED every
+   exposure interval across the EXTENDED session (04:00–20:00 ET, where
+   overnight gaps materialize; first/last-sample and 20-minute max-gap
+   requirements; violations make the criterion NOT EVALUABLE).
+   Closed-trade drawdown is informational only. Recorded caveat:
+   unrealized in-flight shadow-bet distortion remains, bounded by the
+   1-bet budget cap; account separation stays on the live-gate backlog.
 5. **Class discipline (enforced via config)**: every class ENABLED in
-   `risk-rules.live.yaml` must clear its own floor — ≥30 trades AND
-   net-positive — or the verdict FAILS; the remedy is disabling the class
-   (`swing_enabled` / `earnings_bet_enabled`, which the gate enforces) or
-   collecting more. Earnings bets earn their enable decision on their own
-   ≥30-trade shadow record.
+   `risk-rules.live.yaml` must clear its own floor — ≥30 trades,
+   net-positive, profit factor ≥ 1.3 AND a positive entry-cohort
+   bootstrap LCB — or the verdict FAILS; the remedy is disabling the
+   class (`swing_enabled` / `earnings_bet_enabled`, which the gate
+   enforces) or collecting more. Disabled classes earn their enable
+   decision on their own shadow record against the SAME bar, reported
+   per class, flipped only by a deliberate journal-recorded operator act.
+6. **Cohort completeness (no right-censoring)**: the FINAL evaluation
+   freezes intake and refuses to PASS while any in-cohort trade (entered
+   inside the window, still working) remains open — a closed-only sample
+   can reach 100 winners while the slow losers sit open and excluded.
 
 **Hypothesis, not fix.** The take-at-x% exit policy that freezes with this
 sample is an explicit experimental hypothesis ("better now than later",

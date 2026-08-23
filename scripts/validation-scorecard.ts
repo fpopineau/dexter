@@ -473,7 +473,21 @@ try {
     const seeded = epochNetliq !== null
         ? [{ ts: sinceMs, netLiq: epochNetliq }, ...series.filter((s) => s.ts > sinceMs)]
         : series;
-    const pdd = portfolioDrawdown(seeded, sinceMs);
+    // Shadow-adjusted (review 2026-08-23): account NetLiq carries the
+    // shadow-only classes' REALIZED P&L — nine fat bet winners could mask a
+    // deployable drawdown. Subtract their cumulative realized net (a step
+    // function at each shadow close); unrealized in-flight distortion is
+    // bounded by the 1-bet budget cap and recorded in the protocol.
+    const shadowSteps = shadowOnlyRows
+        .map((r) => ({ ts: r.closed_at, net: net(r) }))
+        .sort((a, b) => a.ts - b.ts);
+    const shadowNetBefore = (ts: number) => {
+        let sum = 0;
+        for (const s of shadowSteps) { if (s.ts <= ts) sum += s.net; else break; }
+        return sum;
+    };
+    const adjusted = seeded.map((s) => ({ ts: s.ts, netLiq: s.netLiq - shadowNetBefore(s.ts) }));
+    const pdd = portfolioDrawdown(adjusted, sinceMs);
     if (!pdd || pdd.samples <= (epochNetliq !== null ? 1 : 0)) {
         seriesLine = 'portfolio drawdown: NOT EVALUABLE — no equity samples inside the window (is the gateway sampler running?)';
         verdictFails.push('portfolio drawdown not evaluable (no equity samples in window)');
@@ -503,7 +517,7 @@ try {
         // the distortion to a fraction of the 6% bar; separating accounts is
         // on the live-gate backlog.
         if (shadowOnlyRows.length > 0) {
-            seriesLine += `\n  note: account-level NetLiq includes shadow-only earnings-bet P&L (bounded by the 1-bet/1%-budget cap)`;
+            seriesLine += `\n  note: curve adjusted by −$${shadowNetBefore(Number.POSITIVE_INFINITY).toFixed(0)} cumulative REALIZED shadow-class P&L; unrealized in-flight distortion is bounded by the 1-bet budget cap (recorded caveat)`;
         }
     }
 } catch {
@@ -518,47 +532,90 @@ let equity = 0, peak = 0, maxDd = 0;
 for (const v of nets) { equity += v; if (equity > peak) peak = equity; maxDd = Math.max(maxDd, peak - equity); }
 console.log(`closed-trade drawdown ${maxDd.toFixed(2)}${paperNetliq !== null ? ` = ${((maxDd / paperNetliq) * 100).toFixed(2)}% of epoch NetLiq` : ''} (informational — the portfolio series is the criterion)`);
 
-// Per-class discipline (REQ-VAL-011): "below 10 stays paper-only" was
-// TEXT — nothing failed the verdict or disabled the class. Now every
-// live-ENABLED class must clear its own floor (n >= 30, net > 0) or the
-// verdict FAILS: disable the class in risk-rules.live.yaml (the verdict's
-// scope follows the flags) or keep collecting.
-console.log(`\nper-class (every ENABLED class needs n>=${MIN_TRADES_PER_ENABLED_CLASS} and net>0 on its own):`);
+// Per-class discipline (REQ-VAL-011, tightened review 2026-08-23):
+// EVERY live-ENABLED class — earnings bets included the day their flag
+// flips — must clear its own pre-registered floor: n >= 30, net > 0,
+// PF >= 1.3, AND a positive entry-cohort bootstrap LCB ("30 trades and
+// net positive" passes at +$1 or on one outlier; a class-level expectancy
+// claim needs a class-level bound). Otherwise the verdict FAILS: disable
+// the class in risk-rules.live.yaml or keep collecting.
+console.log(`\nper-class (every ENABLED class: n>=${MIN_TRADES_PER_ENABLED_CLASS}, net>0, PF>=1.3, cohort LCB>0):`);
 const byClass = new Map<string, Row[]>();
 for (const r of rows) {
     const k = r.trade_class ?? 'intraday';
     (byClass.get(k) ?? byClass.set(k, []).get(k)!).push(r);
 }
 for (const cls of DEPLOYABLE_CLASSES) {
-    if (cls === 'earnings-bet') continue; // shadow section below owns its record
     const rs = byClass.get(cls) ?? [];
     const t = rs.reduce((s, r) => s + net(r), 0);
     const enough = rs.length >= MIN_TRADES_PER_ENABLED_CLASS;
-    const pass = enough && t > 0;
-    console.log(`  ${cls}: n=${rs.length} net ${t.toFixed(2)} ${pass ? 'PASS' : 'FAIL'}${enough ? '' : ` (n < ${MIN_TRADES_PER_ENABLED_CLASS} — an ENABLED class without its own record cannot go live: disable it or keep collecting)`}`);
+    const clsWins = rs.map(net).filter((v) => v > 0).reduce((s, v) => s + v, 0);
+    const clsLosses = Math.abs(rs.map(net).filter((v) => v < 0).reduce((s, v) => s + v, 0));
+    const clsPf = clsLosses > 0 ? clsWins / clsLosses : Infinity;
+    const clsDays = new Map<string, number[]>();
+    for (const r of rs) {
+        const day = etDayOf(r.entry_filled_at ?? r.closed_at);
+        (clsDays.get(day) ?? clsDays.set(day, []).get(day)!).push(net(r));
+    }
+    const clsBoot = dayBlockBootstrapLcb(clsDays);
+    const pass = enough && t > 0 && clsPf >= 1.3 && clsBoot !== null && clsBoot.lcb > 0;
+    console.log(
+        `  ${cls}: n=${rs.length} net ${t.toFixed(2)} PF ${Number.isFinite(clsPf) ? clsPf.toFixed(2) : '∞'} ` +
+        `LCB ${clsBoot ? clsBoot.lcb.toFixed(2) : 'n/a'} ${pass ? 'PASS' : 'FAIL'}` +
+        `${enough ? '' : ` (n < ${MIN_TRADES_PER_ENABLED_CLASS} — an ENABLED class without its own record cannot go live: disable it or keep collecting)`}`,
+    );
     if (!pass) {
         verdictFails.push(enough
-            ? `class ${cls} net ${t.toFixed(2)} <= 0 at n=${rs.length}`
+            ? `class ${cls} fails its own bar (net ${t.toFixed(2)}, PF ${Number.isFinite(clsPf) ? clsPf.toFixed(2) : '∞'}, LCB ${clsBoot ? clsBoot.lcb.toFixed(2) : 'not evaluable'}) at n=${rs.length}`
             : `class ${cls} enabled but under-sampled (n=${rs.length} < ${MIN_TRADES_PER_ENABLED_CLASS}) — disable it in risk-rules.live.yaml or keep collecting`);
     }
 }
 
-// Shadow-only classes (REQ-VAL-008): earnings bets run in shadow-live only
-// to build the per-class record the live enable decision needs. They are
-// NEVER in the verdict above — a profitable experimental class must not
-// carry a negative deployable book, and an unprofitable one must not sink
-// it. Their own bar: the protocol's class discipline (≥10 trades, net>0).
+// Right-censoring (review 2026-08-23 P1): a closed-only sample can reach
+// 100 winners while slow losers sit open and excluded. The FINAL verdict
+// refuses while any in-cohort trade (entered inside the window, still
+// working) remains unresolved — freeze intake, wait, then evaluate.
+const openInCohort = db.query<{ c: number }>(`
+    SELECT COUNT(*) AS c FROM proposals
+    WHERE status IN ('executing', 'executed') AND created_at >= ?
+      AND source NOT IN ('adopted', 'test', 'smoke')
+`).all(sinceMs)[0]?.c ?? 0;
+if (openInCohort > 0) {
+    console.log(`\ncohort completeness: ${openInCohort} in-cohort trade(s) still OPEN — the closed-trade sample is right-censored; a final PASS must wait for them`);
+    verdictFails.push(`${openInCohort} in-cohort trade(s) still open (right-censored sample)`);
+} else {
+    console.log('\ncohort completeness: no in-cohort trades open — sample not right-censored');
+}
+
+// Shadow-only classes (REQ-VAL-008): classes DISABLED in the live config
+// trade in shadow only to build the record their enable decision needs.
+// Never in the verdict — a profitable experimental class must not carry a
+// negative deployable book, nor sink it. Reported PER CLASS (review
+// 2026-08-23: never lump all disabled classes under one label), each
+// against the SAME bar an enabled class faces: n>=30, net>0, PF>=1.3.
 if (shadowOnlyRows.length > 0) {
-    const bNets = shadowOnlyRows.map(net);
-    const bTotal = bNets.reduce((s, v) => s + v, 0);
-    const bWins = bNets.filter((v) => v > 0), bLosses = bNets.filter((v) => v < 0);
-    const bPf = bLosses.length ? bWins.reduce((s, v) => s + v, 0) / Math.abs(bLosses.reduce((s, v) => s + v, 0)) : Infinity;
-    console.log(
-        `\nshadow-only earnings-bet record (NOT in the verdict): n=${shadowOnlyRows.length} net ${bTotal.toFixed(2)} ` +
-        `expectancy ${(bTotal / shadowOnlyRows.length).toFixed(2)} PF ${Number.isFinite(bPf) ? bPf.toFixed(2) : '∞'} ` +
-        `win ${(100 * bWins.length / shadowOnlyRows.length).toFixed(1)}% — ` +
-        `${shadowOnlyRows.length >= 10 ? (bTotal > 0 ? 'class record POSITIVE at n>=10 (live enable is a separate operator decision)' : 'class record NEGATIVE at n>=10 — stays disabled') : 'below 10 trades — class stays live-disabled regardless'}`,
-    );
+    const byShadowClass = new Map<string, Row[]>();
+    for (const r of shadowOnlyRows) {
+        const k = r.trade_class ?? 'intraday';
+        (byShadowClass.get(k) ?? byShadowClass.set(k, []).get(k)!).push(r);
+    }
+    for (const [cls, rs] of byShadowClass) {
+        const bNets = rs.map(net);
+        const bTotal = bNets.reduce((s, v) => s + v, 0);
+        const bWins = bNets.filter((v) => v > 0), bLosses = bNets.filter((v) => v < 0);
+        const bPf = bLosses.length ? bWins.reduce((s, v) => s + v, 0) / Math.abs(bLosses.reduce((s, v) => s + v, 0)) : Infinity;
+        const barMet = rs.length >= MIN_TRADES_PER_ENABLED_CLASS && bTotal > 0 && bPf >= 1.3;
+        console.log(
+            `\nshadow-only ${cls} record (NOT in the verdict): n=${rs.length} net ${bTotal.toFixed(2)} ` +
+            `expectancy ${(bTotal / rs.length).toFixed(2)} PF ${Number.isFinite(bPf) ? bPf.toFixed(2) : '∞'} ` +
+            `win ${(100 * bWins.length / rs.length).toFixed(1)}% — ` +
+            `${barMet
+                ? 'class bar MET (enable is a deliberate operator flag flip, recorded in the journal — never automatic)'
+                : rs.length >= MIN_TRADES_PER_ENABLED_CLASS
+                    ? 'class bar NOT met — stays disabled'
+                    : `below ${MIN_TRADES_PER_ENABLED_CLASS} trades — stays disabled regardless`}`,
+        );
+    }
 }
 
 // Per-lane split (informational)

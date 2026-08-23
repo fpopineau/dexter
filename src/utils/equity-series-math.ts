@@ -80,18 +80,23 @@ export function etIsWeekday(ts: number): boolean {
  * Exposure coverage (review 2026-08-23 P1): "one sample on every close day"
  * certified a series that could sleep through the whole holding period and
  * wake after the recovery. For every ET WEEKDAY inside any exposure
- * interval, the series must prove it was WATCHING: a sample at/before
- * 10:00 ET, a sample at/after 15:30 ET, and no intra-RTH gap over
- * `maxGapMin`. Returns human-readable violations (empty = covered).
- * Half-session days can flag the 15:30 requirement — operator judgment,
- * better a false flag than a certified blind spot.
+ * interval, the series must prove it was WATCHING the whole EXTENDED
+ * session (04:00–20:00 ET — overnight gaps materialize at 04:00, exactly
+ * where RTH-only coverage was blind): samples near both edges of the
+ * exposed window and no gap over `maxGapMin` (default 20 min against the
+ * 5-min sampler). Returns human-readable violations (empty = covered).
+ * Holidays/half-days can false-flag — operator judgment; better a false
+ * flag than a certified blind spot.
  */
 export function exposureCoverageGaps(
     series: EquitySample[],
     intervals: Array<{ from: number; to: number; label: string }>,
-    maxGapMin = 60,
+    maxGapMin = 20,
 ): string[] {
-    const RTH_OPEN = 9 * 60 + 30, RTH_CLOSE = 16 * 60;
+    // Equity can move 04:00-20:00 ET (extended hours) — overnight gap risk
+    // materializes AT 04:00, so coverage owes the whole extended session
+    // (review 2026-08-23: RTH-only coverage never observed the gap).
+    const RTH_OPEN = 4 * 60, RTH_CLOSE = 20 * 60;
     const fmt = (m: number) => `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`;
     // Per exposed weekday: the merged RTH sub-window the series must cover,
     // CLIPPED to the actual exposure (an entry at 14:50 does not owe the

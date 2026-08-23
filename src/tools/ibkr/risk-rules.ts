@@ -503,13 +503,17 @@ export function isShadowLive(): boolean {
 }
 
 /** Public accessor for the risk rules (active profile). In shadow-live the
- *  single documented deviation applies (REQ-SHADOW-002): earnings bets stay
- *  enabled — the live profile locks them out until the class has a record,
- *  and the shadow run is precisely where that record accrues. */
+ *  TWO documented deviations apply (REQ-SHADOW-002, extended review
+ *  2026-08-23): the live profile keeps every unvalidated class DISABLED
+ *  (fail-closed — a scorecard is a report, not a runtime authorization),
+ *  and the shadow run is precisely where those classes must trade to build
+ *  the ≥30-trade records that justify enabling them. Forcing the class
+ *  switches on here, on a PAPER account only, resolves that circularity;
+ *  the go-live verdict still scores only the yaml-enabled classes. */
 export function getRiskRules(): RiskRules {
     const rules = loadRules(activeProfile);
-    if (shadowMode && activeProfile === 'live' && !rules.earnings_bet_enabled) {
-        return { ...rules, earnings_bet_enabled: true };
+    if (shadowMode && activeProfile === 'live' && (!rules.earnings_bet_enabled || !rules.swing_enabled)) {
+        return { ...rules, earnings_bet_enabled: true, swing_enabled: true };
     }
     return rules;
 }

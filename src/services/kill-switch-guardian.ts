@@ -43,51 +43,89 @@ export function isGuardianEnabled(): boolean {
     return (process.env.KILL_SWITCH_GUARDIAN ?? 'true').trim().toLowerCase() !== 'false';
 }
 
-/** Pure: what this tick should do. Handles once per ET day — the halt is
- *  daily and re-alerting every minute is noise, not safety. */
-export function decideGuardianStep(
-    status: { halted: boolean; latched?: boolean },
-    handledDay: string | null,
-    today: string,
-): 'handle' | 'none' {
-    if (!status.halted || status.latched !== true) return 'none';
-    return handledDay === today ? 'none' : 'handle';
+/** Consecutive fail-safe (halted-but-unlatched) observations before the
+ *  guardian treats an UNVERIFIABLE account like a latch for entry cleanup
+ *  (review 2026-08-23: pending entries are future risk — but a single
+ *  30-second broker hiccup must not strip working orders). 5 × 60s. */
+export const FAILSAFE_PERSIST_TICKS = 5;
+
+export interface GuardianStep {
+    /** Send the once-per-day alert. */
+    alert: boolean;
+    /** Attempt entry-parent cleanup THIS tick. Cleanup repeats every tick
+     *  until the working-entry book is empty (review 2026-08-23 P1: the
+     *  old one-shot marked the day handled BEFORE cancels succeeded — a
+     *  timeout left a resting entry free to fill after the halt). */
+    cleanup: boolean;
 }
 
-let handledDay: string | null = null;
+/** Pure: what this tick should do. Alerting is once per ET day (noise);
+ *  cleanup is EVERY tick while the halt condition stands and entries may
+ *  remain — idempotent by construction (an empty book cancels nothing). */
+export function decideGuardianStep(
+    status: { halted: boolean; latched?: boolean },
+    alertedDay: string | null,
+    today: string,
+    unverifiedStreak: number,
+): GuardianStep {
+    const latched = status.halted && status.latched === true;
+    const persistentFailsafe = status.halted && status.latched !== true && unverifiedStreak >= FAILSAFE_PERSIST_TICKS;
+    if (!latched && !persistentFailsafe) return { alert: false, cleanup: false };
+    return { alert: alertedDay !== today, cleanup: true };
+}
+
+let alertedDay: string | null = null;
+let unverifiedStreak = 0;
+let tickRunning = false;
 
 async function tick(): Promise<void> {
-    // The status call itself latches on breach — observation is enforcement.
-    const status = await getDailyLossStatus();
-    const today = new Date().toLocaleDateString('en-CA', { timeZone: ET });
-    if (decideGuardianStep(status, handledDay, today) !== 'handle') return;
-    handledDay = today;
-
-    logger.error(`[kill-switch-guardian] LATCHED: ${status.reason} — cancelling unfilled entry parents`);
-    let cancelled = 0, skipped = 0;
+    if (tickRunning) return; // overlap guard: a slow broker call must not stack ticks
+    tickRunning = true;
     try {
-        const unfilled = (await listTrackable()).filter((t) => t.entryFillPrice === null && t.source !== 'adopted');
-        for (const p of unfilled) {
-            try {
-                if (await cancelEntryLeg(p, 'kill-switch latched — a working entry is new risk')) cancelled++;
-                else skipped++;
-            } catch (err) {
-                skipped++;
-                logger.warn(`[kill-switch-guardian] ${p.id} ${p.symbol}: entry cancel failed — ${err}`);
+        // The status call itself latches on breach — observation is enforcement.
+        const status = await getDailyLossStatus();
+        unverifiedStreak = status.halted && status.latched !== true ? unverifiedStreak + 1 : 0;
+        const today = new Date().toLocaleDateString('en-CA', { timeZone: ET });
+        const step = decideGuardianStep(status, alertedDay, today, unverifiedStreak);
+        if (!step.cleanup) return;
+
+        let cancelled = 0, remaining = 0;
+        try {
+            const unfilled = (await listTrackable()).filter((t) => t.entryFillPrice === null && t.source !== 'adopted');
+            for (const p of unfilled) {
+                try {
+                    if (await cancelEntryLeg(p, 'kill-switch halt — a working entry is new risk')) cancelled++;
+                    else remaining++; // filled/racing/unconfirmed — retried next tick until the book drains
+                } catch (err) {
+                    remaining++;
+                    logger.warn(`[kill-switch-guardian] ${p.id} ${p.symbol}: entry cancel failed (retries next tick) — ${err}`);
+                }
+            }
+        } catch (err) {
+            remaining = -1; // enumeration itself failed — retry next tick, say so
+            logger.error(`[kill-switch-guardian] could not enumerate working entries (retries next tick): ${err}`);
+        }
+        if (cancelled > 0 || remaining !== 0) {
+            logger.error(`[kill-switch-guardian] halt cleanup: ${cancelled} entry parent(s) cancelled, ${remaining === -1 ? 'enumeration failed' : `${remaining} remaining (retrying every ${GUARDIAN_INTERVAL_MS / 1000}s)`}`);
+        }
+
+        if (step.alert) {
+            alertedDay = today;
+            const why = status.latched === true
+                ? `LATCHED: ${status.reason}`
+                : `UNVERIFIABLE for ${unverifiedStreak} minute(s): ${status.reason} — treating working entries as new risk`;
+            const msg =
+                `🛑 KILL-SWITCH (guardian) ${why}\n` +
+                `Working entry parents cancelled: ${cancelled}${remaining ? ` (${remaining === -1 ? 'book unreadable' : remaining} remaining — the guardian retries every minute until the book is clean)` : ' — book clean'}. ` +
+                `Protective exits untouched; 'close SYMBOL' / 'protect' / 'cancel' stay available. No new risk today.`;
+            for (const cb of [...alertCallbacks]) {
+                try { await cb(msg); } catch (err) {
+                    logger.error(`[kill-switch-guardian] alert callback failed: ${err}`);
+                }
             }
         }
-    } catch (err) {
-        logger.error(`[kill-switch-guardian] could not enumerate working entries: ${err}`);
-    }
-
-    const msg =
-        `🛑 KILL-SWITCH LATCHED (guardian): ${status.reason}\n` +
-        `Working entry parents cancelled: ${cancelled}${skipped ? ` (${skipped} left to the tracker — filled/racing/unconfirmed)` : ''}. ` +
-        `Protective exits untouched; 'close SYMBOL' / 'protect' / 'cancel' stay available. No new risk today.`;
-    for (const cb of [...alertCallbacks]) {
-        try { await cb(msg); } catch (err) {
-            logger.error(`[kill-switch-guardian] alert callback failed: ${err}`);
-        }
+    } finally {
+        tickRunning = false;
     }
 }
 
@@ -99,7 +137,14 @@ export function startKillSwitchGuardian(): void {
     timer = setInterval(() => {
         tick().catch((err) => logger.warn(`[kill-switch-guardian] tick failed: ${err}`));
     }, GUARDIAN_INTERVAL_MS);
-    logger.info(`[kill-switch-guardian] started: daily-loss status every ${GUARDIAN_INTERVAL_MS / 1000}s — a breach latches on OBSERVATION, and a latch cancels working entry parents`);
+    if (process.env.NODE_ENV !== 'test') {
+        // Startup tick (review 2026-08-23): a halt latched before a restart
+        // must be enforced as soon as the connection settles, not a minute in.
+        setTimeout(() => {
+            tick().catch((err) => logger.warn(`[kill-switch-guardian] startup tick failed: ${err}`));
+        }, 5_000);
+    }
+    logger.info(`[kill-switch-guardian] started: daily-loss status every ${GUARDIAN_INTERVAL_MS / 1000}s — a breach latches on OBSERVATION; a latch (or a ${FAILSAFE_PERSIST_TICKS}-min unverifiable account) cancels working entry parents until the book is clean`);
 }
 
 export function stopKillSwitchGuardian(): void {

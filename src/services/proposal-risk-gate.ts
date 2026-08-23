@@ -863,6 +863,26 @@ export function checkProposalRisk(
                     `Close or trim an overnight hold first, or skip`,
                 );
             }
+            // Gap-stress at ACCEPTANCE (review 2026-08-23): the notional cap
+            // bounds size; this bounds the LOSS an adverse overnight gap
+            // hands the whole surviving book — stops do not fill through a
+            // gap. Earnings bets stress at their own assumed gap (already
+            // their sizing basis); everything else at the configured shock.
+            const stress = rules.overnight_gap_stress_pct;
+            if (stress > 0 && rules.max_daily_loss_pct > 0) {
+                const ownStressPct = tradeClass === 'earnings-bet'
+                    ? Math.max(stress, Math.max(ctx.worstCaseGapPct ?? 0, rules.earnings_bet_gap_floor_pct))
+                    : stress;
+                const stressedUsd = positionValue * (ownStressPct / 100) + ctx.overnightExposureUsd * (stress / 100);
+                const budgetUsd = (rules.max_daily_loss_pct / 100) * ctx.netLiquidation;
+                if (stressedUsd > budgetUsd) {
+                    violations.push(
+                        `an adverse overnight gap (${stress}% book, ${ownStressPct}% this position) on the surviving book ` +
+                        `would cost $${stressedUsd.toFixed(0)} — over one daily-loss budget ` +
+                        `(${rules.max_daily_loss_pct}% = $${budgetUsd.toFixed(0)}). Trim the overnight book or skip`,
+                    );
+                }
+            }
         }
     }
 

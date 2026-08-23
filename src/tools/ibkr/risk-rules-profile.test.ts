@@ -23,11 +23,15 @@ describe('risk-rules profiles (small live account prep)', () => {
     test('live profile applies risk-rules.live.yaml overrides on top of base', () => {
         setAccountProfile('live');
         const r = getRiskRules();
-        // €10K revision (2026-08-22, REVIEW-marked): 15% × 4 slots.
+        // First-tranche revision (2026-08-23, REVIEW-marked): 15% × 4 slots,
+        // halved risk budgets, classes fail-closed.
         expect(r.max_position_pct).toBe(15);
-        expect(r.max_risk_per_trade_pct).toBe(1.0);
+        expect(r.max_risk_per_trade_pct).toBe(0.5);
+        expect(r.max_daily_loss_pct).toBe(1.5);
         expect(r.max_open_positions).toBe(4);
         expect(r.min_risk_budget_usd).toBe(15);
+        expect(r.swing_enabled).toBe(false); // fail-closed until its own shadow record passes
+        expect(r.earnings_bet_enabled).toBe(false);
         // inherited from the base file, not overridden
         expect(r.min_risk_reward).toBe(2.0);
         expect(r.min_stop_atr_fraction).toBe(0.4);
@@ -58,7 +62,7 @@ describe('shadow-live override (WP-SHADOW, REQ-SHADOW-001/002)', () => {
         expect(resolveProfileOverride('paper', 'shadow')!.ignored).toContain('unknown value');
     });
 
-    test('shadow-live serves the live rules with the single earnings deviation', async () => {
+    test('shadow-live serves the live rules with the two class-enable deviations', async () => {
         const prev = process.env.DEXTER_RISK_PROFILE;
         process.env.DEXTER_RISK_PROFILE = 'live';
         try {
@@ -67,8 +71,11 @@ describe('shadow-live override (WP-SHADOW, REQ-SHADOW-001/002)', () => {
             const { isShadowLive } = await import('./risk-rules.js');
             expect(isShadowLive()).toBe(true);
             const r = getRiskRules();
-            expect(r.max_risk_per_trade_pct).toBe(1.0); // live numbers
-            expect(r.earnings_bet_enabled).toBe(true);  // THE deviation (live yaml says false)
+            expect(r.max_risk_per_trade_pct).toBe(0.5); // live first-tranche numbers
+            // The deviations: fail-closed classes trade in SHADOW so the
+            // ≥30-trade records their enable decisions need can accrue.
+            expect(r.earnings_bet_enabled).toBe(true);
+            expect(r.swing_enabled).toBe(true);
         } finally {
             if (prev === undefined) delete process.env.DEXTER_RISK_PROFILE;
             else process.env.DEXTER_RISK_PROFILE = prev;

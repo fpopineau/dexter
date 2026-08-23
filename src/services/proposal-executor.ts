@@ -623,7 +623,11 @@ export async function autoExecuteProposal(id: string): Promise<ExecutionOutcome>
 // ---------------------------------------------------------------------------
 
 export function isChaseContinuationEnabled(): boolean {
-    return (process.env.CHASE_CONTINUATION ?? 'true').trim().toLowerCase() !== 'false';
+    // Default OFF (review 2026-08-23, "profit as surely as possible"): a
+    // gate that refused an extended entry should not automatically
+    // manufacture another way into the same move. Re-enable deliberately
+    // with CHASE_CONTINUATION=true; the machinery and its ledger stay.
+    return (process.env.CHASE_CONTINUATION ?? 'false').trim().toLowerCase() === 'true';
 }
 
 /** Confirmation quantum for the continuation trigger, as a fraction of the

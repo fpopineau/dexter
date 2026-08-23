@@ -116,6 +116,11 @@ export interface OpenOrderSummary {
      *  close-vs-stop mutual exclusion broker-side, killing the gap-open
      *  over-close race. */
     ocaGroup: string | null;
+    /** Review 2026-08-23 (P2): pair-identity fields — the runner release
+     *  must prove the surviving stop covers the position and shares the
+     *  target's OCA group and account, not merely its ref base. */
+    account: string | null;
+    quantity: number | null;
 }
 
 export interface OpenOrdersView {
@@ -148,6 +153,9 @@ export async function fetchOpenOrdersFor(
                 tif: String(order.tif ?? ''),
                 orderRef: typeof order.orderRef === 'string' ? order.orderRef : null,
                 ocaGroup: typeof order.ocaGroup === 'string' && order.ocaGroup.length > 0 ? order.ocaGroup : null,
+                account: typeof order.account === 'string' && order.account.length > 0 ? order.account : null,
+                quantity: Number.isFinite(Number(order.totalQuantity)) && Number(order.totalQuantity) > 0
+                    ? Number(order.totalQuantity) : null,
             });
         };
         const onEnd = () => {
@@ -650,71 +658,6 @@ export async function closePosition(symbolRaw: string, source = 'close command')
         const qty = Math.abs(pos.quantity);
         const closeAction = isLong ? OrderAction.SELL : OrderAction.BUY;
 
-        // Round-9 review: an automated close either shares ONE atomic
-        // exclusion scheme with every working Dexter exit, or it does not
-        // go out. Proceeding unjoined embedded the over-close race (a stop
-        // and the close both filling = reversal); "documented trade-off"
-        // is not a fix. Cases:
-        //   complete view, no Dexter exits  → nothing to race, proceed
-        //   complete view, wholly one group → JOIN it
-        //   multi-group / ungrouped exits   → REFUSE with instructions
-        //   incomplete view / probe failure → REFUSE (unprovable book)
-        let joinOcaGroup: string | null = null;
-        try {
-            const exitView = await fetchOpenOrdersFor(api, symbol, closeAction, closeDeps.probeTimeoutMs);
-            if (!exitView.complete) {
-                recentlyClosed.delete(symbol);
-                return {
-                    ok: false,
-                    message:
-                        `⛔ Cannot close ${symbol} safely right now: the open-orders snapshot did not complete, ` +
-                        `so a working exit could be hidden — the close and a hidden stop could BOTH fill and ` +
-                        `reverse the position. Retry in a moment.`,
-                };
-            }
-            // Round-10 review: EVERY working exit-side order can race the
-            // close — a manual TWS stop is not ours to join OR cancel, so
-            // filtering to OUR_REF before deciding "nothing to race" was a
-            // bypass. Foreign/manual exits refuse outright.
-            const foreign = exitView.orders.filter((o) => !OUR_REF.test(o.orderRef ?? ''));
-            if (foreign.length > 0) {
-                recentlyClosed.delete(symbol);
-                return {
-                    ok: false,
-                    message:
-                        `⛔ Cannot close ${symbol} atomically: ${foreign.length} working exit-side order(s) not placed by ` +
-                        `Dexter (${foreign.map((o) => `#${o.orderId} ${o.orderType}${o.orderRef ? ` ref '${o.orderRef}'` : ''}`).join(', ')}) — ` +
-                        `they cannot be joined or cancelled from here, and one filling alongside the close REVERSES the ` +
-                        `position. Cancel them in TWS first, or close there.`,
-                };
-            }
-            const ours = exitView.orders.filter((o) => OUR_REF.test(o.orderRef ?? ''));
-            const groups = [...new Set(ours.filter((o) => o.ocaGroup !== null).map((o) => o.ocaGroup as string))];
-            const ungrouped = ours.filter((o) => o.ocaGroup === null).length;
-            if (ours.length === 0) {
-                // Truly empty exit book — nothing can race the close.
-            } else if (groups.length === 1 && ungrouped === 0) {
-                joinOcaGroup = groups[0]!;
-                logger.info(`[position-actions] ${symbol}: close joins exit OCA group '${joinOcaGroup}' — broker-side mutual exclusion with the stop/target`);
-            } else {
-                recentlyClosed.delete(symbol);
-                return {
-                    ok: false,
-                    message:
-                        `⛔ Cannot close ${symbol} atomically: its exit book spans ${groups.length} OCA group(s)` +
-                        `${ungrouped > 0 ? ` plus ${ungrouped} ungrouped exit(s)` : ''} — the close cannot be made ` +
-                        `mutually exclusive with ALL of them, and a stop filling alongside the close would REVERSE ` +
-                        `the position. Cancel the extra exit pair first ('cancel ${symbol}' or TWS), then close.`,
-                };
-            }
-        } catch (err) {
-            recentlyClosed.delete(symbol);
-            return {
-                ok: false,
-                message: `⛔ Cannot close ${symbol} safely: the exit-book probe failed (${err instanceof Error ? err.message : err}). Retry in a moment.`,
-            };
-        }
-
         // Review 2026-08-21 (round 4): the tracker registration must exist
         // BEFORE the first broker event can arrive. The old order —
         // place, wait up to 8s for the fill, then register — let the
@@ -727,7 +670,76 @@ export async function closePosition(symbolRaw: string, source = 'close command')
             logger.warn(`[position-actions] outcome tracker unavailable for ${symbol} close registration: ${err}`);
             return null;
         });
-        const { orderId, order, ack } = await withOrderLock(async () => {
+        // Review 2026-08-23 P1: the exit-book probe, the OCA-join decision
+        // AND the placement hold the global order lock TOGETHER — a WP2
+        // resize between an unlocked snapshot and the placement could add a
+        // second OCA group and leave the close mutually exclusive with only
+        // one of them. Refusals surface as {refused} out of the closure.
+        const lockOutcome = await withOrderLock(async (): Promise<
+            { refused: PositionActionOutcome } | { orderId: number; order: Order; ack: Awaited<ReturnType<ReturnType<typeof watchOrderAcks>['settle']>>[0] }
+        > => {
+            // Round-9 review: an automated close either shares ONE atomic
+            // exclusion scheme with every working Dexter exit, or it does
+            // not go out. Cases:
+            //   complete view, no Dexter exits  → nothing to race, proceed
+            //   complete view, wholly one group → JOIN it
+            //   multi-group / ungrouped exits   → REFUSE with instructions
+            //   incomplete view / probe failure → REFUSE (unprovable book)
+            let joinOcaGroup: string | null = null;
+            try {
+                const exitView = await fetchOpenOrdersFor(api, symbol, closeAction, closeDeps.probeTimeoutMs);
+                if (!exitView.complete) {
+                    recentlyClosed.delete(symbol);
+                    return { refused: {
+                        ok: false,
+                        message:
+                            `⛔ Cannot close ${symbol} safely right now: the open-orders snapshot did not complete, ` +
+                            `so a working exit could be hidden — the close and a hidden stop could BOTH fill and ` +
+                            `reverse the position. Retry in a moment.`,
+                    } };
+                }
+                // Round-10 review: EVERY working exit-side order can race the
+                // close — a manual TWS stop is not ours to join OR cancel, so
+                // filtering to OUR_REF before deciding "nothing to race" was a
+                // bypass. Foreign/manual exits refuse outright.
+                const foreign = exitView.orders.filter((o) => !OUR_REF.test(o.orderRef ?? ''));
+                if (foreign.length > 0) {
+                    recentlyClosed.delete(symbol);
+                    return { refused: {
+                        ok: false,
+                        message:
+                            `⛔ Cannot close ${symbol} atomically: ${foreign.length} working exit-side order(s) not placed by ` +
+                            `Dexter (${foreign.map((o) => `#${o.orderId} ${o.orderType}${o.orderRef ? ` ref '${o.orderRef}'` : ''}`).join(', ')}) — ` +
+                            `they cannot be joined or cancelled from here, and one filling alongside the close REVERSES the ` +
+                            `position. Cancel them in TWS first, or close there.`,
+                    } };
+                }
+                const ours = exitView.orders.filter((o) => OUR_REF.test(o.orderRef ?? ''));
+                const groups = [...new Set(ours.filter((o) => o.ocaGroup !== null).map((o) => o.ocaGroup as string))];
+                const ungrouped = ours.filter((o) => o.ocaGroup === null).length;
+                if (ours.length === 0) {
+                    // Truly empty exit book — nothing can race the close.
+                } else if (groups.length === 1 && ungrouped === 0) {
+                    joinOcaGroup = groups[0]!;
+                    logger.info(`[position-actions] ${symbol}: close joins exit OCA group '${joinOcaGroup}' — broker-side mutual exclusion with the stop/target`);
+                } else {
+                    recentlyClosed.delete(symbol);
+                    return { refused: {
+                        ok: false,
+                        message:
+                            `⛔ Cannot close ${symbol} atomically: its exit book spans ${groups.length} OCA group(s)` +
+                            `${ungrouped > 0 ? ` plus ${ungrouped} ungrouped exit(s)` : ''} — the close cannot be made ` +
+                            `mutually exclusive with ALL of them, and a stop filling alongside the close would REVERSE ` +
+                            `the position. Cancel the extra exit pair first ('cancel ${symbol}' or TWS), then close.`,
+                    } };
+                }
+            } catch (err) {
+                recentlyClosed.delete(symbol);
+                return { refused: {
+                    ok: false,
+                    message: `⛔ Cannot close ${symbol} safely: the exit-book probe failed (${err instanceof Error ? err.message : err}). Retry in a moment.`,
+                } };
+            }
             const orderId = await closeDeps.nextOrderId(api);
             const order: Order = {
                 orderId,
@@ -764,6 +776,8 @@ export async function closePosition(symbolRaw: string, source = 'close command')
             const states = await watch.settle(closeDeps.fillWaitMs, 'filled');
             return { orderId, order, ack: states[0] };
         });
+        if ('refused' in lockOutcome) return lockOutcome.refused;
+        const { orderId, order, ack } = lockOutcome;
 
         if (ack?.rejection) {
             // The close DID NOT go out: protection stays exactly as it was.

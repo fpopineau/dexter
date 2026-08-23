@@ -95,12 +95,18 @@ describe('exposureCoverageGaps (review 2026-08-23 — the series must prove it w
         expect(exposureCoverageGaps(afternoon, [{ from: et(24, 14, 10), to: et(24, 15, 45), label: 'P-D' }])).toEqual([]);
     });
 
-    test('weekend days inside a multi-day hold owe nothing; the exposed weekdays still do', async () => {
+    test('weekend days inside a multi-day hold owe nothing; the exposed weekdays owe the EXTENDED session', async () => {
         const { exposureCoverageGaps } = await import('@/utils/equity-series-math.js');
-        // Hold Fri 2026-08-21 15:00 → Mon 2026-08-24 10:00; series covers
-        // Friday's tail and Monday's open, nothing on Sat/Sun.
-        const series = [...every5(21, 15, 0, 16, 0), ...every5(24, 9, 30, 10, 30)];
-        const v = exposureCoverageGaps(series, [{ from: et(21, 15, 5), to: et(24, 10, 0), label: 'P-E' }]);
-        expect(v).toEqual([]);
+        // Hold Fri 2026-08-21 15:00 → Mon 2026-08-24 10:00. The overnight
+        // gap materializes at 04:00 ET Monday — coverage owes Friday
+        // 15:05-20:00 and Monday 04:00-10:00, nothing on Sat/Sun.
+        const covered = [...every5(21, 15, 0, 20, 0), ...every5(24, 4, 0, 10, 30)];
+        expect(exposureCoverageGaps(covered, [{ from: et(21, 15, 5), to: et(24, 10, 0), label: 'P-E' }])).toEqual([]);
+        // An RTH-only sampler misses the pre-market gap window → violation
+        // (this exact blindness passed the old RTH-scoped coverage).
+        const rthOnly = [...every5(21, 15, 0, 16, 0), ...every5(24, 9, 30, 10, 30)];
+        const v = exposureCoverageGaps(rthOnly, [{ from: et(21, 15, 5), to: et(24, 10, 0), label: 'P-E' }]);
+        expect(v.length).toBeGreaterThan(0);
+        expect(v.join(' ')).toContain('unobserved');
     });
 });

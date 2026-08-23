@@ -138,93 +138,99 @@ describe('runner mode direction mapping (shorts covered)', () => {
         expect(exitActionFor('short')).toBe(OrderAction.BUY);
     });
 
-    test('release decision cancels only OUR LMT leg, never the stop, both directions (REQ-TRAIL-001)', async () => {
+    test('a single coherent pair releases its target — brackets, protect pairs, resized pairs (REQ-TRAIL-001/003)', async () => {
         const { decideTargetRelease } = await import('./profit-trail.js');
-        // Long bracket exits: SELL LMT (target) + SELL STP (stop), both ours
-        const longExits = [
-            { orderId: 1, orderType: 'LMT', orderRef: 'P-1A2B:tp' },
-            { orderId: 2, orderType: 'STP', orderRef: 'P-1A2B:stop' },
-        ];
-        const long = decideTargetRelease({ complete: true, orders: longExits });
-        expect(long.cancelIds).toEqual([1]);
-        expect(long.blockedReason).toBeNull();
-        // Short auto-protect exits: BUY STP (stop above) + BUY LMT (target below)
-        const shortExits = [
-            { orderId: 3, orderType: 'STP', orderRef: 'protect-XYZ:stop' },
-            { orderId: 4, orderType: 'LMT', orderRef: 'protect-XYZ:tp' },
-        ];
-        expect(decideTargetRelease({ complete: true, orders: shortExits }).cancelIds).toEqual([4]);
-        // STP LMT stops (momentum-style) are never targets — nothing to cancel
-        expect(decideTargetRelease({ complete: true, orders: [{ orderId: 5, orderType: 'STP LMT', orderRef: 'P-1A2B:stop' }] }).blockedReason)
-            .toBe('no-targets');
+        const leg = (orderId: number, orderType: string, orderRef: string, over: object = {}) =>
+            ({ orderId, orderType, orderRef, ocaGroup: 'G1', account: 'DU1', quantity: 10, ...over });
+        const v = (orders: unknown[], complete = true) => ({ orders: orders as never[], complete });
+
+        const bracket = decideTargetRelease(v([leg(1, 'LMT', 'P-1A2B:tp'), leg(2, 'STP', 'P-1A2B:stop')]), 10);
+        expect(bracket.cancelIds).toEqual([1]);
+        expect(bracket.blockedReason).toBeNull();
+        const protect = decideTargetRelease(v([leg(3, 'STP', 'protect-XYZ:stop'), leg(4, 'LMT', 'protect-XYZ:tp')]), 10);
+        expect(protect.cancelIds).toEqual([4]);
+        const resized = decideTargetRelease(v([leg(5, 'LMT', 'P-9F06:tp2'), leg(6, 'STP LMT', 'P-9F06:stop2')]), 10);
+        expect(resized.cancelIds).toEqual([5]);
+        // STP LMT alone is a stop, never a target.
+        expect(decideTargetRelease(v([leg(7, 'STP LMT', 'P-1A2B:stop')]), 10).blockedReason).toBe('no-targets');
     });
 
-    test('a foreign (manual TWS) LMT is never a cancel candidate (REQ-TRAIL-001)', async () => {
+    test('ANY foreign exit-side order blocks the release (REQ-TRAIL-001 + round-10 close doctrine)', async () => {
         const { decideTargetRelease } = await import('./profit-trail.js');
-        const d = decideTargetRelease({ complete: true, orders: [
-            { orderId: 10, orderType: 'LMT', orderRef: null },            // manual TWS limit
-            { orderId: 11, orderType: 'LMT', orderRef: 'my-own-note' },   // non-Dexter ref
-            { orderId: 12, orderType: 'LMT', orderRef: 'P-9F00:tp' },     // ours
-            { orderId: 13, orderType: 'STP', orderRef: 'P-9F00:stop' },
-        ] });
-        expect(d.cancelIds).toEqual([12]);
-        expect(d.foreignRefs).toEqual(['#10 <no ref>', '#11 my-own-note']);
-        expect(d.blockedReason).toBeNull();
+        const leg = (orderId: number, orderType: string, orderRef: string | null, over: object = {}) =>
+            ({ orderId, orderType, orderRef, ocaGroup: 'G1', account: 'DU1', quantity: 10, ...over });
+        const v = (orders: unknown[]) => ({ orders: orders as never[], complete: true });
+        // closePosition refuses to exit around foreign orders — runner mode
+        // must not enter a state its own exit path refuses.
+        const d = decideTargetRelease(v([
+            leg(10, 'LMT', null),
+            leg(12, 'LMT', 'P-9F00:tp'),
+            leg(13, 'STP', 'P-9F00:stop'),
+        ]), 10);
+        expect(d.blockedReason).toBe('foreign-orders');
+        expect(d.cancelIds).toEqual([]);
+        expect(d.foreignRefs).toEqual(['#10 LMT <no ref>']);
     });
 
-    test('a Dexter-owned LMT that is not a TARGET leg is never a candidate (REQ-TRAIL-003)', async () => {
+    test('cross-bracket stops, generation mismatches and orphan legs never authorize a release (REQ-TRAIL-003/004)', async () => {
         const { decideTargetRelease } = await import('./profit-trail.js');
-        // An agent-authorized reduction limit shares the position's exit side
-        // and our ownership — it is not the bracket target and must survive.
-        const d = decideTargetRelease({ complete: true, orders: [
-            { orderId: 30, orderType: 'LMT', orderRef: 'reduce-XYZ' },
-            { orderId: 31, orderType: 'LMT', orderRef: 'P-9F04:tp' },
-            { orderId: 32, orderType: 'STP', orderRef: 'P-9F04:stop' },
-        ] });
-        expect(d.cancelIds).toEqual([31]);
-        expect(d.foreignRefs).toEqual([]); // ours — just not a target
-        // Only a reduce- limit and our stop: no target to release at all.
-        const onlyReduce = decideTargetRelease({ complete: true, orders: [
-            { orderId: 33, orderType: 'LMT', orderRef: 'reduce-XYZ' },
-            { orderId: 34, orderType: 'STP', orderRef: 'P-9F05:stop' },
-        ] });
-        expect(onlyReduce.blockedReason).toBe('no-targets');
-        // The WP2 resized pair (:tp2/:stop2) is recognized on both sides.
-        const resized = decideTargetRelease({ complete: true, orders: [
-            { orderId: 35, orderType: 'LMT', orderRef: 'P-9F06:tp2' },
-            { orderId: 36, orderType: 'STP', orderRef: 'P-9F06:stop2' },
-        ] });
-        expect(resized.cancelIds).toEqual([35]);
-        // A reduce- STP is not bracket protection: release stays blocked.
-        const reduceStop = decideTargetRelease({ complete: true, orders: [
-            { orderId: 37, orderType: 'LMT', orderRef: 'P-9F07:tp' },
-            { orderId: 38, orderType: 'STP', orderRef: 'reduce-XYZ' },
-        ] });
-        expect(reduceStop.blockedReason).toBe('no-own-stop');
+        const leg = (orderId: number, orderType: string, orderRef: string, over: object = {}) =>
+            ({ orderId, orderType, orderRef, ocaGroup: 'G1', account: 'DU1', quantity: 10, ...over });
+        const v = (orders: unknown[]) => ({ orders: orders as never[], complete: true });
+        // A stop from ANOTHER bracket is not this target's protection.
+        expect(decideTargetRelease(v([leg(20, 'LMT', 'P-AAAA:tp'), leg(21, 'STP', 'P-BBBB:stop')]), 10).blockedReason)
+            .toBe('no-own-stop');
+        // Generations never cross-pair.
+        expect(decideTargetRelease(v([leg(22, 'LMT', 'P-AAAA:tp'), leg(23, 'STP', 'P-AAAA:stop2')]), 10).blockedReason)
+            .toBe('no-own-stop');
+        // A reduce- limit next to the pair is an extra OUR leg — incoherent.
+        expect(decideTargetRelease(v([
+            leg(24, 'LMT', 'reduce-XYZ'), leg(25, 'LMT', 'P-9F04:tp'), leg(26, 'STP', 'P-9F04:stop'),
+        ]), 10).blockedReason).toBe('incoherent-book');
+        // A complete pair PLUS an orphan stop is not a single pair.
+        expect(decideTargetRelease(v([
+            leg(27, 'LMT', 'P-AAAA:tp'), leg(28, 'STP', 'P-AAAA:stop'), leg(29, 'STP', 'P-CCCC:stop'),
+        ]), 10).blockedReason).toBe('stacked-brackets');
+        // Two full pairs (stacked theses, or a transitional resize book).
+        expect(decideTargetRelease(v([
+            leg(30, 'LMT', 'P-AAAA:tp'), leg(31, 'STP', 'P-AAAA:stop'),
+            leg(32, 'LMT', 'P-BBBB:tp'), leg(33, 'STP', 'P-BBBB:stop'),
+        ]), 10).blockedReason).toBe('stacked-brackets');
     });
 
-    test('no surviving Dexter STP leg blocks the release entirely (REQ-TRAIL-002)', async () => {
+    test('OCA-group, account and quantity identity are required — unknowns fail closed (review 2026-08-23 P2)', async () => {
         const { decideTargetRelease } = await import('./profit-trail.js');
-        // Our target but only a FOREIGN stop: releasing would hand protection
-        // to an order we do not own — blocked.
-        const foreignStop = decideTargetRelease({ complete: true, orders: [
-            { orderId: 20, orderType: 'LMT', orderRef: 'P-9F01:tp' },
-            { orderId: 21, orderType: 'STP', orderRef: null },
-        ] });
-        expect(foreignStop.blockedReason).toBe('no-own-stop');
-        expect(foreignStop.cancelIds).toEqual([]);
-        // No stop at all (partial book view, or stop already gone): blocked.
-        const noStop = decideTargetRelease({ complete: true, orders: [
-            { orderId: 22, orderType: 'LMT', orderRef: 'P-9F02:tp' },
-        ] });
-        expect(noStop.blockedReason).toBe('no-own-stop');
-        // A Dexter STP LMT counts as the protective leg.
-        const stpLmt = decideTargetRelease({ complete: true, orders: [
-            { orderId: 23, orderType: 'LMT', orderRef: 'P-9F03:tp' },
-            { orderId: 24, orderType: 'STP LMT', orderRef: 'P-9F03:stop' },
-        ] });
-        expect(stpLmt.blockedReason).toBeNull();
-        expect(stpLmt.cancelIds).toEqual([23]);
+        const leg = (orderId: number, orderType: string, orderRef: string, over: object = {}) =>
+            ({ orderId, orderType, orderRef, ocaGroup: 'G1', account: 'DU1', quantity: 10, ...over });
+        const v = (orders: unknown[]) => ({ orders: orders as never[], complete: true });
+        // Different OCA groups: the legs are not each other's siblings.
+        expect(decideTargetRelease(v([
+            leg(40, 'LMT', 'P-AA10:tp'), leg(41, 'STP', 'P-AA10:stop', { ocaGroup: 'G2' }),
+        ]), 10).blockedReason).toBe('incoherent-book');
+        // Unknown group or account: identity unproven.
+        expect(decideTargetRelease(v([
+            leg(42, 'LMT', 'P-AA20:tp', { ocaGroup: null }), leg(43, 'STP', 'P-AA20:stop'),
+        ]), 10).blockedReason).toBe('incoherent-book');
+        expect(decideTargetRelease(v([
+            leg(44, 'LMT', 'P-AA30:tp'), leg(45, 'STP', 'P-AA30:stop', { account: 'DU2' }),
+        ]), 10).blockedReason).toBe('incoherent-book');
+        // The stop must cover the position; unknown quantity fails closed.
+        expect(decideTargetRelease(v([
+            leg(46, 'LMT', 'P-AA40:tp'), leg(47, 'STP', 'P-AA40:stop', { quantity: 5 }),
+        ]), 10).blockedReason).toBe('stop-undersized');
+        expect(decideTargetRelease(v([
+            leg(48, 'LMT', 'P-AA50:tp'), leg(49, 'STP', 'P-AA50:stop', { quantity: null }),
+        ]), 10).blockedReason).toBe('stop-undersized');
+    });
+
+    test('an INCOMPLETE broker view releases nothing', async () => {
+        const { decideTargetRelease } = await import('./profit-trail.js');
+        const d = decideTargetRelease({ complete: false, orders: [
+            { orderId: 60, orderType: 'LMT', orderRef: 'P-AAAA:tp', ocaGroup: 'G1', account: 'DU1', quantity: 10 },
+            { orderId: 61, orderType: 'STP', orderRef: 'P-AAAA:stop', ocaGroup: 'G1', account: 'DU1', quantity: 10 },
+        ] }, 10);
+        expect(d.blockedReason).toBe('incomplete-book');
+        expect(d.cancelIds).toEqual([]);
     });
 });
 

@@ -90,12 +90,16 @@ export interface EodDecision {
 }
 
 /**
- * WP5 (remediation 2026-08-20, decision D2): an overnight hold must be
- * EARNED — a position the triage cannot price or whose momentum it cannot
- * read closes before the bell (fail-closed), overridable by an explicit
- * pre-bell `keep SYMBOL` from the operator. The old fail-open branches
- * ("when in doubt, hold") were the audit's crit. 9. Winners and
- * stabilizing losers still keep on their own merit.
+ * FLAT BY CLOSE (operator policy 2026-08-23, "profit as surely as
+ * possible"): an intraday thesis ENDS with its session. The old
+ * momentum-keep ("winners hold, stabilizing losers hold") silently
+ * converted intraday trades into overnight gap exposure sized by intraday
+ * rules — the single largest hole four external reviews kept finding, and
+ * with the take-at-x% policy winners bank at their target during the day
+ * anyway. The ONLY path overnight for an intraday position is the
+ * explicit pre-bell `keep SYMBOL` (a human decision, still subject to the
+ * earnings guard, the overnight caps and the gap-stress vet); a planned
+ * overnight position is a SWING and must be proposed as one.
  */
 export function decideEodAction(input: {
     direction: 'long' | 'short';
@@ -103,30 +107,18 @@ export function decideEodAction(input: {
     last: number;
     hourAgo: number | null;
 }): EodDecision {
-    const { direction, entryFill, last, hourAgo } = input;
+    const { direction, entryFill, last } = input;
     if (!(last > 0) || !(entryFill > 0)) {
-        return { action: 'close', reason: 'price unavailable — cannot vet for overnight; closing (fail-closed; pre-bell \'keep SYMBOL\' overrides)' };
+        return { action: 'close', reason: 'flat by close (price unavailable too) — pre-bell \'keep SYMBOL\' overrides' };
     }
-
     const pnlPct = direction === 'long'
         ? ((last - entryFill) / entryFill) * 100
         : ((entryFill - last) / entryFill) * 100;
-    if (pnlPct >= 0) {
-        return { action: 'keep', reason: `winning ${pnlPct.toFixed(2)}% — holds overnight (protected at the bell)` };
-    }
-
-    if (hourAgo === null || !(hourAgo > 0)) {
-        return { action: 'close', reason: `losing ${pnlPct.toFixed(2)}% with momentum unknown — cannot vet; closing (fail-closed; pre-bell 'keep SYMBOL' overrides)` };
-    }
-    const drift = direction === 'long' ? last - hourAgo : hourAgo - last;
-    if (drift < 0) {
-        const driftPct = (Math.abs(drift) / hourAgo) * 100;
-        return {
-            action: 'close',
-            reason: `losing ${pnlPct.toFixed(2)}% and still fading (${driftPct.toFixed(2)}% against us over the last hour) — closing before the bell`,
-        };
-    }
-    return { action: 'keep', reason: `losing ${pnlPct.toFixed(2)}% but stabilizing/recovering over the last hour — keeping` };
+    return {
+        action: 'close',
+        reason: `flat by close (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(2)}%) — intraday theses do not ride gaps; ` +
+            `pre-bell 'keep SYMBOL' overrides, a planned overnight is a swing proposal`,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +136,13 @@ export interface OvernightVetCandidate {
      *  position counts at (REQ-EOD-001). Understates a winner, but exposure
      *  that the caps cannot see is how a book breaches silently. */
     fallbackValueUsd?: number | null;
+    /** Counted in every sum but never trimmed (review 2026-08-23:
+     *  earnings bets hold through the print BY DESIGN — closing one at the
+     *  bell defeats the class; its tail still weighs on the book). */
+    trimExempt?: boolean;
+    /** Per-candidate stress % (earnings bets stress at max(their own
+     *  worst historical gap, the base stress)); null/absent = base. */
+    stressPctOverride?: number | null;
 }
 
 export interface OvernightVetResult {
@@ -212,7 +211,7 @@ export function vetOvernightBook(
             continue;
         }
         const pct = (k.marketValueUsd / netLiq) * 100;
-        if (pct > rules.max_overnight_position_pct && !overrides.has(k.symbol)) {
+        if (pct > rules.max_overnight_position_pct && !overrides.has(k.symbol) && k.trimExempt !== true) {
             trims.push({
                 symbol: k.symbol, label: k.label,
                 reason: `${pct.toFixed(1)}% of NetLiq vs the ${rules.max_overnight_position_pct}% per-position overnight cap`,
@@ -227,7 +226,7 @@ export function vetOvernightBook(
     const capUsd = (rules.max_overnight_exposure_pct / 100) * netLiq;
     if (bookUsd > capUsd) {
         const trimmable = surviving
-            .filter((k) => !overrides.has(k.symbol))
+            .filter((k) => !overrides.has(k.symbol) && k.trimExempt !== true)
             .sort((a, b) => (a.pnlPct ?? -Infinity) - (b.pnlPct ?? -Infinity));
         for (const k of trimmable) {
             if (bookUsd <= capUsd) break;
@@ -251,24 +250,25 @@ export function vetOvernightBook(
         const budgetUsd = (dailyLossPct / 100) * netLiq;
         const trimmed = new Set(trims.map((t) => t.symbol));
         const alive = () => surviving.filter((k) => !trimmed.has(k.symbol));
-        stressedUsd = alive().reduce((s, k) => s + k.valueUsd * (stressPct / 100), 0);
+        const stressOf = (k: typeof surviving[number]) => k.valueUsd * ((k.stressPctOverride ?? stressPct) / 100);
+        stressedUsd = alive().reduce((s, k) => s + stressOf(k), 0);
         if (stressedUsd > budgetUsd) {
             const stressTrimmable = alive()
-                .filter((k) => !overrides.has(k.symbol))
+                .filter((k) => !overrides.has(k.symbol) && k.trimExempt !== true)
                 .sort((a, b) => (a.pnlPct ?? -Infinity) - (b.pnlPct ?? -Infinity));
             for (const k of stressTrimmable) {
                 if (stressedUsd <= budgetUsd) break;
-                stressedUsd -= k.valueUsd * (stressPct / 100);
+                stressedUsd -= stressOf(k);
                 trimmed.add(k.symbol);
                 trims.push({
                     symbol: k.symbol, label: k.label,
-                    reason: `a ${stressPct}% adverse gap on the surviving book would cost more than one daily-loss budget ` +
+                    reason: `an adverse overnight gap on the surviving book would cost more than one daily-loss budget ` +
                         `(${dailyLossPct}% of NetLiq) — gap-stress trim, worst-first (${k.pnlPct === null ? 'P&L unknown' : `${k.pnlPct.toFixed(2)}%`})`,
                 });
             }
             if (stressedUsd > budgetUsd) {
                 warnings.push(
-                    `⚠ gap-stress: operator overrides hold a book whose ${stressPct}% adverse gap costs ` +
+                    `⚠ gap-stress: overrides/exempt positions hold a book whose adverse gap costs ` +
                     `$${stressedUsd.toFixed(0)} — over the ${dailyLossPct}% daily-loss budget ($${budgetUsd.toFixed(0)}).`,
                 );
             }
@@ -682,29 +682,6 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
         }
     }
 
-    // WP5: vet the conversion book against the overnight caps at MARKET
-    // value — per-name breaches and a book breach trim worst-first, unless
-    // the operator armed a pre-bell override. The 🌙 conversion at the bell
-    // then only fires on gate-passed positions (wasVettedKeepToday).
-    const vet = vetOvernightBook(vetCandidates, await getNetLiquidation(), getRiskRules(), overrides);
-    for (const trim of vet.trims) {
-        if (closedSymbols.has(trim.symbol)) continue; // WP11: already flat this run
-        if (dryRun) {
-            lines.push(`• ${trim.symbol} (${trim.label}): WILL CAP-TRIM at 15:52 — ${trim.reason}. Reply 'keep ${trim.symbol}' to hold it anyway.`);
-            continue;
-        }
-        const outcome = await closePosition(trim.symbol, 'EOD triage (overnight cap trim)');
-        if (outcome.state === 'filled' && outcome.flat === true) closedSymbols.add(trim.symbol);
-        lines.push(`• ${trim.symbol} (${trim.label}): overnight vet — ${trim.reason}. ${outcome.clean === true ? 'Closed.' : outcome.message}`);
-    }
-    if (!dryRun) {
-        for (const k of vetCandidates) {
-            if (!vet.trims.some((tr) => tr.symbol === k.symbol)) {
-                vettedKeeps.set(k.symbol, today);
-            }
-        }
-    }
-
     // GTC positions: silent when healthy (their brackets survive the bell);
     // a line only when the guard closes one, or an earnings bet is about
     // to do exactly what it was sized for.
@@ -732,6 +709,69 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
         const outcome = await closePosition(t.symbol, 'EOD triage (earnings guard)');
         if (outcome.state === 'filled' && outcome.flat === true) closedSymbols.add(t.symbol);
         lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} GTC): ${decision.reason}. ${outcome.clean === true ? 'Closed.' : outcome.message}`);
+    }
+
+    // Whole-book overnight vet (WP5 + review 2026-08-23): EVERYTHING that
+    // survives the bell — keep-override conversions AND deliberate GTC
+    // positions — is vetted at market value against the overnight caps and
+    // the gap-stress budget. A GTC book alone could lose 2× the daily-loss
+    // budget under the configured shock while only conversions were
+    // stressed. Earnings bets are counted at max(their own worst historical
+    // gap, the base stress) but never trimmed — holding through the print
+    // IS the class; the 🌙 conversion at the bell then only fires on
+    // gate-passed DAY positions (wasVettedKeepToday).
+    const daySymbols = new Set(vetCandidates.map((k) => k.symbol));
+    const baseStress = getRiskRules().overnight_gap_stress_pct;
+    const gtcSeen = new Set<string>();
+    for (const t of gtcCandidates) {
+        if (gtcSeen.has(t.symbol) || daySymbols.has(t.symbol) || closedSymbols.has(t.symbol)) continue;
+        gtcSeen.add(t.symbol);
+        const pos = positions.find((p) => p.symbol === t.symbol && p.quantity !== 0);
+        if (!pos) continue;
+        let last: number | null = lastBySymbol.get(t.symbol) ?? null;
+        if (last === null) {
+            try {
+                const bars = (await fetchBars(t.symbol, BarSizeSetting.MINUTES_ONE, '1 D', true)).filter((b) => b.close != null);
+                last = bars[bars.length - 1]?.close ?? null;
+            } catch { /* cost-basis mark below — a data hiccup must not close a deliberate swing */ }
+        }
+        const costMark = last === null;
+        const mv = last !== null
+            ? Math.abs(pos.quantity) * last
+            : pos.avgCost > 0 ? Math.abs(pos.quantity) * pos.avgCost : null;
+        const pnlPct = last !== null && t.entryFillPrice
+            ? (t.direction === 'long'
+                ? ((last - t.entryFillPrice) / t.entryFillPrice) * 100
+                : ((t.entryFillPrice - last) / t.entryFillPrice) * 100)
+            : null;
+        vetCandidates.push({
+            symbol: t.symbol,
+            label: `${t.id}, ${t.tradeClass} GTC${costMark ? ', cost-basis mark' : ''}`,
+            marketValueUsd: mv,
+            pnlPct,
+            fallbackValueUsd: pos.avgCost > 0 ? Math.abs(pos.quantity) * pos.avgCost : null,
+            trimExempt: t.tradeClass === 'earnings-bet',
+            stressPctOverride: t.tradeClass === 'earnings-bet'
+                ? Math.max(baseStress, t.worstCaseGapPct ?? 0)
+                : null,
+            pos,
+        });
+    }
+    const vet = vetOvernightBook(vetCandidates, await getNetLiquidation(), getRiskRules(), overrides);
+    for (const trim of vet.trims) {
+        if (closedSymbols.has(trim.symbol)) continue; // WP11: already flat this run
+        if (dryRun) {
+            lines.push(`• ${trim.symbol} (${trim.label}): WILL TRIM at 15:52 — ${trim.reason}. Reply 'keep ${trim.symbol}' to hold it anyway.`);
+            continue;
+        }
+        const outcome = await closePosition(trim.symbol, 'EOD triage (overnight vet trim)');
+        if (outcome.state === 'filled' && outcome.flat === true) closedSymbols.add(trim.symbol);
+        lines.push(`• ${trim.symbol} (${trim.label}): overnight vet — ${trim.reason}. ${outcome.clean === true ? 'Closed.' : outcome.message}`);
+    }
+    if (!dryRun) {
+        for (const sym of daySymbols) {
+            if (!vet.trims.some((tr) => tr.symbol === sym)) vettedKeeps.set(sym, today);
+        }
     }
 
     // Unfilled GTC entries: a resting order is exposure-in-waiting. With a

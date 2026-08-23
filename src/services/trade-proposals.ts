@@ -635,10 +635,6 @@ export interface CreateProposalInput {
     };
 }
 
-/** Entries within this fraction of an existing working bracket's entry on
- *  the same symbol are duplicates (the daily brief re-proposing yesterday's
- *  swing setup), not new trades. */
-export const DUPLICATE_ENTRY_TOLERANCE = 0.02;
 
 /**
  * Count real commitments of a trade class: proposals executing or executed
@@ -657,19 +653,21 @@ export async function createProposal(
     input: CreateProposalInput,
     gateContext: RiskGateContext = {},
 ): Promise<TradeProposal> {
-    // Duplicate-setup guard: an executed proposal on the same symbol with a
-    // near-identical entry means this exact setup already has a working
-    // bracket — creating another stacks orders, it does not add a trade.
-    if (input.entry != null && input.entry > 0) {
-        const dupe = (await listTrackable()).find((t) =>
-            t.symbol === input.symbol.trim().toUpperCase() &&
-            t.entry != null &&
-            Math.abs(t.entry - input.entry!) / input.entry! < DUPLICATE_ENTRY_TOLERANCE);
-        if (dupe) {
+    // ONE ACTIVE THESIS PER SYMBOL (review 2026-08-23, replaces the old
+    // 2%-tolerance duplicate guard): any executed/working row on the symbol
+    // refuses a new proposal outright. Stacking created aggregate-position
+    // ambiguity, multiple OCA groups (which the close and the runner both
+    // rightly refuse), trail exemption leaks and attribution noise — an
+    // amendment REPLACES the working bracket ('cancel P-XXXX' first), it
+    // does not sit beside it. Adopted rows count too: Dexter does not
+    // trade around a position it merely records.
+    {
+        const existing = (await listTrackable()).find((t) => t.symbol === input.symbol.trim().toUpperCase());
+        if (existing) {
             throw new Error(
-                `[risk-gate] REFUSED ${input.symbol.toUpperCase()}: duplicate setup — ${dupe.id} already has a ` +
-                `working bracket at ${dupe.entry} (within ${DUPLICATE_ENTRY_TOLERANCE * 100}% of ${input.entry}). ` +
-                `Cancel ${dupe.id} first, or skip`,
+                `[risk-gate] REFUSED ${input.symbol.toUpperCase()}: one active thesis per symbol — ${existing.id} ` +
+                `(${existing.tradeClass}${existing.entryFillPrice !== null ? ', filled' : ', entry working'}) already owns it. ` +
+                `Cancel or close ${existing.id} first, or skip`,
             );
         }
     }

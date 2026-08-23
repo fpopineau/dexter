@@ -270,20 +270,22 @@ describe('proposal store lifecycle', () => {
         await releaseProposalClaim(p.id); // cleanup for cross-file counts
     });
 
-    test('duplicate-setup guard: refuses a near-identical entry against a working bracket', async () => {
+    test('one active thesis per symbol: ANY working row refuses a new proposal (review 2026-08-23)', async () => {
         const a = await create(validInput({ symbol: 'DUPE' }));
         await setProposalStatus(a.id, 'executed', { orderIds: [71, 72, 73], executedAt: Date.now() });
 
-        // Same symbol, entry within 2% → refused (the daily re-propose
-        // pattern; the duplicate guard fires BEFORE the risk gate).
+        // Same symbol at ANY level — the old 2% tolerance let a "genuinely
+        // different level" stack a second bracket (multiple OCA groups the
+        // close and the runner both refuse). An amendment replaces.
         await expect(create(validInput({ symbol: 'DUPE', entry: 101, stop: 98.5, target: 107.06 })))
-            .rejects.toThrow(/duplicate setup/);
-        // A genuinely different level (>2%) is a new trade. Take geometry at
-        // entry 106: target round(106 × 1.06) = 112.36, stop within 3.18.
+            .rejects.toThrow(/one active thesis/);
+        await expect(create(validInput({ symbol: 'DUPE', entry: 106, stop: 103.4, target: 112.36 })))
+            .rejects.toThrow(/one active thesis/);
+
+        // Once the working row is gone, the symbol is proposable again.
+        await closeProposal(a.id, { exitReason: 'cancelled' });
         const fresh = await create(validInput({ symbol: 'DUPE', entry: 106, stop: 103.4, target: 112.36 }));
         expect(fresh.status).toBe('open');
-
-        await closeProposal(a.id, { exitReason: 'cancelled' }); // free the slot for other tests
     });
 
     test('listStaleUnfilled finds old unfilled entries, not filled or fresh ones', async () => {

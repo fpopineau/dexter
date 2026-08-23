@@ -37,6 +37,7 @@ import { confirmCancel } from '@/tools/ibkr/order-ack.js';
 import { fetchDailyRiskContext } from '@/tools/ibkr/daily-atr.js';
 import { createIbkrMarketData } from '@/tools/ibkr/market-data.js';
 import { getRiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
+import { withOrderLock } from '@/tools/ibkr/order-lock.js';
 import { formulaTakePct } from './proposal-risk-gate.js';
 import { logger } from '@/utils';
 import { getMarketSession, MarketSession } from '@/utils/market-hours.js';
@@ -257,10 +258,13 @@ export function exitActionFor(direction: 'long' | 'short'): OrderAction {
 export interface ReleaseDecision {
     /** Dexter-owned LMT target legs — the only orders a release may cancel. */
     cancelIds: number[];
-    /** Exit-side LMTs NOT ours (manual TWS, other clients) — reported, never touched. */
+    /** Exit-side orders NOT ours (manual TWS, other clients) — reported, never touched. */
     foreignRefs: string[];
     /** Why nothing may be cancelled. null = release may proceed. */
-    blockedReason: 'no-targets' | 'no-own-stop' | 'incomplete-book' | 'stacked-brackets' | null;
+    blockedReason:
+        | 'no-targets' | 'no-own-stop' | 'incomplete-book' | 'stacked-brackets'
+        | 'foreign-orders' | 'incoherent-book' | 'stop-undersized'
+        | null;
 }
 
 /** Semantic leg identity (REQ-TRAIL-003, review 2026-08-23): Dexter stamps
@@ -280,38 +284,63 @@ function pairKey(ref: string): string {
 }
 
 /** Pure: the release decision over a position's exit-side orders
- *  (REQ-TRAIL-001/002/003 + bracket atomicity, review 2026-08-23 P1).
+ *  (REQ-TRAIL-001..004 + review 2026-08-23 P2 pair identity).
  *  Rules, in order:
  *  - An INCOMPLETE broker view releases nothing — a leg we cannot see is
  *    a leg we cannot reason about.
- *  - Only Dexter-owned `:tp` legs are candidates (never manual limits,
- *    never `reduce-`/`close-` orders).
- *  - A target may only be released when ITS OWN bracket's stop (same base
- *    ref, same generation) survives — a stop from another bracket is not
- *    this target's protection.
- *  - Exactly ONE working pair may exist: with stacked brackets, releasing
- *    targets leaves multiple OCA stop groups and `closePosition` (round 9)
- *    rightly refuses the non-atomic close — runner mode must not build
- *    the very book its own exit path refuses. */
-export function decideTargetRelease<T extends { orderId: number; orderType: string; orderRef: string | null }>(
+ *  - ANY foreign exit-side order blocks the release: `closePosition`
+ *    (round 10) refuses to exit around foreign orders, so runner mode
+ *    must not enter a state its own exit path refuses.
+ *  - The entire Dexter exit book must be EXACTLY one coherent pair: one
+ *    `:tp` target + one `:stop` stop, same ref base and generation, same
+ *    OCA group, same account — an orphan stop, a groupless leg or a
+ *    second pair is an incoherent book (blocked; the WP3 sweep heals it).
+ *  - The stop must cover the position: unknown or undersized stop
+ *    quantity blocks (a released target with a half-size stop leaves the
+ *    remainder unprotected). */
+export function decideTargetRelease<T extends {
+    orderId: number; orderType: string; orderRef: string | null;
+    ocaGroup?: string | null; account?: string | null; quantity?: number | null;
+}>(
     view: { orders: T[]; complete: boolean },
+    positionQty?: number,
 ): ReleaseDecision {
     const exitOrders = view.orders;
     const foreignRefs = exitOrders
-        .filter((o) => o.orderType === 'LMT' && !isOurOrderRef(o.orderRef))
-        .map((o) => `#${o.orderId} ${o.orderRef ?? '<no ref>'}`);
+        .filter((o) => !isOurOrderRef(o.orderRef))
+        .map((o) => `#${o.orderId} ${o.orderType} ${o.orderRef ?? '<no ref>'}`);
     if (!view.complete) return { cancelIds: [], foreignRefs, blockedReason: 'incomplete-book' };
+    if (foreignRefs.length > 0) return { cancelIds: [], foreignRefs, blockedReason: 'foreign-orders' };
     const targets = exitOrders.filter((o) =>
-        o.orderType === 'LMT' && isOurOrderRef(o.orderRef) && TARGET_LEG_REF.test(o.orderRef ?? ''));
+        o.orderType === 'LMT' && TARGET_LEG_REF.test(o.orderRef ?? ''));
     if (targets.length === 0) return { cancelIds: [], foreignRefs, blockedReason: 'no-targets' };
-    const stopKeys = new Set(exitOrders
-        .filter((o) => o.orderType.startsWith('STP') && isOurOrderRef(o.orderRef) && STOP_LEG_REF.test(o.orderRef ?? ''))
-        .map((o) => pairKey(o.orderRef ?? '')));
-    const paired = targets.filter((o) => stopKeys.has(pairKey(o.orderRef ?? '')));
-    if (paired.length === 0) return { cancelIds: [], foreignRefs, blockedReason: 'no-own-stop' };
-    const pairs = new Set(paired.map((o) => pairKey(o.orderRef ?? '')));
-    if (pairs.size > 1 || paired.length > 1) return { cancelIds: [], foreignRefs, blockedReason: 'stacked-brackets' };
-    return { cancelIds: [paired[0].orderId], foreignRefs, blockedReason: null };
+    const stops = exitOrders.filter((o) =>
+        o.orderType.startsWith('STP') && STOP_LEG_REF.test(o.orderRef ?? ''));
+    // Every Dexter exit-side order must be one of THE pair's two legs —
+    // an extra stop, a reduce-/close- order or a third leg is incoherent.
+    if (exitOrders.length !== targets.length + stops.length) {
+        return { cancelIds: [], foreignRefs, blockedReason: 'incoherent-book' };
+    }
+    if (targets.length > 1 || stops.length > 1) {
+        return { cancelIds: [], foreignRefs, blockedReason: 'stacked-brackets' };
+    }
+    const target = targets[0];
+    const stop = stops[0];
+    if (stops.length === 0 || pairKey(stop.orderRef ?? '') !== pairKey(target.orderRef ?? '')) {
+        return { cancelIds: [], foreignRefs, blockedReason: 'no-own-stop' };
+    }
+    // Same OCA group and account, both KNOWN — unknown identity fails closed.
+    if (!target.ocaGroup || !stop.ocaGroup || target.ocaGroup !== stop.ocaGroup
+        || !target.account || !stop.account || target.account !== stop.account) {
+        return { cancelIds: [], foreignRefs, blockedReason: 'incoherent-book' };
+    }
+    // The surviving stop must cover the position (unknown qty fails closed).
+    if (positionQty !== undefined) {
+        if (stop.quantity == null || stop.quantity < positionQty) {
+            return { cancelIds: [], foreignRefs, blockedReason: 'stop-undersized' };
+        }
+    }
+    return { cancelIds: [target.orderId], foreignRefs, blockedReason: null };
 }
 
 /**
@@ -326,22 +355,35 @@ async function releaseTargetLeg(
     api: Awaited<ReturnType<typeof getIBApi>>,
     entry: TrailEntry,
 ): Promise<string | null> {
+    // Under the global order lock (review 2026-08-23 P1): the snapshot,
+    // the decision and the cancel are one atomic step — a WP2 resize must
+    // not add a second OCA pair between the read and the cancel.
+    return withOrderLock(async () => releaseTargetLegLocked(api, entry));
+}
+
+async function releaseTargetLegLocked(
+    api: Awaited<ReturnType<typeof getIBApi>>,
+    entry: TrailEntry,
+): Promise<string | null> {
     const view = await fetchOpenOrdersFor(api, entry.symbol, exitActionFor(entry.direction));
-    const decision = decideTargetRelease(view);
+    const decision = decideTargetRelease(view, entry.quantity);
     if (decision.foreignRefs.length > 0) {
         logger.warn(
-            `[profit-trail] ${entry.symbol}: ${decision.foreignRefs.length} foreign exit-side LMT order(s) ` +
-            `left untouched (not ours to cancel — review in TWS): ${decision.foreignRefs.join(', ')}`,
+            `[profit-trail] ${entry.symbol}: foreign exit-side order(s) present (not ours — review in TWS): ${decision.foreignRefs.join(', ')}`,
         );
     }
     if (decision.blockedReason === 'no-targets') return null;
     if (decision.blockedReason !== null) {
-        const why = decision.blockedReason === 'no-own-stop'
-            ? 'no Dexter stop from the SAME bracket survives — runner mode would strip broker-side protection'
-            : decision.blockedReason === 'incomplete-book'
-                ? 'the open-orders view is INCOMPLETE — a leg we cannot see is a leg we cannot reason about'
-                : 'multiple working bracket pairs (stacked theses) — releasing targets would build the multi-OCA book closePosition refuses';
-        logger.error(`[profit-trail] ${entry.symbol}: target NOT released — ${why}`);
+        const why: Record<Exclude<ReleaseDecision['blockedReason'], null>, string> = {
+            'no-targets': '',
+            'no-own-stop': 'no Dexter stop from the SAME bracket survives — runner mode would strip broker-side protection',
+            'incomplete-book': 'the open-orders view is INCOMPLETE — a leg we cannot see is a leg we cannot reason about',
+            'stacked-brackets': 'multiple working bracket pairs (stacked theses) — releasing targets would build the multi-OCA book closePosition refuses',
+            'foreign-orders': 'foreign exit-side orders present — closePosition refuses to exit around them, so runner mode must not start',
+            'incoherent-book': 'the Dexter exit book is not exactly one coherent OCA pair (orphan leg, group/account mismatch) — the WP3 sweep heals, runner mode waits',
+            'stop-undersized': 'the surviving stop does not cover the full position — releasing the target would leave the remainder unprotected',
+        };
+        logger.error(`[profit-trail] ${entry.symbol}: target NOT released — ${why[decision.blockedReason]}`);
         return null;
     }
     // Round-4 review (2026-08-21): "released" means the broker CONFIRMED

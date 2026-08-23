@@ -127,52 +127,42 @@ describe('splitTriageCandidates (kept-overnight holds re-enter momentum triage)'
 
 const TODAY = '2026-08-05';
 
-describe('EOD triage decision', () => {
-    test('losing AND fading → close (the operator rule)', () => {
-        const d = decideEodAction({ direction: 'long', entryFill: 193.11, last: 191.2, hourAgo: 192.4 });
+describe('EOD triage decision (FLAT BY CLOSE — operator policy 2026-08-23)', () => {
+    test('every intraday position closes at the bell: winners, losers, stabilizers alike', () => {
+        // The momentum-keep is GONE — an intraday thesis ends with its
+        // session; the take-at-x% target banks winners during the day.
+        for (const c of [
+            { direction: 'long' as const, entryFill: 193.11, last: 196, hourAgo: 195 },   // winner
+            { direction: 'long' as const, entryFill: 193.11, last: 191.2, hourAgo: 190.5 }, // stabilizing loser
+            { direction: 'long' as const, entryFill: 193.11, last: 191.2, hourAgo: 192.4 }, // fading loser
+            { direction: 'short' as const, entryFill: 100, last: 98.5, hourAgo: 98 },     // winning short
+            { direction: 'long' as const, entryFill: 100, last: 100, hourAgo: 101 },      // breakeven
+            { direction: 'long' as const, entryFill: 100, last: 98, hourAgo: null },      // no momentum data
+        ]) {
+            const d = decideEodAction(c);
+            expect(d.action).toBe('close');
+            expect(d.reason).toContain('flat by close');
+        }
+    });
+
+    test('the only overnight path is the explicit operator override, named in the reason', () => {
+        const d = decideEodAction({ direction: 'long', entryFill: 100, last: 104, hourAgo: 103 });
         expect(d.action).toBe('close');
-        expect(d.reason).toContain('losing');
-        expect(d.reason).toContain('fading');
+        expect(d.reason).toContain("keep SYMBOL");
+        expect(d.reason).toContain('swing proposal');
     });
 
-    test('losing but stabilizing/recovering → keep', () => {
-        const d = decideEodAction({ direction: 'long', entryFill: 193.11, last: 191.2, hourAgo: 190.5 });
-        expect(d.action).toBe('keep');
-        expect(d.reason).toContain('stabilizing');
-    });
-
-    test('winning → keep, regardless of momentum', () => {
-        expect(decideEodAction({ direction: 'long', entryFill: 193.11, last: 196, hourAgo: 197 }).action).toBe('keep');
-        expect(decideEodAction({ direction: 'long', entryFill: 193.11, last: 196, hourAgo: 195 }).action).toBe('keep');
-    });
-
-    test('short positions mirror: losing = price above fill, fading = still rising', () => {
-        expect(decideEodAction({ direction: 'short', entryFill: 100, last: 101.5, hourAgo: 100.8 }).action).toBe('close');
-        expect(decideEodAction({ direction: 'short', entryFill: 100, last: 101.5, hourAgo: 102.2 }).action).toBe('keep');
-        expect(decideEodAction({ direction: 'short', entryFill: 100, last: 98.5, hourAgo: 98 }).action).toBe('keep');
-    });
-
-    test('WP5 fail-closed flip: unknown momentum on a loser, or bad prices, CLOSE (was fail-open)', () => {
-        // An overnight hold must be EARNED — a position the triage cannot
-        // price or read does not ride the night by default (audit crit. 9,
-        // decision D2: the operator's pre-bell 'keep SYMBOL' overrides).
-        const noMomentum = decideEodAction({ direction: 'long', entryFill: 100, last: 98, hourAgo: null });
-        expect(noMomentum.action).toBe('close');
-        expect(noMomentum.reason).toContain('keep SYMBOL');
-        const noPrice = decideEodAction({ direction: 'long', entryFill: 100, last: 0, hourAgo: 99 });
-        expect(noPrice.action).toBe('close');
-        expect(noPrice.reason).toContain('fail-closed');
-    });
-
-    test('exactly breakeven counts as winning (kept)', () => {
-        expect(decideEodAction({ direction: 'long', entryFill: 100, last: 100, hourAgo: 101 }).action).toBe('keep');
+    test('unpriceable positions close too (nothing rides on missing data)', () => {
+        const d = decideEodAction({ direction: 'long', entryFill: 100, last: 0, hourAgo: 99 });
+        expect(d.action).toBe('close');
     });
 });
 
 describe('earnings guard (the SNDK rule: never hold a print unintentionally)', () => {
-    test('a WINNING keep is overridden to close when the symbol reports', () => {
-        const base = decideEodAction({ direction: 'long', entryFill: 100, last: 104, hourAgo: 103 });
-        expect(base.action).toBe('keep'); // winning — would hold overnight
+    test('an operator-override KEEP is still overridden to close when the symbol reports', () => {
+        // Flat-by-close: the only keep that reaches the guard is the
+        // explicit `keep SYMBOL` override — and even that never holds a print.
+        const base = { action: 'keep' as const, reason: "operator override ('keep SNDK')" };
         const guarded = applyEarningsGuard(base, { date: '2026-08-05', time: 'after-hours' }, TODAY);
         expect(guarded.action).toBe('close');
         expect(guarded.reason).toContain('earnings guard');
@@ -210,7 +200,7 @@ describe('past-print exemption (the reaction-trade rule)', () => {
         // with "flat before the print" — the print was 7 hours in the past.
         const base = decideEodAction({ direction: 'long', entryFill: 100, last: 104, hourAgo: 103 });
         const guarded = applyEarningsGuard(base, { date: TODAY, time: 'pre-market' }, TODAY);
-        expect(guarded).toEqual(base); // untouched — holds overnight, protected
+        expect(guarded).toEqual(base); // untouched — the base (flat-by-close) decision stands as-is
     });
 
     test('a print TODAY after-hours is still ahead — guard fires', () => {
