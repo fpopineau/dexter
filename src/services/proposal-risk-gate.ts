@@ -360,6 +360,12 @@ export function checkProposalRisk(
             'wait for the open bet to resolve',
         );
     }
+    if (tradeClass === 'swing' && !rules.swing_enabled) {
+        violations.push(
+            'the swing class is disabled in this profile (unvalidated or switched off pending its own record) — ' +
+            'do not re-propose as another class to work around this',
+        );
+    }
     if (tradeClass === 'swing' && ctx.openSwingPositions !== undefined
         && ctx.openSwingPositions >= rules.max_swing_positions) {
         violations.push(

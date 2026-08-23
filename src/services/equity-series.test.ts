@@ -56,3 +56,51 @@ describe('equity series (REQ-VAL-006 — portfolio drawdown from marked NetLiq)'
         expect(portfolioDrawdown(series, t0)!.maxDdPct).toBeCloseTo(10, 5);
     });
 });
+
+describe('exposureCoverageGaps (review 2026-08-23 — the series must prove it was WATCHING)', () => {
+    // 2026-08-24 is a Monday. Build ET-wall-clock instants via a helper:
+    // 14:00 UTC = 10:00 ET (EDT).
+    const et = (day: number, h: number, m: number) => Date.UTC(2026, 7, day, h + 4, m, 0);
+    const s = (ts: number) => ({ ts, netLiq: 11_700 });
+    const every5 = (day: number, fromH: number, fromM: number, toH: number, toM: number) => {
+        const out = [];
+        for (let t = et(day, fromH, fromM); t <= et(day, toH, toM); t += 5 * 60_000) out.push(s(t));
+        return out;
+    };
+
+    test('full-day coverage at 5-min cadence passes', async () => {
+        const { exposureCoverageGaps } = await import('@/utils/equity-series-math.js');
+        const series = every5(24, 9, 30, 16, 0);
+        const v = exposureCoverageGaps(series, [{ from: et(24, 9, 40), to: et(24, 15, 50), label: 'P-A' }]);
+        expect(v).toEqual([]);
+    });
+
+    test('a sampler that slept through the trough and woke after recovery is caught', async () => {
+        const { exposureCoverageGaps } = await import('@/utils/equity-series-math.js');
+        // Exposure all day; samples only 15:00-16:00 (boot after recovery).
+        const series = every5(24, 15, 0, 16, 0);
+        const v = exposureCoverageGaps(series, [{ from: et(24, 9, 35), to: et(24, 15, 55), label: 'P-B' }]);
+        expect(v.some((x) => x.includes('was unobserved'))).toBe(true);
+    });
+
+    test('a mid-day outage over the max gap flags; the exposed window is clipped to the actual entry/exit', async () => {
+        const { exposureCoverageGaps } = await import('@/utils/equity-series-math.js');
+        // Gap 11:00 → 13:00 while exposed → violation.
+        const gappy = [...every5(24, 9, 30, 11, 0), ...every5(24, 13, 0, 16, 0)];
+        const v = exposureCoverageGaps(gappy, [{ from: et(24, 10, 0), to: et(24, 15, 0), label: 'P-C' }]);
+        expect(v.some((x) => x.includes('sampling gap'))).toBe(true);
+        // An afternoon-only exposure owes only the afternoon: morning-less
+        // series still covers it.
+        const afternoon = every5(24, 14, 0, 16, 0);
+        expect(exposureCoverageGaps(afternoon, [{ from: et(24, 14, 10), to: et(24, 15, 45), label: 'P-D' }])).toEqual([]);
+    });
+
+    test('weekend days inside a multi-day hold owe nothing; the exposed weekdays still do', async () => {
+        const { exposureCoverageGaps } = await import('@/utils/equity-series-math.js');
+        // Hold Fri 2026-08-21 15:00 → Mon 2026-08-24 10:00; series covers
+        // Friday's tail and Monday's open, nothing on Sat/Sun.
+        const series = [...every5(21, 15, 0, 16, 0), ...every5(24, 9, 30, 10, 30)];
+        const v = exposureCoverageGaps(series, [{ from: et(21, 15, 5), to: et(24, 10, 0), label: 'P-E' }]);
+        expect(v).toEqual([]);
+    });
+});

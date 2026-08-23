@@ -145,7 +145,7 @@ describe('runner mode direction mapping (shorts covered)', () => {
             { orderId: 1, orderType: 'LMT', orderRef: 'P-1A2B:tp' },
             { orderId: 2, orderType: 'STP', orderRef: 'P-1A2B:stop' },
         ];
-        const long = decideTargetRelease(longExits);
+        const long = decideTargetRelease({ complete: true, orders: longExits });
         expect(long.cancelIds).toEqual([1]);
         expect(long.blockedReason).toBeNull();
         // Short auto-protect exits: BUY STP (stop above) + BUY LMT (target below)
@@ -153,20 +153,20 @@ describe('runner mode direction mapping (shorts covered)', () => {
             { orderId: 3, orderType: 'STP', orderRef: 'protect-XYZ:stop' },
             { orderId: 4, orderType: 'LMT', orderRef: 'protect-XYZ:tp' },
         ];
-        expect(decideTargetRelease(shortExits).cancelIds).toEqual([4]);
+        expect(decideTargetRelease({ complete: true, orders: shortExits }).cancelIds).toEqual([4]);
         // STP LMT stops (momentum-style) are never targets — nothing to cancel
-        expect(decideTargetRelease([{ orderId: 5, orderType: 'STP LMT', orderRef: 'P-1A2B:stop' }]).blockedReason)
+        expect(decideTargetRelease({ complete: true, orders: [{ orderId: 5, orderType: 'STP LMT', orderRef: 'P-1A2B:stop' }] }).blockedReason)
             .toBe('no-targets');
     });
 
     test('a foreign (manual TWS) LMT is never a cancel candidate (REQ-TRAIL-001)', async () => {
         const { decideTargetRelease } = await import('./profit-trail.js');
-        const d = decideTargetRelease([
+        const d = decideTargetRelease({ complete: true, orders: [
             { orderId: 10, orderType: 'LMT', orderRef: null },            // manual TWS limit
             { orderId: 11, orderType: 'LMT', orderRef: 'my-own-note' },   // non-Dexter ref
             { orderId: 12, orderType: 'LMT', orderRef: 'P-9F00:tp' },     // ours
             { orderId: 13, orderType: 'STP', orderRef: 'P-9F00:stop' },
-        ]);
+        ] });
         expect(d.cancelIds).toEqual([12]);
         expect(d.foreignRefs).toEqual(['#10 <no ref>', '#11 my-own-note']);
         expect(d.blockedReason).toBeNull();
@@ -176,30 +176,30 @@ describe('runner mode direction mapping (shorts covered)', () => {
         const { decideTargetRelease } = await import('./profit-trail.js');
         // An agent-authorized reduction limit shares the position's exit side
         // and our ownership — it is not the bracket target and must survive.
-        const d = decideTargetRelease([
+        const d = decideTargetRelease({ complete: true, orders: [
             { orderId: 30, orderType: 'LMT', orderRef: 'reduce-XYZ' },
             { orderId: 31, orderType: 'LMT', orderRef: 'P-9F04:tp' },
             { orderId: 32, orderType: 'STP', orderRef: 'P-9F04:stop' },
-        ]);
+        ] });
         expect(d.cancelIds).toEqual([31]);
         expect(d.foreignRefs).toEqual([]); // ours — just not a target
         // Only a reduce- limit and our stop: no target to release at all.
-        const onlyReduce = decideTargetRelease([
+        const onlyReduce = decideTargetRelease({ complete: true, orders: [
             { orderId: 33, orderType: 'LMT', orderRef: 'reduce-XYZ' },
             { orderId: 34, orderType: 'STP', orderRef: 'P-9F05:stop' },
-        ]);
+        ] });
         expect(onlyReduce.blockedReason).toBe('no-targets');
         // The WP2 resized pair (:tp2/:stop2) is recognized on both sides.
-        const resized = decideTargetRelease([
+        const resized = decideTargetRelease({ complete: true, orders: [
             { orderId: 35, orderType: 'LMT', orderRef: 'P-9F06:tp2' },
             { orderId: 36, orderType: 'STP', orderRef: 'P-9F06:stop2' },
-        ]);
+        ] });
         expect(resized.cancelIds).toEqual([35]);
         // A reduce- STP is not bracket protection: release stays blocked.
-        const reduceStop = decideTargetRelease([
+        const reduceStop = decideTargetRelease({ complete: true, orders: [
             { orderId: 37, orderType: 'LMT', orderRef: 'P-9F07:tp' },
             { orderId: 38, orderType: 'STP', orderRef: 'reduce-XYZ' },
-        ]);
+        ] });
         expect(reduceStop.blockedReason).toBe('no-own-stop');
     });
 
@@ -207,22 +207,22 @@ describe('runner mode direction mapping (shorts covered)', () => {
         const { decideTargetRelease } = await import('./profit-trail.js');
         // Our target but only a FOREIGN stop: releasing would hand protection
         // to an order we do not own — blocked.
-        const foreignStop = decideTargetRelease([
+        const foreignStop = decideTargetRelease({ complete: true, orders: [
             { orderId: 20, orderType: 'LMT', orderRef: 'P-9F01:tp' },
             { orderId: 21, orderType: 'STP', orderRef: null },
-        ]);
+        ] });
         expect(foreignStop.blockedReason).toBe('no-own-stop');
         expect(foreignStop.cancelIds).toEqual([]);
         // No stop at all (partial book view, or stop already gone): blocked.
-        const noStop = decideTargetRelease([
+        const noStop = decideTargetRelease({ complete: true, orders: [
             { orderId: 22, orderType: 'LMT', orderRef: 'P-9F02:tp' },
-        ]);
+        ] });
         expect(noStop.blockedReason).toBe('no-own-stop');
         // A Dexter STP LMT counts as the protective leg.
-        const stpLmt = decideTargetRelease([
+        const stpLmt = decideTargetRelease({ complete: true, orders: [
             { orderId: 23, orderType: 'LMT', orderRef: 'P-9F03:tp' },
             { orderId: 24, orderType: 'STP LMT', orderRef: 'P-9F03:stop' },
-        ]);
+        ] });
         expect(stpLmt.blockedReason).toBeNull();
         expect(stpLmt.cancelIds).toEqual([23]);
     });
@@ -257,5 +257,57 @@ describe('ratchet mode geometry (REQ-EXIT-008, exit_style: ratchet)', () => {
         // x = 3: exact giveback would be ~0.97% — fine; x extremely small is
         // clamped by the spread-noise floor.
         expect(ratchetGeometry(0.5).pullbackPct).toBeGreaterThanOrEqual(0.35);
+    });
+});
+
+describe('bracket-atomic release (review 2026-08-23 P1)', () => {
+    test('a stop from ANOTHER bracket does not authorize this target', async () => {
+        const { decideTargetRelease } = await import('./profit-trail.js');
+        const d = decideTargetRelease({ complete: true, orders: [
+            { orderId: 40, orderType: 'LMT', orderRef: 'P-AAAA:tp' },
+            { orderId: 41, orderType: 'STP', orderRef: 'P-BBBB:stop' },
+        ] });
+        expect(d.blockedReason).toBe('no-own-stop');
+        expect(d.cancelIds).toEqual([]);
+    });
+
+    test('generations never cross-pair: :tp needs :stop, :tp2 needs :stop2', async () => {
+        const { decideTargetRelease } = await import('./profit-trail.js');
+        const d = decideTargetRelease({ complete: true, orders: [
+            { orderId: 42, orderType: 'LMT', orderRef: 'P-AAAA:tp' },
+            { orderId: 43, orderType: 'STP', orderRef: 'P-AAAA:stop2' },
+        ] });
+        expect(d.blockedReason).toBe('no-own-stop');
+    });
+
+    test('stacked brackets refuse the release — the multi-OCA book closePosition refuses must never be built', async () => {
+        const { decideTargetRelease } = await import('./profit-trail.js');
+        const d = decideTargetRelease({ complete: true, orders: [
+            { orderId: 50, orderType: 'LMT', orderRef: 'P-AAAA:tp' },
+            { orderId: 51, orderType: 'STP', orderRef: 'P-AAAA:stop' },
+            { orderId: 52, orderType: 'LMT', orderRef: 'P-BBBB:tp' },
+            { orderId: 53, orderType: 'STP', orderRef: 'P-BBBB:stop' },
+        ] });
+        expect(d.blockedReason).toBe('stacked-brackets');
+        expect(d.cancelIds).toEqual([]);
+        // A transitional resize book (old pair + new pair, same base) is
+        // equally two OCA groups — equally refused.
+        const resizing = decideTargetRelease({ complete: true, orders: [
+            { orderId: 54, orderType: 'LMT', orderRef: 'P-AAAA:tp' },
+            { orderId: 55, orderType: 'STP', orderRef: 'P-AAAA:stop' },
+            { orderId: 56, orderType: 'LMT', orderRef: 'P-AAAA:tp2' },
+            { orderId: 57, orderType: 'STP', orderRef: 'P-AAAA:stop2' },
+        ] });
+        expect(resizing.blockedReason).toBe('stacked-brackets');
+    });
+
+    test('an INCOMPLETE broker view releases nothing', async () => {
+        const { decideTargetRelease } = await import('./profit-trail.js');
+        const d = decideTargetRelease({ complete: false, orders: [
+            { orderId: 60, orderType: 'LMT', orderRef: 'P-AAAA:tp' },
+            { orderId: 61, orderType: 'STP', orderRef: 'P-AAAA:stop' },
+        ] });
+        expect(d.blockedReason).toBe('incomplete-book');
+        expect(d.cancelIds).toEqual([]);
     });
 });

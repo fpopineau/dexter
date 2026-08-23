@@ -39,6 +39,9 @@ export default {
   transformIgnorePatterns: [
     'node_modules/(?!(p-retry|is-network-error|@langchain)/)',
   ],
+  // REQ-TEST-001: unconditional DB isolation before any suite imports the
+  // stores — the production DEXTER_DATA_DIR must never survive into tests.
+  setupFiles: ['<rootDir>/test/test-env.ts'],
   testMatch: ['**/src/**/*.test.ts'],
   testPathIgnorePatterns: [
     '\\\\node_modules\\\\',

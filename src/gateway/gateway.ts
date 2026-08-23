@@ -44,6 +44,7 @@ import { catchUpPatternScan } from '@/services/pattern-scanner.js';
 import { startExcursionSweeper, stopExcursionSweeper } from '@/services/excursion-sweeper.js';
 import { startStaleEntrySweeper, stopStaleEntrySweeper } from '@/services/stale-entry-sweeper.js';
 import { startEquitySeries, stopEquitySeries } from '@/services/equity-series.js';
+import { startKillSwitchGuardian, stopKillSwitchGuardian } from '@/services/kill-switch-guardian.js';
 import { makeDebugLog } from './debug-log.js';
 import { registerScanHealthAlerts } from './health-alerts.js';
 import { registerTriggerAlerts } from './trigger-alerts.js';
@@ -310,9 +311,12 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     startProfitTrail();
     // Reclaim position slots from brackets whose entry never filled.
     startStaleEntrySweeper();
-    // Marked NetLiq every 15 min (REQ-VAL-006): the validation scorecard
-    // judges PORTFOLIO drawdown from this series, not from closed trades.
+    // Marked NetLiq series (REQ-VAL-006): the validation scorecard judges
+    // PORTFOLIO drawdown from this series, not from closed trades.
     startEquitySeries();
+    // Continuous kill-switch (review 2026-08-23): a breach latches on
+    // OBSERVATION, and a latch cancels working entry parents.
+    startKillSwitchGuardian();
     // Nightly MFE/MAE backfill on closed rows (WP0.9): target-reachability
     // tuning reads excursion data — without this it tunes on ~4 rows.
     startExcursionSweeper();
@@ -420,6 +424,7 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
       stopProfitTrail();
       stopStaleEntrySweeper();
       stopEquitySeries();
+      stopKillSwitchGuardian();
       stopExcursionSweeper();
       stopEodTriage();
       stopNewsPulse();

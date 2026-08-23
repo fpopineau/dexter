@@ -540,3 +540,23 @@ describe('trade classes', () => {
         expect(report).toContain('swing:');
     });
 });
+
+describe('assertTestDataDirIsTemp (REQ-TEST-001 — the production DB is unreachable under tests)', () => {
+    test('temp paths pass; the production path, subdirs of the repo, and unset all refuse', async () => {
+        const { assertTestDataDirIsTemp } = await import('./trade-proposals.js');
+        const { tmpdir } = await import('node:os');
+        const { join } = await import('node:path');
+        const tmp = tmpdir();
+        // Inside the OS temp dir (what mkdtemp produces): fine.
+        expect(() => assertTestDataDirIsTemp(join(tmp, 'dexter-test-abc'), 'test', tmp)).not.toThrow();
+        // The exact production path .env carries: refused.
+        expect(() => assertTestDataDirIsTemp('.dexter/data', 'test', tmp)).toThrow(/OUTSIDE the OS temp directory/);
+        // An absolute repo path: refused.
+        expect(() => assertTestDataDirIsTemp(join(process.cwd(), '.dexter', 'data'), 'test', tmp)).toThrow(/OUTSIDE/);
+        // Unset under test: refused (the original guard's case).
+        expect(() => assertTestDataDirIsTemp(undefined, 'test', tmp)).toThrow(/set DEXTER_DATA_DIR/);
+        // Production runtime (NODE_ENV not 'test'): the guard stays out of the way.
+        expect(() => assertTestDataDirIsTemp('.dexter/data', undefined, tmp)).not.toThrow();
+        expect(() => assertTestDataDirIsTemp(undefined, 'production', tmp)).not.toThrow();
+    });
+});

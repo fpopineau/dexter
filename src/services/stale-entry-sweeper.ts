@@ -40,7 +40,7 @@
 
 import { OrderAction } from '@stoqey/ib';
 import { getIBApi } from '@/tools/ibkr/connection.js';
-import { confirmCancel } from '@/tools/ibkr/order-ack.js';
+import { confirmCancelDetailed } from '@/tools/ibkr/order-ack.js';
 import { withOrderLock } from '@/tools/ibkr/order-lock.js';
 import { logger } from '@/utils';
 import { fetchOpenOrdersFor } from './position-actions.js';
@@ -87,7 +87,9 @@ export function entryActionFor(direction: 'long' | 'short'): OrderAction {
     return direction === 'long' ? OrderAction.BUY : OrderAction.SELL;
 }
 
-async function cancelEntryLeg(p: TradeProposal, why: string): Promise<boolean> {
+/** THE safe entry-cancel primitive (REQ-ENTRY-003) — also used by the
+ *  kill-switch guardian to neutralize working entries after a latch. */
+export async function cancelEntryLeg(p: TradeProposal, why: string): Promise<boolean> {
     const api = await getIBApi();
     // Under the order lock: no placement, resize, or close interleaves with
     // the book read + cancel — the snapshot we act on is the one we hold.
@@ -101,10 +103,23 @@ async function cancelEntryLeg(p: TradeProposal, why: string): Promise<boolean> {
             );
             return false;
         }
-        const outcome = await confirmCancel(api, parentId, CANCEL_CONFIRM_MS);
+        const { outcome, filledQty } = await confirmCancelDetailed(api, parentId, CANCEL_CONFIRM_MS);
         switch (outcome) {
             case 'cancelled':
-                logger.info(`[stale-entry-sweeper] ${p.id} ${p.symbol}: ${why} — entry #${parentId} cancelled (broker-confirmed; attached exits cancel with it)`);
+                // Review 2026-08-23 P1: IBKR can confirm a cancel WITH a
+                // nonzero filled quantity — a partial fill raced us and a
+                // real position exists. Never report that as a clean sweep:
+                // the tracker's terminal-partial path (WP2) downgrades the
+                // row and resizes the exits; this sweep's job is only to be
+                // honest about what happened.
+                if (filledQty !== null && filledQty > 0) {
+                    logger.warn(
+                        `[stale-entry-sweeper] ${p.id} ${p.symbol}: entry #${parentId} cancelled with ${filledQty} share(s) ` +
+                        `ALREADY FILLED — partial position is LIVE; exits left standing, tracker resizes protection (WP2)`,
+                    );
+                    return false;
+                }
+                logger.info(`[stale-entry-sweeper] ${p.id} ${p.symbol}: ${why} — entry #${parentId} cancelled clean (broker-confirmed, 0 filled; attached exits cancel with it)`);
                 return true;
             case 'filled':
             case 'not-cancellable':

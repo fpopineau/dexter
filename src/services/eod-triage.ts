@@ -169,7 +169,15 @@ export interface OvernightVetResult {
 export function vetOvernightBook(
     keeps: OvernightVetCandidate[],
     netLiq: number | null,
-    rules: { max_overnight_exposure_pct: number; max_overnight_position_pct: number },
+    rules: {
+        max_overnight_exposure_pct: number;
+        max_overnight_position_pct: number;
+        /** Review 2026-08-23 P1: assumed adverse overnight gap (%). The
+         *  book is trimmed until gap × surviving notional fits inside one
+         *  daily-loss budget — a stop cannot contain an opening gap. */
+        overnight_gap_stress_pct?: number;
+        max_daily_loss_pct?: number;
+    },
     overrides: ReadonlySet<string>,
 ): OvernightVetResult {
     if (keeps.length === 0) return { trims: [], capLine: null, warnings: [] };
@@ -231,12 +239,53 @@ export function vetOvernightBook(
         }
     }
 
+    // Gap-stress trim (review 2026-08-23 P1): notional caps bound SIZE; this
+    // bounds the LOSS a correlated adverse gap hands the account overnight —
+    // gap% × surviving notional must fit inside one daily-loss budget.
+    // Trims worst-first among the non-overridden; operator overrides hold
+    // their excess (reported, like the notional caps).
+    const stressPct = rules.overnight_gap_stress_pct ?? 0;
+    const dailyLossPct = rules.max_daily_loss_pct ?? 0;
+    let stressedUsd = 0;
+    if (stressPct > 0 && dailyLossPct > 0) {
+        const budgetUsd = (dailyLossPct / 100) * netLiq;
+        const trimmed = new Set(trims.map((t) => t.symbol));
+        const alive = () => surviving.filter((k) => !trimmed.has(k.symbol));
+        stressedUsd = alive().reduce((s, k) => s + k.valueUsd * (stressPct / 100), 0);
+        if (stressedUsd > budgetUsd) {
+            const stressTrimmable = alive()
+                .filter((k) => !overrides.has(k.symbol))
+                .sort((a, b) => (a.pnlPct ?? -Infinity) - (b.pnlPct ?? -Infinity));
+            for (const k of stressTrimmable) {
+                if (stressedUsd <= budgetUsd) break;
+                stressedUsd -= k.valueUsd * (stressPct / 100);
+                trimmed.add(k.symbol);
+                trims.push({
+                    symbol: k.symbol, label: k.label,
+                    reason: `a ${stressPct}% adverse gap on the surviving book would cost more than one daily-loss budget ` +
+                        `(${dailyLossPct}% of NetLiq) — gap-stress trim, worst-first (${k.pnlPct === null ? 'P&L unknown' : `${k.pnlPct.toFixed(2)}%`})`,
+                });
+            }
+            if (stressedUsd > budgetUsd) {
+                warnings.push(
+                    `⚠ gap-stress: operator overrides hold a book whose ${stressPct}% adverse gap costs ` +
+                    `$${stressedUsd.toFixed(0)} — over the ${dailyLossPct}% daily-loss budget ($${budgetUsd.toFixed(0)}).`,
+                );
+            }
+        }
+        // Recompute the surviving notional for the cap line below.
+        bookUsd = alive().reduce((s, k) => s + k.valueUsd, 0);
+    }
+
     const finalPct = (bookUsd / netLiq) * 100;
     const overCap = bookUsd > capUsd;
+    const stressNote = stressPct > 0 && dailyLossPct > 0
+        ? ` Gap-stress (${stressPct}%): $${stressedUsd.toFixed(0)} vs the ${dailyLossPct}% budget.`
+        : '';
     const capLine = overCap
-        ? `⚠ overnight book ${finalPct.toFixed(1)}% of NetLiq still exceeds the ${rules.max_overnight_exposure_pct}% cap after trims (operator overrides hold the excess).`
+        ? `⚠ overnight book ${finalPct.toFixed(1)}% of NetLiq still exceeds the ${rules.max_overnight_exposure_pct}% cap after trims (operator overrides hold the excess).${stressNote}`
         : trims.length
-            ? `overnight book ${finalPct.toFixed(1)}% of NetLiq after ${trims.length} cap trim(s).`
+            ? `overnight book ${finalPct.toFixed(1)}% of NetLiq after ${trims.length} trim(s).${stressNote}`
             : null;
     return { trims, capLine, warnings };
 }

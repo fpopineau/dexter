@@ -10,7 +10,9 @@ import { EventName, type Contract, type Order } from '@stoqey/ib';
 // delta-based with unique symbols, the established pattern).
 const dir = mkdtempSync(join(tmpdir(), 'dexter-partial-'));
 const prevDataDir = process.env.DEXTER_DATA_DIR;
-process.env.DEXTER_DATA_DIR ??= dir;
+// Plain assignment (REQ-TEST-001): `??=` kept the PRODUCTION path when .env
+// supplied one — the preload isolates globally, this pins the suite's own dir.
+process.env.DEXTER_DATA_DIR = dir;
 
 import { createProposal, getProposal, setProposalStatus } from './trade-proposals.js';
 import {

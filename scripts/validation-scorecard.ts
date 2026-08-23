@@ -63,9 +63,11 @@
 import 'dotenv/config';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { dayBlockBootstrapLcb } from '../src/utils/day-bootstrap.js';
-import { etDayOf, parseEquitySeries, portfolioDrawdown } from '../src/utils/equity-series-math.js';
+import { etDayOf, exposureCoverageGaps, parseEquitySeries, portfolioDrawdown } from '../src/utils/equity-series-math.js';
+import { DEFAULT_RULES, parseFlatYaml, type RiskRules } from '../src/tools/ibkr/risk-rules.js';
 
 const UNTRUSTWORTHY = '%NOT trustworthy%';
 const dataDir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
@@ -77,16 +79,38 @@ const dataDir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'd
 const TARGET_NETLIQ_USD = 11_700;
 const TARGET_NETLIQ_TOLERANCE = 0.10;
 const LIVE_DAILY_LOSS_PCT = 3.0; // risk-rules.live.yaml max_daily_loss_pct
-/** Classes enabled on live day one (REQ-VAL-008). Earnings bets are
- *  live-DISABLED (shadow forces them on only to build their record), so
- *  they must not carry the go-live verdict — they get their own section. */
-const DEPLOYABLE_CLASSES = new Set(['intraday', 'swing']);
+/** Every live-ENABLED class must clear this on its own (REQ-VAL-011) —
+ *  n≥10 was text, not a floor; 30 is the pre-registered minimum for a
+ *  class-level expectancy claim. */
+const MIN_TRADES_PER_ENABLED_CLASS = 30;
+/** Broker-provenance allowlist (REQ-VAL-010): lanes production actually
+ *  stamps. 'test'/'adopted' rows are excluded by the query; a source
+ *  outside this list is an integrity anomaly, never a silent sample row. */
+const KNOWN_SOURCES = new Set(['trigger', 'breadth', 'agent', 'tui', 'whatsapp', 'chase-continuation']);
+const isKnownSource = (s: string) => KNOWN_SOURCES.has(s) || s.startsWith('cron:');
+
+/** Classes enabled on LIVE DAY ONE (REQ-VAL-008/011) — read from the live
+ *  rule files themselves, so the verdict's scope IS the deployable config:
+ *  flipping a class flag changes what must pass, not just what trades. */
+function deployableClasses(): { classes: Set<string>; line: string } {
+    const cfgDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src/config');
+    const merged = {
+        ...DEFAULT_RULES,
+        ...parseFlatYaml(join(cfgDir, 'risk-rules.yaml')),
+        ...parseFlatYaml(join(cfgDir, 'risk-rules.live.yaml')),
+    } as RiskRules;
+    const classes = new Set<string>(['intraday']);
+    if (merged.swing_enabled) classes.add('swing');
+    if (merged.earnings_bet_enabled) classes.add('earnings-bet');
+    return { classes, line: `deployable classes (from risk-rules.live.yaml flags): ${[...classes].join(', ')}` };
+}
+const { classes: DEPLOYABLE_CLASSES, line: deployableLine } = deployableClasses();
 
 interface Row {
     id: string; symbol: string; trade_class: string | null; source: string;
     score: number | null; model: string | null; regime: string | null;
     realized_pnl: number; commissions: number | null; closed_at: number;
-    entry_filled_at: number | null;
+    entry_filled_at: number | null; order_perm_ids: string | null;
     exit_reason: string | null; take_pct: number | null;
     post_exit_mfe_pct: number | null; take_counterfactual: string | null;
 }
@@ -250,18 +274,20 @@ if (paperNetliq === null) {
     } catch { /* reported below */ }
 }
 
+// REQ-VAL-010: synthetic and adopted rows never qualify — the test-isolation
+// failure of 2026-08-23 put source='test' rows INTO the deployable sample.
 const SAMPLE_WHERE = `
     WHERE status = 'closed' AND created_at >= ? AND closed_at >= ?
       AND entry_fill_price IS NOT NULL AND realized_pnl IS NOT NULL
       AND (exit_reason IS NULL OR exit_reason != 'cancelled')
-      AND source != 'adopted'
+      AND source NOT IN ('adopted', 'test', 'smoke')
       AND (note IS NULL OR note NOT LIKE '${UNTRUSTWORTHY}')
     ORDER BY closed_at ASC`;
 let allRows: Row[];
 try {
     allRows = db.query<Row>(`
         SELECT id, symbol, trade_class, source, score, model, regime,
-               realized_pnl, commissions, closed_at, entry_filled_at,
+               realized_pnl, commissions, closed_at, entry_filled_at, order_perm_ids,
                exit_reason, take_pct, post_exit_mfe_pct, take_counterfactual
         FROM proposals ${SAMPLE_WHERE}
     `).all(sinceMs, sinceMs);
@@ -272,7 +298,7 @@ try {
     console.log('note: take-tracking columns absent (DB pre-dates WP-EXIT — restart the gateway to migrate); take-vs-target reports n/a');
     allRows = db.query<Row>(`
         SELECT id, symbol, trade_class, source, score, model, regime,
-               realized_pnl, commissions, closed_at, entry_filled_at, exit_reason,
+               realized_pnl, commissions, closed_at, entry_filled_at, order_perm_ids, exit_reason,
                NULL AS take_pct, NULL AS post_exit_mfe_pct, NULL AS take_counterfactual
         FROM proposals ${SAMPLE_WHERE}
     `).all(sinceMs, sinceMs);
@@ -289,7 +315,8 @@ const shadowOnlyRows = allRows.filter((r) => !DEPLOYABLE_CLASSES.has(r.trade_cla
 const net = (r: Row) => r.realized_pnl - (r.commissions ?? 0);
 const n = rows.length;
 console.log(`\n=== VALIDATION SCORECARD — ${windowLabel} ===`);
-console.log(`deployable sample n = ${n} (intraday + swing — protocol needs >= 100)${shadowOnlyRows.length ? `; ${shadowOnlyRows.length} shadow-only earnings-bet row(s) reported separately` : ''}`);
+console.log(deployableLine);
+console.log(`deployable sample n = ${n} (protocol needs >= 100)${shadowOnlyRows.length ? `; ${shadowOnlyRows.length} shadow-only row(s) reported separately` : ''}`);
 if (n < 100) verdictFails.push(`deployable sample n=${n} < 100`);
 
 // Integrity gate — anomalies freeze the evaluation (protocol: "zero
@@ -352,7 +379,20 @@ try {
 } catch { /* reconLine already says MISSING */ }
 console.log(reconLine);
 const missingStamps = rows.filter((r) => r.model === null || r.regime === null || r.regime === 'unknown').length;
+// REQ-VAL-010: provenance. Every sample row must come from a known
+// production lane AND carry broker execution identity (permIds, WP1) —
+// a row without them was not proven to be a broker trade.
+const unknownSources = [...new Set(rows.filter((r) => !isKnownSource(r.source)).map((r) => r.source))];
+const missingPermIds = rows.filter((r) => {
+    if (r.order_perm_ids === null) return true;
+    try {
+        const ids = JSON.parse(r.order_perm_ids) as Array<number | null>;
+        return !ids.some((v) => typeof v === 'number' && v > 0);
+    } catch { return true; }
+}).length;
 const anomalies: string[] = [];
+if (unknownSources.length > 0) anomalies.push(`unrecognized proposal source(s) in the sample: ${unknownSources.join(', ')} — provenance unproven`);
+if (missingPermIds > 0) anomalies.push(`${missingPermIds} sample row(s) without broker permIds — execution identity unproven (WP1)`);
 if (staleUnconfirmed > 0) anomalies.push(`${staleUnconfirmed} placement-unconfirmed row(s) older than 24h`);
 if (pnlHoles > 0) anomalies.push(`${pnlHoles} in-window close(s) with NULL realized P&L`);
 if (missingCommissions > 0) anomalies.push(`${missingCommissions} sample row(s) missing commissions (net P&L overstated)`);
@@ -424,26 +464,50 @@ if (paperNetliq !== null) {
 // overnight troughs a closed-trade curve cannot. Coverage is part of the
 // proof: every ET day a sample trade closed must carry at least one
 // sample, or the criterion is not evaluable (fail-closed).
-const closeDays = new Set(rows.map((r) => etDayOf(r.closed_at)));
 let seriesLine: string;
 try {
     const series = parseEquitySeries(readFileSync(join(dataDir, 'equity-series.jsonl'), 'utf-8'));
-    const pdd = portfolioDrawdown(series, sinceMs);
-    if (!pdd) {
+    // Seeded with the FROZEN epoch NetLiq (review 2026-08-23): the curve
+    // starts where the sample started — a loss before the first real sample
+    // must not vanish.
+    const seeded = epochNetliq !== null
+        ? [{ ts: sinceMs, netLiq: epochNetliq }, ...series.filter((s) => s.ts > sinceMs)]
+        : series;
+    const pdd = portfolioDrawdown(seeded, sinceMs);
+    if (!pdd || pdd.samples <= (epochNetliq !== null ? 1 : 0)) {
         seriesLine = 'portfolio drawdown: NOT EVALUABLE — no equity samples inside the window (is the gateway sampler running?)';
         verdictFails.push('portfolio drawdown not evaluable (no equity samples in window)');
     } else {
-        const uncovered = [...closeDays].filter((d) => !pdd.days.has(d));
         const ok = pdd.maxDdPct <= 2 * LIVE_DAILY_LOSS_PCT;
-        seriesLine = `portfolio drawdown ${pdd.maxDdPct.toFixed(2)}% of marked NetLiq (peak ${pdd.peak.toFixed(0)} → trough ${pdd.trough.toFixed(0)}, ${pdd.samples} samples over ${pdd.days.size} day(s)) (${ok ? 'PASS' : 'FAIL'} — must be <= ${2 * LIVE_DAILY_LOSS_PCT}%)`;
+        seriesLine = `portfolio drawdown ${pdd.maxDdPct.toFixed(2)}% of marked NetLiq, epoch-seeded (peak ${pdd.peak.toFixed(0)} → trough ${pdd.trough.toFixed(0)}, ${pdd.samples} samples over ${pdd.days.size} day(s)) (${ok ? 'PASS' : 'FAIL'} — must be <= ${2 * LIVE_DAILY_LOSS_PCT}%)`;
         if (!ok) verdictFails.push(`portfolio drawdown ${pdd.maxDdPct.toFixed(2)}% > ${2 * LIVE_DAILY_LOSS_PCT}%`);
-        if (uncovered.length > 0) {
-            seriesLine += `\n  ⚠ equity series has NO sample on ${uncovered.length} trade-close day(s) (${uncovered.slice(0, 5).join(', ')}${uncovered.length > 5 ? ', …' : ''}) — coverage incomplete, criterion NOT EVALUABLE`;
-            verdictFails.push(`portfolio drawdown coverage incomplete (${uncovered.length} day(s) unsampled)`);
+        // Coverage (review 2026-08-23): the series must have been WATCHING
+        // through every EXPOSURE interval — one sample per close day
+        // certified a sampler that slept through the trough.
+        const intervals = rows
+            .filter((r) => r.entry_filled_at !== null)
+            .map((r) => ({ from: r.entry_filled_at!, to: r.closed_at, label: r.id }));
+        const noEntryStamp = rows.length - intervals.length;
+        const gaps = exposureCoverageGaps(series, intervals);
+        if (noEntryStamp > 0) {
+            seriesLine += `\n  ⚠ ${noEntryStamp} row(s) without an entry stamp — their exposure windows are unverifiable`;
+            verdictFails.push(`${noEntryStamp} exposure window(s) unverifiable (no entry stamp)`);
+        }
+        if (gaps.length > 0) {
+            seriesLine += `\n  ⚠ exposure coverage: ${gaps.slice(0, 4).join('; ')}${gaps.length > 4 ? `; +${gaps.length - 4} more` : ''} — criterion NOT EVALUABLE`;
+            verdictFails.push(`portfolio drawdown coverage incomplete (${gaps.length} exposure gap(s))`);
+        }
+        // Scope caveat (review 2026-08-23, recorded): NetLiq marks the WHOLE
+        // account — shadow-only bets and any manual position ride inside it.
+        // Bets are capped at 1 concurrent / 1% worst-case budget, bounding
+        // the distortion to a fraction of the 6% bar; separating accounts is
+        // on the live-gate backlog.
+        if (shadowOnlyRows.length > 0) {
+            seriesLine += `\n  note: account-level NetLiq includes shadow-only earnings-bet P&L (bounded by the 1-bet/1%-budget cap)`;
         }
     }
 } catch {
-    seriesLine = 'portfolio drawdown: NOT EVALUABLE — equity-series.jsonl missing (the gateway sampler writes it every 15 min; REQ-VAL-006)';
+    seriesLine = 'portfolio drawdown: NOT EVALUABLE — equity-series.jsonl missing (the gateway sampler writes it every 5 min; REQ-VAL-006)';
     verdictFails.push('portfolio drawdown not evaluable (no equity series)');
 }
 console.log(seriesLine);
@@ -454,18 +518,29 @@ let equity = 0, peak = 0, maxDd = 0;
 for (const v of nets) { equity += v; if (equity > peak) peak = equity; maxDd = Math.max(maxDd, peak - equity); }
 console.log(`closed-trade drawdown ${maxDd.toFixed(2)}${paperNetliq !== null ? ` = ${((maxDd / paperNetliq) * 100).toFixed(2)}% of epoch NetLiq` : ''} (informational — the portfolio series is the criterion)`);
 
-// Per-class discipline
-console.log('\nper-class (each class with n>=10 must be net-positive alone):');
+// Per-class discipline (REQ-VAL-011): "below 10 stays paper-only" was
+// TEXT — nothing failed the verdict or disabled the class. Now every
+// live-ENABLED class must clear its own floor (n >= 30, net > 0) or the
+// verdict FAILS: disable the class in risk-rules.live.yaml (the verdict's
+// scope follows the flags) or keep collecting.
+console.log(`\nper-class (every ENABLED class needs n>=${MIN_TRADES_PER_ENABLED_CLASS} and net>0 on its own):`);
 const byClass = new Map<string, Row[]>();
 for (const r of rows) {
     const k = r.trade_class ?? 'intraday';
     (byClass.get(k) ?? byClass.set(k, []).get(k)!).push(r);
 }
-for (const [k, rs] of byClass) {
+for (const cls of DEPLOYABLE_CLASSES) {
+    if (cls === 'earnings-bet') continue; // shadow section below owns its record
+    const rs = byClass.get(cls) ?? [];
     const t = rs.reduce((s, r) => s + net(r), 0);
-    const evaluable = rs.length >= 10;
-    console.log(`  ${k}: n=${rs.length} net ${t.toFixed(2)} ${evaluable ? (t > 0 ? 'PASS' : 'FAIL') : '(below 10 — stays paper-only)'}`);
-    if (evaluable && t <= 0) verdictFails.push(`class ${k} net ${t.toFixed(2)} <= 0 at n=${rs.length}`);
+    const enough = rs.length >= MIN_TRADES_PER_ENABLED_CLASS;
+    const pass = enough && t > 0;
+    console.log(`  ${cls}: n=${rs.length} net ${t.toFixed(2)} ${pass ? 'PASS' : 'FAIL'}${enough ? '' : ` (n < ${MIN_TRADES_PER_ENABLED_CLASS} — an ENABLED class without its own record cannot go live: disable it or keep collecting)`}`);
+    if (!pass) {
+        verdictFails.push(enough
+            ? `class ${cls} net ${t.toFixed(2)} <= 0 at n=${rs.length}`
+            : `class ${cls} enabled but under-sampled (n=${rs.length} < ${MIN_TRADES_PER_ENABLED_CLASS}) — disable it in risk-rules.live.yaml or keep collecting`);
+    }
 }
 
 // Shadow-only classes (REQ-VAL-008): earnings bets run in shadow-live only

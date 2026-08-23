@@ -393,3 +393,46 @@ describe('priceMinutesBack (WP11 — timestamp arithmetic, not index arithmetic)
         expect(priceMinutesBack(bars, 60, frame)).toBeNull();
     });
 });
+
+describe('gap-stress vet (review 2026-08-23 — the book is bounded by LOSS, not just notional)', () => {
+    const RULES = {
+        max_overnight_exposure_pct: 30, max_overnight_position_pct: 10,
+        overnight_gap_stress_pct: 20, max_daily_loss_pct: 3,
+    };
+    const NONE = new Set<string>();
+    const k = (symbol: string, marketValueUsd: number | null, pnlPct: number | null) =>
+        ({ symbol, label: `P-${symbol}`, marketValueUsd, pnlPct });
+
+    test('a book inside the notional caps still trims when a 20% gap would exceed the daily-loss budget', () => {
+        // 2 × 9.5k = 19% of 100k — inside 30%/10% caps. Stressed: 3.8k > 3k
+        // budget → worst-first trim (the loser) → 1.9k ≤ 3k survives.
+        const v = vetOvernightBook(
+            [k('WIN', 9_500, 3), k('LOSE', 9_500, -2)],
+            100_000, RULES, NONE,
+        );
+        expect(v.trims.map((t) => t.symbol)).toEqual(['LOSE']);
+        expect(v.trims[0].reason).toContain('gap-stress');
+        expect(v.capLine).toContain('Gap-stress');
+    });
+
+    test('inside the stress budget: nothing trims', () => {
+        const v = vetOvernightBook([k('AAA', 9_500, 1), k('BBB', 5_000, 0.5)], 100_000, RULES, NONE);
+        expect(v.trims).toEqual([]);
+    });
+
+    test('an operator override holds its excess through the stress — loudly', () => {
+        const v = vetOvernightBook([k('KEEP', 9_500, -1), k('OTHER', 9_500, 2)], 100_000, RULES, new Set(['KEEP']));
+        // OTHER (trimmable) goes first; KEEP survives on the override, and if
+        // the remainder still breaches, the warning names it.
+        expect(v.trims.map((t) => t.symbol)).toEqual(['OTHER']);
+        expect(v.warnings.length === 0 || v.warnings.some((w) => w.includes('gap-stress'))).toBe(true);
+    });
+
+    test('stress 0 disables the check (legacy behavior)', () => {
+        const v = vetOvernightBook(
+            [k('AAA', 9_500, 1), k('BBB', 9_500, -1)],
+            100_000, { ...RULES, overnight_gap_stress_pct: 0 }, NONE,
+        );
+        expect(v.trims).toEqual([]);
+    });
+});

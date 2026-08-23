@@ -35,7 +35,13 @@ max_daily_trades: 6
 max_daily_loss_pct: 3
 
 # --- Overnight ---
-max_overnight_position_pct: 15 # ≈$1,755 riding a gap — one 20% adverse gap ≈ the whole daily halt; the overnight-gap stress model stays on the live-gate backlog
+max_overnight_position_pct: 15 # ≈$1,755 riding a gap — one 20% adverse gap ≈ the whole daily halt
+# Gap-stress vet (2026-08-23, REVIEW): at 20% assumed gap vs the 3% daily
+# loss, the surviving overnight book is at most 15% of NetLiq (≈$1,755) —
+# effectively ONE full-size overnight position. That is the "profit as
+# surely as possible" posture; raise max_daily_loss_pct or lower the
+# stress only as a deliberate risk-appetite change.
+overnight_gap_stress_pct: 20
 
 # --- Per-Trade Risk Budget ---
 max_risk_per_trade_pct: 1.0 # ≈$117 max loss per stop-out at full confidence
@@ -50,6 +56,12 @@ sizing_low_mult: 1.0 # FLAT until calibrated — see above
 min_risk_budget_usd: 15 # refuse trades whose weighted budget is below this — inert at $117 budgets, kept as the floor
 
 # --- Trade Classes ---
+# CLASS ENABLEMENT IS THE VALIDATION SCOPE (review 2026-08-23): the
+# scorecard's go-live verdict covers exactly the classes enabled here, and
+# every enabled class must clear its OWN pre-registered floor (≥30 trades,
+# net-positive) or the verdict FAILS — disable the class or keep
+# collecting; "stays paper-only" is no longer just text.
+swing_enabled: true # REVIEW: swings deployable on live day one — flip false if the shadow sample cannot fund a 30-swing record
 # Swings scale with the live intraday budget (1.0%): 1.5% keeps a 3-swing
 # book's total stop-out cost under ~4.5% of the account.
 swing_risk_pct: 1.5 # ≈$175 max loss per swing stop-out on $11.7K — REVIEW

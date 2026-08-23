@@ -10,6 +10,7 @@
 import { onAutoProtect, onTradeClosed } from '@/services/outcome-tracker.js';
 import { onBenchmarkReport } from '@/services/benchmark.js';
 import { onEodTriage } from '@/services/eod-triage.js';
+import { onKillSwitchAlert } from '@/services/kill-switch-guardian.js';
 import { onProfitTrailAlert } from '@/services/profit-trail.js';
 import { formatProposalLine, type TradeProposal } from '@/services/trade-proposals.js';
 import { logger } from '@/utils';
@@ -130,6 +131,23 @@ export function registerOutcomeAlerts(): void {
         }
         await sendMessageWhatsApp({ to: session.lastTo, body: message, accountId: session.lastAccountId });
         logger.info('[outcome-alerts] benchmark report delivered');
+    });
+
+    // Kill-switch guardian (review 2026-08-23): latch + entry-cancel report.
+    onKillSwitchAlert(async (message) => {
+        const session = findTargetSession();
+        if (!session?.lastTo || !session?.lastAccountId) {
+            logger.warn('[outcome-alerts] no WhatsApp delivery target, skipping kill-switch alert');
+            return;
+        }
+        try {
+            assertOutboundAllowed({ to: session.lastTo, accountId: session.lastAccountId });
+        } catch {
+            logger.warn('[outcome-alerts] outbound blocked, skipping kill-switch alert');
+            return;
+        }
+        await sendMessageWhatsApp({ to: session.lastTo, body: message, accountId: session.lastAccountId });
+        logger.info('[outcome-alerts] kill-switch alert delivered');
     });
 
     // Profit-trail closes (winner peaked, pulled back, auto-closed).

@@ -259,9 +259,8 @@ export interface ReleaseDecision {
     cancelIds: number[];
     /** Exit-side LMTs NOT ours (manual TWS, other clients) — reported, never touched. */
     foreignRefs: string[];
-    /** Why nothing may be cancelled: no target to release, or no surviving
-     *  Dexter STP leg to hand protection to. null = release may proceed. */
-    blockedReason: 'no-targets' | 'no-own-stop' | null;
+    /** Why nothing may be cancelled. null = release may proceed. */
+    blockedReason: 'no-targets' | 'no-own-stop' | 'incomplete-book' | 'stacked-brackets' | null;
 }
 
 /** Semantic leg identity (REQ-TRAIL-003, review 2026-08-23): Dexter stamps
@@ -272,25 +271,47 @@ export interface ReleaseDecision {
 const TARGET_LEG_REF = /:tp2?$/;
 const STOP_LEG_REF = /:stop2?$/;
 
-/** Pure: the release decision over a position's exit-side orders. The
- *  target is the Dexter-owned LMT leg whose ref names it a target — not
- *  any LMT (manual TWS limits, REQ-TRAIL-001) and not any Dexter LMT (a
- *  `reduce-` limit, REQ-TRAIL-003). Protection (REQ-TRAIL-002): the
- *  release is blocked unless a Dexter-owned STOP leg (`:stop`) survives —
- *  a partial book view that misses it blocks conservatively. */
+/** Pair key: the bracket a leg belongs to — base ref + generation, so
+ *  `P-1A2B:tp` pairs `P-1A2B:stop` and `P-1A2B:tp2` pairs `P-1A2B:stop2`,
+ *  never across. */
+function pairKey(ref: string): string {
+    const m = /^(.*):(tp|stop)(2?)$/.exec(ref);
+    return m ? `${m[1]}#${m[3]}` : ref;
+}
+
+/** Pure: the release decision over a position's exit-side orders
+ *  (REQ-TRAIL-001/002/003 + bracket atomicity, review 2026-08-23 P1).
+ *  Rules, in order:
+ *  - An INCOMPLETE broker view releases nothing — a leg we cannot see is
+ *    a leg we cannot reason about.
+ *  - Only Dexter-owned `:tp` legs are candidates (never manual limits,
+ *    never `reduce-`/`close-` orders).
+ *  - A target may only be released when ITS OWN bracket's stop (same base
+ *    ref, same generation) survives — a stop from another bracket is not
+ *    this target's protection.
+ *  - Exactly ONE working pair may exist: with stacked brackets, releasing
+ *    targets leaves multiple OCA stop groups and `closePosition` (round 9)
+ *    rightly refuses the non-atomic close — runner mode must not build
+ *    the very book its own exit path refuses. */
 export function decideTargetRelease<T extends { orderId: number; orderType: string; orderRef: string | null }>(
-    exitOrders: T[],
+    view: { orders: T[]; complete: boolean },
 ): ReleaseDecision {
+    const exitOrders = view.orders;
     const foreignRefs = exitOrders
         .filter((o) => o.orderType === 'LMT' && !isOurOrderRef(o.orderRef))
         .map((o) => `#${o.orderId} ${o.orderRef ?? '<no ref>'}`);
+    if (!view.complete) return { cancelIds: [], foreignRefs, blockedReason: 'incomplete-book' };
     const targets = exitOrders.filter((o) =>
         o.orderType === 'LMT' && isOurOrderRef(o.orderRef) && TARGET_LEG_REF.test(o.orderRef ?? ''));
     if (targets.length === 0) return { cancelIds: [], foreignRefs, blockedReason: 'no-targets' };
-    const hasOwnStop = exitOrders.some((o) =>
-        o.orderType.startsWith('STP') && isOurOrderRef(o.orderRef) && STOP_LEG_REF.test(o.orderRef ?? ''));
-    if (!hasOwnStop) return { cancelIds: [], foreignRefs, blockedReason: 'no-own-stop' };
-    return { cancelIds: targets.map((o) => o.orderId), foreignRefs, blockedReason: null };
+    const stopKeys = new Set(exitOrders
+        .filter((o) => o.orderType.startsWith('STP') && isOurOrderRef(o.orderRef) && STOP_LEG_REF.test(o.orderRef ?? ''))
+        .map((o) => pairKey(o.orderRef ?? '')));
+    const paired = targets.filter((o) => stopKeys.has(pairKey(o.orderRef ?? '')));
+    if (paired.length === 0) return { cancelIds: [], foreignRefs, blockedReason: 'no-own-stop' };
+    const pairs = new Set(paired.map((o) => pairKey(o.orderRef ?? '')));
+    if (pairs.size > 1 || paired.length > 1) return { cancelIds: [], foreignRefs, blockedReason: 'stacked-brackets' };
+    return { cancelIds: [paired[0].orderId], foreignRefs, blockedReason: null };
 }
 
 /**
@@ -305,8 +326,8 @@ async function releaseTargetLeg(
     api: Awaited<ReturnType<typeof getIBApi>>,
     entry: TrailEntry,
 ): Promise<string | null> {
-    const exits = (await fetchOpenOrdersFor(api, entry.symbol, exitActionFor(entry.direction))).orders;
-    const decision = decideTargetRelease(exits);
+    const view = await fetchOpenOrdersFor(api, entry.symbol, exitActionFor(entry.direction));
+    const decision = decideTargetRelease(view);
     if (decision.foreignRefs.length > 0) {
         logger.warn(
             `[profit-trail] ${entry.symbol}: ${decision.foreignRefs.length} foreign exit-side LMT order(s) ` +
@@ -314,11 +335,13 @@ async function releaseTargetLeg(
         );
     }
     if (decision.blockedReason === 'no-targets') return null;
-    if (decision.blockedReason === 'no-own-stop') {
-        logger.error(
-            `[profit-trail] ${entry.symbol}: no Dexter-owned STP leg survives — target NOT released ` +
-            `(runner mode would leave the position without broker-side protection we control)`,
-        );
+    if (decision.blockedReason !== null) {
+        const why = decision.blockedReason === 'no-own-stop'
+            ? 'no Dexter stop from the SAME bracket survives — runner mode would strip broker-side protection'
+            : decision.blockedReason === 'incomplete-book'
+                ? 'the open-orders view is INCOMPLETE — a leg we cannot see is a leg we cannot reason about'
+                : 'multiple working bracket pairs (stacked theses) — releasing targets would build the multi-OCA book closePosition refuses';
+        logger.error(`[profit-trail] ${entry.symbol}: target NOT released — ${why}`);
         return null;
     }
     // Round-4 review (2026-08-21): "released" means the broker CONFIRMED

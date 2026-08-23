@@ -245,10 +245,61 @@ Operator actions still open (the code cannot do these):
 | REQ-VAL-006 | `equity-series.test.ts` (`portfolioDrawdown`, parse); scorecard smoke-run (criterion + coverage) |
 | REQ-VAL-007/008/009 | scorecard smoke-run (pinned evaluator) |
 
+### Review-14 response (2026-08-23 evening, append-only)
+
+- REQ-TEST-001 (P0): test runs can NEVER bind the production DB — a
+  runner preload (`test/test-env.ts`, wired in bunfig.toml and
+  jest.config.js) unconditionally redirects `DEXTER_DATA_DIR` to a fresh
+  temp dir; the store's guard refuses ANY non-temp path under
+  `NODE_ENV=test` (`assertTestDataDirIsTemp`); the three `??=` suites now
+  assign plainly. The 14 synthetic rows the reviewer's run inserted were
+  backed up (`proposals.db.bak-20260823-contamination`) and deleted; a
+  full suite run is proven to leave proposals.db untouched.
+- REQ-VAL-010: sample provenance — `test`/`smoke`/`adopted` sources are
+  excluded by the query; unknown sources and rows without WP1 permIds
+  are integrity anomalies (evaluation freezes, never silently counts).
+- REQ-VAL-011: class enablement is enforceable — `swing_enabled` rule key
+  (gate-refused when false, like the earnings switch); the scorecard
+  derives its deployable scope from the live yaml flags and FAILS the
+  verdict for any enabled class below its own floor (≥30 trades, net>0).
+- REQ-VAL-012: portfolio drawdown is epoch-SEEDED (a loss before the
+  first sample cannot vanish) and coverage-proved per EXPOSURE interval
+  (`exposureCoverageGaps`: first/last-sample and 60-min max-gap inside
+  each exposed RTH window, weekend-aware, clipped to actual entry/exit);
+  the sampler runs at 5 minutes. Recorded caveat: account NetLiq includes
+  shadow-bet P&L (bounded by the 1-bet/1%-budget cap).
+- REQ-ACK-001: `confirmCancelDetailed` preserves the broker's filled
+  quantity; the entry sweep treats Cancelled+filled>0 as a LIVE partial
+  position (exits standing, tracker resizes — WP2), never a clean sweep.
+- REQ-GUARD-001: continuous kill-switch guardian — `getDailyLossStatus`
+  every 60s (observation latches by construction); a LATCH transition
+  alerts and cancels unfilled entry parents via the REQ-ENTRY-003 safe
+  primitive, once per ET day; halted-but-unlatched (unverifiable P&L)
+  never cancels. `KILL_SWITCH_GUARDIAN=false` disables.
+- REQ-EOD-003: gap-stress vet — the conversion book is trimmed
+  worst-first until `overnight_gap_stress_pct` (20) × surviving notional
+  fits one daily-loss budget; operator overrides hold their excess
+  loudly. Sector/index correlation shocks stay on the backlog.
+- REQ-TRAIL-004: release is bracket-atomic — a target releases only when
+  ITS OWN pair's stop (same base ref, same generation) survives, on a
+  COMPLETE book view, and never with stacked pairs (the multi-OCA book
+  `closePosition` refuses must not be built).
+
+| REQ | Test |
+|---|---|
+| REQ-TEST-001 | `trade-proposals.test.ts` guard suite; full-run DB-mtime check (manual, recorded) |
+| REQ-VAL-010/011/012 | scorecard smoke-run; `equity-series.test.ts` (`exposureCoverageGaps`); `risk-rules-validation.test.ts` (swing_enabled bool) |
+| REQ-ACK-001 | `stale-entry-sweeper` partial branch (pure decision via CancelResult shape; FakeIb path pending) |
+| REQ-GUARD-001 | `kill-switch-guardian.test.ts` (`decideGuardianStep`) |
+| REQ-EOD-003 | `eod-triage.test.ts` — gap-stress suite |
+| REQ-TRAIL-004 | `profit-trail.test.ts` — bracket-atomic suite |
+
 Open items recorded 2026-08-23 (operator decisions / backlog, not code
 defects): broker-side GTD entry deadline (the safe sweeper stands in;
-GTD needs a live-verified `goodTillDate` format); continuous kill-switch
-guardian; EOD keep-by-default vs flat-by-close (a strategy decision the
-operator ratified 2026-08-22 and may wish to revisit under the "profit as
-surely as possible" lens); `take_atr_mult` sits at the reachability cap by
-design — tune only from the sample's MFE evidence.
+GTD needs a live-verified `goodTillDate` format); EOD keep-by-default vs
+flat-by-close (operator decision, "surely as possible" lens); account
+separation for shadow bets vs the NetLiq caveat; sector/index correlated
+stress; same-symbol stacking prevention (the trail now refuses stacked
+releases; the close already refuses non-atomic books); chase continuation
+stays default-on by operator decision; `take_atr_mult` tunes only from
+the sample's MFE evidence.

@@ -5,7 +5,9 @@ import { join } from 'node:path';
 
 const dir = mkdtempSync(join(tmpdir(), 'dexter-adopt-'));
 const prevDataDir = process.env.DEXTER_DATA_DIR;
-process.env.DEXTER_DATA_DIR ??= dir;
+// Plain assignment (REQ-TEST-001): `??=` kept the PRODUCTION path when .env
+// supplied one — the preload isolates globally, this pins the suite's own dir.
+process.env.DEXTER_DATA_DIR = dir;
 
 import { decideAdoptions, selectManualExitRehydrations, type BrokerOrderSnap, type BrokerPositionSnap } from './broker-adopt.js';
 import { countOpenExecuted, createAdoptedPosition, getProposal, resolveAdoptedFlat } from './trade-proposals.js';

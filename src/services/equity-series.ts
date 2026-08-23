@@ -26,7 +26,9 @@ import { getNetLiquidation } from './daily-loss-guard.js';
 
 export { parseEquitySeries, portfolioDrawdown, etDayOf, type EquitySample, type PortfolioDrawdown } from '@/utils/equity-series-math.js';
 
-const SAMPLE_INTERVAL_MS = 15 * 60_000;
+// 5 minutes (review 2026-08-23: 15-min sampling left 3× the gap the
+// coverage criterion tolerates; the account-summary call is cheap).
+const SAMPLE_INTERVAL_MS = 5 * 60_000;
 const BOOT_DELAY_MS = 30_000;
 
 export function equitySeriesPath(): string {

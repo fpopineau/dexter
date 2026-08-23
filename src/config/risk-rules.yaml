@@ -21,6 +21,12 @@ mandatory_stop_loss: true # Every trade must have a stop loss
 # --- Overnight ---
 max_overnight_exposure_pct: 30 # Max % of account held overnight
 max_overnight_position_pct: 3 # Max % per position held overnight (tighter than intraday)
+# Gap-stress vet (2026-08-23): the EOD conversion book is ALSO trimmed until
+# an assumed adverse gap of this % on every keep costs no more than one
+# daily-loss budget — stops cannot contain an opening gap. NOTE this binds
+# BEFORE the notional cap: at 20% stress vs a 2% daily loss the surviving
+# book is at most 10% of NetLiq. 0 disables.
+overnight_gap_stress_pct: 20
 
 # --- Price & Liquidity Filters ---
 min_price: 5.0 # Avoid penny stocks

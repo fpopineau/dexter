@@ -153,6 +153,16 @@ export function classifyCancelRejection(code: number, message: string): CancelOu
     return null; // not a cancel-classifying code
 }
 
+export interface CancelResult {
+    outcome: CancelOutcome;
+    /** Shares FILLED on the order as last reported by the broker before the
+     *  cancel settled (review 2026-08-23 P1: IBKR can report a terminal
+     *  Cancelled with a nonzero filled quantity — a PARTIAL fill raced the
+     *  cancel and a position exists). Null = the broker never reported a
+     *  fill figure (error-classified or unconfirmed settlements). */
+    filledQty: number | null;
+}
+
 /**
  * Cancel an order and wait for the broker to CONFIRM it (round-4 review,
  * 2026-08-21: every cancel used to be request-and-forget — "cancelled" in
@@ -160,19 +170,21 @@ export function classifyCancelRejection(code: number, message: string): CancelOu
  * the 15-minute healing-sweep gap while the book said it was gone).
  * Listeners armed before the request; always resolves.
  */
-export function confirmCancel(api: IBApi, orderId: number, timeoutMs: number): Promise<CancelOutcome> {
-    return new Promise<CancelOutcome>((resolve) => {
+export function confirmCancelDetailed(api: IBApi, orderId: number, timeoutMs: number): Promise<CancelResult> {
+    return new Promise<CancelResult>((resolve) => {
         let settled = false;
+        let lastFilled: number | null = null;
         const finish = (outcome: CancelOutcome) => {
             if (settled) return;
             settled = true;
             clearTimeout(timer);
             api.off(EventName.orderStatus, onOrderStatus);
             api.off(EventName.error, onError);
-            resolve(outcome);
+            resolve({ outcome, filledQty: lastFilled });
         };
         const onOrderStatus = (id: number, status: string, filled: number, remaining: number) => {
             if (id !== orderId) return;
+            if (Number.isFinite(filled)) lastFilled = filled;
             // PendingCancel is a request in flight, not a confirmation —
             // only terminal statuses settle (round-5 review). Round 6:
             // 'Inactive' is NOT a confirmed cancellation either — IBKR uses
@@ -198,4 +210,10 @@ export function confirmCancel(api: IBApi, orderId: number, timeoutMs: number): P
             finish('unconfirmed');
         }
     });
+}
+
+/** Outcome-only view of confirmCancelDetailed — callers that reconcile
+ *  fills through the tracker's execDetails replay keep the simple shape. */
+export async function confirmCancel(api: IBApi, orderId: number, timeoutMs: number): Promise<CancelOutcome> {
+    return (await confirmCancelDetailed(api, orderId, timeoutMs)).outcome;
 }

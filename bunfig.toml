@@ -1,0 +1,6 @@
+# Bun configuration. The [test] preload is a SAFETY device (REQ-TEST-001):
+# it unconditionally redirects DEXTER_DATA_DIR to a temp dir before any
+# suite imports the stores — without it, bun's automatic .env loading can
+# hand a test run the PRODUCTION database path.
+[test]
+preload = ["./test/test-env.ts"]

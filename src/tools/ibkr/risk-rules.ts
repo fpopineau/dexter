@@ -109,6 +109,13 @@ export interface RiskRules {
      *  decimal quantity and all three legs carry it. */
     fractional_shares: boolean;
     // --- Trade classes (see TradeClass) ---
+    /** Master switch for the 'swing' class (review 2026-08-23 P1: "below
+     *  10 trades stays paper-only" was TEXT — nothing disabled an
+     *  under-validated class). false = the gate refuses every swing
+     *  proposal; the validation scorecard derives its deployable class set
+     *  from these flags, so an unvalidated class must be switched off HERE
+     *  to pass, and stays off live until its own record clears the bar. */
+    swing_enabled: boolean;
     /** Per-trade risk budget for the 'swing' class (% of net liquidation).
      *  Swings are fewer and wider-stopped than intraday trades. */
     swing_risk_pct: number;
@@ -146,6 +153,13 @@ export interface RiskRules {
     /** Upper clamp on x (%) — also the ceiling for a model-supplied
      *  take_pct override. */
     take_cap_pct: number;
+    /** Overnight gap stress (review 2026-08-23 P1): the EOD vet trims the
+     *  conversion book until an assumed adverse OVERNIGHT GAP of this % on
+     *  every surviving keep costs no more than one daily-loss budget —
+     *  notional caps bound size, this bounds the LOSS a correlated gap can
+     *  hand the account before any stop fires. 0 disables. Sector/index
+     *  correlation shocks remain on the live-gate backlog. */
+    overnight_gap_stress_pct: number;
     /** Exit style for the intraday class (REQ-EXIT-007/008):
      *  'target'  — the bracket's LMT leg sits at the take level (broker-side,
      *              fills with the gateway down). Default.
@@ -192,6 +206,7 @@ export const DEFAULT_RULES: RiskRules = {
     min_risk_budget_usd: 0,
     profit_trail_replaces_target: true,
     fractional_shares: false,
+    swing_enabled: true,
     swing_risk_pct: 0.5,
     max_swing_positions: 3,
     earnings_bet_enabled: false,
@@ -199,6 +214,7 @@ export const DEFAULT_RULES: RiskRules = {
     earnings_bet_risk_pct: 0.25,
     earnings_bet_gap_floor_pct: 20,
     earnings_bet_min_verified: 4,
+    overnight_gap_stress_pct: 20,
     take_atr_mult: 1.5,
     take_floor_pct: 3,
     take_cap_pct: 10,
@@ -263,6 +279,7 @@ const RULE_SCHEMA: Record<keyof RiskRules, RuleSpec> = {
     min_risk_budget_usd: num(0, 1e6),
     profit_trail_replaces_target: bool,
     fractional_shares: bool,
+    swing_enabled: bool,
     swing_risk_pct: num(0, 10, { minExclusive: true }),
     max_swing_positions: num(0, 50, { integer: true }),
     earnings_bet_enabled: bool,
@@ -270,6 +287,7 @@ const RULE_SCHEMA: Record<keyof RiskRules, RuleSpec> = {
     earnings_bet_risk_pct: num(0, 10, { minExclusive: true }),
     earnings_bet_gap_floor_pct: num(0, 100),
     earnings_bet_min_verified: num(0, 20, { integer: true }),
+    overnight_gap_stress_pct: num(0, 100),
     take_atr_mult: num(0, 10, { minExclusive: true }),
     take_floor_pct: num(0, 50, { minExclusive: true }),
     take_cap_pct: num(0, 50, { minExclusive: true }),

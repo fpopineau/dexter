@@ -62,3 +62,87 @@ export function portfolioDrawdown(series: EquitySample[], fromMs: number, toMs =
         days: new Set(win.map((s) => etDayOf(s.ts))),
     };
 }
+
+/** ET wall-clock minutes-since-midnight of an epoch instant. */
+export function etMinutes(ts: number): number {
+    const s = new Date(ts).toLocaleTimeString('en-GB', { timeZone: ET, hour12: false });
+    const m = /^(\d{2}):(\d{2})/.exec(s);
+    return m ? Number(m[1]) * 60 + Number(m[2]) : 0;
+}
+
+/** Is the ET calendar day of `ts` a weekday? */
+export function etIsWeekday(ts: number): boolean {
+    const d = new Date(ts).toLocaleDateString('en-US', { timeZone: ET, weekday: 'short' });
+    return d !== 'Sat' && d !== 'Sun';
+}
+
+/**
+ * Exposure coverage (review 2026-08-23 P1): "one sample on every close day"
+ * certified a series that could sleep through the whole holding period and
+ * wake after the recovery. For every ET WEEKDAY inside any exposure
+ * interval, the series must prove it was WATCHING: a sample at/before
+ * 10:00 ET, a sample at/after 15:30 ET, and no intra-RTH gap over
+ * `maxGapMin`. Returns human-readable violations (empty = covered).
+ * Half-session days can flag the 15:30 requirement — operator judgment,
+ * better a false flag than a certified blind spot.
+ */
+export function exposureCoverageGaps(
+    series: EquitySample[],
+    intervals: Array<{ from: number; to: number; label: string }>,
+    maxGapMin = 60,
+): string[] {
+    const RTH_OPEN = 9 * 60 + 30, RTH_CLOSE = 16 * 60;
+    const fmt = (m: number) => `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`;
+    // Per exposed weekday: the merged RTH sub-window the series must cover,
+    // CLIPPED to the actual exposure (an entry at 14:50 does not owe the
+    // morning; a close at 10:10 does not owe the afternoon).
+    const days = new Map<string, { startMin: number; endMin: number; labels: string[] }>();
+    for (const iv of intervals) {
+        if (!(iv.to >= iv.from)) continue;
+        const fromDay = etDayOf(iv.from), toDay = etDayOf(iv.to);
+        for (let t = iv.from; ; t += 86_400_000) {
+            const day = etDayOf(t);
+            if (etIsWeekday(t)) {
+                const startMin = day === fromDay ? Math.max(RTH_OPEN, etMinutes(iv.from)) : RTH_OPEN;
+                const endMin = day === toDay ? Math.min(RTH_CLOSE, etMinutes(iv.to)) : RTH_CLOSE;
+                if (startMin < endMin) {
+                    const cur = days.get(day);
+                    if (cur) {
+                        cur.startMin = Math.min(cur.startMin, startMin);
+                        cur.endMin = Math.max(cur.endMin, endMin);
+                        cur.labels.push(iv.label);
+                    } else {
+                        days.set(day, { startMin, endMin, labels: [iv.label] });
+                    }
+                }
+            }
+            if (day === toDay || t > iv.to + 86_400_000) break;
+        }
+    }
+    const violations: string[] = [];
+    for (const [day, w] of [...days.entries()].sort()) {
+        const who = [...new Set(w.labels)].join(', ');
+        const inWindow = series
+            .filter((s) => etDayOf(s.ts) === day)
+            .filter((s) => { const m = etMinutes(s.ts); return m >= w.startMin && m <= w.endMin; })
+            .sort((a, b) => a.ts - b.ts);
+        if (inWindow.length === 0) {
+            violations.push(`${day}: NO samples in the exposed window ${fmt(w.startMin)}-${fmt(w.endMin)} ET (${who})`);
+            continue;
+        }
+        if (etMinutes(inWindow[0].ts) > w.startMin + maxGapMin / 2) {
+            violations.push(`${day}: first sample at ${fmt(etMinutes(inWindow[0].ts))} ET — the start of the exposed window (${fmt(w.startMin)}) was unobserved (${who})`);
+        }
+        if (etMinutes(inWindow[inWindow.length - 1].ts) < w.endMin - maxGapMin / 2) {
+            violations.push(`${day}: last sample at ${fmt(etMinutes(inWindow[inWindow.length - 1].ts))} ET — the end of the exposed window (${fmt(w.endMin)}) was unobserved (${who})`);
+        }
+        for (let i = 1; i < inWindow.length; i++) {
+            const gapMin = (inWindow[i].ts - inWindow[i - 1].ts) / 60_000;
+            if (gapMin > maxGapMin) {
+                violations.push(`${day}: ${Math.round(gapMin)}min sampling gap while exposed (${who})`);
+                break; // one gap per day is enough to fail it
+            }
+        }
+    }
+    return violations;
+}

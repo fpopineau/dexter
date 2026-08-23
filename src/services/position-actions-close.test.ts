@@ -9,7 +9,9 @@ import { EventName, OrderType, type Contract, type Order } from '@stoqey/ib';
 // another suite already initialized the shared store — tests are
 // delta-based with unique symbols, the established pattern).
 const dir = mkdtempSync(join(tmpdir(), 'dexter-close-'));
-process.env.DEXTER_DATA_DIR ??= dir;
+// Plain assignment (REQ-TEST-001): `??=` kept the PRODUCTION path when .env
+// supplied one — the preload isolates globally, this pins the suite's own dir.
+process.env.DEXTER_DATA_DIR = dir;
 
 import { createProposal, getProposal, setProposalStatus } from './trade-proposals.js';
 import {

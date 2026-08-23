@@ -21,8 +21,8 @@ positive expectancy after costs, not improved loss control.
   — the validation trades the exact live policy at the live scale, so no
   cross-profile extrapolation survives in the evaluator. ONE documented
   deviation: `earnings_bet_enabled` is forced true in shadow so the
-  class keeps building its per-class record (criterion 4 still keeps it
-  paper-only after go-live until its own ≥10-trade record passes).
+  class keeps building its per-class record (criterion 5 still keeps it
+  paper-only after go-live until its own ≥30-trade record passes).
 - **The judgment policy freezes too** (review 2026-08-21): the runtime
   model/provider settings are pinned at tag time and recorded in the
   validation journal; every proposal stamps its `model` column, and the
@@ -107,9 +107,17 @@ positive expectancy after costs, not improved loss control.
 these are still pre-registered numbers, not fitted ones.)
 
 **Scope — the deployable book.** Every criterion below is computed over
-the classes enabled on live day one: intraday and swing. Earnings bets
-run in shadow-live only to build their per-class record; they are
-reported apart by the scorecard and NEVER carry (or sink) the verdict.
+the classes ENABLED in `risk-rules.live.yaml` (the scorecard reads the
+flags — the verdict's scope IS the deployable config). Earnings bets run
+in shadow-live only to build their per-class record; they are reported
+apart and NEVER carry (or sink) the verdict.
+
+**Provenance (REQ-VAL-010).** Sample rows must come from a known
+production lane and carry broker execution identity (WP1 permIds);
+`test`/`smoke`/`adopted` sources never qualify, and an unrecognized
+source freezes the evaluation. (A test-isolation failure on 2026-08-23
+put 12 synthetic rows into the real DB — cleaned, and the runners now
+isolate unconditionally with a temp-dir-only guard, REQ-TEST-001.)
 
 0. **Live scale**: the frozen epoch NetLiq must sit inside ±10% of the
    $11,700 live target — the sample must have been collected at the scale
@@ -126,16 +134,21 @@ reported apart by the scorecard and NEVER carry (or sink) the verdict.
 3. **Profit factor ≥ 1.3**: gross wins / |gross losses| on net-of-
    commission trade P&L.
 4. **Portfolio drawdown inside the live math**: the worst peak-to-trough
-   of MARKED NetLiq (the gateway's 15-minute equity series) over the
-   window must not exceed 2× the live `max_daily_loss_pct`, with a sample
-   on every day a trade closed — else NOT EVALUABLE. Closed-trade drawdown
-   is informational only (it cannot see unrealized troughs, correlated open
-   exposure, or overnight gaps that later recover). The former ×4
-   risk-ratio scaling is retired.
-5. **Class discipline**: every deployable class that traded ≥10 times
-   must individually satisfy (1); a class below 10 trades stays
-   paper-only after go-live regardless of the aggregate. Earnings bets
-   earn their enable decision on their own ≥10-trade shadow record.
+   of MARKED NetLiq (the gateway's 5-minute equity series, SEEDED with the
+   frozen epoch NetLiq so a loss before the first sample cannot vanish)
+   must not exceed 2× the live `max_daily_loss_pct` — with the series
+   proving it WATCHED every exposure interval (first/last-sample and
+   max-gap requirements inside each exposed RTH window; violations make
+   the criterion NOT EVALUABLE). Closed-trade drawdown is informational
+   only. Recorded caveat: NetLiq marks the whole account — shadow-bet P&L
+   rides inside it, bounded by the 1-bet/1%-budget cap; account separation
+   stays on the live-gate backlog.
+5. **Class discipline (enforced via config)**: every class ENABLED in
+   `risk-rules.live.yaml` must clear its own floor — ≥30 trades AND
+   net-positive — or the verdict FAILS; the remedy is disabling the class
+   (`swing_enabled` / `earnings_bet_enabled`, which the gate enforces) or
+   collecting more. Earnings bets earn their enable decision on their own
+   ≥30-trade shadow record.
 
 **Hypothesis, not fix.** The take-at-x% exit policy that freezes with this
 sample is an explicit experimental hypothesis ("better now than later",
@@ -178,5 +191,5 @@ Fails → sizing stays flat on live; the scorer keeps collecting.
 - Never widen a criterion to fit the sample after the fact.
 - Never count adopted, cancelled-annotated, or pre-freeze rows.
 - Never flip `earnings_bet_enabled` on live from this protocol alone —
-  the class needs its own ≥10-trade shadow record per criterion (5), and
+  the class needs its own ≥30-trade shadow record per criterion (5), and
   it is never part of the deployable verdict.

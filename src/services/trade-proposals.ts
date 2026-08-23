@@ -20,7 +20,8 @@ import { logger } from '@/utils';
 import { randomBytes } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
+import { tmpdir } from 'node:os';
 import { assertProposalRisk, type RiskGateContext } from './proposal-risk-gate.js';
 import type { TradeClass } from '@/tools/ibkr/risk-rules.js';
 
@@ -152,14 +153,33 @@ interface SqliteDatabase {
 
 let db: SqliteDatabase | null = null;
 
+/** REQ-TEST-001: under tests the data dir must live inside the OS temp
+ *  directory — "the variable is set" proved nothing when .env supplied the
+ *  PRODUCTION path (review 2026-08-23 P0: a verification run wrote 14
+ *  synthetic rows into the real proposals.db). Exported for its test. */
+export function assertTestDataDirIsTemp(dataDir: string | undefined, nodeEnv: string | undefined, tmpRoot: string): void {
+    if (nodeEnv !== 'test') return;
+    if (!dataDir) {
+        throw new Error('[proposals] refusing to open the production DB under NODE_ENV=test — set DEXTER_DATA_DIR to a temp dir first');
+    }
+    const norm = (p: string) => resolve(p).toLowerCase().replace(/[\\/]+$/, '');
+    const dir = norm(dataDir);
+    const tmp = norm(tmpRoot);
+    if (dir !== tmp && !dir.startsWith(tmp + sep)) {
+        throw new Error(
+            `[proposals] refusing to open '${dataDir}' under NODE_ENV=test — it is OUTSIDE the OS temp directory ` +
+            `('${tmpRoot}'). A test run bound to the production DB once wrote synthetic trades into it; ` +
+            `use the test preload (test/test-env.ts) or mkdtemp, never a real path`,
+        );
+    }
+}
+
 async function getDb(): Promise<SqliteDatabase> {
     if (db) return db;
     // Hard guard: a test run must NEVER bind the production proposals DB.
     // The store caches its handle process-wide, so one test file importing
     // without isolation poisons the entire run — refuse loudly instead.
-    if (process.env.NODE_ENV === 'test' && !process.env.DEXTER_DATA_DIR) {
-        throw new Error('[proposals] refusing to open the production DB under NODE_ENV=test — set DEXTER_DATA_DIR to a temp dir first');
-    }
+    assertTestDataDirIsTemp(process.env.DEXTER_DATA_DIR, process.env.NODE_ENV, tmpdir());
     const dbDir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
     const dbPath = join(dbDir, 'proposals.db');
     await mkdir(dirname(dbPath), { recursive: true });

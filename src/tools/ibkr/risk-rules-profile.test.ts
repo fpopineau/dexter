@@ -1,6 +1,13 @@
-import { afterAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeEach, describe, expect, test } from 'bun:test';
 import { getAccountProfile, getRiskRules, setAccountProfile } from './risk-rules.js';
 
+// The operator's shell/.env carries DEXTER_RISK_PROFILE=live (shadow-live);
+// bun re-injects .env per test file AFTER the global preload, so the leak
+// must be cleared HERE — these suites test the account-derived default and
+// set the override explicitly where they mean to (review 2026-08-23).
+delete process.env.DEXTER_RISK_PROFILE;
+
+beforeEach(() => { delete process.env.DEXTER_RISK_PROFILE; });
 afterAll(() => setAccountProfile('paper'));
 
 describe('risk-rules profiles (small live account prep)', () => {
