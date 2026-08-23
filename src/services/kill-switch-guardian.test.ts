@@ -31,3 +31,20 @@ describe('kill-switch guardian (review 2026-08-23 — cleanup repeats until the 
         expect(decideGuardianStep({ halted: false }, D, D, 99)).toEqual({ alert: false, cleanup: false });
     });
 });
+
+describe('selectEntryParents (omission 7 — broker-truth halt cleanup)', () => {
+    test('only bracket ENTRY parents are candidates; exits, protects, closes and foreign refs never are', async () => {
+        const { selectEntryParents } = await import('./kill-switch-guardian.js');
+        const picked = selectEntryParents([
+            { orderId: 1, orderRef: 'P-1A2B:entry' },   // ✓ bracket parent
+            { orderId: 2, orderRef: 'P-1A2B:tp' },      // exit — never
+            { orderId: 3, orderRef: 'P-1A2B:stop' },    // protection — never
+            { orderId: 4, orderRef: 'protect-XYZ:stop' }, // protection — never
+            { orderId: 5, orderRef: 'close-XYZ' },      // risk-reducing — never
+            { orderId: 6, orderRef: 'reduce-XYZ' },     // risk-reducing — never
+            { orderId: 7, orderRef: null },             // foreign — never
+            { orderId: 8, orderRef: 'P-9F00:entry' },   // ✓ another parent (orphaned/executing rows included)
+        ]);
+        expect(picked.map((o) => o.orderId)).toEqual([1, 8]);
+    });
+});

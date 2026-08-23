@@ -1,18 +1,14 @@
 /**
- * End-of-day triage — decide, per unresolved DAY position, whether it
- * deserves the night.
+ * End-of-day triage — FLAT BY CLOSE (operator policy 2026-08-23,
+ * superseding the 2026-07-30 momentum-keep).
  *
- * Operator policy (2026-07-30): do NOT flatten intraday positions at the
- * close by default. Instead, at 15:52 ET each filled DAY-bracket position
- * is triaged:
- *
- *   CLOSE before the bell  — losing vs the entry fill AND the last hour's
- *                            momentum still running against the position
- *                            ("the horizon is fading");
- *   KEEP                   — everything else: winners, and losers that are
- *                            stabilizing/recovering. At the bell the DAY
- *                            exits expire and auto-protect converts the
- *                            position to a 🌙 protected overnight hold.
+ * At 15:52 ET every filled DAY-bracket position CLOSES. The only path
+ * overnight for an intraday position is the operator's explicit pre-bell
+ * `keep SYMBOL` — still subject to the earnings guard, the whole-book
+ * overnight vet and the gap-stress budget; a PLANNED overnight position
+ * is a swing proposal. The vet then prices EVERYTHING that survives the
+ * bell: keep-overrides, deliberate GTC swings/bets, adopted/manual
+ * positions, failed closes and resting GTC entries.
  *
  * EARNINGS GUARD (2026-08-05): a KEEP must never turn an intraday trade
  * into an accidental earnings bet — a winning DAY position in a stock
@@ -54,7 +50,8 @@ import { findUpcomingEarnings, nextTradingDates, type UpcomingEarnings } from '.
 import { getMacroEventsWithin, macroNightWarning } from './event-risk.js';
 import { barTimeFrameMs } from './outcome-tracker.js';
 import { closePosition, fetchPositions } from './position-actions.js';
-import { listTrackable } from './trade-proposals.js';
+import { listTrackable, type TradeProposal } from './trade-proposals.js';
+import { cancelEntryLeg } from './stale-entry-sweeper.js';
 import { getRiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
 import { confirmCancel } from '@/tools/ibkr/order-ack.js';
 
@@ -137,9 +134,14 @@ export interface OvernightVetCandidate {
      *  that the caps cannot see is how a book breaches silently. */
     fallbackValueUsd?: number | null;
     /** Counted in every sum but never trimmed (review 2026-08-23:
-     *  earnings bets hold through the print BY DESIGN — closing one at the
-     *  bell defeats the class; its tail still weighs on the book). */
+     *  earnings bets hold through the print BY DESIGN; adopted/manual
+     *  positions are never managed; a failed close must not be blindly
+     *  re-closed — but all of their tails weigh on the book). */
     trimExempt?: boolean;
+    /** A resting (unfilled) GTC entry — exposure-in-waiting. A trim on
+     *  this candidate CANCELS the entry parent instead of closing a
+     *  position (omission 5, review 2026-08-23). */
+    restingEntry?: TradeProposal;
     /** Per-candidate stress % (earnings bets stress at max(their own
      *  worst historical gap, the base stress)); null/absent = base. */
     stressPctOverride?: number | null;
@@ -607,9 +609,11 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
 
     const overrides = activeKeepOverrides();
     const lastBySymbol = new Map<string, number>();
+    /** DAY closes that did NOT confirm flat — still holding (omission 5). */
+    const failedCloses = new Map<string, string>();
     // Keeps surviving the momentum/earnings decisions — the conversion book
     // the overnight vet (WP5) prices next.
-    const vetCandidates: Array<OvernightVetCandidate & { pos: { quantity: number; avgCost: number } }> = [];
+    const vetCandidates: Array<OvernightVetCandidate & { pos?: { quantity: number; avgCost: number } }> = [];
 
     for (const t of dayCandidates) {
         const pos = positions.find((p) => p.symbol === t.symbol && p.quantity !== 0);
@@ -661,6 +665,7 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
             // Round-10 review: 'closed' means CONFIRMED FLAT, not 'the
             // close order filled' — an over-close incident must surface.
             if (outcome.state === 'filled' && outcome.flat === true) closedSymbols.add(t.symbol);
+            else failedCloses.set(t.symbol, label); // omission 5: still holding — must weigh on the overnight book
             lines.push(`• ${t.symbol} (${label}): ${decision.reason}. ${outcome.clean === true ? 'Closed.' : outcome.message}`);
         } else {
             lines.push(`• ${t.symbol} (${label}): ${decision.reason}.`);
@@ -757,11 +762,62 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
             pos,
         });
     }
+    // Omission 5 (review 2026-08-23) — the stress book must be the WHOLE
+    // book, not just the rows the triage manages:
+    // (ii) DAY closes that did not confirm flat still hold — counted,
+    //      never blindly re-closed (a second full-size MKT risks a double).
+    for (const [sym, label] of failedCloses) {
+        if (vetCandidates.some((k) => k.symbol === sym)) continue;
+        const pos = positions.find((p) => p.symbol === sym && p.quantity !== 0);
+        if (!pos) continue;
+        const last = lastBySymbol.get(sym) ?? null;
+        vetCandidates.push({
+            symbol: sym, label: `${label}, close FAILED — still holding`,
+            marketValueUsd: last !== null ? Math.abs(pos.quantity) * last : (pos.avgCost > 0 ? Math.abs(pos.quantity) * pos.avgCost : null),
+            pnlPct: null, trimExempt: true,
+            fallbackValueUsd: pos.avgCost > 0 ? Math.abs(pos.quantity) * pos.avgCost : null,
+        });
+    }
+    // (i) adopted/manual broker positions the triage never manages —
+    //     counted at cost basis (never trimmed: not ours to close).
+    for (const pos of positions) {
+        if (pos.quantity === 0) continue;
+        if (closedSymbols.has(pos.symbol) || vetCandidates.some((k) => k.symbol === pos.symbol)) continue;
+        vetCandidates.push({
+            symbol: pos.symbol, label: 'adopted/manual — counted, never managed',
+            marketValueUsd: pos.avgCost > 0 ? Math.abs(pos.quantity) * pos.avgCost : null,
+            pnlPct: null, trimExempt: true,
+            fallbackValueUsd: pos.avgCost > 0 ? Math.abs(pos.quantity) * pos.avgCost : null,
+        });
+    }
+    // (iii) resting non-bet GTC entries: exposure-in-waiting at the worst
+    //       entry basis. A trim here CANCELS the entry (safe primitive) —
+    //       cancelling an order always beats closing a position.
+    for (const t of unfilledGtc) {
+        if (t.tradeClass === 'earnings-bet') continue; // reported by the guard loop, sized for its print
+        if (vetCandidates.some((k) => k.symbol === t.symbol)) continue;
+        const basis = Math.max(t.entry ?? 0, t.entryLimit ?? 0);
+        if (!(basis > 0) || !(t.quantity > 0)) continue;
+        vetCandidates.push({
+            symbol: t.symbol, label: `${t.id}, resting ${t.tradeClass} entry`,
+            marketValueUsd: basis * t.quantity, pnlPct: null,
+            restingEntry: t,
+        });
+    }
+
     const vet = vetOvernightBook(vetCandidates, await getNetLiquidation(), getRiskRules(), overrides);
+    const candidateBySymbol = new Map(vetCandidates.map((k) => [k.symbol, k]));
     for (const trim of vet.trims) {
         if (closedSymbols.has(trim.symbol)) continue; // WP11: already flat this run
+        const cand = candidateBySymbol.get(trim.symbol);
         if (dryRun) {
-            lines.push(`• ${trim.symbol} (${trim.label}): WILL TRIM at 15:52 — ${trim.reason}. Reply 'keep ${trim.symbol}' to hold it anyway.`);
+            lines.push(`• ${trim.symbol} (${trim.label}): WILL ${cand?.restingEntry ? 'CANCEL the resting entry' : 'TRIM'} at 15:52 — ${trim.reason}. Reply 'keep ${trim.symbol}' to hold it anyway.`);
+            continue;
+        }
+        if (cand?.restingEntry) {
+            const cancelled = await cancelEntryLeg(cand.restingEntry, `overnight vet — ${trim.reason}`)
+                .catch((err: unknown) => { logger.warn(`[eod-triage] ${trim.symbol}: resting-entry cancel failed — ${err}`); return false; });
+            lines.push(`• ${trim.symbol} (${trim.label}): overnight vet — ${trim.reason}. ${cancelled ? 'Resting entry cancelled (broker-confirmed).' : 'Entry cancel NOT confirmed — check orders.'}`);
             continue;
         }
         const outcome = await closePosition(trim.symbol, 'EOD triage (overnight vet trim)');

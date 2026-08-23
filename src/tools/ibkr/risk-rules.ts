@@ -497,6 +497,23 @@ export function getAccountProfile(): AccountProfile {
     return activeProfile;
 }
 
+/** Classes DISABLED in the raw live config (before shadow deviations) —
+ *  the "shadow-only" classes whose P&L must be stripped from the
+ *  deployable equity curve (REQ-VAL-012 tightening, review 2026-08-23).
+ *  Reads the live yaml directly; a read failure returns the conservative
+ *  answer (both classes shadow-only). */
+export function liveDisabledClasses(): TradeClass[] {
+    try {
+        const live = loadRules('live');
+        const out: TradeClass[] = [];
+        if (!live.swing_enabled) out.push('swing');
+        if (!live.earnings_bet_enabled) out.push('earnings-bet');
+        return out;
+    } catch {
+        return ['swing', 'earnings-bet'];
+    }
+}
+
 /** True when a paper account is running the live rules (REQ-SHADOW-001). */
 export function isShadowLive(): boolean {
     return shadowMode;

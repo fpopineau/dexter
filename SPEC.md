@@ -351,11 +351,71 @@ Review findings:
 | REQ-VAL-013..016 | scorecard smoke-run; `equity-series.test.ts` extended-session coverage; `risk-rules-profile.test.ts` dual deviation |
 | REQ-TRAIL-005 | `profit-trail.test.ts` — pair-identity suites |
 
-Open items (backlog, not code defects): broker-side GTD entry deadline
-(the safe sweeper stands in; enforcement is absent while the gateway is
-down — GTD needs a live-verified `goodTillDate` format); dedicated
-account or deployable-only marked ledger for shadow classes (the
-realized-P&L adjustment closes the biggest hole; unrealized in-flight
-distortion is bounded and recorded); sector/index correlated stress;
-market-calendar-aware coverage (holidays/half-days can false-flag);
-`take_atr_mult` tunes only from the sample's MFE evidence.
+### Review-16 response (2026-08-23 late, append-only)
+
+Open-items ledger executed with the reviewer's corrections:
+- REQ-GATE-001: intraday requires `tif: DAY` (gate rule, creation AND
+  acceptance) — closes the GTD open item structurally: DAY parents die at
+  the bell broker-side, gateway or no gateway. Legacy unfilled intraday
+  GTC rows are swept at boot regardless of expiry (criterion 0), and the
+  sweeper runs a boot pass 5s after start (post-reconciliation by gateway
+  ordering).
+- REQ-BRACKET-001: protective exits are ALWAYS GTC — a filled DAY
+  position no longer loses its stop at the bell when the gateway is down
+  at the close (children attached by parentId die with an unfilled
+  parent, so GTC children add protection only after a fill). This closes
+  the reviewer's "important limitation" rather than documenting it.
+- REQ-VAL-017: the equity sampler marks open shadow-class positions
+  (classes from the RAW live flags via `liveDisabledClasses`) and records
+  `shadowUnrealized` + `shadowMarkComplete` per sample; the scorecard
+  subtracts realized AND recorded-unrealized shadow P&L and fails closed
+  on incomplete-mark samples. Recorded residuals: quote-`last` marks vs
+  IBKR's NetLiq marks; open-trade commissions accrue at close. Manual
+  trading in the validation account is PROHIBITED (protocol).
+- REQ-VAL-018: coverage is calendar-aware (`SessionWindow` adapter over
+  the market-hours holiday table: closed holidays owe nothing, half-days
+  end 17:00 ET, days beyond the table refuse certification) with
+  DST-safe noon-anchored day iteration.
+- REQ-TEST-002: `cancelEntryLegCore` FakeIb path tests (clean cancel /
+  partial-fill honesty / parent-gone).
+- Omissions 1-7, all fixed: scorecard reads the daily-loss bar FROM the
+  merged yaml (the 3.0 pin had doubled the bar); the shadow class bar
+  includes the cohort LCB; symbol-level accept exclusion (claim +
+  `listWorkingForSymbol` re-check, creation guard covers 'executing');
+  the close neutralizes working entry parents and re-reads the position
+  INSIDE the order lock (foreign entries refuse); the EOD stress book
+  includes adopted/manual positions and failed closes (counted, never
+  trimmed) and resting GTC entries (trims CANCEL the entry); acceptance
+  stress is class-aware (`overnightStressedLossUsd`, bets at their own
+  gap); the guardian enumerates BROKER entry parents
+  (`selectEntryParents` over a complete snapshot, under the lock).
+- Item 5 re-scoped pre-freeze per the reviewer: broker-only union
+  symbols REFUSE accepts (was a warn) until the adoption sweep gives
+  them rows; foreign working orders refuse accepts (complete snapshot
+  required).
+- Item 7 renamed: correlation aggregation CLOSED (the uniform whole-book
+  shock is full correlation in loss space); the remaining research item
+  is **stress-severity and factor calibration** (a high-beta or
+  event-concentrated book may deserve MORE than 20%).
+- Protocol: OCA-joined close observation is a REQUIRED pre-tag
+  prerequisite (WP2/WP11 need observation or an explicit waiver); the
+  freeze-manifest template exists (`docs/day2day/FREEZE-MANIFEST.md`);
+  the research backlog is explicitly frozen mid-sample; the shadow swing
+  record is EXPLORATORY (enabling swing needs a swing-specific sample
+  after any macro-calendar addition).
+
+| REQ | Test |
+|---|---|
+| REQ-GATE-001 | gate suite "intraday requires DAY"; `listUnfilledIntradayGtc` rides the sweeper suite |
+| REQ-BRACKET-001 | bracket suites green under GTC exits (leg tif structural) |
+| REQ-VAL-017 | `parseEquitySeries` field tests; scorecard smoke-run |
+| REQ-VAL-018 | `equity-series.test.ts` calendar-aware suite |
+| REQ-TEST-002 | `stale-entry-sweeper.test.ts` FakeIb suite |
+| Omissions 1-7 | scorecard smoke-run; guardian `selectEntryParents` test; close-lifecycle suite green under the entry-neutralization restructure; gate acceptance-stress test |
+
+Remaining open items: dedicated account/process for shadow classes
+(operationally impractical for now; the realized+unrealized ledger is
+the working answer, residuals recorded); stress-severity and factor
+calibration (post-validation research); official macro calendar (gates
+the swing-enable decision, not this sample); `take_atr_mult` tunes only
+from the sample's MFE evidence.

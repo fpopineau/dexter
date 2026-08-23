@@ -44,3 +44,62 @@ describe('selectEntryLegToCancel (REQ-ENTRY-003 — only the verified parent, ne
         expect(entryActionFor('short')).toBe(OrderAction.SELL);
     });
 });
+
+describe('cancelEntryLegCore — the full path on a fake broker (review 2026-08-23, item 4)', () => {
+    const { EventEmitter } = require('node:events') as typeof import('node:events');
+    const { EventName } = require('@stoqey/ib') as typeof import('@stoqey/ib');
+
+    class FakeIb extends EventEmitter {
+        cancelled: number[] = [];
+        book: Array<{ id: number; symbol: string; ref: string }> = [];
+        /** Broker reaction to a cancel: [status, filled]. */
+        onCancel: (id: number) => [string, number] = () => ['Cancelled', 0];
+        reqAllOpenOrders(): void {
+            queueMicrotask(() => {
+                for (const o of this.book) {
+                    this.emit(EventName.openOrder, o.id, { symbol: o.symbol }, {
+                        action: 'BUY', orderType: 'STP LMT', tif: 'DAY', orderRef: o.ref,
+                        account: 'DU1', totalQuantity: 10,
+                    });
+                }
+                this.emit(EventName.openOrderEnd);
+            });
+        }
+        cancelOrder(id: number): void {
+            this.cancelled.push(id);
+            const [status, filled] = this.onCancel(id);
+            queueMicrotask(() => this.emit(EventName.orderStatus, id, status, filled, 0, 0));
+        }
+    }
+    const proposal = { id: 'P-1A2B', symbol: 'CANC', direction: 'long' } as never;
+
+    test('clean cancel: only the verified parent is cancelled; children untouched', async () => {
+        const { cancelEntryLegCore } = await import('./stale-entry-sweeper.js');
+        const fake = new FakeIb();
+        fake.book = [
+            { id: 501, symbol: 'CANC', ref: 'P-1A2B:entry' },
+            // exit-side children exist on the SELL side and never even enter
+            // the BUY-side book — but a same-side stray must survive too:
+            { id: 509, symbol: 'CANC', ref: 'P-9F00:entry' },
+        ];
+        expect(await cancelEntryLegCore(fake as never, proposal, 'test')).toBe(true);
+        expect(fake.cancelled).toEqual([501]); // never the other proposal's parent
+    });
+
+    test('Cancelled WITH filled>0 is a live partial position, never a clean sweep', async () => {
+        const { cancelEntryLegCore } = await import('./stale-entry-sweeper.js');
+        const fake = new FakeIb();
+        fake.book = [{ id: 502, symbol: 'CANC', ref: 'P-1A2B:entry' }];
+        fake.onCancel = () => ['Cancelled', 4];
+        expect(await cancelEntryLegCore(fake as never, proposal, 'test')).toBe(false);
+        expect(fake.cancelled).toEqual([502]); // the cancel went out — the RESULT is what must stay honest
+    });
+
+    test('parent already gone from the book: nothing cancelled at all', async () => {
+        const { cancelEntryLegCore } = await import('./stale-entry-sweeper.js');
+        const fake = new FakeIb();
+        fake.book = []; // filled or expired — the tracker owns whatever happened
+        expect(await cancelEntryLegCore(fake as never, proposal, 'test')).toBe(false);
+        expect(fake.cancelled).toEqual([]);
+    });
+});

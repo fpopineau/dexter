@@ -23,6 +23,8 @@ import { join } from 'node:path';
 import { logger } from '@/utils';
 import { parseEquitySeries, type EquitySample } from '@/utils/equity-series-math.js';
 import { getNetLiquidation } from './daily-loss-guard.js';
+import { liveDisabledClasses } from '@/tools/ibkr/risk-rules.js';
+import { listTrackable } from './trade-proposals.js';
 
 export { parseEquitySeries, portfolioDrawdown, etDayOf, type EquitySample, type PortfolioDrawdown } from '@/utils/equity-series-math.js';
 
@@ -43,14 +45,53 @@ export function readEquitySeries(): EquitySample[] {
     }
 }
 
-/** One sample. Exported for the boot path and tests. */
+/** One sample. Exported for the boot path and tests.
+ *
+ *  Review 2026-08-23: alongside NetLiq, the sampler marks every OPEN
+ *  shadow-only-class position (classes disabled in the raw live config —
+ *  they trade in shadow only to build their records) and records their
+ *  unrealized P&L, so the scorecard can strip it from the deployable
+ *  curve. A failed mark while a shadow position is open sets
+ *  shadowMarkComplete=false — the scorecard fails that interval closed.
+ *  Mark provenance: quote `last` — NOT IBKR's own NetLiq mark, so small
+ *  residuals remain (recorded caveat); commissions accrue only at close. */
 export async function sampleEquityOnce(): Promise<EquitySample | null> {
     const netLiq = await getNetLiquidation().catch(() => null);
     if (netLiq === null || !(netLiq > 0)) {
         logger.warn('[equity-series] NetLiq unavailable — sample skipped (never faked)');
         return null;
     }
-    const sample: EquitySample = { ts: Date.now(), netLiq };
+    let shadowUnrealized = 0;
+    let shadowMarkComplete: boolean | undefined;
+    try {
+        const shadow = new Set(liveDisabledClasses());
+        const open = (await listTrackable()).filter((t) =>
+            shadow.has(t.tradeClass) && t.entryFillPrice !== null && t.source !== 'adopted');
+        if (open.length > 0) {
+            shadowMarkComplete = true;
+            const { fetchLastPrice } = await import('./proposal-executor.js');
+            for (const t of open) {
+                const last = await fetchLastPrice(t.symbol).catch(() => null);
+                if (last === null || !(last > 0)) {
+                    shadowMarkComplete = false;
+                    logger.warn(`[equity-series] shadow mark unavailable for ${t.symbol} — sample flagged incomplete`);
+                    continue;
+                }
+                const sign = t.direction === 'long' ? 1 : -1;
+                shadowUnrealized += sign * t.quantity * (last - (t.entryFillPrice ?? last));
+            }
+        }
+    } catch (err) {
+        shadowMarkComplete = false;
+        logger.warn(`[equity-series] shadow-position enumeration failed — sample flagged incomplete: ${err}`);
+    }
+    const sample: EquitySample = {
+        ts: Date.now(),
+        netLiq,
+        ...(shadowMarkComplete !== undefined
+            ? { shadowUnrealized: Math.round(shadowUnrealized * 100) / 100, shadowMarkComplete }
+            : {}),
+    };
     try {
         appendFileSync(equitySeriesPath(), `${JSON.stringify(sample)}\n`);
     } catch (err) {

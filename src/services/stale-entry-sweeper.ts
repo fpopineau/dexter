@@ -44,7 +44,7 @@ import { confirmCancelDetailed } from '@/tools/ibkr/order-ack.js';
 import { withOrderLock } from '@/tools/ibkr/order-lock.js';
 import { logger } from '@/utils';
 import { fetchOpenOrdersFor } from './position-actions.js';
-import { listExpiredUnfilledEntries, listStaleUnfilled, type TradeProposal } from './trade-proposals.js';
+import { listExpiredUnfilledEntries, listStaleUnfilled, listUnfilledIntradayGtc, type TradeProposal } from './trade-proposals.js';
 
 const SWEEP_INTERVAL_MS = 10 * 60_000;
 /** Broker-confirmation window for the parent cancel. */
@@ -87,13 +87,24 @@ export function entryActionFor(direction: 'long' | 'short'): OrderAction {
     return direction === 'long' ? OrderAction.BUY : OrderAction.SELL;
 }
 
-/** THE safe entry-cancel primitive (REQ-ENTRY-003) — also used by the
- *  kill-switch guardian to neutralize working entries after a latch. */
+/** THE safe entry-cancel primitive (REQ-ENTRY-003) — also used by the EOD
+ *  vet to cancel resting entries the gap-stress budget cannot afford. */
 export async function cancelEntryLeg(p: TradeProposal, why: string): Promise<boolean> {
     const api = await getIBApi();
     // Under the order lock: no placement, resize, or close interleaves with
     // the book read + cancel — the snapshot we act on is the one we hold.
-    return withOrderLock(async () => {
+    return withOrderLock(async () => cancelEntryLegCore(api, p, why));
+}
+
+/** The lock-free core against any IBApi-shaped emitter — exported so the
+ *  FakeIb harness drives the partial-fill and children-untouched paths
+ *  without a gateway (review 2026-08-23, item 4). */
+export async function cancelEntryLegCore(
+    api: Awaited<ReturnType<typeof getIBApi>>,
+    p: TradeProposal,
+    why: string,
+): Promise<boolean> {
+    {
         const book = await fetchOpenOrdersFor(api, p.symbol, entryActionFor(p.direction));
         const parentId = selectEntryLegToCancel(p.id, book);
         if (parentId === null) {
@@ -132,7 +143,7 @@ export async function cancelEntryLeg(p: TradeProposal, why: string): Promise<boo
                 logger.error(`[stale-entry-sweeper] ${p.id} ${p.symbol}: entry #${parentId} cancel NOT CONFIRMED within ${CANCEL_CONFIRM_MS}ms — will retry next sweep; review in TWS if it persists`);
                 return false;
         }
-    });
+    }
 }
 
 export async function sweepStaleEntriesOnce(): Promise<number> {
@@ -140,11 +151,18 @@ export async function sweepStaleEntriesOnce(): Promise<number> {
     // — it must be cancelled once, not raced against itself.
     const candidates = new Map<string, { p: TradeProposal; why: string }>();
 
+    // Criterion 0 (review 2026-08-23): LEGACY intraday GTC entries are
+    // policy-invalid since flat-by-close (the gate now refuses creating
+    // them) — swept regardless of expiry, not merely once expired.
+    for (const p of await listUnfilledIntradayGtc()) {
+        candidates.set(p.id, { p, why: 'intraday GTC entry — policy-invalid since flat-by-close (2026-08-23)' });
+    }
+
     // Criterion 1: expired intraday entries (thesis validity).
     const graceMin = entryExpiryGraceMin();
     if (graceMin >= 0) {
         for (const p of await listExpiredUnfilledEntries(Date.now(), graceMin * 60_000)) {
-            candidates.set(p.id, { p, why: 'entry unfilled past the proposal\'s validity window' });
+            if (!candidates.has(p.id)) candidates.set(p.id, { p, why: 'entry unfilled past the proposal\'s validity window' });
         }
     }
 
@@ -175,6 +193,15 @@ export function startStaleEntrySweeper(): void {
     timer = setInterval(() => {
         sweepStaleEntriesOnce().catch((err) => logger.warn(`[stale-entry-sweeper] sweep failed: ${err}`));
     }, SWEEP_INTERVAL_MS);
+    if (process.env.NODE_ENV !== 'test') {
+        // Boot sweep (review 2026-08-23): the gateway starts this AFTER the
+        // outcome tracker's boot reconciliation — entries that went stale
+        // while the gateway was down are cancelled promptly on recovery, not
+        // ten minutes later.
+        setTimeout(() => {
+            sweepStaleEntriesOnce().catch((err) => logger.warn(`[stale-entry-sweeper] boot sweep failed: ${err}`));
+        }, 5_000);
+    }
     logger.info(
         `[stale-entry-sweeper] started: expired intraday entries cancelled past expiry ` +
         `(+${entryExpiryGraceMin()}min grace), any unfilled entry after ${staleEntryMaxDays()}d ` +

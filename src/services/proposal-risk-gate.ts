@@ -89,6 +89,11 @@ export interface RiskGateContext {
      *  close (GTC rows, incl. kept-overnight holds). Enables the
      *  max_overnight_exposure_pct check for GTC proposals. */
     overnightExposureUsd?: number;
+    /** CLASS-AWARE stressed loss (USD) of that same book — each row at its
+     *  own gap severity (bets at max(record gap, floor, base stress)).
+     *  When provided, the gap-stress check uses it instead of
+     *  overnightExposureUsd × base stress (omission 6, 2026-08-23). */
+    overnightStressedLossUsd?: number;
     /** Live last price at CREATION, fetched server-side (delayed quotes
      *  refused upstream — a stale price treated as live is the exact
      *  failure this exists to catch). Enables the buy-now entry-pricing
@@ -358,6 +363,17 @@ export function checkProposalRisk(
         violations.push(
             `${ctx.openEarningsBets} earnings bet(s) already open — max ${rules.max_earnings_bets} at a time; ` +
             'wait for the open bet to resolve',
+        );
+    }
+    // Flat-by-close corollary (review 2026-08-23): an intraday thesis ends
+    // with its session, so its ENTRY has no business outliving the day —
+    // a GTC intraday parent was the one order the expiry sweeper could not
+    // reach while the gateway was down. DAY parents die at the bell
+    // broker-side, no gateway required.
+    if (tradeClass === 'intraday' && p.tif === 'GTC') {
+        violations.push(
+            'intraday theses end with the session (flat by close) — use tif DAY; ' +
+            'a setup meant to outlive the day is a SWING proposal with swing-class vetting',
         );
     }
     if (tradeClass === 'swing' && !rules.swing_enabled) {
@@ -873,7 +889,11 @@ export function checkProposalRisk(
                 const ownStressPct = tradeClass === 'earnings-bet'
                     ? Math.max(stress, Math.max(ctx.worstCaseGapPct ?? 0, rules.earnings_bet_gap_floor_pct))
                     : stress;
-                const stressedUsd = positionValue * (ownStressPct / 100) + ctx.overnightExposureUsd * (stress / 100);
+                // Prefer the caller's class-aware book stress (each existing
+                // row at its own severity); base-rate fallback for callers
+                // that only know the notional.
+                const bookStressUsd = ctx.overnightStressedLossUsd ?? ctx.overnightExposureUsd * (stress / 100);
+                const stressedUsd = positionValue * (ownStressPct / 100) + bookStressUsd;
                 const budgetUsd = (rules.max_daily_loss_pct / 100) * ctx.netLiquidation;
                 if (stressedUsd > budgetUsd) {
                     violations.push(

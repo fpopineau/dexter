@@ -23,9 +23,11 @@
  */
 
 import { logger } from '@/utils';
+import { getIBApi } from '@/tools/ibkr/connection.js';
+import { confirmCancelDetailed } from '@/tools/ibkr/order-ack.js';
+import { withOrderLock } from '@/tools/ibkr/order-lock.js';
+import { fetchOpenOrderSnaps } from './broker-adopt.js';
 import { getDailyLossStatus } from './daily-loss-guard.js';
-import { cancelEntryLeg } from './stale-entry-sweeper.js';
-import { listTrackable } from './trade-proposals.js';
 
 const GUARDIAN_INTERVAL_MS = 60_000;
 const ET = 'America/New_York';
@@ -74,6 +76,13 @@ export function decideGuardianStep(
     return { alert: alertedDay !== today, cleanup: true };
 }
 
+/** Pure: the broker book's Dexter ENTRY parents — the only orders a halt
+ *  cleanup may cancel (WP1 stamps `<proposalId>:entry` on every bracket
+ *  parent; exits are `:tp`/`:stop`, protects `protect-`, closes `close-`). */
+export function selectEntryParents<T extends { orderId: number; orderRef: string | null }>(orders: T[]): T[] {
+    return orders.filter((o) => /^P-[0-9A-F]{4}:entry$/.test(o.orderRef ?? ''));
+}
+
 let alertedDay: string | null = null;
 let unverifiedStreak = 0;
 let tickRunning = false;
@@ -89,18 +98,36 @@ async function tick(): Promise<void> {
         const step = decideGuardianStep(status, alertedDay, today, unverifiedStreak);
         if (!step.cleanup) return;
 
+        // BROKER-truth enumeration (review 2026-08-23, omission 7): DB rows
+        // missed 'executing' claims and orphaned parents the DB forgot —
+        // the halt must neutralize what the BROKER says is working. Every
+        // `<id>:entry` ref on the book is a Dexter entry parent by WP1
+        // construction; children are never touched (they die with a
+        // still-working parent, and protect a filled one).
         let cancelled = 0, remaining = 0;
         try {
-            const unfilled = (await listTrackable()).filter((t) => t.entryFillPrice === null && t.source !== 'adopted');
-            for (const p of unfilled) {
-                try {
-                    if (await cancelEntryLeg(p, 'kill-switch halt — a working entry is new risk')) cancelled++;
-                    else remaining++; // filled/racing/unconfirmed — retried next tick until the book drains
-                } catch (err) {
-                    remaining++;
-                    logger.warn(`[kill-switch-guardian] ${p.id} ${p.symbol}: entry cancel failed (retries next tick) — ${err}`);
+            await withOrderLock(async () => {
+                const api = await getIBApi();
+                const snap = await fetchOpenOrderSnaps(api);
+                if (!snap.complete) {
+                    remaining = -1; // partial view — a parent we cannot see is not proven absent
+                    logger.error('[kill-switch-guardian] open-orders snapshot INCOMPLETE — entry cleanup retries next tick');
+                    return;
                 }
-            }
+                for (const o of selectEntryParents(snap.orders)) {
+                    try {
+                        const { outcome, filledQty } = await confirmCancelDetailed(api, o.orderId, 5_000);
+                        if (outcome === 'cancelled' && !(filledQty !== null && filledQty > 0)) cancelled++;
+                        else {
+                            remaining++;
+                            logger.warn(`[kill-switch-guardian] entry #${o.orderId} (${o.orderRef}): ${outcome}${filledQty ? `, ${filledQty} filled` : ''} — position may be live, tracker owns it`);
+                        }
+                    } catch (err) {
+                        remaining++;
+                        logger.warn(`[kill-switch-guardian] entry #${o.orderId}: cancel failed (retries next tick) — ${err}`);
+                    }
+                }
+            });
         } catch (err) {
             remaining = -1; // enumeration itself failed — retry next tick, say so
             logger.error(`[kill-switch-guardian] could not enumerate working entries (retries next tick): ${err}`);

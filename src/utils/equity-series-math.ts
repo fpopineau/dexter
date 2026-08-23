@@ -6,7 +6,19 @@
 
 const ET = 'America/New_York';
 
-export interface EquitySample { ts: number; netLiq: number }
+export interface EquitySample {
+    ts: number;
+    netLiq: number;
+    /** Unrealized P&L (USD) of open SHADOW-ONLY class positions at sample
+     *  time (review 2026-08-23: realized adjustment alone left in-flight
+     *  shadow marks distorting the deployable curve). Absent on legacy
+     *  lines and when no shadow position was open. */
+    shadowUnrealized?: number;
+    /** false = a shadow position was open and at least one mark FAILED —
+     *  the sample's adjustment is incomplete and the scorecard must not
+     *  certify the interval (fail-closed). Absent = nothing to mark. */
+    shadowMarkComplete?: boolean;
+}
 
 /** Parse the JSONL text, dropping malformed lines (a torn write must not
  *  poison the series). Sorted by time. */
@@ -18,7 +30,13 @@ export function parseEquitySeries(text: string): EquitySample[] {
         try {
             const v = JSON.parse(t) as Partial<EquitySample>;
             if (typeof v.ts === 'number' && Number.isFinite(v.ts) && typeof v.netLiq === 'number' && v.netLiq > 0) {
-                out.push({ ts: v.ts, netLiq: v.netLiq });
+                out.push({
+                    ts: v.ts,
+                    netLiq: v.netLiq,
+                    ...(typeof v.shadowUnrealized === 'number' && Number.isFinite(v.shadowUnrealized)
+                        ? { shadowUnrealized: v.shadowUnrealized } : {}),
+                    ...(typeof v.shadowMarkComplete === 'boolean' ? { shadowMarkComplete: v.shadowMarkComplete } : {}),
+                });
             }
         } catch { /* torn line */ }
     }
@@ -88,43 +106,64 @@ export function etIsWeekday(ts: number): boolean {
  * Holidays/half-days can false-flag — operator judgment; better a false
  * flag than a certified blind spot.
  */
+/** The observable session of one ET calendar day (review 2026-08-23):
+ *  'closed' = markets shut, nothing owed; 'unknown' = beyond the
+ *  maintained calendar — coverage cannot be certified. */
+export type SessionWindow = { startMin: number; endMin: number } | 'closed' | 'unknown';
+
 export function exposureCoverageGaps(
     series: EquitySample[],
     intervals: Array<{ from: number; to: number; label: string }>,
     maxGapMin = 20,
+    sessionFor?: (dayIso: string) => SessionWindow,
 ): string[] {
-    // Equity can move 04:00-20:00 ET (extended hours) — overnight gap risk
-    // materializes AT 04:00, so coverage owes the whole extended session
-    // (review 2026-08-23: RTH-only coverage never observed the gap).
-    const RTH_OPEN = 4 * 60, RTH_CLOSE = 20 * 60;
+    // Default session: equity can move 04:00-20:00 ET (extended hours) —
+    // overnight gap risk materializes AT 04:00. A calendar-aware caller
+    // passes `sessionFor` to shorten half-days, drop holidays and refuse
+    // days beyond the maintained calendar.
+    const DEFAULT_SESSION = { startMin: 4 * 60, endMin: 20 * 60 };
     const fmt = (m: number) => `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')}`;
-    // Per exposed weekday: the merged RTH sub-window the series must cover,
+    // Per exposed day: the merged session sub-window the series must cover,
     // CLIPPED to the actual exposure (an entry at 14:50 does not owe the
     // morning; a close at 10:10 does not owe the afternoon).
     const days = new Map<string, { startMin: number; endMin: number; labels: string[] }>();
+    const violations: string[] = [];
+    const unknownDays = new Set<string>();
     for (const iv of intervals) {
         if (!(iv.to >= iv.from)) continue;
         const fromDay = etDayOf(iv.from), toDay = etDayOf(iv.to);
-        for (let t = iv.from; ; t += 86_400_000) {
+        // Noon-anchored stepping (review 2026-08-23): fixed 24h increments
+        // from an arbitrary wall time can drift across a DST transition;
+        // anchoring near ET noon keeps every step inside its intended day.
+        const anchorNoon = iv.from + (12 * 60 - etMinutes(iv.from)) * 60_000;
+        for (let k = 0; ; k++) {
+            const t = k === 0 ? iv.from : anchorNoon + k * 86_400_000;
             const day = etDayOf(t);
             if (etIsWeekday(t)) {
-                const startMin = day === fromDay ? Math.max(RTH_OPEN, etMinutes(iv.from)) : RTH_OPEN;
-                const endMin = day === toDay ? Math.min(RTH_CLOSE, etMinutes(iv.to)) : RTH_CLOSE;
-                if (startMin < endMin) {
-                    const cur = days.get(day);
-                    if (cur) {
-                        cur.startMin = Math.min(cur.startMin, startMin);
-                        cur.endMin = Math.max(cur.endMin, endMin);
-                        cur.labels.push(iv.label);
-                    } else {
-                        days.set(day, { startMin, endMin, labels: [iv.label] });
+                const session = sessionFor ? sessionFor(day) : DEFAULT_SESSION;
+                if (session === 'unknown') {
+                    if (!unknownDays.has(day)) {
+                        unknownDays.add(day);
+                        violations.push(`${day}: beyond the maintained market calendar — coverage cannot be certified (extend the holiday table)`);
+                    }
+                } else if (session !== 'closed') {
+                    const startMin = day === fromDay ? Math.max(session.startMin, etMinutes(iv.from)) : session.startMin;
+                    const endMin = day === toDay ? Math.min(session.endMin, etMinutes(iv.to)) : session.endMin;
+                    if (startMin < endMin) {
+                        const cur = days.get(day);
+                        if (cur) {
+                            cur.startMin = Math.min(cur.startMin, startMin);
+                            cur.endMin = Math.max(cur.endMin, endMin);
+                            cur.labels.push(iv.label);
+                        } else {
+                            days.set(day, { startMin, endMin, labels: [iv.label] });
+                        }
                     }
                 }
             }
             if (day === toDay || t > iv.to + 86_400_000) break;
         }
     }
-    const violations: string[] = [];
     for (const [day, w] of [...days.entries()].sort()) {
         const who = [...new Set(w.labels)].join(', ');
         const inWindow = series

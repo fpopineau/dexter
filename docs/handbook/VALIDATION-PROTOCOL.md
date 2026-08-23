@@ -64,7 +64,23 @@ positive expectancy after costs, not improved loss control.
   behavior, and each is logged in the validation journal
   (`docs/day2day/VALIDATION-JOURNAL.md`, one line per fix, with commit).
 - A behavior change for any reason ENDS the window: new freeze tag, new
-  sample, from zero.
+  sample, from zero. **This covers the research backlog too** (2026-08-23):
+  scanner depth, RVOL treatment, regime routing, data-source changes and
+  judgment-input changes alter discovery, ranking or selection — "not a
+  deterministic gate" does not mean "safe to modify mid-sample".
+- **Freeze manifest** (2026-08-23): at tag time the operator commits
+  `docs/day2day/FREEZE-MANIFEST.md` — tag name and commit SHA, the model
+  and provider strings, the SHA-256 of `.dexter/RULES.md` and of
+  `performance-epoch.json`, the active `exit_style`, the scorer-weights
+  provenance line, the ratified `risk-rules.live.yaml` numbers, the OCA
+  observation record and any WP2/WP11 waivers. The manifest is the
+  immutable record the final evaluation is checked against.
+- **The shadow swing record is EXPLORATORY** (2026-08-23): no official
+  macro calendar exists yet, and adding one later changes the judgment
+  inputs swings depend on. Enabling `swing_enabled` live therefore
+  requires BOTH the class's own record passing its bar AND a
+  swing-specific frozen sample collected AFTER any macro-calendar
+  addition — the current shadow record informs, it cannot authorize.
 
 ### Prerequisites for tagging (operator checklist)
 
@@ -76,15 +92,17 @@ positive expectancy after costs, not improved loss control.
    NVDA 68.5M, KO 8.2M). Tick-236 field 46 (shortable) confirmed
    (AAPL/BYND true); field 49 (halted) is silent on a normal tape —
    the gate's null→note design stands. EUR.USD midpoint 1.168 ✓.
-2. Live-verify the WP2 resize path and the WP11 buffered-events path
-   once on paper (both are broker-event dependent and cannot be forced:
-   they need a genuine partial fill / EOD-keep window). Observe
-   opportunistically during paper trading, or accept on harness
-   coverage — the operator's call at tag time.
-   Same for the OCA-JOINED close (round-6 review): the harness verifies
+2. **OCA-joined close: paper observation REQUIRED before the tag**
+   (strengthened 2026-08-23 — was "opportunistic"). The harness proves
    the transmitted fields, not IBKR's behavior when an order joins an
-   already-working OCA group — observe one joined close cancelling its
-   stop/target broker-side on paper before relying on it.
+   already-working OCA group; a failure discovered mid-sample would be a
+   behavioral fix and restart the sample. Observe one joined close
+   cancelling its stop/target broker-side on paper, and record it in the
+   freeze manifest.
+   For the WP2 resize and WP11 buffered-events paths: prefer real paper
+   observations before the tag; if they cannot reasonably be induced,
+   record an EXPLICIT operator waiver (harness coverage accepted) in the
+   manifest — never leave them vaguely "opportunistic".
 3. One clean gateway boot: YAML validation passes, calendar coverage ok,
    no adoption-sweep surprises. (The rules/calendar halves passed in the
    2026-08-21 script run; confirm on the next real gateway start.)

@@ -168,6 +168,13 @@ export async function placeBracketOrderCore(
     const entryAction = req.direction === 'long' ? OrderAction.BUY : OrderAction.SELL;
     const exitAction = req.direction === 'long' ? OrderAction.SELL : OrderAction.BUY;
     const tif = (req.tif ?? 'DAY') as typeof TimeInForce[keyof typeof TimeInForce];
+    // PROTECTIVE EXITS ARE ALWAYS GTC (review 2026-08-23): a DAY bracket
+    // whose position filled used to lose its stop/target at the bell if the
+    // gateway was down at the close — the one moment protection matters
+    // most. Children attached by parentId stay dormant until the parent
+    // fills and die with it if it expires/cancels, so GTC children on a
+    // DAY parent add protection after a fill and nothing before it.
+    const exitTif = TimeInForce.GTC;
     // Stable correlation key: client order ids reset per connection, but
     // orderRef survives on the broker side — reconciliation matches on it.
     const refBase = req.refId?.trim() || `BRKT-${parentId}`;
@@ -197,7 +204,7 @@ export async function placeBracketOrderCore(
         totalQuantity: req.quantity,
         orderType: OrderType.LMT,
         lmtPrice: req.targetPrice,
-        tif,
+        tif: exitTif,
         ocaGroup,
         ocaType: 1, // cancel remaining orders in group on fill
         transmit: false,
@@ -212,7 +219,7 @@ export async function placeBracketOrderCore(
         totalQuantity: req.quantity,
         orderType: OrderType.STP,
         auxPrice: req.stopPrice,
-        tif,
+        tif: exitTif,
         ocaGroup,
         ocaType: 1,
         transmit: true, // transmits the whole bracket atomically

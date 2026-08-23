@@ -811,7 +811,7 @@ describe('overnight caps (GTC proposals — formerly phantom)', () => {
     test('a GTC position above max_overnight_position_pct is refused', () => {
         // 40 × $100 = $4,000 = 4% > 3% overnight cap (but under the 5% intraday cap).
         const r = checkProposalRisk(
-            longProposal({ quantity: 40, tif: 'GTC' }),
+            longProposal({ quantity: 40, tradeClass: 'swing', tif: 'GTC' }),
             { netLiquidation: 100_000 },
             RULES,
         );
@@ -835,7 +835,7 @@ describe('overnight caps (GTC proposals — formerly phantom)', () => {
         const NOSTRESS = { ...RULES, overnight_gap_stress_pct: 0 };
         // $2,500 new + $28,000 already surviving the close > 30% ($30,000).
         const r = checkProposalRisk(
-            longProposal({ quantity: 25, tif: 'GTC' }),
+            longProposal({ quantity: 25, tradeClass: 'swing', tif: 'GTC' }),
             { netLiquidation: 100_000, overnightExposureUsd: 28_000 },
             NOSTRESS,
         );
@@ -843,7 +843,7 @@ describe('overnight caps (GTC proposals — formerly phantom)', () => {
         expect(r.violations.join(' ')).toContain('overnight book cap');
 
         const ok = checkProposalRisk(
-            longProposal({ quantity: 25, tif: 'GTC' }),
+            longProposal({ quantity: 25, tradeClass: 'swing', tif: 'GTC' }),
             { netLiquidation: 100_000, overnightExposureUsd: 27_000 },
             NOSTRESS,
         );
@@ -867,7 +867,7 @@ describe('sector concentration cap (formerly phantom)', () => {
 
     test('inside the cap passes; applies to DAY and GTC alike', () => {
         const r = checkProposalRisk(
-            longProposal({ quantity: 25, tif: 'GTC' }),
+            longProposal({ quantity: 25, tradeClass: 'swing', tif: 'GTC' }),
             { netLiquidation: 100_000, sector: 'Technology', sameSectorExposureUsd: 15_000 },
             RULES,
         );
@@ -1269,7 +1269,7 @@ describe('acceptance-time gap stress (review 2026-08-23 — the GTC book is boun
     test('a GTC accept whose stressed book exceeds one daily-loss budget is refused', () => {
         // Budget: 2% of 100k = $2,000. Stressed: (2,500 + 8,000) × 20% = $2,100.
         const r = checkProposalRisk(
-            longProposal({ quantity: 25, tif: 'GTC' }),
+            longProposal({ quantity: 25, tradeClass: 'swing', tif: 'GTC' }),
             { netLiquidation: 100_000, overnightExposureUsd: 8_000 },
             RULES,
         );
@@ -1277,10 +1277,20 @@ describe('acceptance-time gap stress (review 2026-08-23 — the GTC book is boun
         expect(r.violations.join(' ')).toContain('adverse overnight gap');
         // Inside the budget: (2,500 + 7,000) × 20% = $1,900 ≤ $2,000 → passes.
         const ok = checkProposalRisk(
-            longProposal({ quantity: 25, tif: 'GTC' }),
+            longProposal({ quantity: 25, tradeClass: 'swing', tif: 'GTC' }),
             { netLiquidation: 100_000, overnightExposureUsd: 7_000 },
             RULES,
         );
         expect(ok.ok).toBe(true);
+    });
+});
+
+describe('intraday requires DAY (flat-by-close corollary, review 2026-08-23)', () => {
+    test('an intraday GTC entry is refused with the swing prescription; DAY passes; swing GTC untouched', () => {
+        const gtc = checkProposalRisk(longProposal({ tif: 'GTC' }), {}, RULES);
+        expect(gtc.ok).toBe(false);
+        expect(gtc.violations.join(' ')).toContain('SWING proposal');
+        expect(checkProposalRisk(longProposal({ tif: 'DAY' }), {}, RULES).ok).toBe(true);
+        expect(checkProposalRisk(longProposal({ tradeClass: 'swing', tif: 'GTC' }), {}, RULES).ok).toBe(true);
     });
 });

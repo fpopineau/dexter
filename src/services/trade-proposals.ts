@@ -662,11 +662,13 @@ export async function createProposal(
     // does not sit beside it. Adopted rows count too: Dexter does not
     // trade around a position it merely records.
     {
-        const existing = (await listTrackable()).find((t) => t.symbol === input.symbol.trim().toUpperCase());
+        // Includes 'executing' rows (omission 3): a proposal mid-accept owns
+        // the symbol just as firmly as an executed one.
+        const existing = (await listWorkingForSymbol(input.symbol))[0];
         if (existing) {
             throw new Error(
                 `[risk-gate] REFUSED ${input.symbol.toUpperCase()}: one active thesis per symbol — ${existing.id} ` +
-                `(${existing.tradeClass}${existing.entryFillPrice !== null ? ', filled' : ', entry working'}) already owns it. ` +
+                `(${existing.tradeClass}${existing.entryFillPrice !== null ? ', filled' : ', working'}) already owns it. ` +
                 `Cancel or close ${existing.id} first, or skip`,
             );
         }
@@ -1003,6 +1005,18 @@ export async function recordTradeExcursion(id: string, mfePct: number, maePct: n
     ).run(mfePct, maePct, Date.now(), id.trim().toUpperCase());
 }
 
+/** Working rows on a symbol — executing (mid-accept) AND executed. The
+ *  one-thesis guard and the accept path both need this view: 'executed'
+ *  alone missed a proposal mid-claim, so two same-symbol proposals could
+ *  both be accepted concurrently (review 2026-08-23, omission 3). */
+export async function listWorkingForSymbol(symbolRaw: string, excludeId?: string): Promise<TradeProposal[]> {
+    const database = await getDb();
+    const rows = database.query<Row>(
+        `SELECT * FROM proposals WHERE status IN ('executing', 'executed') AND symbol = ?`,
+    ).all(symbolRaw.trim().toUpperCase());
+    return rows.map(fromRow).filter((t) => t.id !== excludeId);
+}
+
 /** Executed proposals that have not been closed — what the tracker watches. */
 export async function listTrackable(): Promise<TradeProposal[]> {
     const database = await getDb();
@@ -1043,6 +1057,22 @@ export async function listExpiredUnfilledEntries(nowMs: number, graceMs: number)
            AND executed_at < ?
          ORDER BY executed_at ASC`,
     ).all(nowMs, nowMs - graceMs);
+    return rows.map(fromRow);
+}
+
+/** LEGACY intraday GTC entries, unfilled — policy-invalid since
+ *  flat-by-close (2026-08-23): the gate refuses creating them, the boot
+ *  sweep cancels the survivors regardless of expiry. */
+export async function listUnfilledIntradayGtc(): Promise<TradeProposal[]> {
+    const database = await getDb();
+    const rows = database.query<Row>(
+        `SELECT * FROM proposals
+         WHERE status = 'executed' AND entry_fill_price IS NULL
+           AND tif = 'GTC'
+           AND (trade_class IS NULL OR trade_class NOT IN ('swing', 'earnings-bet'))
+           AND source != 'adopted'
+         ORDER BY executed_at ASC`,
+    ).all();
     return rows.map(fromRow);
 }
 

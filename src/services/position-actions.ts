@@ -655,8 +655,9 @@ export async function closePosition(symbolRaw: string, source = 'close command')
         recentlyClosed.set(symbol, Date.now());
 
         const isLong = pos.quantity > 0;
-        const qty = Math.abs(pos.quantity);
+        let qty = Math.abs(pos.quantity);
         const closeAction = isLong ? OrderAction.SELL : OrderAction.BUY;
+        const entryAction = isLong ? OrderAction.BUY : OrderAction.SELL;
 
         // Review 2026-08-21 (round 4): the tracker registration must exist
         // BEFORE the first broker event can arrive. The old order —
@@ -685,6 +686,62 @@ export async function closePosition(symbolRaw: string, source = 'close command')
             //   complete view, wholly one group → JOIN it
             //   multi-group / ungrouped exits   → REFUSE with instructions
             //   incomplete view / probe failure → REFUSE (unprovable book)
+            // Omission 4 (review 2026-08-23): before sizing the close,
+            // NEUTRALIZE any working ENTRY parent under this same lock — a
+            // parent filling after an unlocked snapshot both stales the
+            // quantity and REVERSES the position when the close also fills.
+            // Foreign entry-side orders refuse (same doctrine as exits);
+            // our `<id>:entry` parents are cancel-confirmed; the position
+            // is then RE-READ inside the lock for the real quantity.
+            try {
+                const entryView = await fetchOpenOrdersFor(api, symbol, entryAction, closeDeps.probeTimeoutMs);
+                if (!entryView.complete) {
+                    recentlyClosed.delete(symbol);
+                    return { refused: {
+                        ok: false,
+                        message: `⛔ Cannot close ${symbol} safely: the ENTRY-side order snapshot did not complete — a hidden entry parent could fill alongside the close and reverse the position. Retry in a moment.`,
+                    } };
+                }
+                const foreignEntries = entryView.orders.filter((o) => !OUR_REF.test(o.orderRef ?? ''));
+                if (foreignEntries.length > 0) {
+                    recentlyClosed.delete(symbol);
+                    return { refused: {
+                        ok: false,
+                        message:
+                            `⛔ Cannot close ${symbol} safely: ${foreignEntries.length} working ENTRY-side order(s) not placed by Dexter ` +
+                            `(${foreignEntries.map((o) => `#${o.orderId} ${o.orderType}`).join(', ')}) — one filling after the close reverses the position. Cancel them in TWS first.`,
+                    } };
+                }
+                for (const o of entryView.orders.filter((e) => /:entry$/.test(e.orderRef ?? ''))) {
+                    const oc = await confirmCancel(api, o.orderId, closeDeps.cancelConfirmMs);
+                    if (oc === 'unconfirmed') {
+                        recentlyClosed.delete(symbol);
+                        return { refused: {
+                            ok: false,
+                            message: `⛔ Cannot close ${symbol} safely: working entry #${o.orderId} could not be confirm-cancelled — closing beside a live entry risks a reversal. Retry in a moment.`,
+                        } };
+                    }
+                    // 'cancelled' | 'filled' | 'not-cancellable': all settle —
+                    // the fresh position read below prices whatever happened.
+                }
+                const fresh = (await fetchPositions(api)).find((q) => q.symbol === symbol);
+                if (!fresh || fresh.quantity === 0) {
+                    recentlyClosed.delete(symbol);
+                    return { refused: { ok: false, message: `No open position in ${symbol} after neutralizing its entry — nothing to close.` } };
+                }
+                if ((fresh.quantity > 0) !== isLong) {
+                    recentlyClosed.delete(symbol);
+                    return { refused: { ok: false, message: `⛔ ${symbol} position flipped direction under the close (${pos.quantity} → ${fresh.quantity}) — refusing; review in TWS.` } };
+                }
+                qty = Math.abs(fresh.quantity);
+            } catch (err) {
+                recentlyClosed.delete(symbol);
+                return { refused: {
+                    ok: false,
+                    message: `⛔ Cannot close ${symbol} safely: the entry-side probe failed (${err instanceof Error ? err.message : err}). Retry in a moment.`,
+                } };
+            }
+
             let joinOcaGroup: string | null = null;
             try {
                 const exitView = await fetchOpenOrdersFor(api, symbol, closeAction, closeDeps.probeTimeoutMs);

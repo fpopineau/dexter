@@ -110,3 +110,34 @@ describe('exposureCoverageGaps (review 2026-08-23 — the series must prove it w
         expect(v.join(' ')).toContain('unobserved');
     });
 });
+
+describe('calendar-aware coverage (review 2026-08-23)', () => {
+    const et = (day: number, h: number, m: number) => Date.UTC(2026, 7, day, h + 4, m, 0);
+    const s = (ts: number) => ({ ts, netLiq: 11_700 });
+    const every5 = (day: number, fromH: number, fromM: number, toH: number, toM: number) => {
+        const out = [];
+        for (let t = et(day, fromH, fromM); t <= et(day, toH, toM); t += 5 * 60_000) out.push(s(t));
+        return out;
+    };
+
+    test('a closed holiday owes nothing; a half-day owes only to its early close; unknown days refuse certification', async () => {
+        const { exposureCoverageGaps } = await import('@/utils/equity-series-math.js');
+        // Tue 2026-08-25 declared a holiday by the stub: a hold spanning it
+        // owes Mon tail + Wed open only.
+        const sessions = (spec: Record<string, unknown>) => (day: string) =>
+            (spec[day] ?? { startMin: 4 * 60, endMin: 20 * 60 }) as never;
+        const holidayStub = sessions({ '2026-08-25': 'closed' });
+        const covered = [...every5(24, 4, 0, 20, 0), ...every5(26, 4, 0, 10, 30)];
+        expect(exposureCoverageGaps(covered, [{ from: et(24, 9, 40), to: et(26, 10, 0), label: 'P-H' }], 20, holidayStub)).toEqual([]);
+        // Same series WITHOUT the holiday stub: Tuesday is owed → violation.
+        expect(exposureCoverageGaps(covered, [{ from: et(24, 9, 40), to: et(26, 10, 0), label: 'P-H' }], 20).length).toBeGreaterThan(0);
+        // Half-day: session ends 17:00 — sampling to 17:00 suffices.
+        const halfStub = sessions({ '2026-08-24': { startMin: 4 * 60, endMin: 17 * 60 } });
+        const halfCovered = every5(24, 4, 0, 17, 0);
+        expect(exposureCoverageGaps(halfCovered, [{ from: et(24, 4, 5), to: et(24, 16, 55), label: 'P-I' }], 20, halfStub)).toEqual([]);
+        // Unknown day: certification refused loudly.
+        const unknownStub = sessions({ '2026-08-24': 'unknown' });
+        const v = exposureCoverageGaps(halfCovered, [{ from: et(24, 9, 40), to: et(24, 15, 0), label: 'P-J' }], 20, unknownStub);
+        expect(v.join(' ')).toContain('maintained market calendar');
+    });
+});

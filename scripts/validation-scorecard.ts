@@ -66,7 +66,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dayBlockBootstrapLcb } from '../src/utils/day-bootstrap.js';
-import { etDayOf, exposureCoverageGaps, parseEquitySeries, portfolioDrawdown } from '../src/utils/equity-series-math.js';
+import { etDayOf, exposureCoverageGaps, parseEquitySeries, portfolioDrawdown, type SessionWindow } from '../src/utils/equity-series-math.js';
+import { calendarCoverageStatus, isMarketHalfDay, isMarketHoliday } from '../src/utils/market-hours.js';
 import { DEFAULT_RULES, parseFlatYaml, type RiskRules } from '../src/tools/ibkr/risk-rules.js';
 
 const UNTRUSTWORTHY = '%NOT trustworthy%';
@@ -78,7 +79,6 @@ const dataDir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'd
 // selection, concentration and commission burden all change with scale.
 const TARGET_NETLIQ_USD = 11_700;
 const TARGET_NETLIQ_TOLERANCE = 0.10;
-const LIVE_DAILY_LOSS_PCT = 3.0; // risk-rules.live.yaml max_daily_loss_pct
 /** Every live-ENABLED class must clear this on its own (REQ-VAL-011) —
  *  n≥10 was text, not a floor; 30 is the pre-registered minimum for a
  *  class-level expectancy claim. */
@@ -92,7 +92,7 @@ const isKnownSource = (s: string) => KNOWN_SOURCES.has(s) || s.startsWith('cron:
 /** Classes enabled on LIVE DAY ONE (REQ-VAL-008/011) — read from the live
  *  rule files themselves, so the verdict's scope IS the deployable config:
  *  flipping a class flag changes what must pass, not just what trades. */
-function deployableClasses(): { classes: Set<string>; line: string } {
+function liveConfig(): { classes: Set<string>; line: string; dailyLossPct: number } {
     const cfgDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src/config');
     const merged = {
         ...DEFAULT_RULES,
@@ -102,9 +102,16 @@ function deployableClasses(): { classes: Set<string>; line: string } {
     const classes = new Set<string>(['intraday']);
     if (merged.swing_enabled) classes.add('swing');
     if (merged.earnings_bet_enabled) classes.add('earnings-bet');
-    return { classes, line: `deployable classes (from risk-rules.live.yaml flags): ${[...classes].join(', ')}` };
+    return {
+        classes,
+        line: `deployable classes (from risk-rules.live.yaml flags): ${[...classes].join(', ')} — live daily loss ${merged.max_daily_loss_pct}%`,
+        // Review 2026-08-23 (omission 1): a hardcoded 3.0 pin survived the
+        // yaml's halving to 1.5 — the drawdown bar would have passed at up
+        // to 6% against a 3% reality. The CONFIG is the pin.
+        dailyLossPct: merged.max_daily_loss_pct,
+    };
 }
-const { classes: DEPLOYABLE_CLASSES, line: deployableLine } = deployableClasses();
+const { classes: DEPLOYABLE_CLASSES, line: deployableLine, dailyLossPct: LIVE_DAILY_LOSS_PCT } = liveConfig();
 
 interface Row {
     id: string; symbol: string; trade_class: string | null; source: string;
@@ -486,7 +493,17 @@ try {
         for (const s of shadowSteps) { if (s.ts <= ts) sum += s.net; else break; }
         return sum;
     };
-    const adjusted = seeded.map((s) => ({ ts: s.ts, netLiq: s.netLiq - shadowNetBefore(s.ts) }));
+    // …and by the sampler's recorded UNREALIZED shadow marks (review
+    // 2026-08-23: realized alone left in-flight shadow P&L moving the
+    // deployable curve while a shadow swing/bet was open).
+    const adjusted = seeded.map((s) => ({
+        ts: s.ts,
+        netLiq: s.netLiq - shadowNetBefore(s.ts) - (s.shadowUnrealized ?? 0),
+    }));
+    const incompleteMarks = series.filter((s) => s.ts >= sinceMs && s.shadowMarkComplete === false).length;
+    if (incompleteMarks > 0) {
+        verdictFails.push(`${incompleteMarks} equity sample(s) with INCOMPLETE shadow marks — the deployable curve is unproven on those intervals`);
+    }
     const pdd = portfolioDrawdown(adjusted, sinceMs);
     if (!pdd || pdd.samples <= (epochNetliq !== null ? 1 : 0)) {
         seriesLine = 'portfolio drawdown: NOT EVALUABLE — no equity samples inside the window (is the gateway sampler running?)';
@@ -502,7 +519,16 @@ try {
             .filter((r) => r.entry_filled_at !== null)
             .map((r) => ({ from: r.entry_filled_at!, to: r.closed_at, label: r.id }));
         const noEntryStamp = rows.length - intervals.length;
-        const gaps = exposureCoverageGaps(series, intervals);
+        // Calendar-aware sessions (review 2026-08-23): a closed holiday owes
+        // nothing, a half-day's extended session ends 17:00 ET, and a day
+        // beyond the maintained holiday table cannot be certified at all.
+        const sessionFor = (day: string): SessionWindow => {
+            if (Number(day.slice(0, 4)) > calendarCoverageStatus(day).lastCoveredYear) return 'unknown';
+            if (isMarketHoliday(day)) return 'closed';
+            if (isMarketHalfDay(day)) return { startMin: 4 * 60, endMin: 17 * 60 };
+            return { startMin: 4 * 60, endMin: 20 * 60 };
+        };
+        const gaps = exposureCoverageGaps(series, intervals, 20, sessionFor);
         if (noEntryStamp > 0) {
             seriesLine += `\n  ⚠ ${noEntryStamp} row(s) without an entry stamp — their exposure windows are unverifiable`;
             verdictFails.push(`${noEntryStamp} exposure window(s) unverifiable (no entry stamp)`);
@@ -604,10 +630,21 @@ if (shadowOnlyRows.length > 0) {
         const bTotal = bNets.reduce((s, v) => s + v, 0);
         const bWins = bNets.filter((v) => v > 0), bLosses = bNets.filter((v) => v < 0);
         const bPf = bLosses.length ? bWins.reduce((s, v) => s + v, 0) / Math.abs(bLosses.reduce((s, v) => s + v, 0)) : Infinity;
-        const barMet = rs.length >= MIN_TRADES_PER_ENABLED_CLASS && bTotal > 0 && bPf >= 1.3;
+        // Review 2026-08-23 (omission 2): the shadow bar is the SAME bar an
+        // enabled class faces — the cohort LCB included, or 'bar MET' could
+        // print on an outlier-carried record.
+        const bDays = new Map<string, number[]>();
+        for (const r of rs) {
+            const day = etDayOf(r.entry_filled_at ?? r.closed_at);
+            (bDays.get(day) ?? bDays.set(day, []).get(day)!).push(net(r));
+        }
+        const bBoot = dayBlockBootstrapLcb(bDays);
+        const barMet = rs.length >= MIN_TRADES_PER_ENABLED_CLASS && bTotal > 0 && bPf >= 1.3
+            && bBoot !== null && bBoot.lcb > 0;
         console.log(
             `\nshadow-only ${cls} record (NOT in the verdict): n=${rs.length} net ${bTotal.toFixed(2)} ` +
             `expectancy ${(bTotal / rs.length).toFixed(2)} PF ${Number.isFinite(bPf) ? bPf.toFixed(2) : '∞'} ` +
+            `LCB ${bBoot ? bBoot.lcb.toFixed(2) : 'n/a'} ` +
             `win ${(100 * bWins.length / rs.length).toFixed(1)}% — ` +
             `${barMet
                 ? 'class bar MET (enable is a deliberate operator flag flip, recorded in the journal — never automatic)'

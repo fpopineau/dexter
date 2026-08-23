@@ -39,6 +39,7 @@ import {
     getProposal,
     listTrackable,
     recordRefusal,
+    listWorkingForSymbol,
     releaseProposalClaim,
     setProposalStatus,
     sumRealizedPnlSince,
@@ -132,6 +133,21 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
     if (!(await claimProposalForExecution(p.id))) {
         return { ok: false, message: `⛔ ${p.id} is already being executed by another accept — not placing a second bracket.` };
     }
+    // SYMBOL-level exclusion (review 2026-08-23, omission 3): the claim is
+    // atomic per proposal id — two DIFFERENT same-symbol proposals could
+    // both win their own claim. After claiming, exactly one survivor per
+    // symbol: any other executing/executed row on it releases this claim.
+    {
+        const rival = (await listWorkingForSymbol(p.symbol, p.id))[0];
+        if (rival) {
+            await releaseProposalClaim(p.id);
+            return {
+                ok: false,
+                message: `⛔ ${p.id} refused: one active thesis per symbol — ${rival.id} already owns ${p.symbol} ` +
+                    `(${rival.status}). Cancel or close it first.`,
+            };
+        }
+    }
 
     // Safety gates — order matters: cheap static lock first, then live P&L.
     // A gate REFUSAL leaves the proposal OPEN: gates re-run on every accept,
@@ -207,8 +223,34 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
             exposure.map((t) => ({ symbol: t.symbol, quantity: t.quantity, valueUsd: exposureValue(t) })),
             brokerBook,
         );
+        // Review 2026-08-23 (item 5, was a warn): a broker position with no
+        // DB row is exposure the sector, planned-risk and stress sums cannot
+        // see — the accept REFUSES until the adoption sweep (≤15 min) gives
+        // it a row. The validated selection policy must be the deployed one.
         if (union.brokerOnlySymbols.length > 0) {
-            logger.warn(`[proposal-executor] ${p.id}: broker holds cap-relevant positions with no DB row yet: ${union.brokerOnlySymbols.join(', ')} (adoption sweep pending)`);
+            throw new Error(
+                `[exposure-gate] broker holds position(s) with no DB row yet: ${union.brokerOnlySymbols.join(', ')} — ` +
+                `sector/planned-risk/stress sums cannot price them; retry after the adoption sweep (runs every 15 min)`,
+            );
+        }
+        // Foreign working orders (item 5): an order Dexter does not own is
+        // exposure-in-waiting the caps cannot classify. Complete view
+        // required; any non-Dexter ref refuses the accept.
+        {
+            const { fetchOpenOrderSnaps } = await import('./broker-adopt.js');
+            const { isOurOrderRef } = await import('./position-actions.js');
+            const snap = await fetchOpenOrderSnaps(await getIBApi());
+            if (!snap.complete) {
+                throw new Error('[exposure-gate] the open-orders snapshot did not complete — unclassified working orders may exist; retry in a moment');
+            }
+            const foreign = snap.orders.filter((o) => !isOurOrderRef(o.orderRef));
+            if (foreign.length > 0) {
+                throw new Error(
+                    `[exposure-gate] ${foreign.length} working order(s) not placed by Dexter ` +
+                    `(${foreign.slice(0, 4).map((o) => `#${o.orderId} ${o.symbol}`).join(', ')}${foreign.length > 4 ? ', …' : ''}) — ` +
+                    `unclassifiable exposure-in-waiting; cancel them in TWS or wait for reconciliation, then retry`,
+                );
+            }
         }
 
         // Sector concentration context — decision D3 (WP6): an
@@ -294,6 +336,20 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 overnightExposureUsd: exposure
                     .filter((t) => t.tif === 'GTC')
                     .reduce((sum, t) => sum + exposureValue(t), 0),
+                // CLASS-AWARE stressed loss of the existing overnight book
+                // (review 2026-08-23, omission 6): an earnings bet in the
+                // book gaps at ITS assumed severity, not the base shock —
+                // stressing it at 20% when its own record says 35% understates
+                // the tail the accept is adding to.
+                overnightStressedLossUsd: exposure
+                    .filter((t) => t.tif === 'GTC')
+                    .reduce((sum, t) => {
+                        const rules = getRiskRules();
+                        const pct = t.tradeClass === 'earnings-bet'
+                            ? Math.max(rules.overnight_gap_stress_pct, Math.max(t.worstCaseGapPct ?? 0, rules.earnings_bet_gap_floor_pct))
+                            : rules.overnight_gap_stress_pct;
+                        return sum + exposureValue(t) * (pct / 100);
+                    }, 0),
                 sector,
                 sameSectorExposureUsd,
                 // WP6: the context the creation-time checks used, now

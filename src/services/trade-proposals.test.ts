@@ -81,8 +81,8 @@ describe('proposal store lifecycle', () => {
         expect(fetched?.realizedPnl).toBeNull();
     });
 
-    test('GTC tif persists (overnight/swing brackets)', async () => {
-        const p = await create(validInput({ tif: 'GTC' }));
+    test('GTC tif persists (swing brackets — intraday is DAY-only since flat-by-close)', async () => {
+        const p = await create(validInput({ symbol: 'GTCS', tradeClass: 'swing', tif: 'GTC' }));
         expect((await getProposal(p.id))?.tif).toBe('GTC');
     });
 
@@ -93,9 +93,10 @@ describe('proposal store lifecycle', () => {
         const p = await create(validInput({
             // Take policy: basis = the limit cap 100.65, x = 6% → target
             // round(100.65 × 1.06) = 106.69; stop within 3.02 of the cap.
+            // DAY since flat-by-close (intraday GTC entries are refused).
             symbol: 'QCRH', entryType: 'STP_LMT',
             entry: 100.35, entryLimit: 100.65, stop: 98.00, target: 106.69,
-            quantity: 26, tif: 'GTC',
+            quantity: 26, tif: 'DAY',
         }));
         const stored = await getProposal(p.id);
         expect(stored?.entryType).toBe('STP_LMT');
