@@ -18,7 +18,7 @@ import { placeBracketOrder } from '@/tools/ibkr/bracket.js';
 import { assertOrderingAllowed, getIBApi, getManagedAccounts, getVerifiedSingleAccount, isLivePort } from '@/tools/ibkr/connection.js';
 import { createIbkrMarketData } from '@/tools/ibkr/market-data.js';
 import { logger } from '@/utils';
-import { getMarketSession, isTradeableSession } from '@/utils/market-hours.js';
+import { getMarketSession, intradayEntryCutoffReached, isMarketHalfDay, isTradeableSession } from '@/utils/market-hours.js';
 import { assertDailyLossOk } from './daily-loss-guard.js';
 import { replayMissedExecutions, trackExecutedProposal } from './outcome-tracker.js';
 import { getSectorInfo } from './sector-map.js';
@@ -292,6 +292,26 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 '[session-gate] the session is over — a DAY bracket placed now is a guaranteed broker rejection. ' +
                 'Re-propose as a GTC overnight setup if the thesis survives the night, or wait for the next session.',
             );
+        }
+        // Review-21 P1: intraday entries CLOSE with the triage window. An
+        // accept at 15:54 can fill after the EOD triage's final snapshot
+        // and ride the night unvetted — and the bell's 🌙 conversion would
+        // then keep it, contradicting flat-by-close. Latched from the
+        // CLOCK (close − 8 min, half-day aware), independent of whether
+        // triage ran or succeeded. Auto-execution shares this path. GTC
+        // swing/bet proposals stay governed by their overnight gates.
+        // Test-gated like the session gate (wall-clock dependent).
+        if (process.env.NODE_ENV !== 'test' && p.tif !== 'GTC') {
+            const nowEt = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+            const todayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+            const closeMin = isMarketHalfDay(todayIso) ? 13 * 60 : 16 * 60;
+            if (intradayEntryCutoffReached(nowEt.getHours() * 60 + nowEt.getMinutes(), closeMin)) {
+                throw new Error(
+                    '[session-gate] intraday entries are CLOSED for today (inside the EOD triage window — a fill now ' +
+                    'would ride the night unvetted). Wait for the next session, or propose a GTC swing through its ' +
+                    'overnight gates.',
+                );
+            }
         }
         const lossStatus = await assertDailyLossOk();
 

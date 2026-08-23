@@ -55,19 +55,28 @@ async function execGit(args: string[], cwd: string): Promise<string | null> {
  *  ALWAYS relevant (git already decided those files matter). */
 const RUNTIME_UNTRACKED = /^(src|scripts)\/|^(package\.json|bunfig\.toml|tsconfig\.json|SOUL\.md)$/;
 
-/** Review-20, pure: split `git status --porcelain` output into "tracked
- *  files changed" and "runtime-relevant untracked paths". Exported for
- *  the harness — the filtering policy is the contract under test. */
-export function classifyWorkingTree(statusPorcelain: string): { hasTrackedChanges: boolean; untrackedRuntime: string[] } {
-    const lines = statusPorcelain.split('\n').filter((l) => l.length > 0);
-    return {
-        hasTrackedChanges: lines.some((l) => !l.startsWith('??')),
-        untrackedRuntime: lines
-            .filter((l) => l.startsWith('?? '))
-            .map((l) => l.slice(3).trim())
-            .filter((p) => RUNTIME_UNTRACKED.test(p))
-            .sort(),
-    };
+/** Review-20/21, pure: split `git status --porcelain=v1 -z` output into
+ *  "tracked files changed" and "runtime-relevant untracked paths".
+ *  NUL-delimited (review-21: the newline form QUOTES paths containing
+ *  spaces — `?? "src/foo bar.ts"` silently failed the runtime filter);
+ *  rename/copy entries carry the ORIGIN path as the following token.
+ *  Exported for the harness — the filtering policy is the contract. */
+export function classifyWorkingTree(statusZ: string): { hasTrackedChanges: boolean; untrackedRuntime: string[] } {
+    const tokens = statusZ.split('\u0000').filter((t) => t.length > 0);
+    let hasTrackedChanges = false;
+    const untrackedRuntime: string[] = [];
+    for (let i = 0; i < tokens.length; i++) {
+        const entry = tokens[i];
+        const xy = entry.slice(0, 2);
+        const path = entry.slice(3);
+        if (xy === '??') {
+            if (RUNTIME_UNTRACKED.test(path)) untrackedRuntime.push(path);
+            continue;
+        }
+        hasTrackedChanges = true;
+        if (/[RC]/.test(xy)) i++; // skip the origin-path token of a rename/copy
+    }
+    return { hasTrackedChanges, untrackedRuntime: untrackedRuntime.sort() };
 }
 
 /** The running code identity: `<HEAD sha>` for a runtime-clean checkout,
@@ -84,7 +93,10 @@ export function classifyWorkingTree(statusPorcelain: string): { hasTrackedChange
 export async function codeIdentity(cwd = process.cwd()): Promise<string | null> {
     const sha = await execGit(['rev-parse', 'HEAD'], cwd);
     if (sha === null || !/^[0-9a-f]{40}$/.test(sha)) return null;
-    const status = await execGit(['status', '--porcelain'], cwd);
+    // -z: NUL-delimited, unquoted paths (spaces survive); untracked-files
+    // =all lists files INSIDE untracked directories individually and
+    // overrides any config that would suppress untracked output.
+    const status = await execGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'], cwd);
     if (status === null) return null; // a clean state we cannot PROVE is not clean
     const tree = classifyWorkingTree(status);
     if (!tree.hasTrackedChanges && tree.untrackedRuntime.length === 0) return sha;

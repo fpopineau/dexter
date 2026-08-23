@@ -86,3 +86,17 @@ describe('calendarCoverageStatus (WP0.5 — the 2028 cliff)', () => {
         expect(v.lastCoveredYear).toBe(2027);
     });
 });
+
+describe('intradayEntryCutoffReached (review-21 — no new DAY entries inside the triage window)', () => {
+    test('latches at close − 8 min, half-day aware, and holds for the rest of the day', async () => {
+        const { intradayEntryCutoffReached } = await import('./market-hours.js');
+        const FULL = 16 * 60, HALF = 13 * 60;
+        expect(intradayEntryCutoffReached(15 * 60 + 51, FULL)).toBe(false); // 15:51 — accepts still open
+        expect(intradayEntryCutoffReached(15 * 60 + 52, FULL)).toBe(true);  // 15:52 — the triage slot itself
+        expect(intradayEntryCutoffReached(15 * 60 + 59, FULL)).toBe(true);  // the exact hole review-21 named
+        expect(intradayEntryCutoffReached(16 * 60 + 30, FULL)).toBe(true);  // after close (session gate also refuses)
+        expect(intradayEntryCutoffReached(9 * 60 + 30, FULL)).toBe(false);  // the open
+        expect(intradayEntryCutoffReached(12 * 60 + 52, HALF)).toBe(true);  // half-day triage slot
+        expect(intradayEntryCutoffReached(12 * 60 + 51, HALF)).toBe(false);
+    });
+});

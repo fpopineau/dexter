@@ -66,7 +66,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dayBlockBootstrapLcb } from '../src/utils/day-bootstrap.js';
-import { etDayOf, exposureCoverageGaps, fingerprintPurity, parseEquitySeries, portfolioDrawdown, type SessionWindow } from '../src/utils/equity-series-math.js';
+import { etDayOf, exposureCoverageGaps, fingerprintFreezeCheck, fingerprintPurity, parseEquitySeries, portfolioDrawdown, type SessionWindow } from '../src/utils/equity-series-math.js';
 import { calendarCoverageStatus, isMarketHalfDay, isMarketHoliday } from '../src/utils/market-hours.js';
 import { DEFAULT_RULES, parseFlatYaml, type RiskRules } from '../src/tools/ibkr/risk-rules.js';
 
@@ -761,6 +761,26 @@ if (fpValues.length > 0) {
     const fp = fingerprintPurity(fpValues);
     console.log(`strategy fingerprint: [${fp.distinct.join(', ')}] (${fp.ok ? 'PASS' : 'FAIL — the window must carry exactly one fingerprint, no ABSENT stamps'}; record it in the freeze manifest)`);
     if (!fp.ok) verdictFails.push('strategy fingerprint mixed or absent (rules/judgment/skills/model/code changed mid-sample, or pre-fingerprint rows in the cohort)');
+
+    // Review-21: internal purity is NOT identity — a sample collected on
+    // a dirty tree and committed afterwards would evaluate clean with a
+    // pure historical fingerprint. The sample's fingerprint must equal
+    // the fingerprint of THIS evaluating runtime, and the manifest's
+    // recorded one once it is filled.
+    const sampleFp = fp.ok ? fp.distinct[0] : null;
+    let currentFp: string | null = null;
+    try {
+        currentFp = await (await import('../src/services/strategy-fingerprint.js')).strategyFingerprint();
+    } catch { currentFp = null; }
+    let manifestFp: string | null = null;
+    try {
+        const man = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../docs/day2day/FREEZE-MANIFEST.md'), 'utf-8');
+        const m = /Strategy fingerprint[^|\n]*\|\s*([0-9a-f]{12})\s*\|/.exec(man);
+        manifestFp = m ? m[1] : null;
+    } catch { manifestFp = null; }
+    const freeze = fingerprintFreezeCheck({ sampleFp, currentFp, manifestFp });
+    console.log(`freeze identity: sample=${sampleFp ?? 'n/a'} current=${currentFp ?? 'UNRESOLVABLE'} manifest=${manifestFp ?? 'not filled (pre-tag)'}${freeze.ok ? ' — MATCH' : ''}`);
+    for (const p of freeze.problems) verdictFails.push(`freeze identity: ${p}`);
 }
 
 // Review-18: the DB-level one-thesis guarantee is real only when its

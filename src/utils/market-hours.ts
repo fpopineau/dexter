@@ -222,3 +222,14 @@ export function isMarketHoliday(dateStr: string): boolean {
 export function isMarketHalfDay(dateStr: string): boolean {
     return HALF_DAYS.has(dateStr);
 }
+
+/** Review-21, pure: has the day crossed into the EOD triage window, after
+ *  which NEW intraday (DAY) entries must refuse? An accept at 15:54 can
+ *  fill after the triage's final snapshot and ride the night unvetted —
+ *  the cutoff latches from the CLOCK (close − leadMin, half-day aware via
+ *  the caller's closeMinutesEt), never from whether triage succeeded.
+ *  True from the cutoff onward for the rest of the day; callers pair it
+ *  with the session gate (which owns the post-close refusal message). */
+export function intradayEntryCutoffReached(minutesEt: number, closeMinutesEt: number, leadMin = 8): boolean {
+    return minutesEt >= closeMinutesEt - leadMin;
+}

@@ -39,24 +39,35 @@ describe('fingerprintFromSurfaces (review-19 — required identity fails CLOSED,
     });
 });
 
-describe('classifyWorkingTree (review-20 — dirty means RUNTIME dirty, and content is what counts)', () => {
+describe('classifyWorkingTree (review-20/21 — RUNTIME dirty, NUL-delimited, spaces survive)', () => {
+    const z = (...entries: string[]) => entries.join('\u0000') + '\u0000';
+
     test('identity-irrelevant untracked noise does not dirty the checkout', () => {
-        const t = classifyWorkingTree('?? .claude/settings.local.json\n?? docs/notes.md\n?? scratch.txt\n');
+        const t = classifyWorkingTree(z('?? .claude/settings.local.json', '?? docs/notes.md', '?? scratch.txt'));
         expect(t.hasTrackedChanges).toBe(false);
         expect(t.untrackedRuntime).toEqual([]);
     });
 
     test('untracked RUNTIME files and any tracked change are identity-relevant', () => {
-        const t = classifyWorkingTree(' M src/services/foo.ts\n?? src/services/new-module.ts\n?? scripts/tool.ts\n?? .claude/x.json\n');
+        const t = classifyWorkingTree(z(' M src/services/foo.ts', '?? src/services/new-module.ts', '?? scripts/tool.ts', '?? .claude/x.json'));
         expect(t.hasTrackedChanges).toBe(true);
         expect(t.untrackedRuntime).toEqual(['scripts/tool.ts', 'src/services/new-module.ts']);
     });
 
-    test('staged, renamed and root-config changes all count as tracked; SOUL.md untracked counts as runtime', () => {
-        expect(classifyWorkingTree('M  src/a.ts\n').hasTrackedChanges).toBe(true);      // staged
-        expect(classifyWorkingTree('R  src/a.ts -> src/b.ts\n').hasTrackedChanges).toBe(true);
-        expect(classifyWorkingTree('?? SOUL.md\n').untrackedRuntime).toEqual(['SOUL.md']);
-        expect(classifyWorkingTree('?? package.json\n').untrackedRuntime).toEqual(['package.json']);
+    test('review-21: a path WITH SPACES is seen (the newline form quoted it into invisibility)', () => {
+        const t = classifyWorkingTree(z('?? src/foo bar.ts'));
+        expect(t.untrackedRuntime).toEqual(['src/foo bar.ts']);
+    });
+
+    test('renames carry the origin as the NEXT token — consumed, never misread as a path', () => {
+        const t = classifyWorkingTree(z('R  src/b.ts', 'src/a.ts', '?? SOUL.md'));
+        expect(t.hasTrackedChanges).toBe(true);
+        expect(t.untrackedRuntime).toEqual(['SOUL.md']); // src/a.ts is the rename origin, not untracked
+    });
+
+    test('staged and root-config changes count; empty tree is clean', () => {
+        expect(classifyWorkingTree(z('M  src/a.ts')).hasTrackedChanges).toBe(true);
+        expect(classifyWorkingTree(z('?? package.json')).untrackedRuntime).toEqual(['package.json']);
         expect(classifyWorkingTree('').hasTrackedChanges).toBe(false);
     });
 });
@@ -87,6 +98,45 @@ describe('readGitHeadSha (diagnostic .git parser)', () => {
         writeFileSync(join(dir, 'gitdir', 'HEAD'), 'ref: refs/heads/main\n');
         writeFileSync(join(dir, 'gitdir', 'refs', 'heads', 'main'), `${sha}\n`);
         expect(await readGitHeadSha(dir)).toBe(sha);
+    });
+});
+
+describe('codeIdentity on a REAL temporary repository (review-21)', () => {
+    test('editing an already-dirty file CHANGES the identity — content, not names', async () => {
+        const { execFileSync } = await import('node:child_process');
+        const dir = mkdtempSync(join(tmpdir(), 'dexter-gitid-'));
+        const g = (...args: string[]) => execFileSync('git', args, { cwd: dir });
+        g('init', '-q');
+        g('config', 'user.email', 'test@dexter');
+        g('config', 'user.name', 'dexter-test');
+        g('config', 'commit.gpgsign', 'false');
+        mkdirSync(join(dir, 'src'), { recursive: true });
+        writeFileSync(join(dir, 'src', 'a.ts'), 'v1');
+        g('add', '.');
+        g('commit', '-qm', 'init');
+
+        const clean = await codeIdentity(dir);
+        expect(clean).toMatch(/^[0-9a-f]{40}$/);
+
+        writeFileSync(join(dir, 'src', 'a.ts'), 'v2');
+        const dirty1 = await codeIdentity(dir);
+        expect(dirty1).toMatch(/\+dirty\.[0-9a-f]{12}$/);
+
+        // The review-20 defect: status names alone left this UNCHANGED.
+        writeFileSync(join(dir, 'src', 'a.ts'), 'v3');
+        const dirty2 = await codeIdentity(dir);
+        expect(dirty2).toMatch(/\+dirty\.[0-9a-f]{12}$/);
+        expect(dirty2).not.toBe(dirty1);
+
+        // The review-21 defect: an untracked runtime file with a SPACE in
+        // its name was quoted into invisibility by the newline form.
+        writeFileSync(join(dir, 'src', 'foo bar.ts'), 'x');
+        const dirty3 = await codeIdentity(dir);
+        expect(dirty3).not.toBe(dirty2);
+
+        // Irrelevant untracked noise leaves the identity untouched.
+        writeFileSync(join(dir, 'notes.txt'), 'irrelevant');
+        expect(await codeIdentity(dir)).toBe(dirty3);
     });
 });
 

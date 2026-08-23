@@ -654,3 +654,51 @@ content. Both now hold as written below.
 | REQ-EOD-006 | ordering + failure-degrade is glue (integration-untested, honest ledger); the alarm paths ride the problems[] assembly |
 | REQ-EOD-007 | stampCountsAsRan suite (running/failed retry; completed/ran/missed-alerted hold); the wrapper glue is integration-untested |
 | REQ-VAL-021 | classifyWorkingTree suite (.claude noise clean; src/scripts/SOUL.md/package.json count; staged+rename tracked); codeIdentity format; scorecard smoke-run printed `+dirty` on this very uncommitted tree and FAILED — the check demonstrably bites |
+
+## Review-21 response (2026-08-24) — intraday-entry cutoff, placement barrier, three-way freeze identity
+
+- REQ-GATE-002: intraday entries CLOSE with the triage window. The accept
+  path (auto-execution shares it) refuses DAY proposals from close − 8
+  minutes (half-day aware, `intradayEntryCutoffReached`, latched from
+  the CLOCK — never from whether triage ran or succeeded): an accept at
+  15:54 could fill after the triage's final snapshot and be 🌙-converted
+  at the bell into exactly the unvetted overnight hold flat-by-close
+  forbids. GTC swing/bet proposals stay governed by their overnight
+  gates. Complementary closure (flat-by-close, entry side): triage now
+  CANCELS resting DAY entries (new `unfilledDay` lane) — an entry still
+  unfilled at 15:52 can only produce a position in the final minutes; a
+  cancel that loses to a fill closes the position on the spot (print-
+  guard doctrine).
+- REQ-EOD-008: the postcondition snapshots run UNDER THE GLOBAL ORDER
+  LOCK (no Dexter placement can slip between them) and take a SECOND
+  open-order snapshot after positions, unioned with the first
+  (`unionOrderSnaps`, pure: union by orderId; complete only when both
+  halves completed) — an order placed mid-sequence from OUTSIDE Dexter
+  lands in one view or the other, never in neither.
+- REQ-VAL-022: freeze identity is a THREE-WAY comparison
+  (`fingerprintFreezeCheck`, pure). Internal window purity was not
+  identity: a sample collected on a dirty tree and committed afterwards
+  evaluated clean with a pure historical fingerprint. The sample's one
+  surviving fingerprint must equal the EVALUATING runtime's
+  `strategyFingerprint()`, and the manifest's recorded fingerprint once
+  filled (parsed mechanically from FREEZE-MANIFEST.md; '_pending_' is
+  reported, not failed — the tag does not exist yet).
+- REQ-VAL-023: working-tree parsing is NUL-delimited
+  (`--porcelain=v1 -z --untracked-files=all`): the newline form QUOTED
+  paths with spaces into invisibility, and =all lists files inside
+  untracked directories individually and overrides config that
+  suppresses untracked output. Rename/copy origin tokens are consumed,
+  never misread as paths.
+- P2 integration additions: a REAL temporary-repository test proves the
+  review-20 content property end-to-end (clean → dirty → edit-again
+  changes the digest; a spaced filename is seen; irrelevant noise leaves
+  identity untouched). Remaining glue (snapshot-failure alert wiring,
+  crash-restart catch-up, OrderState propagation through a live
+  fetchOpenOrderSnaps) stays on the honest untested ledger.
+
+| REQ | Test |
+|---|---|
+| REQ-GATE-002 | `intradayEntryCutoffReached` suite (15:51 open / 15:52 latched / 15:59 the named hole / half-day 12:52); splitTriageCandidates unfilledDay lane test; the executor/triage wiring is test-gated (wall clock) |
+| REQ-EOD-008 | `unionOrderSnaps` suite (either-view survival, half-blind incomplete); lock wiring integration-untested (honest ledger) |
+| REQ-VAL-022 | `fingerprintFreezeCheck` via scorecard smoke-run: prints sample/current/manifest and FAILS the impure pre-migration window; pure-fn covered by the purity suites |
+| REQ-VAL-023 | classifyWorkingTree NUL-delimited suite (spaces, renames, noise); real-repo codeIdentity test |

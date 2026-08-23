@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { applyEarningsGuard, buildRevetBook, decideEodAction, decideGtcEarningsGuard, decideUnfilledEntryGuard, isUpcomingPrint, overnightCapWarning, priceMinutesBack, splitTriageCandidates, triageCatchUpAction, vetOvernightBook } from './eod-triage.js';
+import { applyEarningsGuard, buildRevetBook, decideEodAction, decideGtcEarningsGuard, decideUnfilledEntryGuard, isUpcomingPrint, overnightCapWarning, priceMinutesBack, splitTriageCandidates, triageCatchUpAction, unionOrderSnaps, vetOvernightBook } from './eod-triage.js';
 
 describe('triageCatchUpAction (missed 15:52 slot — SECZ post-mortem 2026-08-13)', () => {
     const min = (h: number, m: number) => h * 60 + m;
@@ -115,13 +115,14 @@ describe('splitTriageCandidates (kept-overnight holds re-enter momentum triage)'
         expect(guardOnly).toEqual([]);
     });
 
-    test('unfilled GTC entries land in their own lane; unfilled DAY entries die at the bell (no lane)', () => {
+    test('unfilled GTC and unfilled DAY entries land in their own lanes (review-21: DAY entries are CANCELLED at triage — a fill in the final minutes rides the night unvetted)', () => {
         const restingGtc = mk('GTC', null);
-        const dyingDay = mk('DAY', null);
-        const { momentum, guardOnly, unfilledGtc } = splitTriageCandidates([dyingDay, restingGtc]);
+        const lateDay = mk('DAY', null);
+        const { momentum, guardOnly, unfilledGtc, unfilledDay } = splitTriageCandidates([lateDay, restingGtc]);
         expect(momentum).toEqual([]);
         expect(guardOnly).toEqual([]);
         expect(unfilledGtc).toEqual([restingGtc]);
+        expect(unfilledDay).toEqual([lateDay]);
     });
 });
 
@@ -511,5 +512,20 @@ describe('stampCountsAsRan (review-20 — a crashed or failed run must RETRY, no
         expect(stampCountsAsRan('running')).toBe(false);
         expect(stampCountsAsRan('failed')).toBe(false);
         expect(stampCountsAsRan(undefined)).toBe(false);
+    });
+});
+
+describe('unionOrderSnaps (review-21 — the placement barrier for the postcondition)', () => {
+    const o = (orderId: number) => ({ orderId } as never);
+    test('an order in EITHER view survives; complete only when BOTH halves completed', () => {
+        const u = unionOrderSnaps(
+            { orders: [o(1), o(2)], complete: true },
+            { orders: [o(2), o(3)], complete: true },
+        );
+        expect(u.orders.map((x) => (x as { orderId: number }).orderId).sort()).toEqual([1, 2, 3]);
+        expect(u.complete).toBe(true);
+        // A half-blind union proves nothing.
+        expect(unionOrderSnaps({ orders: [], complete: false }, { orders: [o(9)], complete: true }).complete).toBe(false);
+        expect(unionOrderSnaps({ orders: [], complete: true }, { orders: [], complete: false }).complete).toBe(false);
     });
 });

@@ -179,6 +179,20 @@ export interface OvernightVetResult {
  * cannot be priced are returned in `unpriced` — the caller must alarm,
  * not pass.
  */
+/** Review-21, pure: union two open-order snapshots by orderId. An order
+ *  present in EITHER view is exposure-in-waiting — placed between the
+ *  first snap and the positions fetch (outside Dexter: TWS, another
+ *  client), or working through both. Complete only when BOTH halves
+ *  completed (a half-blind union proves nothing). */
+export function unionOrderSnaps(
+    a: { orders: BrokerOrderSnap[]; complete: boolean },
+    b: { orders: BrokerOrderSnap[]; complete: boolean },
+): { orders: BrokerOrderSnap[]; complete: boolean } {
+    const byId = new Map<number, BrokerOrderSnap>();
+    for (const o of [...a.orders, ...b.orders]) byId.set(o.orderId, o);
+    return { orders: [...byId.values()], complete: a.complete && b.complete };
+}
+
 export function buildRevetBook(input: {
     positions: Array<{ symbol: string; quantity: number; avgCost: number }>;
     orders: Array<{ symbol: string; orderRef: string | null; quantity: number | null; auxPrice: number | null; lmtPrice: number | null; tif: string | null }>;
@@ -471,19 +485,24 @@ export function priceMinutesBack(
  *   - unfilled-GTC lane: executed proposals whose ENTRY still rests as a
  *     GTC order. The entry survives the close, so a post-print gap can
  *     blow through the trigger and fill INTO the reaction — an entry-side
- *     accidental earnings bet. (Unfilled DAY entries die at the bell —
- *     safe by construction, in no lane.)
+ *     accidental earnings bet.
+ *   - unfilled-DAY lane (review-21): a DAY entry still resting at triage
+ *     time can only produce a position in the FINAL MINUTES — too late
+ *     for any intraday thesis, unvetted by the triage that already ran,
+ *     and 🌙-converted at the bell. Flat-by-close means these entries
+ *     are CANCELLED at triage, not left to race the bell.
  */
 export function splitTriageCandidates<T extends {
     tif: 'DAY' | 'GTC';
     entryFillPrice: number | null;
     keptOvernightAt: number | null;
-}>(trackable: T[]): { momentum: T[]; guardOnly: T[]; unfilledGtc: T[] } {
+}>(trackable: T[]): { momentum: T[]; guardOnly: T[]; unfilledGtc: T[]; unfilledDay: T[] } {
     const filled = trackable.filter((t) => t.entryFillPrice != null);
     return {
         momentum: filled.filter((t) => t.tif === 'DAY' || t.keptOvernightAt != null),
         guardOnly: filled.filter((t) => t.tif === 'GTC' && t.keptOvernightAt == null),
         unfilledGtc: trackable.filter((t) => t.entryFillPrice == null && t.tif === 'GTC'),
+        unfilledDay: trackable.filter((t) => t.entryFillPrice == null && t.tif === 'DAY'),
     };
 }
 
@@ -686,7 +705,7 @@ async function runEodTriageCore(today: string, dryRun: boolean): Promise<void> {
     // Momentum lane: DAY brackets + kept-overnight holds (full triage);
     // guard-only lane: deliberate GTC positions (earnings guard only);
     // unfilled-GTC lane: resting entries that would survive the close.
-    const { momentum: dayCandidates, guardOnly: gtcCandidates, unfilledGtc } = splitTriageCandidates(trackable);
+    const { momentum: dayCandidates, guardOnly: gtcCandidates, unfilledGtc, unfilledDay } = splitTriageCandidates(trackable);
 
     // Review-17 P1: enumerate the broker BEFORE deciding there is no work.
     // An account holding only adopted/manual positions has no managed
@@ -695,7 +714,7 @@ async function runEodTriageCore(today: string, dryRun: boolean): Promise<void> {
     const api = await getIBApi();
     const positions = await fetchPositions(api);
     if (dayCandidates.length === 0 && gtcCandidates.length === 0 && unfilledGtc.length === 0
-        && !positions.some((p) => p.quantity !== 0)) return;
+        && unfilledDay.length === 0 && !positions.some((p) => p.quantity !== 0)) return;
     const lines: string[] = [];
     const closedSymbols = new Set<string>();
 
@@ -798,6 +817,35 @@ async function runEodTriageCore(today: string, dryRun: boolean): Promise<void> {
                 fallbackValueUsd: pos.avgCost > 0 ? Math.abs(pos.quantity) * pos.avgCost : null,
                 pos,
             });
+        }
+    }
+
+    // Review-21 P1 (flat by close, entry side): a DAY entry still resting
+    // NOW can only fill in the final minutes — after this triage's
+    // snapshots, into a thesis with no session left, and 🌙-converted at
+    // the bell into exactly the unvetted overnight hold flat-by-close
+    // forbids. Cancel the verified parent; a cancel that loses to a fill
+    // closes the position right here (same doctrine as the print guard).
+    for (const t of unfilledDay) {
+        logger.info(`[eod-triage] ${t.id} ${t.symbol} {${t.tradeClass}, DAY, unfilled}: cancel — flat by close${dryRun ? ' (preview)' : ''}`);
+        if (dryRun) {
+            lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} entry UNFILLED): WILL CANCEL at triage — a fill this late rides the night unvetted (flat by close).`);
+            continue;
+        }
+        const dayCancelled = await cancelEntryLeg(t, 'EOD triage — flat by close (a fill this late rides the night unvetted)')
+            .catch((err: unknown) => { logger.warn(`[eod-triage] ${t.symbol}: DAY entry cancel failed — ${err}`); return false; });
+        if (dayCancelled) {
+            lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} entry UNFILLED): cancelled at triage — a fill this late rides the night unvetted (children died with the parent).`);
+            continue;
+        }
+        const nowPos = (await fetchPositions(api)).find((p) => p.symbol === t.symbol && p.quantity !== 0);
+        if (nowPos && !closedSymbols.has(t.symbol)) {
+            logger.error(`[eod-triage] ${t.id} ${t.symbol}: DAY entry cancel lost the race — closing the position (flat by close)`);
+            const outcome = await closePosition(t.symbol, 'EOD triage (flat by close — entry filled during cancel)');
+            if (outcome.state === 'filled' && outcome.flat === true) closedSymbols.add(t.symbol);
+            lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} entry): ⚠️ Entry FILLED during the cancel — closed: ${outcome.clean === true ? 'Closed.' : outcome.message}`);
+        } else {
+            lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} entry UNFILLED): ⚠️ cancel NOT broker-confirmed and no position visible — verify in TWS (it dies at the bell if truly unfilled).`);
         }
     }
 
@@ -997,17 +1045,26 @@ async function runEodTriageCore(today: string, dryRun: boolean): Promise<void> {
 
     // Postcondition snapshots. Review-20 P1: OPEN ORDERS first, POSITIONS
     // second — an entry that fills BETWEEN the two then appears in BOTH
-    // (double-counted, conservative) instead of NEITHER (the old
-    // positions-then-orders order let filled exposure vanish from the
-    // re-vet entirely). Both fetches are caught: a failed snapshot is an
-    // UNRESOLVED-EXCESS problem the operator hears about, never a thrown
-    // error that silently skips the alert.
+    // (double-counted, conservative) instead of NEITHER. Review-21 P1:
+    // the sequence runs UNDER THE GLOBAL ORDER LOCK (no Dexter placement
+    // can slip between the snapshots) and takes a SECOND order snapshot
+    // after positions, unioned with the first — an order placed mid-
+    // sequence from OUTSIDE Dexter (TWS, another client) lands in one
+    // view or the other, never in neither. Every fetch is caught: a
+    // failed snapshot is an UNRESOLVED-EXCESS problem the operator hears
+    // about, never a thrown error that silently skips the alert.
     let snap: { orders: BrokerOrderSnap[]; complete: boolean } = { orders: [], complete: true };
+    let freshPositions: Array<{ symbol: string; quantity: number; avgCost: number }> | null = positionsNow;
     if (!dryRun) {
         const { fetchOpenOrderSnaps } = await import('./broker-adopt.js');
-        snap = await fetchOpenOrderSnaps(api).catch(() => ({ orders: [] as BrokerOrderSnap[], complete: false }));
+        const { withOrderLock } = await import('@/tools/ibkr/order-lock.js');
+        ({ snap, freshPositions } = await withOrderLock(async () => {
+            const s1 = await fetchOpenOrderSnaps(api).catch(() => ({ orders: [] as BrokerOrderSnap[], complete: false }));
+            const pos = await fetchPositions(api).catch(() => null);
+            const s2 = await fetchOpenOrderSnaps(api).catch(() => ({ orders: [] as BrokerOrderSnap[], complete: false }));
+            return { snap: unionOrderSnaps(s1, s2), freshPositions: pos };
+        }));
     }
-    const freshPositions = dryRun ? positionsNow : await fetchPositions(api).catch(() => null);
     const positionsSnapFailed = freshPositions === null;
     // Overnight-cap usage (advisory, never trims): everything still open
     // after the decisions above rides the night — including positions the

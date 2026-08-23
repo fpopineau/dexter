@@ -61,6 +61,34 @@ export function fingerprintPurity(values: Iterable<string | null | undefined>): 
     return { ok: set.size === 1 && !set.has('ABSENT'), distinct: [...set].sort() };
 }
 
+/** Review-21, pure: the freeze THREE-WAY identity comparison. Internal
+ *  window purity is not enough — a sample collected entirely on a dirty
+ *  tree, committed afterwards, evaluates on a clean checkout with a pure
+ *  historical fingerprint and would pass. The sample's one surviving
+ *  fingerprint must equal the EVALUATING runtime's fingerprint, and —
+ *  once the manifest is filled — the manifest's recorded one. Nulls fail
+ *  closed; a still-pending manifest is reported by the caller, never
+ *  failed here (the tag does not exist yet). */
+export function fingerprintFreezeCheck(input: {
+    /** The single surviving window fingerprint (null = purity already failed). */
+    sampleFp: string | null;
+    /** strategyFingerprint() at evaluation time. */
+    currentFp: string | null;
+    /** Parsed from the freeze manifest; null = not yet filled. */
+    manifestFp: string | null;
+}): { ok: boolean; problems: string[] } {
+    const problems: string[] = [];
+    if (input.sampleFp === null) problems.push('no single sample fingerprint (window impure)');
+    if (input.currentFp === null) problems.push('current runtime identity unresolvable');
+    if (input.sampleFp !== null && input.currentFp !== null && input.sampleFp !== input.currentFp) {
+        problems.push(`sample fingerprint ${input.sampleFp} != current ${input.currentFp} — the evaluated identity is not the sampled identity`);
+    }
+    if (input.manifestFp !== null && input.sampleFp !== null && input.manifestFp !== input.sampleFp) {
+        problems.push(`manifest fingerprint ${input.manifestFp} != sample ${input.sampleFp}`);
+    }
+    return { ok: problems.length === 0, problems };
+}
+
 export interface PortfolioDrawdown {
     /** Worst peak-to-trough of marked equity inside the window, % of the peak
      *  (rounded to 0.01%). */
