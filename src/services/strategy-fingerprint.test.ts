@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { codeIdentity, fingerprintFromSurfaces, readGitHeadSha, strategyFingerprint } from './strategy-fingerprint.js';
+import { classifyWorkingTree, codeIdentity, fingerprintFromSurfaces, readGitHeadSha, strategyFingerprint } from './strategy-fingerprint.js';
 import { fingerprintPurity } from '@/utils/equity-series-math.js';
 
 describe('fingerprintFromSurfaces (review-19 — required identity fails CLOSED, optional absence is a state)', () => {
@@ -36,6 +36,28 @@ describe('fingerprintFromSurfaces (review-19 — required identity fails CLOSED,
         for (const key of ['effectiveRules', 'codeIdentity', 'providerModel', 'soul', 'rules', 'skills'] as const) {
             expect(fingerprintFromSurfaces({ ...ALL, [key]: 'CHANGED' })).not.toBe(base);
         }
+    });
+});
+
+describe('classifyWorkingTree (review-20 — dirty means RUNTIME dirty, and content is what counts)', () => {
+    test('identity-irrelevant untracked noise does not dirty the checkout', () => {
+        const t = classifyWorkingTree('?? .claude/settings.local.json\n?? docs/notes.md\n?? scratch.txt\n');
+        expect(t.hasTrackedChanges).toBe(false);
+        expect(t.untrackedRuntime).toEqual([]);
+    });
+
+    test('untracked RUNTIME files and any tracked change are identity-relevant', () => {
+        const t = classifyWorkingTree(' M src/services/foo.ts\n?? src/services/new-module.ts\n?? scripts/tool.ts\n?? .claude/x.json\n');
+        expect(t.hasTrackedChanges).toBe(true);
+        expect(t.untrackedRuntime).toEqual(['scripts/tool.ts', 'src/services/new-module.ts']);
+    });
+
+    test('staged, renamed and root-config changes all count as tracked; SOUL.md untracked counts as runtime', () => {
+        expect(classifyWorkingTree('M  src/a.ts\n').hasTrackedChanges).toBe(true);      // staged
+        expect(classifyWorkingTree('R  src/a.ts -> src/b.ts\n').hasTrackedChanges).toBe(true);
+        expect(classifyWorkingTree('?? SOUL.md\n').untrackedRuntime).toEqual(['SOUL.md']);
+        expect(classifyWorkingTree('?? package.json\n').untrackedRuntime).toEqual(['package.json']);
+        expect(classifyWorkingTree('').hasTrackedChanges).toBe(false);
     });
 });
 

@@ -52,6 +52,7 @@ import { barTimeFrameMs } from './outcome-tracker.js';
 import { closePosition, fetchPositions } from './position-actions.js';
 import { listTrackable, type TradeProposal } from './trade-proposals.js';
 import { cancelEntryLeg } from './stale-entry-sweeper.js';
+import type { BrokerOrderSnap } from './broker-adopt.js';
 import { getRiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
 
 const ET = 'America/New_York';
@@ -638,14 +639,45 @@ export function isMacroWarningEnabled(): boolean {
     return (process.env.EOD_MACRO_WARNING ?? 'true').trim().toLowerCase() !== 'false';
 }
 
+let triageInFlight = false;
+
 export async function runEodTriageOnce(dryRun = false): Promise<void> {
     const today = new Date().toLocaleDateString('en-CA', { timeZone: ET });
     if (isMarketHoliday(today)) return;
-    // Stamp at the START of the run: the boot-time catch-up must never
-    // double-run behind a cron firing that is already in flight. A preview
-    // (dryRun) stamps nothing — the real slot must still fire.
-    if (!dryRun) markTriageRun(today, 'ran');
+    // A preview (dryRun) stamps nothing and needs no lifecycle — the real
+    // slot must still fire.
+    if (dryRun) return runEodTriageCore(today, true);
+    // Review-20 P1: the old stamp-'ran'-at-start meant a broker throw
+    // later in the run was only LOGGED — no operator alert, and the boot
+    // catch-up saw today's stamp and refused to retry. Now: an in-memory
+    // single-flight guard covers same-process double-fires, the stamp is
+    // three-state ('running' → 'completed' | 'failed'), only 'completed'
+    // counts as ran-today (stampCountsAsRan), and a mid-run failure
+    // notifies the operator LOUDLY — the book not being fully vetted is
+    // exactly the situation the triage exists to prevent.
+    if (triageInFlight) {
+        logger.warn('[eod-triage] a run is already in flight — skipping this firing');
+        return;
+    }
+    triageInFlight = true;
+    markTriageRun(today, 'running');
+    try {
+        await runEodTriageCore(today, false);
+        markTriageRun(today, 'completed');
+    } catch (err) {
+        markTriageRun(today, 'failed');
+        logger.error(`[eod-triage] run FAILED mid-flight: ${err instanceof Error ? err.stack ?? err.message : err}`);
+        await notify(
+            `🚨 EOD TRIAGE FAILED mid-run (${err instanceof Error ? err.message : err}) — the book was NOT fully ` +
+            `vetted for overnight. Check TWS and close anything you would not hold; a gateway restart before the ` +
+            `bell retries automatically.`,
+        ).catch(() => { /* the alert failing must not mask the failed stamp */ });
+    } finally {
+        triageInFlight = false;
+    }
+}
 
+async function runEodTriageCore(today: string, dryRun: boolean): Promise<void> {
     // Adopted rows (WP3) are broker positions Dexter did not open and does
     // not manage — they exist so the caps see them. Triage closing one
     // would be adoption placing orders, which the adoption contract
@@ -963,11 +995,26 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
         }
     }
 
+    // Postcondition snapshots. Review-20 P1: OPEN ORDERS first, POSITIONS
+    // second — an entry that fills BETWEEN the two then appears in BOTH
+    // (double-counted, conservative) instead of NEITHER (the old
+    // positions-then-orders order let filled exposure vanish from the
+    // re-vet entirely). Both fetches are caught: a failed snapshot is an
+    // UNRESOLVED-EXCESS problem the operator hears about, never a thrown
+    // error that silently skips the alert.
+    let snap: { orders: BrokerOrderSnap[]; complete: boolean } = { orders: [], complete: true };
+    if (!dryRun) {
+        const { fetchOpenOrderSnaps } = await import('./broker-adopt.js');
+        snap = await fetchOpenOrderSnaps(api).catch(() => ({ orders: [] as BrokerOrderSnap[], complete: false }));
+    }
+    const freshPositions = dryRun ? positionsNow : await fetchPositions(api).catch(() => null);
+    const positionsSnapFailed = freshPositions === null;
     // Overnight-cap usage (advisory, never trims): everything still open
     // after the decisions above rides the night — including positions the
-    // caps would have refused as deliberate GTC entries. Review-17 P1:
-    // taken FRESH — the vet trims and guard closes above changed the book.
-    const finalPositions = dryRun ? positionsNow : await fetchPositions(api);
+    // caps would have refused as deliberate GTC entries. Taken FRESH; on
+    // a failed fetch the pre-action snapshot approximates the footer and
+    // the failure itself alarms below.
+    const finalPositions = freshPositions ?? positionsNow;
     const holds = finalPositions
         .filter((pos) => pos.quantity !== 0 && !closedSymbols.has(pos.symbol))
         .map((pos) => ({ symbol: pos.symbol, valueUsd: Math.abs(pos.quantity) * pos.avgCost }));
@@ -990,8 +1037,6 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
     // loudly instead of re-firing.
     let excessLine: string | null = null;
     if (!dryRun) {
-        const { fetchOpenOrderSnaps } = await import('./broker-adopt.js');
-        const snap = await fetchOpenOrderSnaps(api).catch(() => ({ orders: [], complete: false }));
         // Fresh marks for held symbols the run has not priced yet
         // (adopted/manual books never enter the day loops).
         const markGaps: string[] = [];
@@ -1013,6 +1058,7 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
             ? vetOvernightBook(built.candidates, await getNetLiquidation(), getRiskRules(), overrides)
             : null;
         const problems: string[] = [];
+        if (positionsSnapFailed) problems.push('the final POSITIONS snapshot FAILED — the postcondition ran on pre-action positions');
         if (!snap.complete) problems.push('the open-orders snapshot was INCOMPLETE — resting-entry exposure is unproven');
         const unpriceable = [...new Set([...markGaps, ...built.unpriced])];
         if (unpriceable.length > 0) problems.push(`unpriceable at market: ${unpriceable.join(', ')} (cost basis counted where available)`);
@@ -1093,7 +1139,16 @@ export function triageCatchUpAction(
     return 'none'; // before the slot — the cron will fire normally
 }
 
-interface TriageRunStamp { date: string; status: 'ran' | 'missed-alerted'; at: number }
+interface TriageRunStamp { date: string; status: 'running' | 'completed' | 'failed' | 'missed-alerted' | 'ran'; at: number }
+
+/** Review-20, pure: only a COMPLETED run (or an already-sent missed
+ *  alert) counts as "ran today". A stamp left at 'running' by a crash,
+ *  or at 'failed' by a mid-run broker error, must let the boot catch-up
+ *  RETRY before the bell instead of certifying a half-vetted book.
+ *  Legacy 'ran' stamps (pre-three-state) count as completed. */
+export function stampCountsAsRan(status: string | undefined): boolean {
+    return status === 'completed' || status === 'ran' || status === 'missed-alerted';
+}
 
 function stampPath(): string {
     return join(process.env.DEXTER_DATA_DIR || join('.dexter', 'data'), 'eod-triage-run.json');
@@ -1125,7 +1180,7 @@ async function checkMissedTriage(): Promise<void> {
     const stamp = readTriageStamp();
     const action = triageCatchUpAction(
         et.getHours() * 60 + et.getMinutes(),
-        stamp?.date === todayIso,
+        stamp?.date === todayIso && stampCountsAsRan(stamp?.status),
         isTradingDay,
         closeMinutes,
     );

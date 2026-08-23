@@ -130,7 +130,15 @@ export interface WorkingOrderView {
     auxPrice: number | null;
     lmtPrice: number | null;
     ocaGroup: string | null;
+    status: string | null;
+    ocaType: number | null;
 }
+
+/** Review-20: the only OrderState statuses that PROVE an order is
+ *  working at the broker. Inactive is invalid/rejected/held (a held
+ *  order is not protection), PendingSubmit is unacknowledged, and
+ *  silence proves nothing — all fail closed. */
+const WORKING_STATUSES = new Set(['PreSubmitted', 'Submitted']);
 
 /** Review-19, pure: the conservative planned-risk basis is
  *  DIRECTION-AWARE. max(cost, mark) is conservative only for a LONG; a
@@ -201,14 +209,28 @@ export function verifyAdoptedProtection(input: {
     if (s.orderType !== 'STP') return { ok: false, reason: `stop #${s.orderId} is ${s.orderType ?? 'unknown'} — only a plain STP assures an exit through a gap` };
     if (s.quantity === null || s.quantity !== qty) return { ok: false, reason: `stop #${s.orderId} covers ${s.quantity ?? '?'} of ${qty} shares — must match exactly (an oversized stop reverses on trigger)` };
     if (s.auxPrice === null || !(s.auxPrice > 0)) return { ok: false, reason: `stop #${s.orderId} has no stop price` };
+    // Review-20: right ref/type/price is not enough — an Inactive,
+    // cancelled or held order will not fire. Only a broker-acknowledged
+    // WORKING status proves protection.
+    if (s.status === null || !WORKING_STATUSES.has(s.status)) {
+        return { ok: false, reason: `stop #${s.orderId} status is ${s.status ?? 'unknown'} — not a proven working order` };
+    }
     if (tpLegs.length > 1) return { ok: false, reason: `${tpLegs.length} :tp legs — incoherent protection` };
     if (tpLegs.length === 1) {
         const t = tpLegs[0];
         if (t.account !== input.account) return { ok: false, reason: `target #${t.orderId} in account ${t.account ?? 'unknown'}, not ${input.account}` };
         if (t.action !== exitSide) return { ok: false, reason: `target #${t.orderId} is ${t.action ?? 'unknown'}-side — not an exit for this ${long ? 'long' : 'short'}` };
         if (t.quantity === null || t.quantity !== qty) return { ok: false, reason: `target #${t.orderId} covers ${t.quantity ?? '?'} of ${qty} shares — must match exactly` };
+        if (t.status === null || !WORKING_STATUSES.has(t.status)) {
+            return { ok: false, reason: `target #${t.orderId} status is ${t.status ?? 'unknown'} — not a proven working order` };
+        }
         if (s.ocaGroup === null || t.ocaGroup === null || s.ocaGroup !== t.ocaGroup) {
             return { ok: false, reason: `stop #${s.orderId} and target #${t.orderId} are not OCA-joined — both could fill and reverse the position` };
+        }
+        // Blocking OCA (type 1) is what protectPosition places; any other
+        // mode lets both legs partially fill in a race.
+        if (s.ocaType !== 1 || t.ocaType !== 1) {
+            return { ok: false, reason: `stop/target OCA is not BLOCKING (ocaType ${s.ocaType ?? '?'}/${t.ocaType ?? '?'}, need 1/1) — a race can overfill` };
         }
     }
     const riskUsd = long

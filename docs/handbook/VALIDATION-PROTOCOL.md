@@ -92,6 +92,14 @@ positive expectancy after costs, not improved loss control.
   model proposed each trade. The scorecard also verifies the one-thesis
   unique index exists (`PRAGMA index_list`) — a legacy DB where it could
   not be created has no DB-level accept exclusion and is called out.
+  Operational requirements (review-20): set `provider` AND `modelId`
+  EXPLICITLY in `.dexter/settings.json` before the freeze — the
+  fingerprint refuses implicit defaults (null → ABSENT → window
+  refused); schedule-specific model overrides are caught by the
+  per-trade `model` column, a recorded residual. The gateway must run
+  from a CLEAN checkout: a runtime-dirty tree fingerprints as
+  `sha+dirty.<content-hash>` and the scorecard fails the evaluation —
+  the tag could not reconstruct the sampled behavior.
 - **The shadow swing record is EXPLORATORY** (2026-08-23): no official
   macro calendar exists yet, and adding one later changes the judgment
   inputs swings depend on. Enabling `swing_enabled` live therefore

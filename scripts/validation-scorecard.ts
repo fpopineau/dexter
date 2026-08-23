@@ -779,6 +779,27 @@ try {
     verdictFails.push('one-thesis unique index unverifiable');
 }
 
+// Review-20: the frozen behavior must be RECONSTRUCTIBLE from the tag.
+// A checkout whose runtime files differ from HEAD ran behavior no tag
+// can reproduce; unresolvable identity proves nothing. (Identity-
+// irrelevant untracked noise — .claude/, docs — does not dirty it.)
+try {
+    const { codeIdentity } = await import('../src/services/strategy-fingerprint.js');
+    const code = await codeIdentity();
+    if (code === null) {
+        console.log('code identity: UNRESOLVABLE (git unavailable, or unprovable untracked runtime content) — FAIL');
+        verdictFails.push('code identity unresolvable');
+    } else if (code.includes('+dirty.')) {
+        console.log(`code identity: ${code} (FAIL — runtime files differ from HEAD; the tag cannot reconstruct this behavior)`);
+        verdictFails.push('checkout dirty (runtime files) — commit or revert before evaluating');
+    } else {
+        console.log(`code identity: ${code} (clean checkout)`);
+    }
+} catch (err) {
+    console.log(`code identity: UNVERIFIABLE (${err instanceof Error ? err.message : err})`);
+    verdictFails.push('code identity unverifiable');
+}
+
 // One unambiguous line (round-4 review: the criteria were printed but
 // never combined). Anomalies make the sample NOT-EVALUABLE, never PASS.
 if (anomalies.length > 0) {

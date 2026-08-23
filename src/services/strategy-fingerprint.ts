@@ -41,26 +41,65 @@ const execFileAsync = promisify(execFile);
 
 async function execGit(args: string[], cwd: string): Promise<string | null> {
     try {
-        const { stdout } = await execFileAsync('git', args, { cwd, timeout: 10_000 });
+        // 64MB buffer: `git diff --binary HEAD` carries file CONTENT.
+        const { stdout } = await execFileAsync('git', args, { cwd, timeout: 10_000, maxBuffer: 64 * 1024 * 1024 });
         return stdout.replace(/\r/g, '').trim();
     } catch {
         return null;
     }
 }
 
-/** The running code identity: `<HEAD sha>` for a clean checkout,
- *  `<sha>+dirty.<digest>` when tracked files differ from HEAD (the
- *  digest is over `git status --porcelain`, so WHICH files are dirty is
- *  part of the identity). Null when git cannot prove either half —
- *  required surface, so null fails the whole fingerprint closed. */
+/** Untracked paths that shape runtime behavior — everything else
+ *  (.claude/, docs, editor droppings, data dirs) is identity-irrelevant
+ *  noise that must not mark the checkout dirty. Tracked changes are
+ *  ALWAYS relevant (git already decided those files matter). */
+const RUNTIME_UNTRACKED = /^(src|scripts)\/|^(package\.json|bunfig\.toml|tsconfig\.json|SOUL\.md)$/;
+
+/** Review-20, pure: split `git status --porcelain` output into "tracked
+ *  files changed" and "runtime-relevant untracked paths". Exported for
+ *  the harness — the filtering policy is the contract under test. */
+export function classifyWorkingTree(statusPorcelain: string): { hasTrackedChanges: boolean; untrackedRuntime: string[] } {
+    const lines = statusPorcelain.split('\n').filter((l) => l.length > 0);
+    return {
+        hasTrackedChanges: lines.some((l) => !l.startsWith('??')),
+        untrackedRuntime: lines
+            .filter((l) => l.startsWith('?? '))
+            .map((l) => l.slice(3).trim())
+            .filter((p) => RUNTIME_UNTRACKED.test(p))
+            .sort(),
+    };
+}
+
+/** The running code identity: `<HEAD sha>` for a runtime-clean checkout,
+ *  `<sha>+dirty.<digest>` otherwise — where the digest is over the
+ *  actual CONTENT of the drift (review-20: hashing status output alone
+ *  meant further edits to an already-dirty file left the identity
+ *  unchanged): `git diff --binary HEAD` for tracked changes, plus the
+ *  contents of runtime-relevant untracked files. Identity-irrelevant
+ *  untracked noise (.claude/, docs) does not dirty the checkout. Null
+ *  when git cannot prove any half — required surface, so null fails the
+ *  whole fingerprint closed (an unreadable untracked runtime file, or an
+ *  untracked runtime DIRECTORY, is unprovable content → null; commit or
+ *  remove it). */
 export async function codeIdentity(cwd = process.cwd()): Promise<string | null> {
     const sha = await execGit(['rev-parse', 'HEAD'], cwd);
     if (sha === null || !/^[0-9a-f]{40}$/.test(sha)) return null;
     const status = await execGit(['status', '--porcelain'], cwd);
     if (status === null) return null; // a clean state we cannot PROVE is not clean
-    return status.length === 0
-        ? sha
-        : `${sha}+dirty.${createHash('sha256').update(status).digest('hex').slice(0, 12)}`;
+    const tree = classifyWorkingTree(status);
+    if (!tree.hasTrackedChanges && tree.untrackedRuntime.length === 0) return sha;
+    const h = createHash('sha256');
+    if (tree.hasTrackedChanges) {
+        const diff = await execGit(['diff', '--binary', 'HEAD'], cwd);
+        if (diff === null) return null;
+        h.update(diff);
+    }
+    for (const p of tree.untrackedRuntime) {
+        const content = await readFile(join(cwd, p), 'utf-8').catch(() => null);
+        if (content === null) return null; // content unprovable → identity unprovable
+        h.update(p).update(' ').update(content).update(' ');
+    }
+    return `${sha}+dirty.${h.digest('hex').slice(0, 12)}`;
 }
 
 /** Diagnostic fallback: HEAD sha by parsing .git directly (no dirty

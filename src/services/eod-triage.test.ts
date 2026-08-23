@@ -499,3 +499,17 @@ describe('buildRevetBook (review-19 — the postcondition book is broker truth)'
         expect(b.candidates.map((c) => c.symbol)).toEqual(['NOPX']);
     });
 });
+
+describe('stampCountsAsRan (review-20 — a crashed or failed run must RETRY, not certify)', () => {
+    test("only 'completed' (or an already-sent missed alert, or the legacy 'ran') counts", async () => {
+        const { stampCountsAsRan } = await import('./eod-triage.js');
+        expect(stampCountsAsRan('completed')).toBe(true);
+        expect(stampCountsAsRan('ran')).toBe(true);            // pre-three-state stamps
+        expect(stampCountsAsRan('missed-alerted')).toBe(true); // once-per-day alert holds
+        // A 'running' stamp survives a crash; 'failed' is a mid-run broker
+        // error — both must let the boot catch-up run again before the bell.
+        expect(stampCountsAsRan('running')).toBe(false);
+        expect(stampCountsAsRan('failed')).toBe(false);
+        expect(stampCountsAsRan(undefined)).toBe(false);
+    });
+});

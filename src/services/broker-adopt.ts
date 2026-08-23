@@ -38,6 +38,12 @@ export interface BrokerOrderSnap {
     lmtPrice: number | null;
     ocaGroup: string | null;
     tif: string | null;
+    /** Review-20: an order with the right ref/type/price can still be
+     *  Inactive/held — protection must be a PROVEN WORKING order
+     *  (OrderState.status from the openOrder event), and an OCA pair
+     *  must use BLOCKING mode (ocaType 1) or a race can overfill. */
+    status: string | null;
+    ocaType: number | null;
 }
 
 export interface BrokerPositionSnap {
@@ -123,7 +129,7 @@ export function fetchOpenOrderSnaps(api: IBApi): Promise<{ orders: BrokerOrderSn
     const found: BrokerOrderSnap[] = [];
     return new Promise<{ orders: BrokerOrderSnap[]; complete: boolean }>((resolve) => {
         const timer = setTimeout(() => { cleanup(); resolve({ orders: found, complete: false }); }, 10_000);
-        const onOpen = (id: number, contract: { symbol?: string }, order: Order) => {
+        const onOpen = (id: number, contract: { symbol?: string }, order: Order, orderState?: { status?: string }) => {
             found.push({
                 orderId: id,
                 symbol: (contract.symbol ?? '').toUpperCase(),
@@ -136,6 +142,8 @@ export function fetchOpenOrderSnaps(api: IBApi): Promise<{ orders: BrokerOrderSn
                 lmtPrice: typeof order.lmtPrice === 'number' && Number.isFinite(order.lmtPrice) ? order.lmtPrice : null,
                 ocaGroup: typeof order.ocaGroup === 'string' && order.ocaGroup.length > 0 ? order.ocaGroup : null,
                 tif: typeof order.tif === 'string' ? order.tif : null,
+                status: typeof orderState?.status === 'string' ? orderState.status : null,
+                ocaType: typeof order.ocaType === 'number' ? order.ocaType : null,
             });
         };
         const onEnd = () => { clearTimeout(timer); cleanup(); resolve({ orders: found, complete: true }); };

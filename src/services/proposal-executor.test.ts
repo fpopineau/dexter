@@ -304,12 +304,12 @@ describe('verifyAdoptedProtection (review-18 — a protect- REF alone is not pro
     const stop = (over: Record<string, unknown> = {}) => ({
         orderId: 900, symbol: 'ADPT', orderRef: 'protect-ADPT:stop', account: 'DU1',
         quantity: 10, action: 'SELL', orderType: 'STP', auxPrice: 95,
-        lmtPrice: null, ocaGroup: 'dexter-protect-ADPT-900', ...over,
+        lmtPrice: null, ocaGroup: 'dexter-protect-ADPT-900', status: 'Submitted', ocaType: 1, ...over,
     });
     const tp = (over: Record<string, unknown> = {}) => ({
         orderId: 901, symbol: 'ADPT', orderRef: 'protect-ADPT:tp', account: 'DU1',
         quantity: 10, action: 'SELL', orderType: 'LMT', auxPrice: null,
-        lmtPrice: 110, ocaGroup: 'dexter-protect-ADPT-900', ...over,
+        lmtPrice: 110, ocaGroup: 'dexter-protect-ADPT-900', status: 'PreSubmitted', ocaType: 1, ...over,
     });
     const check = async (orders: unknown[], input: Record<string, unknown> = {}) => {
         const { verifyAdoptedProtection } = await import('./proposal-executor.js');
@@ -381,6 +381,29 @@ describe('verifyAdoptedProtection (review-18 — a protect- REF alone is not pro
     test('a stop on ANOTHER symbol does not protect this one', async () => {
         expect((await check([stop({ symbol: 'OTHER', orderRef: 'protect-OTHER:stop' })])).ok).toBe(false);
     });
+
+    test('review-20: only a broker-ACKNOWLEDGED working order is protection', async () => {
+        // Inactive = invalid/rejected/HELD — right ref, type and price, and
+        // it will still never fire.
+        const inactive = await check([stop({ status: 'Inactive' })]);
+        expect(inactive.ok).toBe(false);
+        expect((inactive as { reason: string }).reason).toContain('not a proven working order');
+        // PendingSubmit is sent, not acknowledged; silence proves nothing.
+        expect((await check([stop({ status: 'PendingSubmit' })])).ok).toBe(false);
+        expect((await check([stop({ status: null })])).ok).toBe(false);
+        // The pair: a dead TARGET also refuses (its cancel-on-fill link is
+        // part of the protection contract).
+        expect((await check([stop(), tp({ status: 'Cancelled' })])).ok).toBe(false);
+    });
+
+    test('review-20: the OCA pair must be BLOCKING (ocaType 1) — any other mode can overfill in a race', async () => {
+        const nonBlocking = await check([stop({ ocaType: 2 }), tp()]);
+        expect(nonBlocking.ok).toBe(false);
+        expect((nonBlocking as { reason: string }).reason).toContain('BLOCKING');
+        expect((await check([stop(), tp({ ocaType: null })])).ok).toBe(false);
+        // A LONE stop needs no OCA mode — there is no sibling to race.
+        expect((await check([stop({ ocaType: null, ocaGroup: null })])).ok).toBe(true);
+    });
 });
 
 describe('directionalBasis (review-19 — max(cost, mark) hid short-side risk)', () => {
@@ -399,6 +422,7 @@ describe('directionalBasis (review-19 — max(cost, mark) hid short-side risk)',
             orders: [{
                 orderId: 950, symbol: 'SHRT', orderRef: 'protect-SHRT:stop', account: 'DU1',
                 quantity: 10, action: 'BUY', orderType: 'STP', auxPrice: 90, lmtPrice: null, ocaGroup: null,
+                status: 'Submitted', ocaType: null,
             }],
         });
         expect(r).toEqual({ ok: true, riskUsd: 100 });

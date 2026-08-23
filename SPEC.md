@@ -600,3 +600,57 @@ over tested cores, and all sit behind the paper-observation phase.
 | REQ-EXPO-005 | directionalBasis suite incl. the reviewer's exact short case (riskUsd 100, was 0) |
 | REQ-EOD-005 | buildRevetBook suite: partial-fill counts both ways; broker TIF beats row TIF; orphan entries count; bets at own severity; unpriced returned — the wiring glue remains integration-untested (honest ledger) |
 | REQ-VAL-019 | fingerprintFromSurfaces (each required null → null; optional absence changes digest, never nulls it); codeIdentity (sha or sha+dirty in a checkout, null outside); readGitHeadSha follows a `.git` FILE; fingerprintPurity strict-format (malformed → ABSENT) |
+
+## Review-20 response (2026-08-24) — proven-working protection, race-ordered snapshots, honest run lifecycle, content-true identity
+
+Claim corrections first (the reviewer was right that review-19's SPEC
+text overstated): "broker truth" had a positions-then-orders fill race
+that could VANISH exposure, and "dirty identity" hashed file NAMES, not
+content. Both now hold as written below.
+
+- REQ-EXPO-006: protection must be a PROVEN WORKING order. The snapshot
+  now captures `OrderState.status` (the openOrder event's fourth
+  argument, previously ignored) and `ocaType`; verifyAdoptedProtection
+  accepts only broker-acknowledged statuses (PreSubmitted/Submitted) on
+  BOTH legs — an Inactive/held/cancelled stop with a perfect
+  ref/type/price is not protection — and requires the pair to use
+  BLOCKING OCA (ocaType 1 on both, what protectPosition places); any
+  other mode can overfill in a race. A lone stop needs no OCA mode.
+- REQ-EOD-006: postcondition snapshots are RACE-ORDERED — open orders
+  FIRST, positions SECOND, so an entry filling between the two appears
+  in BOTH (double-counted, conservative) instead of NEITHER (the old
+  order let filled exposure vanish from the re-vet). Both fetches are
+  caught: a failed positions snapshot degrades to the pre-action view
+  AND alarms as unresolved excess.
+- REQ-EOD-007: the triage run has an honest LIFECYCLE. The old
+  stamp-'ran'-at-start meant a mid-run broker throw was only logged —
+  no alert, and boot catch-up refused to retry behind the stamp. Now:
+  in-memory single-flight (same-process double-fires), three-state
+  stamp 'running' → 'completed' | 'failed', `stampCountsAsRan` treats
+  only completed (+ legacy 'ran', + missed-alerted) as ran-today —
+  a crash ('running') or failure retries before the bell — and a
+  mid-run failure notifies 🚨 "the book was NOT fully vetted".
+- REQ-VAL-021: code identity is CONTENT-TRUE. `+dirty.<digest>` now
+  digests `git diff --binary HEAD` (tracked changes — further edits to
+  an already-dirty file change the identity) plus the CONTENTS of
+  runtime-relevant untracked files (src/, scripts/, root configs,
+  SOUL.md — `classifyWorkingTree`, pure). Identity-irrelevant untracked
+  noise (.claude/, docs) no longer dirties the checkout; unprovable
+  content (unreadable file, untracked runtime directory) → null → the
+  fingerprint fails closed. The scorecard REQUIRES a clean checkout:
+  dirty or unresolvable code identity fails the evaluation — the tag
+  must be able to reconstruct the sampled behavior.
+- P2 recorded (provider/model): the fingerprint pins the EXPLICIT
+  settings.json provider+modelId (implicit defaults → null → refused;
+  protocol now instructs setting them before the freeze); per-run
+  model overrides are caught by the per-trade `model` column. Using the
+  run context for proposal stamps was considered and rejected: mixing
+  identity SOURCES between rows and samples manufactures false mixed
+  windows; the model column already proves per-trade purity.
+
+| REQ | Test |
+|---|---|
+| REQ-EXPO-006 | executor suite: Inactive/PendingSubmit/null-status stops refuse; dead target refuses; non-blocking and unknown ocaType pairs refuse; lone stop passes without OCA |
+| REQ-EOD-006 | ordering + failure-degrade is glue (integration-untested, honest ledger); the alarm paths ride the problems[] assembly |
+| REQ-EOD-007 | stampCountsAsRan suite (running/failed retry; completed/ran/missed-alerted hold); the wrapper glue is integration-untested |
+| REQ-VAL-021 | classifyWorkingTree suite (.claude noise clean; src/scripts/SOUL.md/package.json count; staged+rename tracked); codeIdentity format; scorecard smoke-run printed `+dirty` on this very uncommitted tree and FAILED — the check demonstrably bites |
