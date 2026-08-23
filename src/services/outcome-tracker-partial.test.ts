@@ -207,10 +207,12 @@ describe('resize timeout fails CLOSED (review 2026-08-21 round 3)', () => {
 describe('manual-exit attribution allocates by quantity (WP2)', () => {
     test('a 10-share close cannot pay P&L on 15 shares of proposals', async () => {
         // One-thesis-per-symbol (2026-08-23) forbids CREATING a stack, but
-        // stacked rows still exist in the wild (near-simultaneous accepts,
-        // legacy data) — the tracker's allocation must stay honest on them.
-        // Build the stack the only way production can: both rows created
-        // while OPEN (the guard checks working rows), then both executed.
+        // stacked rows still exist in the wild (legacy data — review-17's
+        // unique index refuses to build over duplicates and logs instead)
+        // — the tracker's allocation must stay honest on them. Drop the
+        // index to simulate exactly that legacy DB.
+        const { __dropOneThesisIndexForTests } = await import('./trade-proposals.js');
+        await __dropOneThesisIndexForTests();
         const mk = async (qty: number, entry: number) => createProposal({
             symbol: 'WPE', direction: 'long', entryType: 'LMT', entry,
             stop: Math.round(entry * 0.975 * 100) / 100,

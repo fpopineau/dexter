@@ -53,10 +53,6 @@ import { closePosition, fetchPositions } from './position-actions.js';
 import { listTrackable, type TradeProposal } from './trade-proposals.js';
 import { cancelEntryLeg } from './stale-entry-sweeper.js';
 import { getRiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
-import { confirmCancel } from '@/tools/ibkr/order-ack.js';
-
-/** Broker-confirmation window for a cancel request (round-4 review). */
-const CANCEL_CONFIRM_MS = 5_000;
 
 const ET = 'America/New_York';
 // Two slots, 8 minutes before each possible close: 15:52 for a normal 16:00
@@ -578,10 +574,15 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
     // guard-only lane: deliberate GTC positions (earnings guard only);
     // unfilled-GTC lane: resting entries that would survive the close.
     const { momentum: dayCandidates, guardOnly: gtcCandidates, unfilledGtc } = splitTriageCandidates(trackable);
-    if (dayCandidates.length === 0 && gtcCandidates.length === 0 && unfilledGtc.length === 0) return;
 
+    // Review-17 P1: enumerate the broker BEFORE deciding there is no work.
+    // An account holding only adopted/manual positions has no managed
+    // candidates, yet its book still rides the night — the whole-book vet
+    // below must see it. Return only when there is genuinely nothing.
     const api = await getIBApi();
     const positions = await fetchPositions(api);
+    if (dayCandidates.length === 0 && gtcCandidates.length === 0 && unfilledGtc.length === 0
+        && !positions.some((p) => p.quantity !== 0)) return;
     const lines: string[] = [];
     const closedSymbols = new Set<string>();
 
@@ -727,11 +728,16 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
     // gate-passed DAY positions (wasVettedKeepToday).
     const daySymbols = new Set(vetCandidates.map((k) => k.symbol));
     const baseStress = getRiskRules().overnight_gap_stress_pct;
+    // Review-17 P1: the whole-book additions must price the book AS IT IS
+    // NOW — the boot-time snapshot predates every close above and would
+    // resurrect symbols already flattened (or miss a failed close that is
+    // in fact still holding).
+    const positionsNow = dryRun ? positions : await fetchPositions(api);
     const gtcSeen = new Set<string>();
     for (const t of gtcCandidates) {
         if (gtcSeen.has(t.symbol) || daySymbols.has(t.symbol) || closedSymbols.has(t.symbol)) continue;
         gtcSeen.add(t.symbol);
-        const pos = positions.find((p) => p.symbol === t.symbol && p.quantity !== 0);
+        const pos = positionsNow.find((p) => p.symbol === t.symbol && p.quantity !== 0);
         if (!pos) continue;
         let last: number | null = lastBySymbol.get(t.symbol) ?? null;
         if (last === null) {
@@ -768,7 +774,7 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
     //      never blindly re-closed (a second full-size MKT risks a double).
     for (const [sym, label] of failedCloses) {
         if (vetCandidates.some((k) => k.symbol === sym)) continue;
-        const pos = positions.find((p) => p.symbol === sym && p.quantity !== 0);
+        const pos = positionsNow.find((p) => p.symbol === sym && p.quantity !== 0);
         if (!pos) continue;
         const last = lastBySymbol.get(sym) ?? null;
         vetCandidates.push({
@@ -780,7 +786,7 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
     }
     // (i) adopted/manual broker positions the triage never manages —
     //     counted at cost basis (never trimmed: not ours to close).
-    for (const pos of positions) {
+    for (const pos of positionsNow) {
         if (pos.quantity === 0) continue;
         if (closedSymbols.has(pos.symbol) || vetCandidates.some((k) => k.symbol === pos.symbol)) continue;
         vetCandidates.push({
@@ -790,18 +796,23 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
             fallbackValueUsd: pos.avgCost > 0 ? Math.abs(pos.quantity) * pos.avgCost : null,
         });
     }
-    // (iii) resting non-bet GTC entries: exposure-in-waiting at the worst
-    //       entry basis. A trim here CANCELS the entry (safe primitive) —
-    //       cancelling an order always beats closing a position.
+    // (iii) resting GTC entries: exposure-in-waiting at the worst entry
+    //       basis. A non-bet trim here CANCELS the entry (safe primitive) —
+    //       cancelling an order always beats closing a position. Review-17
+    //       P1: a resting EARNINGS-BET entry is gap exposure-in-waiting too
+    //       — counted at its own gap severity, but never trimmed (holding
+    //       through the print IS the class; the guard loop reports it).
     for (const t of unfilledGtc) {
-        if (t.tradeClass === 'earnings-bet') continue; // reported by the guard loop, sized for its print
         if (vetCandidates.some((k) => k.symbol === t.symbol)) continue;
         const basis = Math.max(t.entry ?? 0, t.entryLimit ?? 0);
         if (!(basis > 0) || !(t.quantity > 0)) continue;
+        const isBet = t.tradeClass === 'earnings-bet';
         vetCandidates.push({
             symbol: t.symbol, label: `${t.id}, resting ${t.tradeClass} entry`,
             marketValueUsd: basis * t.quantity, pnlPct: null,
-            restingEntry: t,
+            ...(isBet
+                ? { trimExempt: true, stressPctOverride: Math.max(baseStress, t.worstCaseGapPct ?? 0) }
+                : { restingEntry: t }),
         });
     }
 
@@ -847,32 +858,36 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
             lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} entry UNFILLED): WILL CANCEL at 15:52 — ${reason}`);
             continue;
         }
-        // Round-4 review (2026-08-21): count broker-CONFIRMED cancels, not
-        // requests — a "cancelled" entry that actually fills after this
-        // report is a position nobody is watching overnight.
-        let cancelled = 0;
-        let unconfirmed = 0;
-        let filledDuringCancel = 0;
-        const outcomes = await Promise.all((t.orderIds ?? []).map((oid) => confirmCancel(api, oid, CANCEL_CONFIRM_MS)));
-        for (const outcome of outcomes) {
-            if (outcome === 'cancelled') cancelled++;
-            else if (outcome === 'filled') filledDuringCancel++;
-            else unconfirmed++; // 'not-cancellable' and silence both mean: verify
+        // Review-17 P1: never cancel the stored bracket IDs wholesale — if
+        // the parent fills during that loop, the cancels strip the newly
+        // live stop and target (the exact race cancelEntryLeg exists to
+        // prevent). Cancel ONLY the broker-verified parent; the dormant
+        // children die with it. Losing the race means the position now
+        // EXISTS with a print ahead — which is precisely what the guard
+        // closes on a filled position, so close it.
+        const cancelled = await cancelEntryLeg(t, `EOD earnings guard — ${reason}`)
+            .catch((err: unknown) => { logger.warn(`[eod-triage] ${t.symbol}: guard entry cancel failed — ${err}`); return false; });
+        if (cancelled) {
+            lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} entry UNFILLED): ${reason}. Resting entry cancelled (broker-confirmed; children die with the parent).`);
+            continue;
         }
-        if (filledDuringCancel > 0) {
-            logger.error(`[eod-triage] ${t.id} ${t.symbol}: an order FILLED while being cancelled — the position now EXISTS; it was NOT vetted for overnight`);
+        const nowPos = (await fetchPositions(api)).find((p) => p.symbol === t.symbol && p.quantity !== 0);
+        if (nowPos && !closedSymbols.has(t.symbol)) {
+            logger.error(`[eod-triage] ${t.id} ${t.symbol}: entry cancel lost the race — the position EXISTS with a print ahead; guard closes it`);
+            const outcome = await closePosition(t.symbol, 'EOD triage (earnings guard — entry filled during cancel)');
+            if (outcome.state === 'filled' && outcome.flat === true) closedSymbols.add(t.symbol);
+            lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} entry): ${reason}. ⚠️ Entry FILLED during the cancel — guard closed the position: ${outcome.clean === true ? 'Closed.' : outcome.message}`);
+        } else {
+            lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} entry UNFILLED): ${reason}. ⚠️ Entry cancel NOT broker-confirmed and no position visible — verify in TWS.`);
         }
-        const tail =
-            (cancelled ? `${cancelled} resting order(s) cancelled (confirmed).` : 'No confirmed cancels — check ibkr_orders.') +
-            (filledDuringCancel ? ` ⚠️ ${filledDuringCancel} order(s) FILLED during the cancel — position EXISTS, review now.` : '') +
-            (unconfirmed ? ` ⚠️ ${unconfirmed} cancel(s) NOT confirmed — verify in TWS.` : '');
-        lines.push(`• ${t.symbol} (${t.id}, ${t.tradeClass} entry UNFILLED): ${reason}. ${tail}`);
     }
 
     // Overnight-cap usage (advisory, never trims): everything still open
     // after the decisions above rides the night — including positions the
-    // caps would have refused as deliberate GTC entries.
-    const holds = positions
+    // caps would have refused as deliberate GTC entries. Review-17 P1:
+    // taken FRESH — the vet trims and guard closes above changed the book.
+    const finalPositions = dryRun ? positionsNow : await fetchPositions(api);
+    const holds = finalPositions
         .filter((pos) => pos.quantity !== 0 && !closedSymbols.has(pos.symbol))
         .map((pos) => ({ symbol: pos.symbol, valueUsd: Math.abs(pos.quantity) * pos.avgCost }));
     const capLine = holds.length

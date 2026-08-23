@@ -419,3 +419,74 @@ the working answer, residuals recorded); stress-severity and factor
 calibration (post-validation research); official macro calendar (gates
 the swing-enable decision, not this sample); `take_atr_mult` tunes only
 from the sample's MFE evidence.
+
+## Review-17 response (2026-08-24) — two order races closed, broker-whole-book EOD, item 5 finished, machine-verifiable freeze
+
+The reviewer's verdict "do not tag yet" was CORRECT on every blocking
+finding; all are implemented.
+
+- REQ-CLOSE-001: the close's entry-neutralization treats ONLY
+  'cancelled' and 'filled' as settled — 'not-cancellable' refuses (per
+  the confirmCancel contract the order may be inactive/held and still
+  able to execute; no position reread can prove otherwise). After the
+  cancels the COMPLETE entry-side book is re-enumerated: ANY remaining
+  order (incl. a Dexter-owned entry-side order not ending `:entry`)
+  refuses the close. Empty book or no close.
+- REQ-EOD-003: the EOD earnings guard on unfilled entries routes through
+  `cancelEntryLeg` (broker-verified parent only — the old
+  cancel-every-stored-id loop could strip a newly live stop/target if
+  the parent filled mid-loop). Losing the race means the position now
+  EXISTS with a print ahead: the guard closes it (exactly what it does
+  to a filled position of that class), reported loudly.
+- REQ-EOD-004 (broker-whole-book, three gaps): (a) broker positions are
+  enumerated BEFORE the no-work early return — an account holding only
+  adopted/manual positions is vetted; (b) resting earnings-bet entries
+  count in the stress book at their own gap severity, trimExempt (gap
+  exposure-in-waiting; never trimmed — the guard loop reports them);
+  (c) the whole-book candidate additions and the final holds footer use
+  FRESH position snapshots taken after the mutation loops, not the
+  boot-of-run snapshot.
+- REQ-EXPO-002 (item 5 finished): acceptance exposure is UNCACHED
+  (`fetchBrokerExposure({fresh:true})`) and MARKED — every sum
+  (union, sector, same-symbol, overnight, stress) prices at
+  max(basis, |qty|×last); a missing mark falls back to basis, never
+  shrinks a sum. Orphan Dexter refs refuse: a `P-XXXX:*` order whose id
+  is not the accepted proposal or a live exposure row — and any legacy
+  `BRKT-` ref — is unreconciled exposure-in-waiting. An adopted position
+  with NO working `protect-` stop broker-side refuses the accept: its
+  synthetic ±5% stop prices headroom but bounds nothing.
+- REQ-PROP-001: one-thesis-per-symbol is DB law — partial unique index
+  `ux_one_working_thesis` on proposals(symbol) WHERE status IN
+  ('executing','executed'); the claim UPDATE catches the constraint and
+  loses gracefully, so simultaneous same-symbol accepts leave exactly
+  one survivor (the app-level claim + rival-exclusion could race with
+  both releasing). Index creation over a legacy DB with pre-existing
+  duplicates fails LOUDLY and the code-level guards remain; tests
+  simulate that DB via `__dropOneThesisIndexForTests`.
+- REQ-VAL-019 (machine-verifiable freeze): every proposal row and equity
+  sample carries a strategy fingerprint — 12-hex digest of the effective
+  risk rules + SOUL.md + `.dexter/RULES.md`
+  (`src/services/strategy-fingerprint.ts`). The scorecard REFUSES a
+  window with mixed or absent fingerprints. The manifest identity model
+  is de-self-referenced: behavioral baseline SHA (last runtime commit) +
+  docs-only manifest commit the tag points at (empty non-docs diff
+  verified) + the fingerprint. Code drift = git's job; model drift = the
+  `model` column; config/judgment drift = the fingerprint.
+- REQ-BRACKET-002: the three transmitted bracket TIFs are pinned in the
+  harness (DAY parent → ['DAY','GTC','GTC']; GTC parent → all GTC).
+  Broker-side mixed-TIF behavior is NOT documented by IBKR beyond
+  "children held until the parent fills" — three paper observations
+  (unfilled-expiry, filled-overnight, partial-at-expiry) are REQUIRED
+  pre-tag prerequisites in the protocol and manifest.
+- Jest/ESM: the FakeIb suite's CommonJS `require` calls replaced with
+  top-level imports — Jest fallback 63/63 suites, 769 tests.
+
+| REQ | Test |
+|---|---|
+| REQ-CLOSE-001 | close-lifecycle suite green under the stricter refusals (not-cancellable path exercised via confirmCancel contract tests) |
+| REQ-EOD-003 | sweeper FakeIb suite covers cancelEntryLegCore honesty; triage compiles against it (behavioral paper observation pending) |
+| REQ-EOD-004 | vetOvernightBook suite (trimExempt/stressPctOverride); smoke-run |
+| REQ-EXPO-002 | executor gate suite green under marked/uncached exposure; orphan/adopted refusals exercised at accept |
+| REQ-PROP-001 | outcome-tracker-partial + executor ambiguity tests via `__dropOneThesisIndexForTests` (legacy-DB simulation) |
+| REQ-VAL-019 | scorecard smoke-run prints the fingerprint line and FAILS on ABSENT (verified against the pre-migration DB) |
+| REQ-BRACKET-002 | `bracket-ack.test.ts` TIF-pinning tests |

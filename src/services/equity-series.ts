@@ -85,12 +85,20 @@ export async function sampleEquityOnce(): Promise<EquitySample | null> {
         shadowMarkComplete = false;
         logger.warn(`[equity-series] shadow-position enumeration failed — sample flagged incomplete: ${err}`);
     }
+    // Review-17 freeze integrity: every sample carries the strategy
+    // fingerprint — a mid-sample rules/judgment edit shows up as a mixed
+    // window and the scorecard refuses it. Best-effort (absent is flagged
+    // by the scorecard, never invented here).
+    const fingerprint = await import('./strategy-fingerprint.js')
+        .then((m) => m.strategyFingerprint())
+        .catch(() => null);
     const sample: EquitySample = {
         ts: Date.now(),
         netLiq,
         ...(shadowMarkComplete !== undefined
             ? { shadowUnrealized: Math.round(shadowUnrealized * 100) / 100, shadowMarkComplete }
             : {}),
+        ...(fingerprint ? { fingerprint } : {}),
     };
     try {
         appendFileSync(equitySeriesPath(), `${JSON.stringify(sample)}\n`);

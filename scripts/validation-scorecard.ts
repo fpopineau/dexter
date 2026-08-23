@@ -120,6 +120,7 @@ interface Row {
     entry_filled_at: number | null; order_perm_ids: string | null;
     exit_reason: string | null; take_pct: number | null;
     post_exit_mfe_pct: number | null; take_counterfactual: string | null;
+    strategy_fingerprint: string | null;
 }
 
 interface SqliteQuery<T> { all(...params: unknown[]): T[] }
@@ -295,18 +296,21 @@ try {
     allRows = db.query<Row>(`
         SELECT id, symbol, trade_class, source, score, model, regime,
                realized_pnl, commissions, closed_at, entry_filled_at, order_perm_ids,
-               exit_reason, take_pct, post_exit_mfe_pct, take_counterfactual
+               exit_reason, take_pct, post_exit_mfe_pct, take_counterfactual,
+               strategy_fingerprint
         FROM proposals ${SAMPLE_WHERE}
     `).all(sinceMs, sinceMs);
 } catch {
-    // Pre-WP-EXIT database: the take-tracking columns land with the store's
+    // Pre-migration database: the newer columns land with the store's
     // idempotent migration on the next gateway boot. Read-only here — fall
-    // back honestly rather than crash or migrate out-of-band.
-    console.log('note: take-tracking columns absent (DB pre-dates WP-EXIT — restart the gateway to migrate); take-vs-target reports n/a');
+    // back honestly rather than crash or migrate out-of-band. Absent
+    // fingerprints then FAIL the purity check below, by design.
+    console.log('note: newer columns absent (DB pre-dates the current migration — restart the gateway); take-vs-target reports n/a');
     allRows = db.query<Row>(`
         SELECT id, symbol, trade_class, source, score, model, regime,
                realized_pnl, commissions, closed_at, entry_filled_at, order_perm_ids, exit_reason,
-               NULL AS take_pct, NULL AS post_exit_mfe_pct, NULL AS take_counterfactual
+               NULL AS take_pct, NULL AS post_exit_mfe_pct, NULL AS take_counterfactual,
+               NULL AS strategy_fingerprint
         FROM proposals ${SAMPLE_WHERE}
     `).all(sinceMs, sinceMs);
 }
@@ -472,8 +476,13 @@ if (paperNetliq !== null) {
 // proof: every ET day a sample trade closed must carry at least one
 // sample, or the criterion is not evaluable (fail-closed).
 let seriesLine: string;
+// Review-17 freeze integrity: fingerprints seen on IN-WINDOW equity
+// samples, folded into the purity check below (null = no series at all —
+// the drawdown criterion already fails on that separately).
+let seriesFingerprints: Set<string> | null = null;
 try {
     const series = parseEquitySeries(readFileSync(join(dataDir, 'equity-series.jsonl'), 'utf-8'));
+    seriesFingerprints = new Set(series.filter((s) => s.ts >= sinceMs).map((s) => s.fingerprint ?? 'ABSENT'));
     // Seeded with the FROZEN epoch NetLiq (review 2026-08-23): the curve
     // starts where the sample started — a loss before the first real sample
     // must not vanish.
@@ -740,6 +749,20 @@ console.log(`calendar breadth: ${weeks.size} ISO week(s) (${weeks.size >= 6 ? 'P
 if (!purityOk) verdictFails.push('judgment purity (multiple or NULL models)');
 if (regimes.size < 2) verdictFails.push(`regime breadth ${regimes.size} < 2`);
 if (weeks.size < 6) verdictFails.push(`calendar breadth ${weeks.size} < 6 ISO weeks`);
+
+// Review-17 freeze integrity: exactly ONE strategy fingerprint across the
+// sample rows AND the in-window equity samples. A mid-sample rules edit,
+// profile flip or judgment-doc rewrite is a DIFFERENT strategy, not more
+// data — and an absent stamp means the instrumentation cannot prove
+// otherwise. The single surviving value is what the freeze manifest
+// records.
+const fps = new Set(rows.map((r) => r.strategy_fingerprint ?? 'ABSENT'));
+if (seriesFingerprints) for (const f of seriesFingerprints) fps.add(f);
+if (fps.size > 0) {
+    const fpOk = fps.size === 1 && !fps.has('ABSENT');
+    console.log(`strategy fingerprint: [${[...fps].join(', ')}] (${fpOk ? 'PASS' : 'FAIL — the window must carry exactly one fingerprint, no ABSENT stamps'}; record it in the freeze manifest)`);
+    if (!fpOk) verdictFails.push('strategy fingerprint mixed or absent (rules/judgment changed mid-sample, or pre-fingerprint rows in the cohort)');
+}
 
 // One unambiguous line (round-4 review: the criteria were printed but
 // never combined). Anomalies make the sample NOT-EVALUABLE, never PASS.

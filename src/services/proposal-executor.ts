@@ -209,7 +209,6 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         // Risk gate with live account context. Re-runs the static checks too:
         // rules may have been tightened since the proposal was created.
         const exposure = (await listExposure()).filter((t) => t.id !== p.id);
-        const exposureValue = worstEntryNotional;
 
         // WP4: the broker book is canonical — the caps see the MAX of what
         // the DB believes and what the broker actually holds. FAIL CLOSED:
@@ -218,7 +217,21 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         // Planned-RISK headroom stays DB-side (a broker-only position has
         // no stop to price); WP3 adoption rows close that gap within a
         // sweep cycle, this union backstops the counts and notionals.
-        const brokerBook = await fetchBrokerExposure();
+        // Review-17 P1: FRESH (no 10s cache — this decision places real
+        // orders) and MARKED — every exposure sum below prices at
+        // max(basis, |qty|×mark), so a position that ran since entry
+        // cannot hide behind its cost. A missing mark falls back to basis
+        // (already fail-closed vs the broker's own cost view); it never
+        // shrinks a sum.
+        const brokerBookRaw = await fetchBrokerExposure({ fresh: true });
+        const marks = new Map<string, number>();
+        for (const sym of new Set([...brokerBookRaw.map((b) => b.symbol), ...exposure.map((t) => t.symbol.toUpperCase())])) {
+            const m = await fetchLastPrice(sym).catch(() => null);
+            if (m !== null && m > 0) marks.set(sym, m);
+        }
+        const brokerBook = brokerBookRaw.map((b) => ({ ...b, markPrice: marks.get(b.symbol) ?? null }));
+        const exposureValue = (t: { symbol: string; quantity: number } & Parameters<typeof worstEntryNotional>[0]): number =>
+            Math.max(worstEntryNotional(t), Math.abs(t.quantity) * (marks.get(t.symbol.toUpperCase()) ?? 0));
         const union = unionExposure(
             exposure.map((t) => ({ symbol: t.symbol, quantity: t.quantity, valueUsd: exposureValue(t) })),
             brokerBook,
@@ -250,6 +263,43 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                     `(${foreign.slice(0, 4).map((o) => `#${o.orderId} ${o.symbol}`).join(', ')}${foreign.length > 4 ? ', …' : ''}) — ` +
                     `unclassifiable exposure-in-waiting; cancel them in TWS or wait for reconciliation, then retry`,
                 );
+            }
+            // Review-17 P1: the ownership PREFIX is not reconciliation. A
+            // `P-XXXX:*` ref whose proposal row is no longer working is a
+            // zombie bracket — exposure-in-waiting no cap prices — and a
+            // legacy `BRKT-` fallback ref maps to no row at all. Both
+            // refuse. protect-/close-/reduce- refs are transient
+            // risk-REDUCING orders on existing positions and stay owned.
+            const workingIds = new Set([p.id, ...exposure.map((t) => t.id)]);
+            const orphans = snap.orders.filter((o) => {
+                const ref = o.orderRef ?? '';
+                const m = /^(P-[0-9A-F]{4}):/.exec(ref);
+                if (m) return !workingIds.has(m[1]);
+                return /^BRKT-/.test(ref);
+            });
+            if (orphans.length > 0) {
+                throw new Error(
+                    `[exposure-gate] ${orphans.length} working Dexter-ref order(s) with no live proposal row ` +
+                    `(${orphans.slice(0, 4).map((o) => `#${o.orderId} ${o.symbol} ref '${o.orderRef}'`).join(', ')}${orphans.length > 4 ? ', …' : ''}) — ` +
+                    `orphaned exposure-in-waiting; cancel them in TWS or wait for the sweeps, then retry`,
+                );
+            }
+            // Review-17 P1: an adopted row's synthetic ±5% stop is
+            // BOOKKEEPING, not protection — no order enforces it. While an
+            // adopted position has no working protective stop broker-side,
+            // its real downside is unbounded and the synthetic headroom it
+            // grants must not admit NEW risk on top.
+            for (const t of exposure) {
+                if (t.source !== 'adopted') continue;
+                const hasStop = snap.orders.some((o) =>
+                    o.symbol.toUpperCase() === t.symbol.toUpperCase() && /^protect-/.test(o.orderRef ?? ''));
+                if (!hasStop) {
+                    throw new Error(
+                        `[exposure-gate] adopted position ${t.symbol} (${t.id}) has NO working protective stop — ` +
+                        `its synthetic ±5% level prices headroom but bounds nothing; ` +
+                        `'protect ${t.symbol}' or close it before accepting new risk`,
+                    );
+                }
             }
         }
 

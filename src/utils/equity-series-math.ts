@@ -18,6 +18,10 @@ export interface EquitySample {
      *  the sample's adjustment is incomplete and the scorecard must not
      *  certify the interval (fail-closed). Absent = nothing to mark. */
     shadowMarkComplete?: boolean;
+    /** Strategy fingerprint at sample time (review-17 freeze integrity,
+     *  strategy-fingerprint.ts) — the scorecard refuses a window whose
+     *  samples mix fingerprints. Absent on legacy lines. */
+    fingerprint?: string;
 }
 
 /** Parse the JSONL text, dropping malformed lines (a torn write must not
@@ -36,6 +40,7 @@ export function parseEquitySeries(text: string): EquitySample[] {
                     ...(typeof v.shadowUnrealized === 'number' && Number.isFinite(v.shadowUnrealized)
                         ? { shadowUnrealized: v.shadowUnrealized } : {}),
                     ...(typeof v.shadowMarkComplete === 'boolean' ? { shadowMarkComplete: v.shadowMarkComplete } : {}),
+                    ...(typeof v.fingerprint === 'string' && v.fingerprint ? { fingerprint: v.fingerprint } : {}),
                 });
             }
         } catch { /* torn line */ }

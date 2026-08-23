@@ -68,13 +68,25 @@ positive expectancy after costs, not improved loss control.
   scanner depth, RVOL treatment, regime routing, data-source changes and
   judgment-input changes alter discovery, ranking or selection — "not a
   deterministic gate" does not mean "safe to modify mid-sample".
-- **Freeze manifest** (2026-08-23): at tag time the operator commits
-  `docs/day2day/FREEZE-MANIFEST.md` — tag name and commit SHA, the model
-  and provider strings, the SHA-256 of `.dexter/RULES.md` and of
+- **Freeze manifest** (2026-08-23, identity model revised 2026-08-24):
+  at tag time the operator commits `docs/day2day/FREEZE-MANIFEST.md`.
+  Its identity model is split so nothing is self-referential (review-17):
+  a **behavioral baseline commit SHA** (the last commit touching runtime
+  behavior), then a docs-only manifest commit the tag points at (the
+  baseline..tag diff outside docs must be empty), plus the model and
+  provider strings, the SHA-256 of `.dexter/RULES.md` and of
   `performance-epoch.json`, the active `exit_style`, the scorer-weights
-  provenance line, the ratified `risk-rules.live.yaml` numbers, the OCA
-  observation record and any WP2/WP11 waivers. The manifest is the
-  immutable record the final evaluation is checked against.
+  provenance line, the ratified `risk-rules.live.yaml` numbers, the
+  broker-behavior observation records and any recorded waivers.
+- **Strategy fingerprint — the machine-checked freeze** (2026-08-24):
+  every proposal row and every equity sample is stamped with a 12-hex
+  digest of the effective risk rules + SOUL.md + `.dexter/RULES.md`
+  (`src/services/strategy-fingerprint.ts`). The scorecard REFUSES a
+  window that mixes fingerprints or contains absent stamps — a mid-sample
+  rules edit, profile flip or judgment-doc rewrite is detected by the
+  sample itself, not by trusting the manifest. The manifest records the
+  single fingerprint the scorecard prints. (Code drift is pinned by the
+  baseline SHA; model drift by the per-trade `model` column.)
 - **The shadow swing record is EXPLORATORY** (2026-08-23): no official
   macro calendar exists yet, and adding one later changes the judgment
   inputs swings depend on. Enabling `swing_enabled` live therefore
@@ -103,6 +115,17 @@ positive expectancy after costs, not improved loss control.
    observations before the tag; if they cannot reasonably be induced,
    record an EXPLICIT operator waiver (harness coverage accepted) in the
    manifest — never leave them vaguely "opportunistic".
+   **Mixed-TIF bracket behavior: paper observations REQUIRED before the
+   tag** (review-17). The harness pins the transmitted TIFs (DAY parent,
+   GTC exits), but IBKR documents only that attached children stay held
+   until the parent fills — NOT what happens to GTC children when a DAY
+   parent expires, nor after a partial fill. Observe on paper: (a) an
+   unfilled DAY parent expiring at the bell removes its dormant GTC
+   children; (b) a fully filled DAY parent leaves both GTC exits active
+   overnight; (c) a partially filled DAY parent at expiry leaves
+   correctly sized protection (waivable only with the WP2 resize
+   observation recorded). Record all three in the freeze manifest beside
+   the OCA observation.
 3. One clean gateway boot: YAML validation passes, calendar coverage ok,
    no adoption-sweep surprises. (The rules/calendar halves passed in the
    2026-08-21 script run; confirm on the next real gateway start.)

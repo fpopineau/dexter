@@ -62,6 +62,28 @@ describe('placeBracketOrderCore — identity on every leg', () => {
         expect(result.takeProfitOrderId).toBe(result.parentOrderId + 1);
         expect(result.stopOrderId).toBe(result.parentOrderId + 2);
     });
+
+    // REQ-BRACKET-001 (review-17): the three TIFs are load-bearing — a DAY
+    // parent dies at the bell unfilled, while the GTC exits protect a FILLED
+    // position through a gateway-down close. Pin all three transmitted
+    // values for both parent TIFs.
+    test('intraday bracket: DAY parent, GTC exits — transmitted values pinned', async () => {
+        const fake = new FakeIb();
+        const placement = placeBracketOrderCore(fake as never, ACCOUNT, req({ tif: 'DAY' }), 200);
+        await new Promise((r) => setTimeout(r, 10));
+        for (const p of fake.placed) fake.emit(EventName.orderStatus, p.id, 'Submitted', 0, 10, 0, 1000 + p.id);
+        await placement;
+        expect(fake.placed.map((p) => p.order.tif)).toEqual(['DAY', 'GTC', 'GTC']);
+    });
+
+    test('swing bracket: GTC parent keeps GTC exits', async () => {
+        const fake = new FakeIb();
+        const placement = placeBracketOrderCore(fake as never, ACCOUNT, req({ tif: 'GTC' }), 200);
+        await new Promise((r) => setTimeout(r, 10));
+        for (const p of fake.placed) fake.emit(EventName.orderStatus, p.id, 'Submitted', 0, 10, 0, 1000 + p.id);
+        await placement;
+        expect(fake.placed.map((p) => p.order.tif)).toEqual(['GTC', 'GTC', 'GTC']);
+    });
 });
 
 describe('placeBracketOrderCore — acknowledgement outcomes', () => {

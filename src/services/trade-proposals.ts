@@ -465,6 +465,10 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     // (legacy stop 1×ATR / target 2×ATR must use the ATR the trade was
     // priced against, not a later one).
     ['daily_atr', 'REAL'],
+    // Review-17 freeze integrity: 12-hex digest of the effective risk
+    // rules + judgment documents at creation (strategy-fingerprint.ts).
+    // The scorecard refuses a mixed-fingerprint sample.
+    ['strategy_fingerprint', 'TEXT'],
 ];
 
 /** Replay/instrumentation columns added after the refusals-table release. */
@@ -489,6 +493,25 @@ function migrate(database: SqliteDatabase): void {
         } catch {
             // column already exists
         }
+    }
+    // Review-17: DB-enforced one-thesis-per-symbol. The application-level
+    // claim + rival-exclusion can race (two simultaneous accepts can BOTH
+    // see the other and release); this partial unique index leaves exactly
+    // one survivor — the loser's claim UPDATE throws and reads false. The
+    // creation-time guard stays as the friendly first line; this is the
+    // law. Creation failure (a legacy DB already holding duplicate working
+    // rows on one symbol) is loud, never silent: the code-level guards
+    // still stand, but the operator must resolve the duplicates.
+    try {
+        database.exec(
+            `CREATE UNIQUE INDEX IF NOT EXISTS ux_one_working_thesis
+             ON proposals(symbol) WHERE status IN ('executing', 'executed')`,
+        );
+    } catch (err) {
+        logger.error(
+            `[proposals] one-thesis unique index NOT created — duplicate executing/executed rows per symbol ` +
+            `already exist; the DB-level guarantee is ABSENT until they are resolved: ${err instanceof Error ? err.message : err}`,
+        );
     }
 }
 
@@ -733,6 +756,18 @@ export async function createProposal(
     // proposed the trade — the frozen sample verifies it never mixed.
     if (input.model) {
         database.query<void>(`UPDATE proposals SET model = ? WHERE id = ?`).run(input.model, id);
+    }
+    // Review-17 freeze integrity: stamp the strategy fingerprint (effective
+    // rules + judgment docs) — the scorecard refuses a sample that mixes
+    // fingerprints, so a mid-sample rules edit ends the window detectably.
+    // Best-effort by design: a stamp failure must not lose a proposal, and
+    // an ABSENT fingerprint in the sample is itself flagged by the scorecard.
+    try {
+        const { strategyFingerprint } = await import('./strategy-fingerprint.js');
+        database.query<void>(`UPDATE proposals SET strategy_fingerprint = ? WHERE id = ?`)
+            .run(await strategyFingerprint(), id);
+    } catch (err) {
+        logger.warn(`[proposals] ${id}: strategy fingerprint stamp failed — ${err instanceof Error ? err.message : err}`);
     }
     if (input.regime) {
         database.query<void>(`UPDATE proposals SET regime = ? WHERE id = ?`).run(input.regime, id);
@@ -1455,13 +1490,33 @@ export async function claimProposalForExecution(id: string): Promise<boolean> {
     const database = await getDb();
     const key = id.trim().toUpperCase();
     const token = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-    database.query<void>(
-        `UPDATE proposals SET status = 'executing', claim_token = ?, updated_at = ? WHERE id = ? AND status = 'open'`,
-    ).run(token, Date.now(), key);
+    try {
+        database.query<void>(
+            `UPDATE proposals SET status = 'executing', claim_token = ?, updated_at = ? WHERE id = ? AND status = 'open'`,
+        ).run(token, Date.now(), key);
+    } catch (err) {
+        // ux_one_working_thesis: another proposal on this symbol reached
+        // executing/executed first — this claim LOSES (review-17: the
+        // index is what makes simultaneous same-symbol accepts leave
+        // exactly one survivor).
+        logger.warn(`[proposals] ${key}: claim refused by the one-thesis index — ${err instanceof Error ? err.message : err}`);
+        return false;
+    }
     const row = database.query<{ claim_token: string | null }>(
         `SELECT claim_token FROM proposals WHERE id = ?`,
     ).all(key)[0];
     return row?.claim_token === token;
+}
+
+/** Test hook (review-17): drop the one-thesis unique index to simulate a
+ *  LEGACY DB where it could not be created (pre-existing duplicate working
+ *  rows). The defensive stacked-row handling — manual-exit attribution,
+ *  ambiguity refusals, the triage double-close guard — must stay tested
+ *  even though new DBs make the state unrepresentable. Test-only by
+ *  contract. */
+export async function __dropOneThesisIndexForTests(): Promise<void> {
+    if (process.env.NODE_ENV !== 'test') throw new Error('[proposals] __dropOneThesisIndexForTests is test-only');
+    (await getDb()).exec('DROP INDEX IF EXISTS ux_one_working_thesis');
 }
 
 /** Return a claimed proposal to 'open' (gate refusal — retry allowed). */

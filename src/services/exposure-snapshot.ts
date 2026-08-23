@@ -28,6 +28,11 @@ export interface BrokerExposureRow {
     /** Signed: positive = long, negative = short. */
     quantity: number;
     avgCost: number;
+    /** Live mark, when the caller fetched one (review-17: exposure caps
+     *  price at max(cost, mark) — a position that ran +40% since entry is
+     *  40% more exposure than its cost basis admits). Absent/null = no
+     *  reliable mark; cost basis stands. */
+    markPrice?: number | null;
 }
 
 export interface ExposureUnion {
@@ -54,7 +59,11 @@ export function unionExposure(db: DbExposureRow[], broker: BrokerExposureRow[]):
     for (const pos of broker) {
         if (pos.quantity === 0) continue;
         const sym = pos.symbol.toUpperCase();
-        const notional = Math.abs(pos.quantity) * pos.avgCost;
+        // max(cost, mark): conservative in cap space — never let a rallied
+        // position hide behind its entry price, never let a crashed mark
+        // shrink the recorded commitment.
+        const basis = Math.max(pos.avgCost, pos.markPrice ?? 0);
+        const notional = Math.abs(pos.quantity) * basis;
         // MAX, not sum: the DB rows and the broker position describe the
         // SAME exposure when they agree — summing would double-count.
         notionalBySymbol.set(sym, Math.max(notionalBySymbol.get(sym) ?? 0, notional));
@@ -72,9 +81,11 @@ let cache: { at: number; rows: BrokerExposureRow[] } | null = null;
 
 /** Verified-account broker positions, cached 10s (accepts can burst).
  *  THROWS on failure — the accept path fails closed by contract: a
- *  proposal can wait; unknown exposure cannot. */
-export async function fetchBrokerExposure(): Promise<BrokerExposureRow[]> {
-    if (cache && Date.now() - cache.at < SNAPSHOT_TTL_MS) return cache.rows;
+ *  proposal can wait; unknown exposure cannot. Review-17: the ACCEPT path
+ *  passes { fresh: true } — a decision that places real orders must see
+ *  the broker as it is now, not as it was up to 10s ago. */
+export async function fetchBrokerExposure(opts?: { fresh?: boolean }): Promise<BrokerExposureRow[]> {
+    if (!opts?.fresh && cache && Date.now() - cache.at < SNAPSHOT_TTL_MS) return cache.rows;
     const api = await getIBApi();
     const account = getVerifiedSingleAccount();
     const rows = (await fetchPositions(api))

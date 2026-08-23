@@ -151,6 +151,12 @@ describe('cancel by symbol', () => {
         // (Create BOTH while open — the duplicate-setup guard now refuses
         // creating against an already-executed same-entry proposal, so this
         // state can only arise from near-simultaneous creations.)
+        // Review-17: the one-thesis unique index makes this state
+        // unrepresentable in NEW DBs — drop it to simulate the legacy DB
+        // (index creation failed on pre-existing duplicates) where the
+        // ambiguity refusal is the defense that still matters.
+        const { __dropOneThesisIndexForTests } = await import('./trade-proposals.js');
+        await __dropOneThesisIndexForTests();
         const a = await createProposal({
             symbol: 'CBSA', direction: 'long', entryType: 'LMT',
             entry: 100, stop: 97.5, target: 106, quantity: 10,

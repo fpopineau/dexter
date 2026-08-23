@@ -714,15 +714,36 @@ export async function closePosition(symbolRaw: string, source = 'close command')
                 }
                 for (const o of entryView.orders.filter((e) => /:entry$/.test(e.orderRef ?? ''))) {
                     const oc = await confirmCancel(api, o.orderId, closeDeps.cancelConfirmMs);
-                    if (oc === 'unconfirmed') {
+                    // Review-17 P1: 'not-cancellable' is NOT settled — per the
+                    // confirmCancel contract the order may be inactive, held,
+                    // or otherwise still capable of executing, and no position
+                    // reread can prove it will not fill afterwards. Only
+                    // 'cancelled' and 'filled' are definitive; everything else
+                    // refuses.
+                    if (oc !== 'cancelled' && oc !== 'filled') {
                         recentlyClosed.delete(symbol);
                         return { refused: {
                             ok: false,
-                            message: `⛔ Cannot close ${symbol} safely: working entry #${o.orderId} could not be confirm-cancelled — closing beside a live entry risks a reversal. Retry in a moment.`,
+                            message: `⛔ Cannot close ${symbol} safely: working entry #${o.orderId} could not be confirm-cancelled (${oc}) — closing beside a possibly-live entry risks a reversal. Retry in a moment.`,
                         } };
                     }
-                    // 'cancelled' | 'filled' | 'not-cancellable': all settle —
-                    // the fresh position read below prices whatever happened.
+                }
+                // Review-17 P1: re-enumerate the COMPLETE entry-side book
+                // after the cancels. A Dexter-owned entry-side order that does
+                // not end in `:entry` would have passed the ownership check
+                // above yet been skipped by the cancel loop; anything still
+                // resting here can fill beside the close. Empty book or no
+                // close.
+                const entryRecheck = await fetchOpenOrdersFor(api, symbol, entryAction, closeDeps.probeTimeoutMs);
+                if (!entryRecheck.complete || entryRecheck.orders.length > 0) {
+                    recentlyClosed.delete(symbol);
+                    const leftover = entryRecheck.orders.map((o) => `#${o.orderId}${o.orderRef ? ` ref '${o.orderRef}'` : ''}`).join(', ');
+                    return { refused: {
+                        ok: false,
+                        message: entryRecheck.complete
+                            ? `⛔ Cannot close ${symbol} safely: ${entryRecheck.orders.length} entry-side order(s) still working after neutralization (${leftover}) — one filling beside the close reverses the position. Cancel them in TWS first.`
+                            : `⛔ Cannot close ${symbol} safely: the post-cancel entry-side re-probe did not complete — a hidden entry could fill beside the close. Retry in a moment.`,
+                    } };
                 }
                 const fresh = (await fetchPositions(api)).find((q) => q.symbol === symbol);
                 if (!fresh || fresh.quantity === 0) {

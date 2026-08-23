@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import { OrderAction } from '@stoqey/ib';
+import { EventEmitter } from 'node:events';
+import { EventName, OrderAction } from '@stoqey/ib';
 import { entryActionFor, selectEntryLegToCancel } from './stale-entry-sweeper.js';
 
 describe('selectEntryLegToCancel (REQ-ENTRY-003 — only the verified parent, never the children)', () => {
@@ -46,9 +47,6 @@ describe('selectEntryLegToCancel (REQ-ENTRY-003 — only the verified parent, ne
 });
 
 describe('cancelEntryLegCore — the full path on a fake broker (review 2026-08-23, item 4)', () => {
-    const { EventEmitter } = require('node:events') as typeof import('node:events');
-    const { EventName } = require('@stoqey/ib') as typeof import('@stoqey/ib');
-
     class FakeIb extends EventEmitter {
         cancelled: number[] = [];
         book: Array<{ id: number; symbol: string; ref: string }> = [];
