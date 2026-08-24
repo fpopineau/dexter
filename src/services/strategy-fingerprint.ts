@@ -63,7 +63,7 @@ async function execGit(args: string[], cwd: string): Promise<string | null> {
 export async function resolveFreezeTagTime(
     tag: string,
     cwd = process.cwd(),
-): Promise<{ ok: true; tagTimeMs: number } | { ok: false; reason: string }> {
+): Promise<{ ok: true; tagTimeMs: number; tagObjectSha: string } | { ok: false; reason: string }> {
     const type = await execGit(['cat-file', '-t', `refs/tags/${tag}`], cwd);
     if (type === null) return { ok: false, reason: `tag ${tag} unresolvable` };
     if (type !== 'tag') {
@@ -74,7 +74,17 @@ export async function resolveFreezeTagTime(
     }
     const t = await execGit(['for-each-ref', '--format=%(taggerdate:unix)', `refs/tags/${tag}`], cwd);
     if (t === null || !/^\d+$/.test(t)) return { ok: false, reason: `tagger timestamp of ${tag} unresolvable` };
-    return { ok: true, tagTimeMs: Number(t) * 1000 };
+    // Review-28: the tag OBJECT sha — the annotated object is immutable,
+    // but the tag NAME is a movable ref (`git tag -af` re-points it at a
+    // fresh object). The caller pins this sha outside the repo and
+    // compares on every later evaluation: a force-retag changes it.
+    // (for-each-ref %(objectname), not `rev-parse <tag>^{tag}`: Git for
+    // Windows' MSYS layer glob-strips the braces into `<tag>^tag`. The
+    // ref's objectname IS the tag object — cat-file already proved the
+    // type above.)
+    const obj = await execGit(['for-each-ref', '--format=%(objectname)', `refs/tags/${tag}`], cwd);
+    if (obj === null || !/^[0-9a-f]{40}$/.test(obj)) return { ok: false, reason: `tag object sha of ${tag} unresolvable` };
+    return { ok: true, tagTimeMs: Number(t) * 1000, tagObjectSha: obj };
 }
 
 /** The paths that shape runtime behavior. Code identity is derived from

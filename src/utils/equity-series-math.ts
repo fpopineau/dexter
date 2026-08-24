@@ -122,15 +122,16 @@ const MANIFEST_REQUIRED_FIELDS: Array<{ key: string; validate?: (v: string) => s
     { key: 'Scorer-weights provenance' },
     { key: 'risk-rules.live.yaml` ratified' },
 ];
-// minOrderIds (review-27): every broker-interaction observation involves
-// at least TWO orders — an OCA close and its cancelled sibling, a parent
-// and its removed/surviving children — so one lone id is under-specified
-// evidence.
+// minOrderIds (review-27/28): DISTINCT ids, with row-specific minimums.
+// Every bracket/OCA scenario here involves THREE orders — the
+// parent/close plus the target and stop legs (bracket.ts places exactly
+// that triple) — so two ids under-specify the observation and `#101/
+// #101` (occurrences, not distinct orders) proves nothing.
 const MANIFEST_OBSERVATIONS: Array<{ key: string; waivable: boolean | 'requires-wp2'; minOrderIds: number }> = [
-    { key: 'OCA-joined close', waivable: false, minOrderIds: 2 },
-    { key: 'unfilled DAY parent expiry', waivable: false, minOrderIds: 2 },
-    { key: 'fully filled DAY parent', waivable: false, minOrderIds: 2 },
-    { key: 'PARTIALLY filled DAY parent', waivable: 'requires-wp2', minOrderIds: 2 },
+    { key: 'OCA-joined close', waivable: false, minOrderIds: 3 },
+    { key: 'unfilled DAY parent expiry', waivable: false, minOrderIds: 3 },
+    { key: 'fully filled DAY parent', waivable: false, minOrderIds: 3 },
+    { key: 'PARTIALLY filled DAY parent', waivable: 'requires-wp2', minOrderIds: 3 },
     { key: 'WP2 partial-fill resize', waivable: true, minOrderIds: 0 },
     { key: 'WP11 buffered finalize', waivable: true, minOrderIds: 0 },
 ];
@@ -227,9 +228,9 @@ export function auditFreezeManifest(
             } else {
                 if (!isRealDate(m[1])) problems.push(`observation '${obs.key}' has an impossible date '${m[1]}'`);
                 if (!isTickerShaped(m[2])) problems.push(`observation '${obs.key}' has a non-ticker symbol '${m[2]}'`);
-                const ids = (v.match(/#\d+/g) ?? []).length;
+                const ids = new Set(v.match(/#\d+/g) ?? []).size;
                 if (ids < obs.minOrderIds) {
-                    problems.push(`observation '${obs.key}' records ${ids} broker order id(s) — at least ${obs.minOrderIds} required (every broker interaction here involves multiple orders)`);
+                    problems.push(`observation '${obs.key}' records ${ids} DISTINCT broker order id(s) — at least ${obs.minOrderIds} required (parent/close + target + stop)`);
                 }
             }
         }

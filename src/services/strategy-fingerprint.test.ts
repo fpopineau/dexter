@@ -289,9 +289,9 @@ describe('auditFreezeManifest (review-24/25 — a schema audit, not substring co
 | Epoch NetLiq (frozen denominator) | 12257 |
 | Scorer-weights provenance | pinned 2026-08-11 run (FP) |
 | \`risk-rules.live.yaml\` ratified | FP 2026-08-25 |
-| OCA-joined close cancels its siblings broker-side | observed 2026-08-25 AAPL #101/#102 |
-| Mixed-TIF bracket: unfilled DAY parent expiry removes the dormant GTC children | observed 2026-08-25 MU #201/#202 |
-| Mixed-TIF bracket: fully filled DAY parent leaves both GTC exits active overnight | observed 2026-08-26 NVDA #301/#303 |
+| OCA-joined close cancels its siblings broker-side | observed 2026-08-25 AAPL #100/#101/#102 |
+| Mixed-TIF bracket: unfilled DAY parent expiry removes the dormant GTC children | observed 2026-08-25 MU #200/#201/#202 |
+| Mixed-TIF bracket: fully filled DAY parent leaves both GTC exits active overnight | observed 2026-08-26 NVDA #301/#302/#303 |
 | Mixed-TIF bracket: PARTIALLY filled DAY parent at expiry leaves correctly sized GTC protection | WAIVED FP: hard to stage; WP2 observed |
 | WP2 partial-fill resize | observed 2026-08-26 NVDA resize #302 |
 | WP11 buffered finalize events | WAIVED FP: harness coverage accepted |
@@ -313,10 +313,10 @@ describe('auditFreezeManifest (review-24/25 — a schema audit, not substring co
         const noEpoch = filled.split('\n').filter((l) => !l.includes('SHA-256 of `performance-epoch.json`')).join('\n');
         expect(auditFreezeManifest(noEpoch, exp).problems.some((x) => x.includes("row missing: 'SHA-256 of `performance-epoch.json`"))).toBe(true);
         // 'not observed' is not an observation.
-        const notObs = filled.replace('observed 2026-08-25 AAPL #101/#102', 'not observed');
+        const notObs = filled.replace('observed 2026-08-25 AAPL #100/#101/#102', 'not observed');
         expect(auditFreezeManifest(notObs, exp).problems.some((x) => x.includes('neither observed nor a valid waiver'))).toBe(true);
         // Waiving a non-waivable observation fails.
-        const waivedOca = filled.replace('observed 2026-08-25 AAPL #101/#102', 'WAIVED FP: too hard');
+        const waivedOca = filled.replace('observed 2026-08-25 AAPL #100/#101/#102', 'WAIVED FP: too hard');
         expect(auditFreezeManifest(waivedOca, exp).problems.some((x) => x.includes('NOT waivable'))).toBe(true);
         // The partial-expiry waiver DEPENDS on the WP2 observation.
         const wp2Waived = filled.replace('observed 2026-08-26 NVDA resize #302', 'WAIVED FP: skipped');
@@ -333,10 +333,10 @@ describe('auditFreezeManifest (review-24/25 — a schema audit, not substring co
         const { auditFreezeManifest } = await import('@/utils/equity-series-math.js');
         const exp = { tag: 'validation-freeze-1', deployableClasses: ['intraday'] };
         // Bare 'observed' — no date, no symbol, no details.
-        const bareObs = filled.replace('observed 2026-08-25 AAPL #101/#102', 'observed');
+        const bareObs = filled.replace('observed 2026-08-25 AAPL #100/#101/#102', 'observed');
         expect(auditFreezeManifest(bareObs, exp).problems.some((x) => x.includes('lacks the required evidence'))).toBe(true);
         // Date + symbol but NO order ids on a broker-interaction row.
-        const noIds = filled.replace('observed 2026-08-25 AAPL #101/#102', 'observed 2026-08-25 AAPL sibling cancel seen');
+        const noIds = filled.replace('observed 2026-08-25 AAPL #100/#101/#102', 'observed 2026-08-25 AAPL sibling cancel seen');
         expect(auditFreezeManifest(noIds, exp).problems.some((x) => x.includes('order id'))).toBe(true);
         // Bare 'WAIVED' — no initials, no reason.
         const bareWaiver = filled.replace('WAIVED FP: harness coverage accepted', 'WAIVED');
@@ -425,6 +425,17 @@ describe('resolveFreezeTagTime on a REAL repository (review-27 — the TAGGER cl
             expect(r.tagTimeMs).not.toBe(Date.parse('2026-08-25T10:00:00Z')); // never the commit clock
         }
 
+        // Review-28: the tag OBJECT sha is returned for pinning — and a
+        // FORCE-RETAG produces a DIFFERENT object sha, which is exactly
+        // what the trust-on-first-use pin detects.
+        const firstObj = r.ok ? r.tagObjectSha : '';
+        expect(firstObj).toMatch(/^[0-9a-f]{40}$/);
+        const retagEnv = { ...env, GIT_COMMITTER_DATE: '2026-08-25T18:00:00Z' };
+        g(['tag', '-af', 'validation-freeze-1', '-m', 'moved freeze'], retagEnv);
+        const moved = await resolveFreezeTagTime('validation-freeze-1', dir);
+        expect(moved.ok).toBe(true);
+        if (moved.ok) expect(moved.tagObjectSha).not.toBe(firstObj);
+
         // A lightweight tag has no creation timestamp — rejected by type.
         g(['tag', 'light-tag']);
         const light = await resolveFreezeTagTime('light-tag', dir);
@@ -450,11 +461,13 @@ describe('evidence grammar tightenings (review-27)', () => {
         // Arbitrary lowercase token is not a ticker.
         expect(probe('observed 2026-08-25 whatever #1/#2').some((x) => x.includes('non-ticker symbol'))).toBe(true);
         // ONE order id under-specifies a multi-order broker interaction.
-        expect(probe('observed 2026-08-25 AAPL #101 only').some((x) => x.includes('at least 2 required'))).toBe(true);
+        expect(probe('observed 2026-08-25 AAPL #101 only').some((x) => x.includes('at least 3 required'))).toBe(true);
+        // Review-28: OCCURRENCES are not DISTINCT orders.
+        expect(probe('observed 2026-08-25 AAPL #101/#101/#101').some((x) => x.includes('at least 3 required'))).toBe(true);
         // 'waived'/'waives' are not the documented status — exactly WAIVED.
         expect(probe('waived FP: reason').some((x) => x.includes('neither observed nor a valid waiver'))).toBe(true);
         expect(probe('waives FP: reason').some((x) => x.includes('neither observed nor a valid waiver'))).toBe(true);
         // The full grammar still passes.
-        expect(probe('observed 2026-08-25 AAPL #101/#102').some((x) => x.includes("'OCA-joined close'"))).toBe(false);
+        expect(probe('observed 2026-08-25 AAPL #100/#101/#102').some((x) => x.includes("'OCA-joined close'"))).toBe(false);
     });
 });

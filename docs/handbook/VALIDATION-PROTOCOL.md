@@ -165,6 +165,23 @@ positive expectancy after costs, not improved loss control.
 3. One clean gateway boot: YAML validation passes, calendar coverage ok,
    no adoption-sweep surprises. (The rules/calendar halves passed in the
    2026-08-21 script run; confirm on the next real gateway start.)
+3b. **Tagging procedure (review-27/28 — the tag IS the sample clock).**
+   Commit the filled manifest (docs-only over the baseline), then
+   IMMEDIATELY (within 10 minutes — the scorecard enforces the
+   tolerance against the manifest's `Tagged at (UTC)` row) create an
+   ANNOTATED tag:
+   `git tag -a validation-freeze-1 -m "validation freeze"`
+   The tag's TAGGER timestamp — not the commit's — is the sample window
+   start; a lightweight tag fails the final evaluation. Then anchor it
+   immutably: `git push origin validation-freeze-1` (the remote copy is
+   the independent record; enable tag protection if available), record
+   the tag-OBJECT sha
+   (`git for-each-ref --format="%(objectname)" refs/tags/validation-freeze-1`)
+   in the validation journal, and run the scorecard once — its FIRST
+   SIGHTING pins the tag-object sha to
+   `.dexter/data/freeze-tag-pin.json`, and every later evaluation fails
+   if the tag was force-moved to a different object. Never retag: a
+   moved tag is a broken freeze anchor, window from zero.
 4. **Shadow-live in place (2026-08-22)**: operator ratifies the €10K
    revision of `risk-rules.live.yaml` (REVIEW-marked), resets the paper
    account NetLiq to ≈$11,700 in IBKR Account Management, sets

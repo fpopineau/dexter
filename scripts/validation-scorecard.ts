@@ -63,7 +63,7 @@
 import 'dotenv/config';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dayBlockBootstrapLcb } from '../src/utils/day-bootstrap.js';
@@ -263,8 +263,42 @@ let tagTimeMs: number | null = null;
 if (tagExists) {
     const { resolveFreezeTagTime } = await import('../src/services/strategy-fingerprint.js');
     const resolved = await resolveFreezeTagTime(FREEZE_TAG);
-    if (resolved.ok) tagTimeMs = resolved.tagTimeMs;
-    else verdictFails.push(`final window: ${resolved.reason}`);
+    if (resolved.ok) {
+        tagTimeMs = resolved.tagTimeMs;
+        // Review-28 P1: the annotated OBJECT is immutable but the tag NAME
+        // is a movable ref — a force-retag over a new manifest commit
+        // would move the window while keeping the fingerprint and diff
+        // checks green. Pin the tag-object sha OUTSIDE the repo
+        // (DEXTER_DATA_DIR) on first sighting, trust-on-first-use; every
+        // later evaluation compares. The true immutable anchor is the
+        // REMOTE tag — the protocol instructs pushing it and recording
+        // the object sha in the journal; this pin makes a local retag
+        // tamper-EVIDENT even before that.
+        const pinPath = join(dataDir, 'freeze-tag-pin.json');
+        try {
+            const pin = JSON.parse(readFileSync(pinPath, 'utf-8')) as { tag?: string; tagObjectSha?: string };
+            if (pin.tag !== FREEZE_TAG || typeof pin.tagObjectSha !== 'string') {
+                verdictFails.push('freeze anchor: freeze-tag-pin.json is malformed — cannot verify the tag was not moved');
+            } else if (pin.tagObjectSha !== resolved.tagObjectSha) {
+                verdictFails.push(
+                    `freeze anchor: the tag OBJECT changed since first pinned (${pin.tagObjectSha.slice(0, 12)}… → ` +
+                    `${resolved.tagObjectSha.slice(0, 12)}…) — the tag was FORCE-MOVED; the freeze anchor is broken`,
+                );
+            } else {
+                console.log(`freeze anchor: tag object ${resolved.tagObjectSha.slice(0, 12)}… matches the first-sighting pin`);
+            }
+        } catch {
+            // First sighting: pin it. (writeFileSync import below.)
+            try {
+                writeFileSync(pinPath, JSON.stringify({ tag: FREEZE_TAG, tagObjectSha: resolved.tagObjectSha, pinnedAt: new Date().toISOString() }, null, 2));
+                console.log(`freeze anchor: FIRST SIGHTING — pinned tag object ${resolved.tagObjectSha} to ${pinPath}. Push the tag to origin and record this sha in the validation journal.`);
+            } catch (err) {
+                verdictFails.push(`freeze anchor: could not pin the tag object sha (${err instanceof Error ? err.message : err})`);
+            }
+        }
+    } else {
+        verdictFails.push(`final window: ${resolved.reason}`);
+    }
 }
 
 const sinceArg = process.argv[2];

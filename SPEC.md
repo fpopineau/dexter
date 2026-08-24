@@ -934,3 +934,32 @@ content. Both now hold as written below.
 |---|---|
 | REQ-VAL-037 | REAL temp-repo test: commit at 10:00, annotated tag at 14:00 → resolver returns 14:00 (the tagger clock) and provably not 10:00; lightweight tag rejected with LIGHTWEIGHT named; missing tag unresolvable |
 | REQ-VAL-038 | grammar suite: two impossible dates, lowercase symbol, single order id, 'waived'/'waives' each fail with the specific message; the full grammar passes |
+
+## Review-28 response (2026-08-24) — pinned tag object, distinct-id evidence, protocol tagging procedure
+
+- REQ-VAL-039: the freeze anchor is TAMPER-EVIDENT against a moved tag.
+  The annotated OBJECT is immutable but the tag NAME is a movable ref —
+  `git tag -af` over a fresh manifest commit would move the window while
+  keeping every fingerprint and diff check green. resolveFreezeTagTime
+  now returns the tag-OBJECT sha (via `for-each-ref %(objectname)` —
+  `rev-parse <tag>^{tag}` loses its braces to Git-for-Windows' MSYS
+  globbing, discovered by the test); the scorecard pins it OUTSIDE the
+  repo (`.dexter/data/freeze-tag-pin.json`) on first sighting
+  (trust-on-first-use, loudly instructing the remote push + journal
+  record), and every later evaluation fails on a mismatch: "the tag was
+  FORCE-MOVED; the freeze anchor is broken". The true immutable anchor
+  is the REMOTE tag — the protocol now instructs pushing it; the pin
+  makes a local retag detectable even before that. Recorded residual:
+  the pin is TOFU — an adversary deleting the pin AND retagging before
+  any evaluation defeats it locally; the remote copy is the answer.
+- REQ-VAL-040: broker evidence counts DISTINCT order ids (`#101/#101`
+  proved nothing), and the four bracket/OCA rows require THREE distinct
+  ids — parent/close + target + stop, matching what bracket.ts places.
+- Protocol 3b: the exact tagging procedure — commit manifest → annotated
+  tag within 10 min → push to origin → record the tag-object sha →
+  first scorecard run pins it. Never retag.
+
+| REQ | Test |
+|---|---|
+| REQ-VAL-039 | real-repo test extended: force-retag (`-af`) yields a DIFFERENT tag-object sha — the exact signal the pin detects; the pin file glue is first-sighting scorecard logic (honest ledger) |
+| REQ-VAL-040 | grammar suite: #101/#101/#101 (3 occurrences, 1 distinct) fails; 3-distinct fixtures pass |
