@@ -957,8 +957,9 @@ if (fpValues.length > 0) {
 // fingerprint block and was skipped on a clean pre-sample run, the exact
 // moment the protocol needs runtime confirmation). — only the
 // RUNNING gateway's own attestation proves what the process loaded.
-// Missing, stale (heartbeat is hourly; 2h = dead), wrong-profile,
-// wrong-account and fingerprint-mismatched records each fail.
+// Missing, stale (heartbeat is 15-min; >45 min = dead), future-dated,
+// stopped-marked, dead-or-invalid-PID, wrong-profile, wrong-account
+// and fingerprint-mismatched records each fail.
 let attestation: Parameters<typeof auditRuntimeAttestation>[0] = null;
 try {
     attestation = JSON.parse(readFileSync(join(dataDir, 'runtime-attestation.json'), 'utf-8')) as NonNullable<Parameters<typeof auditRuntimeAttestation>[0]>;

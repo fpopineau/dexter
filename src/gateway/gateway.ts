@@ -429,17 +429,31 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
       stopProfitTrail();
       stopStaleEntrySweeper();
       stopEquitySeries();
-      // Review-33: AWAITED — the stopped marker must be on disk before
-      // shutdown proceeds (the write chain also blocks any in-flight
-      // heartbeat from burying it).
-      await stopRuntimeAttestation();
       stopKillSwitchGuardian();
       stopExcursionSweeper();
       stopEodTriage();
       stopNewsPulse();
       stopBenchmark();
       stopDashboard();
+      // Review-33/34: EVERY synchronous stop signal above fires before
+      // this await — the attestation write fingerprints the whole
+      // strategy surface (git subprocesses, seconds under load) and an
+      // order-capable timer like EOD triage must not stay scheduled
+      // while it runs. Awaited BEFORE manager.stopAll() so the stopped
+      // record can still resolve the verified account; the write chain
+      // blocks any in-flight heartbeat from burying the marker.
+      const stopMarkerOnDisk = await stopRuntimeAttestation();
       await manager.stopAll();
+      if (!stopMarkerOnDisk) {
+        // Review-34: the write swallows persistence errors into null —
+        // surfaced HERE, after the rest of shutdown completed, so the
+        // operator knows the on-disk record still claims a running
+        // gateway until it goes stale (~45 min).
+        logger.error(
+          '[gateway] shutdown finished WITHOUT a stopped attestation marker — the write failed; ' +
+          '.dexter/data/runtime-attestation.json still reads as a running gateway until it goes stale (~45 min)',
+        );
+      }
     },
     snapshot: () => manager.getSnapshot(),
   };

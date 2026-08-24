@@ -1113,3 +1113,34 @@ content. Both now hold as written below.
 | REQ-VAL-048 | writer suite: in-flight write racing stop never buries the marker (awaited stop → stopped on disk), post-stop running write no-ops, restart re-arms |
 | REQ-VAL-049 | audit suite: +24h fails FUTURE, +1min passes, NaN fails as unusable |
 | REQ-VAL-050 | audit suite: pid 0 / 1.5 / −4 each fail on shape |
+
+## Review-34 response (2026-08-24) — surfaced stop-write failure, stops-before-persistence
+
+- REQ-VAL-051 (corrects REQ-VAL-048's blind spot): the stop-marker
+  write's nullable result is CHECKED, not swallowed.
+  `writeRuntimeAttestation` catches persistence errors into null, so
+  the awaited-but-void stop returned "successfully" with NO marker on
+  disk (reviewer-reproduced with an invalid data path) — the record
+  kept claiming a running gateway. `stopRuntimeAttestation()` now
+  returns whether the marker is CONFIRMED on disk, with the verdict
+  latched so a second stop reports the first attempt's truth instead
+  of vacuous success (never-started remains vacuously true — that
+  process wrote no running record to retract). The gateway surfaces a
+  false as an ERROR after the rest of shutdown has completed, naming
+  the consequence (record reads as running until stale, ~45 min).
+- REQ-VAL-052: every SYNCHRONOUS stop signal fires before the slow
+  metadata write. The shutdown awaited the attestation stop —
+  fingerprint hashing spawns git subprocesses and can take seconds —
+  while order-capable timers (EOD triage places market orders,
+  kill-switch guardian, excursion sweeper) stayed scheduled behind it.
+  All sync stops now precede the await; the await stays ahead of
+  `manager.stopAll()` so the stopped record can still resolve the
+  verified account.
+- Corrects review-33's "docs synchronized" overclaim: one scorecard
+  comment still said "hourly; 2h" — now states the 15-min heartbeat /
+  45-min bar and the full failure enumeration (P3).
+
+| REQ | Test |
+|---|---|
+| REQ-VAL-051 | writer suite: invalid data dir → stop returns false twice (latch honest on double-stop), restart re-arms, healthy stop confirms true; clean-stop path asserts true in the race test |
+| REQ-VAL-052 | ordering is gateway shutdown glue — integration-untested (honest ledger); the property (no order-capable timer scheduled during the await) holds by construction in the reordered sequence |

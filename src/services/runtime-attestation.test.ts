@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { auditRuntimeAttestation } from '@/utils/equity-series-math.js';
 
 describe('auditRuntimeAttestation (review-31 — only the RUNNING gateway can prove its profile)', () => {
@@ -97,7 +98,9 @@ describe('writeRuntimeAttestation (the gateway-side writer)', () => {
         // reproduced race: async fingerprint hashing finishes after the
         // stop and used to overwrite the stopped marker).
         const inflight = writeRuntimeAttestation();
-        await stopRuntimeAttestation(); // returns only once stopped:true is ON DISK
+        // Returns only once stopped:true is ON DISK — and review-34:
+        // a clean stop CONFIRMS the marker with true.
+        expect(await stopRuntimeAttestation()).toBe(true);
         expect((JSON.parse(readFileSync(attestationPath(), 'utf-8')) as { stopped?: boolean }).stopped).toBe(true);
         await inflight;
         // A running write enqueued AFTER the stop no-ops entirely.
@@ -105,5 +108,27 @@ describe('writeRuntimeAttestation (the gateway-side writer)', () => {
         expect((JSON.parse(readFileSync(attestationPath(), 'utf-8')) as { stopped?: boolean }).stopped).toBe(true);
         startRuntimeAttestation(); // re-arm cleanly for any later suite
         await stopRuntimeAttestation();
+    });
+
+    test('review-34: a FAILED stopped-record write surfaces false — never a silent orderly shutdown', async () => {
+        const { startRuntimeAttestation, stopRuntimeAttestation } = await import('./runtime-attestation.js');
+        const prev = process.env.DEXTER_DATA_DIR;
+        // A data dir that does not exist: writeFileSync ENOENTs, the
+        // writer swallows it into null, and the old void stop returned
+        // "successfully" with no marker written (reviewer-reproduced).
+        process.env.DEXTER_DATA_DIR = join('.dexter', 'data', '__review34-missing__', 'nested');
+        try {
+            startRuntimeAttestation();
+            expect(await stopRuntimeAttestation()).toBe(false);
+            // The latch keeps a SECOND stop honest — the marker still
+            // is not on disk, so it must not report vacuous success.
+            expect(await stopRuntimeAttestation()).toBe(false);
+        } finally {
+            if (prev === undefined) delete process.env.DEXTER_DATA_DIR;
+            else process.env.DEXTER_DATA_DIR = prev;
+        }
+        // A restart re-arms the verdict and a healthy stop confirms.
+        startRuntimeAttestation();
+        expect(await stopRuntimeAttestation()).toBe(true);
     });
 });
