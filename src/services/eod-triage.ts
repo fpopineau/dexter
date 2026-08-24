@@ -193,10 +193,19 @@ export function classifyViolationResolution(input: {
     /** Signed qty for the symbol (0 = flat); null = positions fetch failed. */
     positionQty: number | null;
 }): 'retry-cancel' | 'close-position' | 'resolved' | 'unproven' {
+    // Review-25 P1: POSITION EVIDENCE OUTRANKS CANCELLATION. A working
+    // parent beside a non-zero position is a PARTIAL FILL — cancelling
+    // the remainder can succeed cleanly (or "order not found" after it
+    // vanishes mid-cancel) while the filled shares stay open, and the old
+    // retry-cancel-first ordering then discarded the violation.
+    // closePosition neutralizes working entry parents under the order
+    // lock, so routing straight to close handles the remainder too and
+    // ends in a CONFIRMED-FLAT check.
+    if (input.positionQty !== null && input.positionQty !== 0) return 'close-position';
     if (input.parentStillWorking === true) return 'retry-cancel';
     if (input.parentStillWorking === null) return 'unproven';
     if (input.positionQty === null) return 'unproven';
-    return input.positionQty !== 0 ? 'close-position' : 'resolved';
+    return 'resolved';
 }
 
 /** Review-21, pure: union two open-order snapshots by orderId. An order

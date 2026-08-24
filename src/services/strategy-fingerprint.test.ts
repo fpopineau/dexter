@@ -266,17 +266,36 @@ describe('judgmentConfigInput (review-24 — cron jobs and search preference are
     });
 });
 
-describe('auditFreezeManifest (review-24 — a template full of _pending_ must not pass a FINAL verdict)', () => {
+describe('auditFreezeManifest (review-24/25 — a schema audit, not substring counting)', () => {
+    // A GENUINELY complete manifest: all 13 required identity rows, all 6
+    // broker-observation rows, and the scope line (review-25: the old
+    // "filled" fixture omitted most rows and still audited clean).
     const filled = `# Freeze manifest
+| Field | Value |
+|---|---|
 | Freeze tag | validation-freeze-1 |
 | Behavioral baseline commit SHA | ${'a'.repeat(40)} |
+| Manifest commit docs-only diff verified | verified 2026-08-25 (FP) |
+| Tagged at (UTC) | 2026-08-25T20:10:00Z |
+| Model string | claude-sonnet-5 |
+| Provider string | anthropic |
+| \`exit_style\` | target |
 | Strategy fingerprint (scorecard prints it) | abc123abc123 |
+| SHA-256 of \`.dexter/RULES.md\` | ${'b'.repeat(64)} |
+| SHA-256 of \`performance-epoch.json\` | ${'c'.repeat(64)} |
 | Epoch NetLiq (frozen denominator) | 12257 |
-| OCA-joined close cancels its siblings broker-side | observed 2026-08-25 AAPL #101/#102 (FP) |
+| Scorer-weights provenance | pinned 2026-08-11 run (FP) |
+| \`risk-rules.live.yaml\` ratified | FP 2026-08-25 |
+| OCA-joined close cancels its siblings broker-side | observed 2026-08-25 AAPL #101/#102 |
+| Mixed-TIF bracket: unfilled DAY parent expiry removes the dormant GTC children | observed 2026-08-25 MU #201 |
+| Mixed-TIF bracket: fully filled DAY parent leaves both GTC exits active overnight | observed 2026-08-26 NVDA #301 |
+| Mixed-TIF bracket: PARTIALLY filled DAY parent at expiry leaves correctly sized GTC protection | WAIVED FP: hard to stage; WP2 observed |
+| WP2 partial-fill resize | observed 2026-08-26 NVDA resize #302 |
+| WP11 buffered finalize events | WAIVED FP: harness coverage accepted |
 - The deployable verdict scope at tag time (record them here): intraday
 `;
 
-    test('a fully filled manifest audits clean and yields the identity fields', async () => {
+    test('a complete manifest audits clean and yields the identity fields', async () => {
         const { auditFreezeManifest } = await import('@/utils/equity-series-math.js');
         const a = auditFreezeManifest(filled, { tag: 'validation-freeze-1', deployableClasses: ['intraday'] });
         expect(a.problems).toEqual([]);
@@ -284,29 +303,54 @@ describe('auditFreezeManifest (review-24 — a template full of _pending_ must n
         expect(a.baselineSha).toBe('a'.repeat(40));
     });
 
-    test('every unfilled placeholder, a wrong tag, and a wrong scope are each named', async () => {
+    test('review-25 schema teeth: missing rows, "not observed", illegal waivers and the WP2 dependency all fail', async () => {
         const { auditFreezeManifest } = await import('@/utils/equity-series-math.js');
-        const template = `| Freeze tag | _pending_ |
-| Behavioral baseline commit SHA | _pending_ |
-| Strategy fingerprint (scorecard prints it) | _pending_ |
-| OCA-joined close | _REQUIRED — record the paper observation_ |
-| WP2 partial-fill resize | _observation or explicit waiver_ |
-- scope (record them here): _pending_
-`;
-        const a = auditFreezeManifest(template, { tag: 'validation-freeze-1', deployableClasses: ['intraday'] });
-        expect(a.problems.some((p) => p.includes("'_pending_'"))).toBe(true);
-        expect(a.problems.some((p) => p.includes("'_REQUIRED'"))).toBe(true);
-        expect(a.problems.some((p) => p.includes("'_observation or explicit waiver_'"))).toBe(true);
-        expect(a.problems.some((p) => p.includes('fingerprint not recorded'))).toBe(true);
-        expect(a.problems.some((p) => p.includes('baseline SHA not recorded'))).toBe(true);
-        expect(a.problems.some((p) => p.includes('freeze tag'))).toBe(true);
-        expect(a.problems.some((p) => p.includes("'intraday' not recorded"))).toBe(true);
+        const exp = { tag: 'validation-freeze-1', deployableClasses: ['intraday'] };
+        // Deleting a mandatory row is its own failure (substring counting missed it).
+        const noEpoch = filled.split('\n').filter((l) => !l.includes('SHA-256 of `performance-epoch.json`')).join('\n');
+        expect(auditFreezeManifest(noEpoch, exp).problems.some((x) => x.includes("row missing: 'SHA-256 of `performance-epoch.json`"))).toBe(true);
+        // 'not observed' is not an observation.
+        const notObs = filled.replace('observed 2026-08-25 AAPL #101/#102', 'not observed');
+        expect(auditFreezeManifest(notObs, exp).problems.some((x) => x.includes('neither observed nor a valid waiver'))).toBe(true);
+        // Waiving a non-waivable observation fails.
+        const waivedOca = filled.replace('observed 2026-08-25 AAPL #101/#102', 'WAIVED FP: too hard');
+        expect(auditFreezeManifest(waivedOca, exp).problems.some((x) => x.includes('NOT waivable'))).toBe(true);
+        // The partial-expiry waiver DEPENDS on the WP2 observation.
+        const wp2Waived = filled.replace('observed 2026-08-26 NVDA resize #302', 'WAIVED FP: skipped');
+        expect(auditFreezeManifest(wp2Waived, exp).problems.some((x) => x.includes('requires the WP2'))).toBe(true);
+        // Arbitrary text in an identity row fails its validator.
+        const badFp = filled.replace('abc123abc123', 'looks fine to me');
+        expect(auditFreezeManifest(badFp, exp).problems.some((x) => x.includes('12-hex'))).toBe(true);
+        // Wrong tag, wrong scope (both directions) still fail.
+        expect(auditFreezeManifest(filled, { tag: 'other-tag', deployableClasses: ['intraday'] }).problems.some((x) => x.includes('freeze tag'))).toBe(true);
+        expect(auditFreezeManifest(filled, { tag: 'validation-freeze-1', deployableClasses: ['intraday', 'swing'] }).problems.some((x) => x.includes("'swing' not recorded"))).toBe(true);
+    });
 
-        // Scope mismatches cut both ways: an enabled class must be recorded,
-        // and a recorded class must be enabled.
-        const wrongScope = auditFreezeManifest(filled, { tag: 'validation-freeze-1', deployableClasses: ['intraday', 'swing'] });
-        expect(wrongScope.problems.some((p) => p.includes("'swing' not recorded"))).toBe(true);
-        const extraScope = auditFreezeManifest(filled.replace('record them here): intraday', 'record them here): intraday, swing'), { tag: 'validation-freeze-1', deployableClasses: ['intraday'] });
-        expect(extraScope.problems.some((p) => p.includes("records 'swing' but it is not enabled"))).toBe(true);
+    test('the real template (all three placeholder variants) fails loudly', async () => {
+        const { auditFreezeManifest } = await import('@/utils/equity-series-math.js');
+        const { readFileSync } = await import('node:fs');
+        const template = readFileSync('docs/day2day/FREEZE-MANIFEST.md', 'utf-8');
+        const a = auditFreezeManifest(template, { tag: 'validation-freeze-1', deployableClasses: ['intraday'] });
+        expect(a.problems.some((x) => x.includes("'_pending_'"))).toBe(true);
+        expect(a.problems.some((x) => x.includes("'_REQUIRED'"))).toBe(true);
+        // Review-25: the parenthesized waiver variant is matched by prefix.
+        expect(a.problems.some((x) => x.includes("'_observation or explicit waiver'"))).toBe(true);
+        expect(a.fingerprint).toBeNull();
+        expect(a.baselineSha).toBeNull();
+    });
+});
+
+describe('memory policy in the identity (review-25)', () => {
+    test('the embedding capability keys ride as presence flags; the judgment surface carries memory settings', async () => {
+        const { behaviorEnvInput, judgmentConfigInput } = await import('./strategy-fingerprint.js');
+        const none = behaviorEnvInput({});
+        expect(none).toContain('OPENAI_API_KEY:absent');
+        expect(none).toContain('GOOGLE_API_KEY:absent');
+        const withKey = behaviorEnvInput({ OPENAI_API_KEY: 'sk-openai-secret' });
+        expect(withKey).toContain('OPENAI_API_KEY:present');
+        expect(withKey).not.toContain('sk-openai-secret');
+        // The judgment surface always carries a memory section (settings or
+        // the 'unset' sentinel = runtime defaults).
+        expect(judgmentConfigInput()).toMatch(/\|memory:/);
     });
 });

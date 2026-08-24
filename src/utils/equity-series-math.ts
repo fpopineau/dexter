@@ -96,29 +96,103 @@ export function fingerprintFreezeCheck(input: {
     return { ok: problems.length === 0, problems };
 }
 
-/** Review-24, pure: the mechanical audit of a TAGGED freeze manifest.
- *  Parsing only the fingerprint let a manifest full of `_pending_`
- *  placeholders — unratified rules, unrecorded observations — pass a
- *  final evaluation. Every unfilled placeholder is a problem; the
- *  recorded tag must match; the recorded deployable scope must name
- *  exactly the enabled classes. Returns whatever identity fields it
- *  could parse so the caller can run the git-side checks (ancestry,
- *  manifest-only diff). */
+/** Review-24/25, pure: the mechanical audit of a TAGGED freeze manifest.
+ *  Substring counting was not an audit (review-25): deleting a mandatory
+ *  row passed, 'not observed' passed, non-waivable observations could be
+ *  waived, and the WP2-dependency of the partial-expiry waiver was not
+ *  enforced. Now a NAMED-FIELD SCHEMA: every required identity row must
+ *  exist with a validly-formatted value; every broker-observation row
+ *  must exist and carry 'observed …' (never 'not observed'), with
+ *  'WAIVED …' accepted only where the protocol allows a waiver — and the
+ *  partial-fill-expiry waiver only when the WP2 resize row itself reads
+ *  observed. Placeholder markers anywhere remain failures (belt). The
+ *  value grammar is documented in the manifest template. */
+const MANIFEST_REQUIRED_FIELDS: Array<{ key: string; validate?: (v: string) => string | null }> = [
+    { key: 'Freeze tag' }, // equality with the expected tag checked separately
+    { key: 'Behavioral baseline commit SHA', validate: (v) => (/^[0-9a-f]{40}$/.test(v) ? null : 'must be a 40-hex commit SHA') },
+    { key: 'Manifest commit docs-only diff verified' },
+    { key: 'Tagged at (UTC)' },
+    { key: 'Model string' },
+    { key: 'Provider string' },
+    { key: 'exit_style', validate: (v) => (/^(target|ratchet)\b/.test(v) ? null : "must be 'target' or 'ratchet'") },
+    { key: 'Strategy fingerprint', validate: (v) => (/^[0-9a-f]{12}$/.test(v) ? null : 'must be the 12-hex fingerprint the scorecard prints') },
+    { key: 'SHA-256 of `.dexter/RULES.md`', validate: (v) => (/[0-9a-f]{64}/.test(v) ? null : 'must contain a 64-hex digest') },
+    { key: 'SHA-256 of `performance-epoch.json`', validate: (v) => (/[0-9a-f]{64}/.test(v) ? null : 'must contain a 64-hex digest') },
+    { key: 'Epoch NetLiq', validate: (v) => (/\d/.test(v) ? null : 'must record the frozen NetLiq number') },
+    { key: 'Scorer-weights provenance' },
+    { key: 'risk-rules.live.yaml` ratified' },
+];
+const MANIFEST_OBSERVATIONS: Array<{ key: string; waivable: boolean | 'requires-wp2' }> = [
+    { key: 'OCA-joined close', waivable: false },
+    { key: 'unfilled DAY parent expiry', waivable: false },
+    { key: 'fully filled DAY parent', waivable: false },
+    { key: 'PARTIALLY filled DAY parent', waivable: 'requires-wp2' },
+    { key: 'WP2 partial-fill resize', waivable: true },
+    { key: 'WP11 buffered finalize', waivable: true },
+];
+const PLACEHOLDER_MARKERS = ['_pending_', '_REQUIRED', '_observation or explicit waiver'];
+
 export function auditFreezeManifest(
     man: string,
     expected: { tag: string; deployableClasses: string[] },
 ): { fingerprint: string | null; baselineSha: string | null; problems: string[] } {
     const problems: string[] = [];
-    for (const marker of ['_pending_', '_REQUIRED', '_observation or explicit waiver_']) {
+    // Belt: any placeholder marker anywhere is unfilled work.
+    for (const marker of PLACEHOLDER_MARKERS) {
         const n = man.split(marker).length - 1;
         if (n > 0) problems.push(`${n} unfilled '${marker}' placeholder(s)`);
     }
-    const fingerprint = /Strategy fingerprint[^|\n]*\|\s*([0-9a-f]{12})\s*\|/.exec(man)?.[1] ?? null;
-    if (fingerprint === null) problems.push('strategy fingerprint not recorded');
-    const baselineSha = /Behavioral baseline commit SHA\s*\|\s*([0-9a-f]{40})/.exec(man)?.[1] ?? null;
-    if (baselineSha === null) problems.push('behavioral baseline SHA not recorded');
-    const tagRow = /\|\s*Freeze tag\s*\|\s*([^|\n]+)\|/.exec(man)?.[1]?.trim() ?? null;
+    // Two-cell markdown table rows → first-cell key, second-cell value.
+    const rows: Array<[string, string]> = [];
+    for (const line of man.split('\n')) {
+        const m = /^\s*\|([^|]+)\|([^|]+)\|\s*$/.exec(line);
+        if (m) rows.push([m[1].trim(), m[2].trim()]);
+    }
+    const find = (key: string): string | null => rows.find(([k]) => k.includes(key))?.[1] ?? null;
+    const isFilled = (v: string): boolean => v.length >= 2 && !PLACEHOLDER_MARKERS.some((p) => v.includes(p));
+
+    for (const field of MANIFEST_REQUIRED_FIELDS) {
+        const v = find(field.key);
+        if (v === null) { problems.push(`required manifest row missing: '${field.key}'`); continue; }
+        if (!isFilled(v)) { problems.push(`required manifest row '${field.key}' is not filled ('${v}')`); continue; }
+        const why = field.validate?.(v) ?? null;
+        if (why !== null) problems.push(`manifest row '${field.key}': ${why} (got '${v}')`);
+    }
+    const fingerprint = (() => {
+        const v = find('Strategy fingerprint');
+        return v !== null && /^[0-9a-f]{12}$/.test(v) ? v : null;
+    })();
+    const baselineSha = (() => {
+        const v = find('Behavioral baseline commit SHA');
+        return v !== null && /^[0-9a-f]{40}$/.test(v) ? v : null;
+    })();
+    const tagRow = find('Freeze tag');
     if (tagRow !== expected.tag) problems.push(`recorded freeze tag '${tagRow ?? 'missing'}' != '${expected.tag}'`);
+
+    // Broker observations: 'observed …' (never 'not observed'); 'WAIVED …'
+    // only where the protocol allows it.
+    // ANCHORED grammar (the template documents it): the value must BEGIN
+    // with its status word — a waiver whose free-text reason mentions
+    // 'observed' must not classify as an observation.
+    const obsStatus = (v: string | null): 'observed' | 'waived' | 'invalid' => {
+        if (v === null || !isFilled(v)) return 'invalid';
+        if (/^not\s+observed/i.test(v)) return 'invalid';
+        if (/^observed\b/i.test(v)) return 'observed';
+        if (/^waiv/i.test(v)) return 'waived';
+        return 'invalid';
+    };
+    const wp2 = obsStatus(find('WP2 partial-fill resize'));
+    for (const obs of MANIFEST_OBSERVATIONS) {
+        const v = find(obs.key);
+        const s = obsStatus(v);
+        if (v === null) { problems.push(`broker-observation row missing: '${obs.key}'`); continue; }
+        if (s === 'invalid') { problems.push(`observation '${obs.key}' is neither observed nor a valid waiver ('${v}')`); continue; }
+        if (s === 'waived' && obs.waivable === false) problems.push(`'${obs.key}' is NOT waivable — a real paper observation is required`);
+        if (s === 'waived' && obs.waivable === 'requires-wp2' && wp2 !== 'observed') {
+            problems.push(`'${obs.key}' waiver requires the WP2 partial-fill resize observation to be recorded as observed`);
+        }
+    }
+
     const scope = /record them here\)?:?\s*([^\n]*)/.exec(man)?.[1]?.trim() ?? '';
     const KNOWN_CLASSES = ['intraday', 'swing', 'earnings-bet'];
     for (const c of expected.deployableClasses) {

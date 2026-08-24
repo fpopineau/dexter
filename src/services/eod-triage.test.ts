@@ -541,8 +541,14 @@ describe('unionOrderSnaps (review-21 — the placement barrier for the postcondi
 describe('classifyViolationResolution (review-24 — an absent parent may have FILLED)', () => {
     test('resolution requires positive proof: cancel, close, or paired no-order/no-position observations', async () => {
         const { classifyViolationResolution } = await import('./eod-triage.js');
-        // Parent still on the book → keep cancelling.
+        // Parent still on the book, no fill proven → keep cancelling.
         expect(classifyViolationResolution({ parentStillWorking: true, positionQty: null })).toBe('retry-cancel');
+        expect(classifyViolationResolution({ parentStillWorking: true, positionQty: 0 })).toBe('retry-cancel');
+        // Review-25: POSITION EVIDENCE OUTRANKS CANCELLATION — a working
+        // parent beside a position is a PARTIAL FILL; cancelling the
+        // remainder cleanly must never discard the filled shares. Close
+        // handles both (entry neutralization runs inside the close's lock).
+        expect(classifyViolationResolution({ parentStillWorking: true, positionQty: 10 })).toBe('close-position');
         // Parent gone + position EXISTS → it filled between snapshots: close it.
         expect(classifyViolationResolution({ parentStillWorking: false, positionQty: 10 })).toBe('close-position');
         expect(classifyViolationResolution({ parentStillWorking: false, positionQty: -5 })).toBe('close-position');

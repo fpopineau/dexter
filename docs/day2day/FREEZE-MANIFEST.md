@@ -64,6 +64,23 @@ freeze identity is therefore split:
 | WP2 partial-fill resize | _observation or explicit waiver_ |
 | WP11 buffered finalize events | _observation or explicit waiver_ |
 
+## Value grammar (review-25 — the final audit parses these MECHANICALLY)
+
+- Every `_pending_` / `_REQUIRED` / `_observation or explicit waiver…_`
+  placeholder must be REPLACED; any survivor fails the final evaluation.
+- Identity rows: `Strategy fingerprint` = exactly the 12-hex value the
+  scorecard prints; `Behavioral baseline commit SHA` = the 40-hex SHA;
+  the SHA-256 rows must contain the 64-hex digest; `exit_style` =
+  `target` or `ratchet`.
+- Broker-observation rows must BEGIN with a status word the audit
+  matches: `observed <date> <symbol> <order ids / details>` for a real
+  observation, or `WAIVED <initials>: <reason>` where the protocol
+  allows a waiver (WP2, WP11, and the partial-expiry row only with the
+  WP2 row observed). `not observed`, blanks, and any other phrasing
+  fail. The OCA row and the first two mixed-TIF rows are NOT waivable.
+- Deleting a row does not bypass the audit — a missing required row is
+  its own failure.
+
 ## Notes
 
 - Any behavior change after the tag ends the window (protocol Freeze

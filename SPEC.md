@@ -829,3 +829,47 @@ content. Both now hold as written below.
 | REQ-EOD-012 | deadline math is wall-clock glue over the tested cutoff/catch-up constants (honest ledger) |
 | REQ-VAL-029 | judgmentConfigInput determinism/shape; behaviorEnvInput presence flags for the three new keys with the secret value asserted absent |
 | REQ-VAL-030 | auditFreezeManifest suite: filled manifest audits clean; template fails on every placeholder type, missing identity fields, wrong tag, both scope mismatch directions; the git diff/ancestry glue fires at tag time |
+
+## Review-25 response (2026-08-24) — position outranks cancellation, schema-audited manifest, memory in the identity, fail-closed diff proof
+
+- REQ-EOD-013 (corrects REQ-EOD-011's precedence): POSITION EVIDENCE
+  OUTRANKS CANCELLATION. A working parent beside a non-zero position is
+  a PARTIAL FILL — the old retry-cancel-first ordering let a clean (or
+  order-not-found) cancel of the remainder discard the violation while
+  the filled shares stayed open. classifyViolationResolution now routes
+  any known non-zero position to close-position (closePosition
+  neutralizes the working parent inside its own order lock and ends in
+  a confirmed-flat check); retry-cancel survives only for a working
+  parent with a proven-flat or unknown position, where a clean cancel
+  (filledQty 0 on a complete book) IS positive proof of no fill.
+- REQ-VAL-031 (corrects REQ-VAL-030): the manifest audit is a NAMED-
+  FIELD SCHEMA, not substring counting. All 13 identity rows must exist
+  (a deleted row is its own failure) with per-field validators (40-hex
+  baseline, 12-hex fingerprint, 64-hex digests, target|ratchet, numeric
+  epoch); all 6 broker-observation rows must exist and carry an
+  ANCHORED status — `observed …` (never `not observed`, and a waiver
+  reason mentioning 'observed' cannot masquerade) or `WAIVED …` only
+  where the protocol allows (WP2/WP11; the partial-expiry row only with
+  the WP2 row itself observed). The template documents the grammar; the
+  parenthesized waiver placeholder variant is matched by prefix. The
+  test fixture is a genuinely COMPLETE manifest (the review-25 finding:
+  the old "filled" fixture omitted most rows and audited clean), and
+  the real template is asserted to fail on all three placeholder types.
+- REQ-VAL-032: MEMORY POLICY is in the identity. judgmentConfigInput
+  carries the raw `memory` settings (context budget, temporal decay,
+  MMR, indexing, embedding provider/model) as sorted-key canonical JSON
+  ('unset' = runtime defaults); OPENAI_API_KEY and GOOGLE_API_KEY join
+  the capability presence flags (automatic embedding-provider selection
+  depends on them). Memory CONTENTS remain operational state, never
+  fingerprinted.
+- REQ-VAL-033 (P2): the baseline→tag proof FAILS CLOSED — unresolvable
+  tag commit, baseline == tag (no manifest-only commit exists), a
+  failed diff, and an EMPTY diff each fail; the changed set must be
+  exactly [docs/day2day/FREEZE-MANIFEST.md].
+
+| REQ | Test |
+|---|---|
+| REQ-EOD-013 | classifier suite: {working parent, qty 10} → close-position (the review-25 case); {working, flat}/{working, unknown} → retry-cancel; close-with-working-parent safety rides the closePosition entry-neutralization suite |
+| REQ-VAL-031 | audit suite vs a COMPLETE fixture: clean pass; deleted row, 'not observed', non-waivable waiver, WP2-dependency, malformed fingerprint, wrong tag, both scope directions each fail; the real template fails all three placeholder types |
+| REQ-VAL-032 | memory-policy suite (presence flags, secret value absent, memory section always present in the judgment surface); every-surface digest loop covers judgmentConfig |
+| REQ-VAL-033 | fail-closed branches are git glue at tag time (honest ledger) — each failure string is distinct and named |

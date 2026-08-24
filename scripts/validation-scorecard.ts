@@ -813,17 +813,30 @@ if (fpValues.length > 0) {
                 } else if (git(['merge-base', '--is-ancestor', audit.baselineSha, FREEZE_TAG]) === null) {
                     verdictFails.push(`freeze identity: declared baseline ${audit.baselineSha.slice(0, 8)} is NOT an ancestor of the tag`);
                 } else {
-                    // Ancestry alone proves order, not content: the
-                    // baseline→tag interval must change ONLY the manifest
-                    // (the manifest's own documented rule, now enforced).
-                    const changed = (git(['diff', '--name-only', `${audit.baselineSha}..${FREEZE_TAG}`]) ?? '')
-                        .split('\n').map((s) => s.trim()).filter((s) => s.length > 0);
-                    const offenders = changed.filter((path) => path !== MANIFEST_REPO_PATH);
-                    if (offenders.length > 0) {
-                        verdictFails.push(
-                            `freeze identity: baseline→tag diff touches non-manifest path(s): ` +
-                            `${offenders.slice(0, 5).join(', ')}${offenders.length > 5 ? ', …' : ''} — the tag is not a manifest-only commit over its baseline`,
-                        );
+                    // Ancestry alone proves order, not content. Review-25:
+                    // every branch here FAILS CLOSED — an unresolvable tag
+                    // commit, baseline == tag (no manifest commit exists),
+                    // a failed diff, and an empty diff each fail; the
+                    // changed set must be EXACTLY [the manifest].
+                    const tagSha = git(['rev-parse', `${FREEZE_TAG}^{commit}`]);
+                    const diffOut = git(['diff', '--name-only', `${audit.baselineSha}..${FREEZE_TAG}`]);
+                    if (tagSha === null || !/^[0-9a-f]{40}$/.test(tagSha)) {
+                        verdictFails.push('freeze identity: the tag commit could not be resolved');
+                    } else if (tagSha === audit.baselineSha) {
+                        verdictFails.push('freeze identity: baseline EQUALS the tag commit — no manifest-only commit exists over the baseline');
+                    } else if (diffOut === null) {
+                        verdictFails.push('freeze identity: the baseline→tag diff could not be computed — manifest-only transition unproven');
+                    } else {
+                        const changed = diffOut.split('\n').map((s) => s.trim()).filter((s) => s.length > 0);
+                        const offenders = changed.filter((path) => path !== MANIFEST_REPO_PATH);
+                        if (offenders.length > 0) {
+                            verdictFails.push(
+                                `freeze identity: baseline→tag diff touches non-manifest path(s): ` +
+                                `${offenders.slice(0, 5).join(', ')}${offenders.length > 5 ? ', …' : ''} — the tag is not a manifest-only commit over its baseline`,
+                            );
+                        } else if (changed.length === 0) {
+                            verdictFails.push('freeze identity: the baseline→tag diff is EMPTY — the tag commit does not change the manifest');
+                        }
                     }
                 }
             }

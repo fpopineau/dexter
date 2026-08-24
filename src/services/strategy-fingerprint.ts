@@ -97,8 +97,23 @@ const BEHAVIOR_ENV = [
 const CAPABILITY_ENV = [
     'ANTHROPIC_API_KEY', 'FINANCIAL_DATASETS_API_KEY', 'EXASEARCH_API_KEY',
     'PERPLEXITY_API_KEY', 'TAVILY_API_KEY', 'LANGSEARCH_API_KEY',
+    // Review-25: automatic embedding-provider selection for MEMORY
+    // retrieval depends on these — presence changes what context the
+    // agent recalls.
+    'OPENAI_API_KEY', 'GOOGLE_API_KEY',
     'X_BEARER_TOKEN', 'OLLAMA_BASE_URL', 'VLLM_BASE_URL',
 ] as const;
+
+/** Deterministic JSON with recursively sorted object keys — settings
+ *  round-trip through editors that reorder keys; identity must not. */
+function stableJson(v: unknown): string {
+    if (Array.isArray(v)) return `[${v.map(stableJson).join(',')}]`;
+    if (v !== null && typeof v === 'object') {
+        const o = v as Record<string, unknown>;
+        return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${stableJson(o[k])}`).join(',')}}`;
+    }
+    return JSON.stringify(v) ?? 'null';
+}
 
 /** Review-23, pure: the typed non-secret snapshot of behavior-affecting
  *  environment. Exported for the harness. */
@@ -138,7 +153,17 @@ export function judgmentConfigInput(): string {
     try {
         search = `search:${getSetting<string | null>('webSearchPreferredProvider', null) ?? 'unset'}`;
     } catch { /* settings unreadable */ }
-    return `${cron}|${search}`;
+    // Review-25: memory POLICY (context budget, temporal decay, MMR,
+    // indexing, embedding provider/model) shapes what the agent recalls
+    // at judgment time — canonical raw settings with sorted keys ('unset'
+    // sentinel = the runtime's defaults). Memory CONTENTS stay
+    // operational state, never fingerprinted.
+    let memory = 'memory:unset';
+    try {
+        const m = getSetting<Record<string, unknown> | null>('memory', null);
+        if (m !== null && m !== undefined) memory = `memory:${stableJson(m)}`;
+    } catch { /* settings unreadable */ }
+    return `${cron}|${search}|${memory}`;
 }
 
 /** Review-20/21, pure: split `git status --porcelain=v1 -z` output into
