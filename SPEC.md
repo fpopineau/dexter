@@ -702,3 +702,44 @@ content. Both now hold as written below.
 | REQ-EOD-008 | `unionOrderSnaps` suite (either-view survival, half-blind incomplete); lock wiring integration-untested (honest ledger) |
 | REQ-VAL-022 | `fingerprintFreezeCheck` via scorecard smoke-run: prints sample/current/manifest and FAILS the impure pre-migration window; pure-fn covered by the purity suites |
 | REQ-VAL-023 | classifyWorkingTree NUL-delimited suite (spaces, renames, noise); real-repo codeIdentity test |
+
+## Review-22 response (2026-08-24) — placement-atomic cutoff, no fail-open DAY parents, self-reference resolved, mandatory final manifest
+
+- REQ-GATE-003: the intraday cutoff is ATOMIC with placement.
+  `placeBracketOrder` re-checks the cutoff INSIDE the global order lock
+  — the same lock the triage snapshots hold — immediately before the
+  first placeOrder: an accept that passed the executor's early check at
+  15:51 and spent minutes in its gates either places before the triage
+  lock section (the snapshots see the order) or is refused by the
+  in-lock recheck. Central, so every bracket caller is covered; the
+  executor's early check survives as the friendly fast refusal.
+- REQ-EOD-009: a DAY `:entry` still working in the FINAL postcondition
+  snapshot no longer fails open. `buildRevetBook` RETURNS such orders as
+  `dayEntryViolations` (they stay out of the overnight stress book —
+  they die at the bell — but they can fill UNTIL the bell); the
+  postcondition retries the cancel once through the safe primitive,
+  closes a fill that won the race, and anything still unresolved raises
+  the 🚨 unresolved-excess alarm — triage can no longer stamp
+  'completed' over a working late-fill risk.
+- REQ-VAL-024: the manifest self-reference is resolved BY CONSTRUCTION.
+  Code identity is now `tree.<digest>` over the git TREE/BLOB hashes of
+  the runtime paths (src/, scripts/, root configs, SOUL.md) at HEAD —
+  not the commit SHA — with the dirty overlay scoped to the same paths
+  (`git status/diff -- <runtime paths>`): a docs-only manifest commit
+  leaves the fingerprint it records unchanged (proven by a real
+  temp-repo test: baseline → docs-only commit → identity IDENTICAL →
+  runtime commit → identity changes). Bonus: filling docs no longer
+  dirties the runtime identity at all.
+- REQ-VAL-025: the freeze manifest is MANDATORY for an authoritative
+  verdict. `fingerprintFreezeCheck` gains `requireManifest`; the
+  scorecard sets it when the `validation-freeze-1` tag exists OR
+  `--final` is passed — a missing/unfilled/malformed manifest then
+  FAILS instead of passing as pre-tag diagnostics (both modes verified
+  in smoke runs).
+
+| REQ | Test |
+|---|---|
+| REQ-GATE-003 | in-lock recheck is test-gated wall-clock glue; the decision fn `intradayEntryCutoffReached` carries the suite (honest ledger for the lock wiring) |
+| REQ-EOD-009 | buildRevetBook violation suite (broker-DAY and row-DAY both returned, orphan-GTC still counted); the retry wiring is integration-untested (honest ledger) |
+| REQ-VAL-024 | real-repo docs-only invariance test + tree.<12hex> format tests; this checkout's smoke-run printed tree.…+dirty on the uncommitted tree and clean after commit |
+| REQ-VAL-025 | fingerprintFreezeCheck requireManifest suite (pre-tag null passes, final null FAILS, filled-match passes, mismatch fails); both scorecard modes smoke-verified |

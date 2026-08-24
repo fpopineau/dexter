@@ -457,8 +457,8 @@ describe('buildRevetBook (review-19 — the postcondition book is broker truth)'
         const b = buildRevetBook({
             positions: [],
             orders: [
-                ord('DDD', 'P-DD01:entry', { tif: 'DAY' }),  // broker says DAY → dies at the bell
-                ord('EEE', 'P-EE01:entry', { tif: null }),   // broker silent, row says DAY → skip
+                ord('DDD', 'P-DD01:entry', { tif: 'DAY' }),  // broker says DAY → out of the stress book…
+                ord('EEE', 'P-EE01:entry', { tif: null }),   // broker silent, row says DAY → same
                 ord('FFF', 'P-FF01:entry', { tif: null }),   // broker silent, NO row → count
             ],
             rows: [row('P-DD01', 'DDD'), row('P-EE01', 'EEE', { tif: 'DAY' })],
@@ -467,6 +467,14 @@ describe('buildRevetBook (review-19 — the postcondition book is broker truth)'
         });
         expect(b.candidates.map((c) => c.symbol)).toEqual(['FFF']);
         expect(b.candidates[0].label).toContain('ORPHAN');
+        // …but review-22: a DAY :entry still working in the POSTCONDITION
+        // snapshot is a flat-by-close VIOLATION (its triage cancel failed
+        // or was missed — it can fill until the bell). Returned for the
+        // caller's retry-and-alarm, never silently skipped.
+        expect(b.dayEntryViolations).toEqual([
+            { symbol: 'DDD', id: 'P-DD01' },
+            { symbol: 'EEE', id: 'P-EE01' },
+        ]);
     });
 
     test('bets count at their own gap severity, never trimmable; no-row positions stay counted-but-exempt', () => {

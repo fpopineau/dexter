@@ -79,10 +79,13 @@ positive expectancy after costs, not improved loss control.
   provenance line, the ratified `risk-rules.live.yaml` numbers, the
   broker-behavior observation records and any recorded waivers.
 - **Strategy fingerprint — the machine-checked freeze** (2026-08-24,
-  widened by review-18): every proposal row and every equity sample is
-  stamped with a 12-hex digest of the effective risk rules + SOUL.md +
-  `.dexter/RULES.md` + every discovered skill's SKILL.md + the
-  configured provider:model pair + the running code commit (git HEAD)
+  widened by review-18, tree-based per review-22): every proposal row
+  and every equity sample is stamped with a 12-hex digest of the
+  effective risk rules + SOUL.md + `.dexter/RULES.md` + every
+  discovered skill's SKILL.md + the configured provider:model pair +
+  the runtime-path TREE identity (git tree/blob hashes of src/,
+  scripts/ and root configs — not the commit SHA, so a docs-only
+  manifest commit leaves the fingerprint unchanged)
   (`src/services/strategy-fingerprint.ts`). The scorecard REFUSES a
   window that mixes fingerprints or contains absent stamps — a
   mid-sample rules edit, profile flip, judgment-doc or skill rewrite,

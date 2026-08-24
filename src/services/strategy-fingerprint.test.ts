@@ -72,10 +72,10 @@ describe('classifyWorkingTree (review-20/21 — RUNTIME dirty, NUL-delimited, sp
     });
 });
 
-describe('codeIdentity (review-19 — HEAD alone misses dirty state)', () => {
-    test('in this checkout: a 40-hex sha, optionally +dirty.<12-hex> — never a bare lie', async () => {
+describe('codeIdentity (review-19/22 — tree-based, dirty-content-aware)', () => {
+    test('in this checkout: tree.<12-hex>, optionally +dirty.<12-hex> — never a bare lie', async () => {
         const id = await codeIdentity();
-        expect(id).toMatch(/^[0-9a-f]{40}(\+dirty\.[0-9a-f]{12})?$/);
+        expect(id).toMatch(/^tree\.[0-9a-f]{12}(\+dirty\.[0-9a-f]{12})?$/);
     });
 
     test('outside any repo: null (identity unprovable → the fingerprint fails closed)', async () => {
@@ -116,7 +116,7 @@ describe('codeIdentity on a REAL temporary repository (review-21)', () => {
         g('commit', '-qm', 'init');
 
         const clean = await codeIdentity(dir);
-        expect(clean).toMatch(/^[0-9a-f]{40}$/);
+        expect(clean).toMatch(/^tree\.[0-9a-f]{12}$/);
 
         writeFileSync(join(dir, 'src', 'a.ts'), 'v2');
         const dirty1 = await codeIdentity(dir);
@@ -138,6 +138,38 @@ describe('codeIdentity on a REAL temporary repository (review-21)', () => {
         writeFileSync(join(dir, 'notes.txt'), 'irrelevant');
         expect(await codeIdentity(dir)).toBe(dirty3);
     });
+
+    test('review-22: a DOCS-ONLY commit leaves the identity unchanged — the manifest workflow cannot perturb the fingerprint it records', async () => {
+        const { execFileSync } = await import('node:child_process');
+        const dir = mkdtempSync(join(tmpdir(), 'dexter-treeid-'));
+        const g = (...args: string[]) => execFileSync('git', args, { cwd: dir });
+        g('init', '-q');
+        g('config', 'user.email', 'test@dexter');
+        g('config', 'user.name', 'dexter-test');
+        g('config', 'commit.gpgsign', 'false');
+        mkdirSync(join(dir, 'src'), { recursive: true });
+        mkdirSync(join(dir, 'docs'), { recursive: true });
+        writeFileSync(join(dir, 'src', 'a.ts'), 'runtime');
+        writeFileSync(join(dir, 'docs', 'MANIFEST.md'), 'fingerprint: _pending_');
+        g('add', '.');
+        g('commit', '-qm', 'baseline');
+        const baseline = await codeIdentity(dir);
+        expect(baseline).toMatch(/^tree\.[0-9a-f]{12}$/);
+
+        // The manifest workflow: fill the doc, commit docs-only. Under the
+        // old HEAD-based identity this changed the fingerprint the
+        // manifest had just recorded — self-referential by construction.
+        writeFileSync(join(dir, 'docs', 'MANIFEST.md'), 'fingerprint: abc123abc123');
+        g('add', 'docs');
+        g('commit', '-qm', 'manifest only');
+        expect(await codeIdentity(dir)).toBe(baseline);
+
+        // A RUNTIME commit does change it.
+        writeFileSync(join(dir, 'src', 'a.ts'), 'runtime v2');
+        g('add', 'src');
+        g('commit', '-qm', 'runtime change');
+        expect(await codeIdentity(dir)).not.toBe(baseline);
+    });
 });
 
 describe('strategyFingerprint (the gathered digest)', () => {
@@ -146,6 +178,23 @@ describe('strategyFingerprint (the gathered digest)', () => {
         const b = await strategyFingerprint();
         expect(b).toBe(a);
         if (a !== null) expect(a).toMatch(/^[0-9a-f]{12}$/);
+    });
+});
+
+describe('fingerprintFreezeCheck requireManifest (review-22 — a missing manifest must not pass a FINAL evaluation)', () => {
+    test('pre-tag: null manifest is diagnostics; final: it fails', async () => {
+        const { fingerprintFreezeCheck } = await import('@/utils/equity-series-math.js');
+        const fp = 'abc123abc123';
+        // Pre-tag diagnostics: sample==current with no manifest passes.
+        expect(fingerprintFreezeCheck({ sampleFp: fp, currentFp: fp, manifestFp: null }).ok).toBe(true);
+        // Final evaluation (tag exists or --final): the manifest is REQUIRED.
+        const final = fingerprintFreezeCheck({ sampleFp: fp, currentFp: fp, manifestFp: null, requireManifest: true });
+        expect(final.ok).toBe(false);
+        expect(final.problems.some((p) => p.includes('REQUIRED'))).toBe(true);
+        // A filled, matching manifest passes final.
+        expect(fingerprintFreezeCheck({ sampleFp: fp, currentFp: fp, manifestFp: fp, requireManifest: true }).ok).toBe(true);
+        // A mismatched one fails regardless of mode.
+        expect(fingerprintFreezeCheck({ sampleFp: fp, currentFp: fp, manifestFp: 'def456def456', requireManifest: true }).ok).toBe(false);
     });
 });
 

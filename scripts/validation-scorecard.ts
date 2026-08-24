@@ -778,8 +778,18 @@ if (fpValues.length > 0) {
         const m = /Strategy fingerprint[^|\n]*\|\s*([0-9a-f]{12})\s*\|/.exec(man);
         manifestFp = m ? m[1] : null;
     } catch { manifestFp = null; }
-    const freeze = fingerprintFreezeCheck({ sampleFp, currentFp, manifestFp });
-    console.log(`freeze identity: sample=${sampleFp ?? 'n/a'} current=${currentFp ?? 'UNRESOLVABLE'} manifest=${manifestFp ?? 'not filled (pre-tag)'}${freeze.ok ? ' — MATCH' : ''}`);
+    // Review-22: once the freeze tag exists (or on an explicit --final
+    // run) the manifest is MANDATORY — a missing/unfilled/malformed
+    // manifest must fail an authoritative verdict, never pass as
+    // pre-tag diagnostics.
+    let tagExists = false;
+    try {
+        const { execFileSync } = await import('node:child_process');
+        tagExists = execFileSync('git', ['tag', '-l', 'validation-freeze-1'], { timeout: 10_000 }).toString().trim().length > 0;
+    } catch { /* git unavailable — --final still forces the requirement */ }
+    const finalMode = process.argv.includes('--final') || tagExists;
+    const freeze = fingerprintFreezeCheck({ sampleFp, currentFp, manifestFp, requireManifest: finalMode });
+    console.log(`freeze identity: sample=${sampleFp ?? 'n/a'} current=${currentFp ?? 'UNRESOLVABLE'} manifest=${manifestFp ?? 'not filled'}${finalMode ? ' [FINAL — manifest required]' : ' (pre-tag diagnostics)'}${freeze.ok ? ' — MATCH' : ''}`);
     for (const p of freeze.problems) verdictFails.push(`freeze identity: ${p}`);
 }
 

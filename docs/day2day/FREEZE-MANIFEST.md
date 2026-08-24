@@ -25,12 +25,17 @@ freeze identity is therefore split:
    row and equity sample is stamped with a 12-hex digest of: the
    effective risk rules, SOUL.md, `.dexter/RULES.md`, every discovered
    skill's SKILL.md (built-in and project), the configured
-   provider:model pair, and the running code commit (git HEAD)
-   (src/services/strategy-fingerprint.ts). The scorecard REFUSES a
-   window that mixes fingerprints or contains absent stamps, so a
-   mid-sample edit on ANY of those surfaces — including a code deploy —
-   is detected without trusting this document. The per-trade `model`
-   column additionally pins which model proposed each trade.
+   provider:model pair, and the RUNTIME-PATH TREE identity
+   (src/services/strategy-fingerprint.ts). Review-22: the code half is
+   the git tree/blob hashes of src/, scripts/ and the root runtime
+   configs — NOT the commit SHA — so committing THIS manifest (a
+   docs-only commit) leaves the fingerprint it records unchanged; the
+   self-reference is resolved by construction. The scorecard REFUSES a
+   window that mixes fingerprints or contains absent stamps, compares
+   sample = current = manifest three ways, and once the tag exists (or
+   with `--final`) a missing manifest fingerprint FAILS the evaluation.
+   The per-trade `model` column additionally pins which model proposed
+   each trade.
 
 | Field | Value |
 |---|---|

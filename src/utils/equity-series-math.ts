@@ -76,6 +76,10 @@ export function fingerprintFreezeCheck(input: {
     currentFp: string | null;
     /** Parsed from the freeze manifest; null = not yet filled. */
     manifestFp: string | null;
+    /** Review-22: true once the freeze tag exists (or in an explicit
+     *  final evaluation) — a missing/unfilled/malformed manifest then
+     *  FAILS instead of passing as pre-tag diagnostics. */
+    requireManifest?: boolean;
 }): { ok: boolean; problems: string[] } {
     const problems: string[] = [];
     if (input.sampleFp === null) problems.push('no single sample fingerprint (window impure)');
@@ -85,6 +89,9 @@ export function fingerprintFreezeCheck(input: {
     }
     if (input.manifestFp !== null && input.sampleFp !== null && input.manifestFp !== input.sampleFp) {
         problems.push(`manifest fingerprint ${input.manifestFp} != sample ${input.sampleFp}`);
+    }
+    if (input.requireManifest && input.manifestFp === null) {
+        problems.push('freeze manifest fingerprint missing/unfilled/unreadable — REQUIRED once the tag exists (final evaluation)');
     }
     return { ok: problems.length === 0, problems };
 }

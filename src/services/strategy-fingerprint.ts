@@ -13,10 +13,13 @@
  * ABSENT and refuses (review-19: hashing 'absent' into a valid digest
  * let a whole identity-less window pass purity):
  *   - the EFFECTIVE risk rules (post profile override);
- *   - the code identity: git HEAD SHA plus a dirty-state digest, read
- *     via the git BINARY (`rev-parse` + `status --porcelain`), which
- *     also resolves worktrees and submodules where `.git` is a file —
- *     a dirty checkout is a distinct (and suspect) identity, not clean;
+ *   - the code identity: a digest of the runtime paths' git tree/blob
+ *     hashes at HEAD plus a content digest of any runtime drift, read
+ *     via the git BINARY (worktrees and submodules where `.git` is a
+ *     file resolve correctly). Tree-based, NOT the commit SHA —
+ *     review-22: a docs-only commit (the manifest workflow) must leave
+ *     the identity unchanged. A dirty runtime checkout is a distinct
+ *     (and suspect) identity, not clean;
  *   - the configured provider:model pair (settings.json — the runtime's
  *     configured identity; the per-trade `model` column separately pins
  *     what actually proposed each trade).
@@ -49,10 +52,14 @@ async function execGit(args: string[], cwd: string): Promise<string | null> {
     }
 }
 
-/** Untracked paths that shape runtime behavior — everything else
- *  (.claude/, docs, editor droppings, data dirs) is identity-irrelevant
- *  noise that must not mark the checkout dirty. Tracked changes are
- *  ALWAYS relevant (git already decided those files matter). */
+/** The paths that shape runtime behavior. Code identity is derived from
+ *  THESE (tree/blob hashes at HEAD + their working-tree drift), never
+ *  from the commit SHA — review-22: HEAD made the freeze manifest
+ *  self-referential by construction (recording the fingerprint in the
+ *  manifest changed HEAD and with it the fingerprint). A docs-only
+ *  commit leaves every one of these objects — and so the identity —
+ *  unchanged. */
+const RUNTIME_PATHS = ['src', 'scripts', 'package.json', 'bunfig.toml', 'tsconfig.json', 'SOUL.md'];
 const RUNTIME_UNTRACKED = /^(src|scripts)\/|^(package\.json|bunfig\.toml|tsconfig\.json|SOUL\.md)$/;
 
 /** Review-20/21, pure: split `git status --porcelain=v1 -z` output into
@@ -79,30 +86,42 @@ export function classifyWorkingTree(statusZ: string): { hasTrackedChanges: boole
     return { hasTrackedChanges, untrackedRuntime: untrackedRuntime.sort() };
 }
 
-/** The running code identity: `<HEAD sha>` for a runtime-clean checkout,
- *  `<sha>+dirty.<digest>` otherwise — where the digest is over the
- *  actual CONTENT of the drift (review-20: hashing status output alone
- *  meant further edits to an already-dirty file left the identity
- *  unchanged): `git diff --binary HEAD` for tracked changes, plus the
- *  contents of runtime-relevant untracked files. Identity-irrelevant
- *  untracked noise (.claude/, docs) does not dirty the checkout. Null
- *  when git cannot prove any half — required surface, so null fails the
- *  whole fingerprint closed (an unreadable untracked runtime file, or an
- *  untracked runtime DIRECTORY, is unprovable content → null; commit or
+/** The running code identity: `tree.<digest>` for a runtime-clean
+ *  checkout — a digest over the git TREE/BLOB hashes of the runtime
+ *  paths at HEAD (review-22: invariant under a docs-only commit, so the
+ *  manifest workflow cannot perturb the fingerprint it records) — and
+ *  `tree.<digest>+dirty.<digest>` when runtime paths drift, where the
+ *  dirty digest is over the actual CONTENT of the drift (review-20:
+ *  names alone let further edits to a dirty file pass unchanged):
+ *  `git diff --binary HEAD -- <runtime paths>` plus the contents of
+ *  runtime-relevant untracked files. Docs/.claude/manifest edits —
+ *  tracked or not — never touch the identity. Null when git cannot
+ *  prove any half — required surface, so null fails the whole
+ *  fingerprint closed (an unreadable untracked runtime file, or an
+ *  untracked runtime DIRECTORY, is unprovable content; commit or
  *  remove it). */
 export async function codeIdentity(cwd = process.cwd()): Promise<string | null> {
-    const sha = await execGit(['rev-parse', 'HEAD'], cwd);
-    if (sha === null || !/^[0-9a-f]{40}$/.test(sha)) return null;
+    const parts: string[] = [];
+    let anyPresent = false;
+    for (const p of RUNTIME_PATHS) {
+        const obj = await execGit(['rev-parse', `HEAD:${p}`], cwd);
+        if (obj !== null && !/^[0-9a-f]{40}$/.test(obj)) return null; // git spoke, but not an object hash
+        if (obj !== null) anyPresent = true;
+        parts.push(`${p}:${obj ?? 'absent'}`);
+    }
+    if (!anyPresent) return null; // not a repo, or nothing runtime-tracked — identity unprovable
+    const base = createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 12);
     // -z: NUL-delimited, unquoted paths (spaces survive); untracked-files
     // =all lists files INSIDE untracked directories individually and
-    // overrides any config that would suppress untracked output.
-    const status = await execGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'], cwd);
+    // overrides any config that would suppress untracked output. Scoped
+    // to the runtime paths: docs edits do not dirty the identity.
+    const status = await execGit(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--', ...RUNTIME_PATHS], cwd);
     if (status === null) return null; // a clean state we cannot PROVE is not clean
     const tree = classifyWorkingTree(status);
-    if (!tree.hasTrackedChanges && tree.untrackedRuntime.length === 0) return sha;
+    if (!tree.hasTrackedChanges && tree.untrackedRuntime.length === 0) return `tree.${base}`;
     const h = createHash('sha256');
     if (tree.hasTrackedChanges) {
-        const diff = await execGit(['diff', '--binary', 'HEAD'], cwd);
+        const diff = await execGit(['diff', '--binary', 'HEAD', '--', ...RUNTIME_PATHS], cwd);
         if (diff === null) return null;
         h.update(diff);
     }
@@ -111,7 +130,7 @@ export async function codeIdentity(cwd = process.cwd()): Promise<string | null> 
         if (content === null) return null; // content unprovable → identity unprovable
         h.update(p).update(' ').update(content).update(' ');
     }
-    return `${sha}+dirty.${h.digest('hex').slice(0, 12)}`;
+    return `tree.${base}+dirty.${h.digest('hex').slice(0, 12)}`;
 }
 
 /** Diagnostic fallback: HEAD sha by parsing .git directly (no dirty

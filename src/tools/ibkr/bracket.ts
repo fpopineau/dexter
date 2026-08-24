@@ -19,6 +19,7 @@ import { withOrderLock } from './order-lock.js';
 import { getNextValidOrderId } from './orders.js';
 import { getRiskRules } from './risk-rules.js';
 import { isValidQuantity } from '@/services/position-sizer.js';
+import { intradayEntryCutoffReached, isMarketHalfDay } from '@/utils/market-hours.js';
 
 /** How long placement waits for the broker's first reaction per bracket.
  *  TWS acks in tens of ms on a healthy link; 4s absorbs a loaded gateway
@@ -134,6 +135,26 @@ export async function placeBracketOrder(req: BracketRequest): Promise<BracketRes
     // The whole id-grant → three placeOrder calls sequence must be atomic
     // vs any other placement (ids N, N+1, N+2 are assumed contiguous).
     return withOrderLock(async () => {
+        // Review-22 P1: the intraday cutoff is RE-CHECKED here, under the
+        // SAME lock the EOD triage holds for its final snapshots — an
+        // accept that passed the executor's early check at 15:51 and then
+        // spent minutes in its gates cannot place a DAY bracket AFTER the
+        // triage snapshot sequence: either this placement's lock section
+        // runs first (the snapshots see the order), or triage ran first
+        // and this recheck refuses. Central so EVERY bracket caller is
+        // covered. Test-gated (wall clock), like the executor's gate.
+        if (process.env.NODE_ENV !== 'test' && (req.tif ?? 'DAY') !== 'GTC') {
+            const nowEt = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+            const todayIso = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+            const closeMin = isMarketHalfDay(todayIso) ? 13 * 60 : 16 * 60;
+            if (intradayEntryCutoffReached(nowEt.getHours() * 60 + nowEt.getMinutes(), closeMin)) {
+                throw new Error(
+                    '[session-gate] intraday entries are CLOSED for today (re-checked under the order lock at ' +
+                    'placement — the accept outlived the cutoff while its gates ran). Wait for the next session, ' +
+                    'or propose a GTC swing through its overnight gates.',
+                );
+            }
+        }
         const api = await getIBApi();
         // Paper/live verification against the ACTUAL account codes — refuses
         // while they are still unknown (fail closed, not fail open).

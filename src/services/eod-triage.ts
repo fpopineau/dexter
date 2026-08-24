@@ -50,7 +50,7 @@ import { findUpcomingEarnings, nextTradingDates, type UpcomingEarnings } from '.
 import { getMacroEventsWithin, macroNightWarning } from './event-risk.js';
 import { barTimeFrameMs } from './outcome-tracker.js';
 import { closePosition, fetchPositions } from './position-actions.js';
-import { listTrackable, type TradeProposal } from './trade-proposals.js';
+import { getProposal, listTrackable, type TradeProposal } from './trade-proposals.js';
 import { cancelEntryLeg } from './stale-entry-sweeper.js';
 import type { BrokerOrderSnap } from './broker-adopt.js';
 import { getRiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
@@ -199,9 +199,10 @@ export function buildRevetBook(input: {
     rows: Array<Pick<TradeProposal, 'id' | 'symbol' | 'tradeClass' | 'worstCaseGapPct' | 'entry' | 'entryLimit' | 'tif' | 'quantity'>>;
     lastBySymbol: Map<string, number>;
     baseStress: number;
-}): { candidates: OvernightVetCandidate[]; unpriced: string[] } {
+}): { candidates: OvernightVetCandidate[]; unpriced: string[]; dayEntryViolations: Array<{ symbol: string; id: string }> } {
     const candidates: OvernightVetCandidate[] = [];
     const unpriced: string[] = [];
+    const dayEntryViolations: Array<{ symbol: string; id: string }> = [];
     const rowById = new Map(input.rows.map((r) => [r.id.toUpperCase(), r]));
     const rowBySymbol = new Map<string, (typeof input.rows)[number]>();
     for (const r of input.rows) if (!rowBySymbol.has(r.symbol)) rowBySymbol.set(r.symbol, r);
@@ -234,11 +235,18 @@ export function buildRevetBook(input: {
         const m = /^(P-[0-9A-F]{4}):entry$/.exec(o.orderRef ?? '');
         if (!m) continue;
         const row = rowById.get(m[1]) ?? null;
-        // A DAY parent dies at the bell — no overnight exposure. Broker
-        // truth decides when it speaks; the row only fills its silence;
-        // fully unknown counts (conservative).
-        if (o.tif === 'DAY') continue;
-        if (o.tif === null && row !== null && row.tif !== 'GTC') continue;
+        // A DAY parent dies at the bell — no overnight exposure for the
+        // STRESS book. But review-22 P1: a DAY :entry still working in the
+        // POSTCONDITION snapshot means a triage cancel failed or was
+        // missed — it can fill until the bell (flat-by-close violation),
+        // so it is RETURNED for the caller to retry-cancel and alarm on,
+        // never silently skipped. Broker truth decides the TIF when it
+        // speaks; the row only fills its silence; fully unknown counts
+        // in the stress book (conservative).
+        if (o.tif === 'DAY' || (o.tif === null && row !== null && row.tif !== 'GTC')) {
+            dayEntryViolations.push({ symbol: o.symbol, id: m[1] });
+            continue;
+        }
         const qty = o.quantity ?? row?.quantity ?? null;
         if (qty === null || !(qty > 0)) { unpriced.push(o.symbol); continue; }
         const basisOrder = Math.max(o.auxPrice ?? 0, o.lmtPrice ?? 0);
@@ -256,7 +264,7 @@ export function buildRevetBook(input: {
             ...(isBet ? { trimExempt: true, stressPctOverride: Math.max(input.baseStress, row?.worstCaseGapPct ?? 0) } : {}),
         });
     }
-    return { candidates, unpriced };
+    return { candidates, unpriced, dayEntryViolations };
 }
 
 export function vetOvernightBook(
@@ -1117,6 +1125,36 @@ async function runEodTriageCore(today: string, dryRun: boolean): Promise<void> {
         const problems: string[] = [];
         if (positionsSnapFailed) problems.push('the final POSITIONS snapshot FAILED — the postcondition ran on pre-action positions');
         if (!snap.complete) problems.push('the open-orders snapshot was INCOMPLETE — resting-entry exposure is unproven');
+        // Review-22 P1: a DAY :entry still working in the FINAL snapshot is
+        // a flat-by-close violation (a triage cancel failed or was missed —
+        // it can fill until the bell). One bounded retry through the safe
+        // primitive; a fill that won the race closes on the spot; anything
+        // still unresolved alarms.
+        if (built.dayEntryViolations.length > 0) {
+            const stillWorking: string[] = [];
+            for (const v of built.dayEntryViolations) {
+                const row = await getProposal(v.id).catch(() => null);
+                const cancelled = row !== null && await cancelEntryLeg(row, 'EOD postcondition — flat-by-close violation (DAY entry still working)')
+                    .catch(() => false);
+                if (cancelled) {
+                    lines.push(`• ${v.symbol} (${v.id}): DAY entry was STILL WORKING after triage — cancelled on the postcondition retry.`);
+                    continue;
+                }
+                const nowPos = (await fetchPositions(api).catch(() => [])).find((p) => p.symbol === v.symbol && p.quantity !== 0);
+                if (nowPos && !closedSymbols.has(v.symbol)) {
+                    const outcome = await closePosition(v.symbol, 'EOD postcondition (flat by close — entry filled after triage)');
+                    if (outcome.state === 'filled' && outcome.flat === true) {
+                        closedSymbols.add(v.symbol);
+                        lines.push(`• ${v.symbol} (${v.id}): DAY entry FILLED after triage — closed on the postcondition retry.`);
+                        continue;
+                    }
+                }
+                stillWorking.push(`${v.symbol} (${v.id})`);
+            }
+            if (stillWorking.length > 0) {
+                problems.push(`flat-by-close VIOLATION: DAY entry parent(s) still working after triage: ${stillWorking.join(', ')} — cancel in TWS NOW or a late fill rides the night unvetted`);
+            }
+        }
         const unpriceable = [...new Set([...markGaps, ...built.unpriced])];
         if (unpriceable.length > 0) problems.push(`unpriceable at market: ${unpriceable.join(', ')} (cost basis counted where available)`);
         if (revet && revet.trims.length > 0) {
