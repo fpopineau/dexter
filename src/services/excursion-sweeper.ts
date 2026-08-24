@@ -202,6 +202,7 @@ export async function sweepExcursionsOnce(): Promise<{ filled: number; skipped: 
 }
 
 let job: Cron | null = null;
+let bootTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Start the nightly sweep + a delayed boot catch-up (idempotent). */
 export function startExcursionSweeper(): void {
@@ -212,12 +213,18 @@ export function startExcursionSweeper(): void {
     logger.info('[excursion-sweeper] scheduled 02:17 ET: backfill MFE/MAE on closed rows missing excursion data');
     if (process.env.NODE_ENV !== 'test') {
         // Boot catch-up, delayed so the IBKR connection settles first.
-        setTimeout(() => {
+        // Review-35: tracked + self-guarded so it dies with stop instead of
+        // sweeping (market-data requests, DB writes) after shutdown.
+        const t: ReturnType<typeof setTimeout> = setTimeout(() => {
+            if (bootTimer !== t) return; // stopped while queued
+            bootTimer = null;
             sweepExcursionsOnce().catch((err) => logger.error(`[excursion-sweeper] boot catch-up failed: ${err}`));
         }, 45_000);
+        bootTimer = t;
     }
 }
 
 export function stopExcursionSweeper(): void {
+    if (bootTimer) { clearTimeout(bootTimer); bootTimer = null; }
     if (job) { job.stop(); job = null; }
 }

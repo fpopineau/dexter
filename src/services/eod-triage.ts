@@ -1350,7 +1350,7 @@ function markTriageRun(date: string, status: TriageRunStamp['status']): void {
     }
 }
 
-async function checkMissedTriage(): Promise<void> {
+async function checkMissedTriage(gen: number): Promise<void> {
     const now = new Date();
     const todayIso = now.toLocaleDateString('en-CA', { timeZone: ET });
     const et = new Date(now.toLocaleString('en-US', { timeZone: ET }));
@@ -1364,6 +1364,10 @@ async function checkMissedTriage(): Promise<void> {
         isTradingDay,
         closeMinutes,
     );
+    // Review-35: everything above is synchronous, so this single check is
+    // atomic with entering the order-capable run below — a catch-up
+    // dispatched before stop can never place orders or alert afterwards.
+    if (gen !== lifecycleGen) return;
     if (action === 'run-late') {
         logger.warn('[eod-triage] today\'s pre-close slot was missed (gateway was down) — running catch-up triage now');
         await runEodTriageOnce();
@@ -1382,6 +1386,21 @@ let job: Cron | null = null;
 let halfDayJob: Cron | null = null;
 let previewJob: Cron | null = null;
 let previewHalfDayJob: Cron | null = null;
+// Review-35 (P1): the boot catch-up used to be an UNTRACKED setTimeout —
+// it survived stopEodTriage() and could fire runEodTriageOnce (market
+// close orders) after gateway shutdown. The timer is now tracked and
+// cleared, and the lifecycle generation is re-checked before acting so
+// a callback already sitting in the event-loop queue when stop ran
+// (clearTimeout cannot recall those) never reaches order placement.
+let catchUpTimer: ReturnType<typeof setTimeout> | null = null;
+let lifecycleGen = 0;
+
+/** Review-35 (exported for tests): the current triage lifecycle
+ *  generation. stopEodTriage() bumps it, invalidating every catch-up
+ *  dispatched under an earlier generation. */
+export function eodLifecycleGen(): number {
+    return lifecycleGen;
+}
 
 /** True when the slot firing now is the right one for today: the 12:52
  *  slot on half-days, the 15:52 slot otherwise. The other slot yields. */
@@ -1419,13 +1438,17 @@ export function startEodTriage(): void {
     // alert bridge finish wiring first. Wall-clock dependent — gated off in
     // tests like the other session-time logic (the pure decision is tested).
     if (process.env.NODE_ENV !== 'test') {
-        setTimeout(() => {
-            checkMissedTriage().catch((err) => logger.error(`[eod-triage] catch-up check failed: ${err}`));
+        const gen = lifecycleGen;
+        catchUpTimer = setTimeout(() => {
+            catchUpTimer = null;
+            checkMissedTriage(gen).catch((err) => logger.error(`[eod-triage] catch-up check failed: ${err}`));
         }, 15_000);
     }
 }
 
 export function stopEodTriage(): void {
+    lifecycleGen++; // review-35: invalidate any catch-up already dispatched or queued
+    if (catchUpTimer) { clearTimeout(catchUpTimer); catchUpTimer = null; }
     if (previewHalfDayJob) { previewHalfDayJob.stop(); previewHalfDayJob = null; }
     if (previewJob) { previewJob.stop(); previewJob = null; }
     if (halfDayJob) { halfDayJob.stop(); halfDayJob = null; }

@@ -561,3 +561,19 @@ describe('classifyViolationResolution (review-24 — an absent parent may have F
         expect(classifyViolationResolution({ parentStillWorking: false, positionQty: null })).toBe('unproven');
     });
 });
+
+describe('lifecycle generation (review-35 — the boot catch-up dies with stop)', () => {
+    test('stopEodTriage bumps the generation, invalidating every dispatched catch-up', async () => {
+        // The P1: an untracked 15s setTimeout survived stopEodTriage() and
+        // could fire runEodTriageOnce (market close orders) after gateway
+        // shutdown. The callback captures the generation at scheduling and
+        // checkMissedTriage refuses to act under a stale one; this pins the
+        // invalidation property (the timer clearing itself is stop glue).
+        const { eodLifecycleGen, stopEodTriage } = await import('./eod-triage.js');
+        const genAtSchedule = eodLifecycleGen();
+        stopEodTriage(); // bumps even when no jobs are running — stop always invalidates
+        expect(eodLifecycleGen()).toBe(genAtSchedule + 1);
+        stopEodTriage();
+        expect(eodLifecycleGen()).toBe(genAtSchedule + 2);
+    });
+});

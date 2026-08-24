@@ -114,6 +114,9 @@ export async function sampleEquityOnce(): Promise<EquitySample | null> {
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
+// Review-35: tracked so stop can clear it — the untracked boot sample
+// survived shutdown and could append to the series from a dead lifecycle.
+let bootTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Start the sampler (idempotent). */
 export function startEquitySeries(): void {
@@ -122,13 +125,17 @@ export function startEquitySeries(): void {
         sampleEquityOnce().catch((err) => logger.warn(`[equity-series] sample failed: ${err}`));
     }, SAMPLE_INTERVAL_MS);
     if (process.env.NODE_ENV !== 'test') {
-        setTimeout(() => {
+        const t: ReturnType<typeof setTimeout> = setTimeout(() => {
+            if (bootTimer !== t) return; // review-35: stopped while queued
+            bootTimer = null;
             sampleEquityOnce().catch((err) => logger.warn(`[equity-series] boot sample failed: ${err}`));
         }, BOOT_DELAY_MS);
+        bootTimer = t;
     }
     logger.info(`[equity-series] started: marked NetLiq every ${SAMPLE_INTERVAL_MS / 60_000}min → ${equitySeriesPath()} (portfolio-drawdown criterion, VALIDATION-PROTOCOL.md)`);
 }
 
 export function stopEquitySeries(): void {
+    if (bootTimer) { clearTimeout(bootTimer); bootTimer = null; }
     if (timer) { clearInterval(timer); timer = null; }
 }

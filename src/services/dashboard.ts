@@ -246,6 +246,9 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
 }
 
 let server: Server | null = null;
+// Review-35: tracked so stop can clear it — the untracked EADDRINUSE
+// retry could RESURRECT the dashboard after stopDashboard().
+let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function isDashboardEnabled(): boolean {
     return (process.env.DASHBOARD ?? 'true').trim().toLowerCase() !== 'false';
@@ -276,7 +279,12 @@ export function startDashboard(): void {
             logger.warn(`[dashboard] port ${port} busy (previous instance still up?) — retrying in 15s`);
             try { server?.close(); } catch { /* not listening */ }
             server = null;
-            setTimeout(() => startDashboard(), 15_000);
+            const t: ReturnType<typeof setTimeout> = setTimeout(() => {
+                if (retryTimer !== t) return; // review-35: stopped — never resurrect
+                retryTimer = null;
+                startDashboard();
+            }, 15_000);
+            retryTimer = t;
             return;
         }
         logger.error(`[dashboard] server error: ${err}`);
@@ -287,5 +295,6 @@ export function startDashboard(): void {
 }
 
 export function stopDashboard(): void {
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
     if (server) { server.close(); server = null; }
 }

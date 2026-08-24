@@ -1144,3 +1144,43 @@ content. Both now hold as written below.
 |---|---|
 | REQ-VAL-051 | writer suite: invalid data dir → stop returns false twice (latch honest on double-stop), restart re-arms, healthy stop confirms true; clean-stop path asserts true in the race test |
 | REQ-VAL-052 | ordering is gateway shutdown glue — integration-untested (honest ledger); the property (no order-capable timer scheduled during the await) holds by construction in the reordered sequence |
+
+## Review-35 response (2026-08-24) — no timer survives its stop, one shared stop verdict
+
+- REQ-VAL-053 (P1; corrects REQ-VAL-052's "holds by construction"
+  overclaim — it was FALSE): EOD triage's 15s boot catch-up was an
+  UNTRACKED setTimeout that survived stopEodTriage() and could fire
+  runEodTriageOnce (market close orders) after gateway shutdown. The
+  timer is now tracked and cleared, and a LIFECYCLE GENERATION guards
+  the dispatched-callback window clearTimeout cannot recall: the
+  callback captures the generation at scheduling, stop increments it,
+  and checkMissedTriage re-checks before acting — the check is
+  synchronous-atomic with entering the order-capable run (and also
+  suppresses post-stop alerts/stamps). In-flight runs remain bounded
+  by their own postconditions, as before.
+- REQ-VAL-054 (class sweep): the same defect existed in FIVE more
+  services — kill-switch guardian's 5s startup tick and the
+  stale-entry sweeper's 5s boot sweep (both CANCEL broker orders),
+  equity-series' boot sample (post-stop series writes), the excursion
+  sweeper's 45s boot catch-up (market-data + DB writes), and the
+  dashboard's EADDRINUSE retry (which could RESURRECT the server after
+  stopDashboard). Each timer is now tracked, cleared by its stop, and
+  self-guarded at callback entry (timer-identity check covers a
+  callback already queued when stop ran). outcome-tracker and
+  opportunity-engine were audited clean (tracked timers + lifecycle
+  flags).
+- REQ-VAL-055 (P2; corrects REQ-VAL-051's concurrency hole):
+  concurrent stops share ONE verdict. The completed-boolean latch
+  raced — caller A cleared the timer and awaited the failing write
+  while caller B saw timer null with no verdict latched and returned
+  vacuous true; Promise.all([stop, stop]) yielded [false, true] for
+  one failed marker (reviewer-reproduced). stopRuntimeAttestation is
+  now deliberately non-async: the shared stopPromise is assigned
+  before any suspension point, every caller awaits the same promise,
+  and only startRuntimeAttestation (a new lifecycle) resets it.
+
+| REQ | Test |
+|---|---|
+| REQ-VAL-053 | eod-triage suite: stop bumps the generation, invalidating every dispatched catch-up (the invalidation property); timer clearing + gen wiring are stop glue (honest ledger) |
+| REQ-VAL-054 | pattern-identical stop glue across five services — integration-untested (honest ledger); the guard shape (tracked timer + identity check at entry) is uniform and reviewed per site |
+| REQ-VAL-055 | writer suite: Promise.all double-stop → [false, false] on a failed write and [true, true] on the healthy path |

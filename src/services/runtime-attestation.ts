@@ -53,13 +53,14 @@ export function attestationPath(): string {
 // overwrite it with a running record.
 let writeChain: Promise<unknown> = Promise.resolve();
 let stoppedFinal = false;
-// Review-34: the outcome of the stop-marker write, latched so a second
-// stop call reports the FIRST attempt's truth instead of a vacuous
-// success (writeRuntimeAttestation swallows persistence errors into
-// null — the caller must see that, or a failed write reads as an
-// orderly shutdown while the record on disk still claims a running
-// gateway).
-let stopMarkerConfirmed: boolean | null = null;
+// Review-34/35: the SHARED stop promise. Latching only the completed
+// boolean raced: caller A cleared the timer and awaited the (failing)
+// write while concurrent caller B saw timer===null with no verdict yet
+// and returned vacuous true — Promise.all([stop(), stop()]) yielded
+// [false, true] for the same failed marker (reviewer-reproduced). The
+// promise is assigned SYNCHRONOUSLY by the first stop, so every later
+// caller awaits the same verdict; reset only by a new lifecycle.
+let stopPromise: Promise<boolean> | null = null;
 
 export function writeRuntimeAttestation(opts?: { stopped?: boolean }): Promise<RuntimeAttestation | null> {
     const run = async (): Promise<RuntimeAttestation | null> => {
@@ -105,7 +106,7 @@ let postConnectTimer: ReturnType<typeof setTimeout> | null = null;
 export function startRuntimeAttestation(): void {
     if (timer) return;
     stoppedFinal = false; // an in-process restart re-arms running writes
-    stopMarkerConfirmed = null; // a fresh run gets a fresh stop verdict
+    stopPromise = null; // a fresh lifecycle gets a fresh stop verdict
     void writeRuntimeAttestation();
     if (process.env.NODE_ENV !== 'test') {
         postConnectTimer = setTimeout(() => { postConnectTimer = null; void writeRuntimeAttestation(); }, POST_CONNECT_DELAY_MS);
@@ -114,25 +115,26 @@ export function startRuntimeAttestation(): void {
     logger.info(`[runtime-attestation] started: profile/account/fingerprint attested to ${attestationPath()} (${HEARTBEAT_MS / 60_000}-min heartbeat)`);
 }
 
-/** Review-32/33/34: clear BOTH timers (the post-connect timeout used to
- *  survive shutdown and could refresh the record afterwards), latch
+/** Review-32/33/34/35: clear BOTH timers (the post-connect timeout used
+ *  to survive shutdown and could refresh the record afterwards), latch
  *  stoppedFinal BEFORE enqueuing (any in-flight running write ahead in
- *  the chain no-ops at run time), and AWAIT the stopped write.
+ *  the chain no-ops at run time), and resolve to whether the stop
+ *  marker is CONFIRMED on disk — the write swallows persistence errors
+ *  into null (reviewer-reproduced with an invalid data path), and the
+ *  caller must see that as false, never as an orderly shutdown.
  *
- *  Returns whether the stop marker is CONFIRMED on disk. The write
- *  swallows persistence errors into null (reviewer-reproduced with an
- *  invalid data path: stop "succeeded" with no marker written) — the
- *  caller must surface a false so the operator knows the record still
- *  reads as a running gateway until it goes stale. When the writer was
- *  never started this process wrote no running record to retract, so
- *  there is nothing to confirm — vacuously true. */
-export async function stopRuntimeAttestation(): Promise<boolean> {
+ *  Deliberately NOT async: the shared stopPromise is assigned before
+ *  any suspension point, so CONCURRENT stops all await the SAME
+ *  verdict (the async version resolved [false, true] for one failed
+ *  write). When the writer was never started this process wrote no
+ *  running record to retract — vacuously true. */
+export function stopRuntimeAttestation(): Promise<boolean> {
     if (postConnectTimer) { clearTimeout(postConnectTimer); postConnectTimer = null; }
-    if (timer) {
-        clearInterval(timer);
-        timer = null;
-        stoppedFinal = true;
-        stopMarkerConfirmed = (await writeRuntimeAttestation({ stopped: true })) !== null;
-    }
-    return stopMarkerConfirmed ?? true;
+    if (stopPromise) return stopPromise;
+    if (!timer) return Promise.resolve(true);
+    clearInterval(timer);
+    timer = null;
+    stoppedFinal = true;
+    stopPromise = writeRuntimeAttestation({ stopped: true }).then((record) => record !== null);
+    return stopPromise;
 }

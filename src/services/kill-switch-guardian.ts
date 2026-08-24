@@ -157,6 +157,9 @@ async function tick(): Promise<void> {
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
+// Review-35: tracked so stop can clear it — the untracked startup tick
+// survived shutdown and could cancel broker orders from a dead lifecycle.
+let startupTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Start the guardian (idempotent; KILL_SWITCH_GUARDIAN=false disables). */
 export function startKillSwitchGuardian(): void {
@@ -167,13 +170,17 @@ export function startKillSwitchGuardian(): void {
     if (process.env.NODE_ENV !== 'test') {
         // Startup tick (review 2026-08-23): a halt latched before a restart
         // must be enforced as soon as the connection settles, not a minute in.
-        setTimeout(() => {
+        const t: ReturnType<typeof setTimeout> = setTimeout(() => {
+            if (startupTimer !== t) return; // review-35: stopped while queued — clearTimeout can't recall a dispatched callback
+            startupTimer = null;
             tick().catch((err) => logger.warn(`[kill-switch-guardian] startup tick failed: ${err}`));
         }, 5_000);
+        startupTimer = t;
     }
     logger.info(`[kill-switch-guardian] started: daily-loss status every ${GUARDIAN_INTERVAL_MS / 1000}s — a breach latches on OBSERVATION; a latch (or a ${FAILSAFE_PERSIST_TICKS}-min unverifiable account) cancels working entry parents until the book is clean`);
 }
 
 export function stopKillSwitchGuardian(): void {
+    if (startupTimer) { clearTimeout(startupTimer); startupTimer = null; }
     if (timer) { clearInterval(timer); timer = null; }
 }

@@ -186,6 +186,9 @@ export async function sweepStaleEntriesOnce(): Promise<number> {
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
+// Review-35: tracked so stop can clear it — the untracked boot sweep
+// survived shutdown and could cancel broker orders from a dead lifecycle.
+let bootTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Start the sweep (idempotent; no-op when both criteria are disabled). */
 export function startStaleEntrySweeper(): void {
@@ -198,9 +201,12 @@ export function startStaleEntrySweeper(): void {
         // outcome tracker's boot reconciliation — entries that went stale
         // while the gateway was down are cancelled promptly on recovery, not
         // ten minutes later.
-        setTimeout(() => {
+        const t: ReturnType<typeof setTimeout> = setTimeout(() => {
+            if (bootTimer !== t) return; // review-35: stopped while queued — no broker cancels from a dead lifecycle
+            bootTimer = null;
             sweepStaleEntriesOnce().catch((err) => logger.warn(`[stale-entry-sweeper] boot sweep failed: ${err}`));
         }, 5_000);
+        bootTimer = t;
     }
     logger.info(
         `[stale-entry-sweeper] started: expired intraday entries cancelled past expiry ` +
@@ -210,5 +216,6 @@ export function startStaleEntrySweeper(): void {
 }
 
 export function stopStaleEntrySweeper(): void {
+    if (bootTimer) { clearTimeout(bootTimer); bootTimer = null; }
     if (timer) { clearInterval(timer); timer = null; }
 }

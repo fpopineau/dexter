@@ -131,4 +131,24 @@ describe('writeRuntimeAttestation (the gateway-side writer)', () => {
         startRuntimeAttestation();
         expect(await stopRuntimeAttestation()).toBe(true);
     });
+
+    test('review-35: CONCURRENT stops share ONE verdict — never [false, true]', async () => {
+        const { startRuntimeAttestation, stopRuntimeAttestation } = await import('./runtime-attestation.js');
+        const prev = process.env.DEXTER_DATA_DIR;
+        // The reproduced race: caller A cleared the timer and awaited the
+        // failing write; caller B saw timer===null with no verdict latched
+        // yet and returned vacuous true — [false, true] for ONE failed
+        // marker. The shared stopPromise makes both await the same truth.
+        process.env.DEXTER_DATA_DIR = join('.dexter', 'data', '__review35-missing__', 'nested');
+        try {
+            startRuntimeAttestation();
+            expect(await Promise.all([stopRuntimeAttestation(), stopRuntimeAttestation()])).toEqual([false, false]);
+        } finally {
+            if (prev === undefined) delete process.env.DEXTER_DATA_DIR;
+            else process.env.DEXTER_DATA_DIR = prev;
+        }
+        // Healthy path: concurrent stops both confirm the marker.
+        startRuntimeAttestation();
+        expect(await Promise.all([stopRuntimeAttestation(), stopRuntimeAttestation()])).toEqual([true, true]);
+    });
 });
