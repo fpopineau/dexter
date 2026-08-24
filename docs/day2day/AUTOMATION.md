@@ -229,10 +229,12 @@ Three services watch every position the executor creates:
   overnight chance — the bell expires the DAY exits and auto-protect
   converts to a 🌙 GTC-protected hold. Doubt (missing prices/momentum)
   always keeps. `EOD_TRIAGE=false` to disable.
-- **Stale-entry sweeper** — `src/services/stale-entry-sweeper.ts`: hourly,
-  cancels the orders of executed proposals whose ENTRY never filled after
-  `STALE_ENTRY_MAX_DAYS` (3) — the tracker closes them as `cancelled`,
-  freeing `max_open_positions` slots from zombie brackets.
+- **Stale-entry sweeper** — `src/services/stale-entry-sweeper.ts`: every
+  10 min, two lanes — cancels intraday entries still unfilled past their
+  stamped expiry (+`ENTRY_EXPIRY_GRACE_MIN`, 30) and the orders of executed
+  proposals whose ENTRY never filled after `STALE_ENTRY_MAX_DAYS` (3) —
+  the tracker closes them as `cancelled`, freeing `max_open_positions`
+  slots from zombie brackets. Parent leg only, broker-confirmed.
 
 ### Earnings calendar — `src/services/earnings-calendar.ts`
 Keyless Nasdaq public data, 6 h cache, 7-day lookahead, pure parser.

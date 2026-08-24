@@ -336,7 +336,11 @@ quality of *judgment*, never *safety*.
 - **Primary runner:** `bun test`. **Secondary:** `npm run test:jest` —
   same colocated `src/**/*.test.ts` files; `bun:test` imports are bridged
   to `@jest/globals` by `test/bun-test-shim.ts` (one bun-mock-dependent
-  suite is jest-excluded).
+  suite is jest-excluded). Jest is capped at 4 workers (jest.config.js,
+  review-38): per-core default parallelism oversubscribes the host and
+  suites that shell out (git-based fingerprints) or hammer sqlite crest
+  the 5 s test timeout from pure contention — the cap is faster AND
+  stable; don't raise it without re-running the full suite several times.
 - Trading-critical modules are covered by unit tests that need no IBKR
   connection: the risk gate (pure), bracket validation (pure), the
   kill-switch's latching/fail-safe file logic (temp-dir), the proposal

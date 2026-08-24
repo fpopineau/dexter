@@ -269,7 +269,7 @@ All times ET; weekends and NYSE holidays are skipped automatically.
 | any time | a candidate enters top-3 with rank ≥ 75 | trigger alert with a proposal, if the evaluation finds a catalyst |
 | RTH, every 60 s | **profit trail** watches each intraday position's peak (swing/earnings-bet exempt) | 📉➡️💰 auto-close alert when a winner ≥2.5×ATR pulls back 0.75×ATR from its peak |
 | 15:52 | **EOD triage** of unresolved DAY positions | 🌇 report: losing-and-fading closed before the bell; the rest keep their overnight chance |
-| hourly | **stale-entry sweeper** | 🚫 close alerts for brackets whose entry never filled in 3 days (slots freed) |
+| every 10 min | **stale-entry sweeper** | 🚫 close alerts for expired intraday entries (past expiry +30 min grace) and for brackets whose entry never filled in 3 days (slots freed) |
 | on fills | outcome tracker | 🎯/🛑 close alerts with realized P&L; 🛡️ auto-protect if DAY exits died on an open position |
 | 16:20 | archive scheduler | (logs only) day's bars archived |
 | 18:00 | universe sweep + swing-pattern scan | (logs only) watchlist + midcap history refreshed, pattern-scan.json rebuilt |
@@ -768,7 +768,7 @@ P&L math, market-hours. Live-socket behavior is exercised by
 | URL refused: `only public http(s) destinations are allowed` | SSRF protection on web_fetch/browser — local/private addresses are never fetchable, by design |
 | `[risk-gate] REFUSED … duplicate setup — P-XXXX already has a working bracket` | the same symbol already has a bracket within 2% of that entry — cancel it first or let it work |
 | `📉➡️💰 PROFIT TRAIL` close you didn't ask for | the winner-protection rule (§9): peak ≥2.5×ATR then 0.75×ATR pullback → banked automatically (5%/1.5% absolute when ATR unknown) |
-| Proposal closed `cancelled` by the hourly sweep | its entry never filled for `STALE_ENTRY_MAX_DAYS` — the zombie bracket was reclaimed |
+| Proposal closed `cancelled` by the stale-entry sweep | its entry never filled for `STALE_ENTRY_MAX_DAYS` — the zombie bracket was reclaimed |
 | `Financial Datasets API unavailable (no credits…)` | expected: that provider is prepaid-only and unfunded; the circuit breaker silences it for 1h and the agent uses web_search/earnings_calendar |
 | Dashboard action returns `forbidden — reload the dashboard page` | the CSRF token rotated with a gateway restart — reload the tab |
 | jest: `better_sqlite3.node not found` | `cd node_modules/better-sqlite3 && npx prebuild-install` (bun installs skip node prebuilds) |

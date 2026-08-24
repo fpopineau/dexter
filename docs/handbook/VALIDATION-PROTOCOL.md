@@ -179,7 +179,9 @@ positive expectancy after costs, not improved loss control.
    ~90s after the account verifies, and every 15 MINUTES as a liveness
    heartbeat — account type, profile env, effective daily-loss/
    per-trade bars, PID, its own fingerprint; orderly shutdown awaits a
-   final `stopped: true` record. The scorecard's "runtime attestation"
+   final `stopped: true` record, and a FAILED stop-marker write is
+   surfaced as a gateway ERROR after shutdown — the on-disk record then
+   still reads as a running gateway until it goes stale (~45 min). The scorecard's "runtime attestation"
    line must read CONFIRMED, failing on missing, stale (>45 min),
    FUTURE-DATED, stopped-marked, dead-or-invalid-PID, wrong-profile,
    wrong-account, or mismatched-fingerprint records). Only

@@ -6,6 +6,7 @@ mission of this fork — built on [Dexter](https://github.com/virattt/dexter)
 
 | Document | What it covers |
 |---|---|
+| **[TRADING-POLICY.md](TRADING-POLICY.md)** | The trading policy in plain terms: what the system trades, how trades start, size and end, the daily-loss kill switch, and what stays disabled until proven — no code required. |
 | **[ARCHITECTURE.md](ARCHITECTURE.md)** | The full system design: layers, components, data flow, the proposal lifecycle, the safety model, storage layout, and the design rationale behind each choice. |
 | **[DATA-SOURCES.md](DATA-SOURCES.md)** | Every data source the system uses or plans to use: what is wired, what it feeds, how to configure it, what is still missing and why it matters. |
 | **[USER-MANUAL.md](USER-MANUAL.md)** | Day-to-day operations: setup, running the gateway, the WhatsApp command reference, scheduled briefs, calibration, backtesting, monitoring, troubleshooting, and the go-live mechanics. |
