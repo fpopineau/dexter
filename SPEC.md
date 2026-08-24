@@ -1223,3 +1223,34 @@ content. Both now hold as written below.
 | REQ | Test |
 |---|---|
 | REQ-VAL-056 | position-actions-fetch suite: on a throwing api, fetchPositions rejects immediately with the cause and fetchOpenOrdersFor resolves incomplete immediately; zero residual listeners asserted on every event; five clean full-parallel Jest runs are the end-to-end evidence |
+
+## Review-37 response (2026-08-24) — re-entrant cleanup closed
+
+- REQ-VAL-057 (corrects REQ-VAL-056's cleanup): fetchPositions' cleanup
+  is IDEMPOTENT and detaches listeners BEFORE calling
+  api.cancelPositions(). The old order called cancel with listeners
+  still attached — a cancellation that synchronously emits positionEnd
+  re-entered cleanup (stack overflow) and resolved [] through onEnd
+  even though reqPositions() had thrown (reviewer-reproduced: the
+  rejection flipped into an empty resolve). Now: a `cleaned` latch, off
+  first, cancel last inside try/catch — the re-emitted event finds no
+  listeners, cancellation executes exactly once, and the settled
+  outcome is the request's own.
+- Wording corrected per reviewer: the remaining unswept api.req*
+  wrapper sites are BOUNDED TEMPORARY LEAKS UNTIL TIMEOUT (not
+  "not leaks") — each sync-throw arms its ~10s timer and listeners
+  until the wrapper's own timeout path fires. The account.ts position/
+  summary/PnL wrappers additionally share the cancel-with-listeners-
+  attached shape fixed here; the backlog sweep must apply BOTH the
+  sync-throw settlement and this idempotent detach-before-cancel
+  cleanup.
+- Recorded residual (reviewer, non-blocking): the fetch tests prove
+  immediate settlement and listener cleanup but do not directly prove
+  clearTimeout ran — fake/injected timers would pin that; deferred
+  (cross-harness fake timers under bun AND Jest are not worth the
+  machinery for a path whose end-to-end evidence is the clean parallel
+  runs).
+
+| REQ | Test |
+|---|---|
+| REQ-VAL-057 | position-actions-fetch suite: ReentrantCancelApi (reqPositions throws, cancelPositions synchronously emits positionEnd) — the wrapper still REJECTS, cancellation executes exactly once, zero residual listeners |

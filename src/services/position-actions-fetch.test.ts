@@ -16,6 +16,19 @@ class ThrowingApi extends EventEmitter {
     cancelPositions(): void { /* cleanup path calls this — must not throw */ }
 }
 
+// Review-37: cancellation that SYNCHRONOUSLY re-emits positionEnd during
+// cleanup. With the old cancel-before-detach order this re-entered
+// cleanup (stack overflow) and resolved [] through onEnd even though the
+// request had thrown (reviewer-reproduced).
+class ReentrantCancelApi extends EventEmitter {
+    cancels = 0;
+    reqPositions(): void { throw new Error('not connected'); }
+    cancelPositions(): void {
+        this.cancels++;
+        this.emit(EventName.positionEnd);
+    }
+}
+
 describe('fetch wrappers on a synchronously-throwing api (review-36)', () => {
     test('fetchPositions rejects NOW with the cause, every listener detached', async () => {
         const api = new ThrowingApi();
@@ -38,5 +51,16 @@ describe('fetch wrappers on a synchronously-throwing api (review-36)', () => {
         expect(Date.now() - started).toBeLessThan(1_000);
         expect(api.listenerCount(EventName.openOrder)).toBe(0);
         expect(api.listenerCount(EventName.openOrderEnd)).toBe(0);
+    });
+
+    test('review-37: a synchronously-emitting cancelPositions cannot flip the rejection into an empty resolve', async () => {
+        const api = new ReentrantCancelApi();
+        await expect(fetchPositions(api as never)).rejects.toThrow(/failed synchronously/);
+        // Idempotent cleanup: cancellation executes exactly once, and the
+        // re-emitted positionEnd finds no listeners to resurrect onEnd.
+        expect(api.cancels).toBe(1);
+        expect(api.listenerCount(EventName.position)).toBe(0);
+        expect(api.listenerCount(EventName.positionEnd)).toBe(0);
+        expect(api.listenerCount(EventName.error)).toBe(0);
     });
 });

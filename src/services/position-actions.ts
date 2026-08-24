@@ -88,11 +88,19 @@ export async function fetchPositions(api: import('@stoqey/ib').IBApi): Promise<L
             cleanup();
             reject(new Error(`positions error ${code}: ${err.message}`));
         };
+        // Review-37: idempotent, and listeners detach BEFORE the cancel —
+        // cancelPositions() may synchronously emit positionEnd, and with
+        // listeners still attached that re-entered cleanup (stack
+        // overflow) and resolved [] through onEnd even though
+        // reqPositions() had thrown (reviewer-reproduced).
+        let cleaned = false;
         function cleanup() {
-            try { api.cancelPositions(); } catch { /* ignore */ }
+            if (cleaned) return;
+            cleaned = true;
             api.off(EventName.position, onPosition);
             api.off(EventName.positionEnd, onEnd);
             api.off(EventName.error, onError);
+            try { api.cancelPositions(); } catch { /* ignore */ }
         }
         api.on(EventName.position, onPosition);
         api.on(EventName.positionEnd, onEnd);
