@@ -963,3 +963,34 @@ content. Both now hold as written below.
 |---|---|
 | REQ-VAL-039 | real-repo test extended: force-retag (`-af`) yields a DIFFERENT tag-object sha — the exact signal the pin detects; the pin file glue is first-sighting scorecard logic (honest ledger) |
 | REQ-VAL-040 | grammar suite: #101/#101/#101 (3 occurrences, 1 distinct) fails; 3-distinct fixtures pass |
+
+## Review-29 response (2026-08-24) — tag last, fail-closed pin, mandatory remote anchor, numeric ids
+
+- Protocol REORDERED (P1): the tagging procedure is now step 5, the
+  LAST prerequisite — after the account reset, `performance reset`,
+  configuration, observations and the completed manifest. The old
+  ordering (tag at 3b, reset at 4) produced a post-tag epoch the
+  scorecard itself rejects; the manifest's epoch SHA-256 row must hash
+  the FINAL post-reset epoch file.
+- REQ-VAL-041 (corrects REQ-VAL-039's fail-open): the TOFU pin FAILS
+  CLOSED. Only a genuine ENOENT is a first sighting; a corrupt or
+  unreadable pin refuses to re-pin ("restore it from the journal or
+  remote") — delete-and-retag can no longer mint a fresh trusted
+  anchor — and the pin is written with flag 'wx' (exclusive create,
+  no overwrite). The REMOTE tag is now MANDATORY and machine-compared:
+  `git ls-remote origin refs/tags/<tag>` must return the same tag
+  object sha as the local ref; an unreachable remote, a missing remote
+  tag, and a differing remote object each fail the final evaluation.
+- REQ-VAL-042 (P2): order-id distinctness is NUMERIC — ids normalize
+  via BigInt before the Set, so `#1/#01/#001` counts as ONE order
+  (adversarial case the reviewer reproduced), while `#1/#02/#003`
+  counts as three.
+- Template synchronized (P2): the manifest grammar section now says
+  THREE DISTINCT ids with a `#100/#101/#102` example and names the
+  numeric-normalization rule — an operator following the template can
+  no longer produce a failing manifest.
+
+| REQ | Test |
+|---|---|
+| REQ-VAL-041 | pin/remote branches are final-evaluation git+fs glue (honest ledger; each failure string distinct and named); exclusive-create semantics are the 'wx' flag's contract |
+| REQ-VAL-042 | grammar suite: #1/#01/#001 fails as one distinct id; #1/#02/#003 passes as three |

@@ -464,6 +464,9 @@ describe('evidence grammar tightenings (review-27)', () => {
         expect(probe('observed 2026-08-25 AAPL #101 only').some((x) => x.includes('at least 3 required'))).toBe(true);
         // Review-28: OCCURRENCES are not DISTINCT orders.
         expect(probe('observed 2026-08-25 AAPL #101/#101/#101').some((x) => x.includes('at least 3 required'))).toBe(true);
+        // Review-29: distinctness is NUMERIC — one order in three costumes.
+        expect(probe('observed 2026-08-25 AAPL #1/#01/#001').some((x) => x.includes('at least 3 required'))).toBe(true);
+        expect(probe('observed 2026-08-25 AAPL #1/#02/#003').some((x) => x.includes('at least 3 required'))).toBe(false);
         // 'waived'/'waives' are not the documented status — exactly WAIVED.
         expect(probe('waived FP: reason').some((x) => x.includes('neither observed nor a valid waiver'))).toBe(true);
         expect(probe('waives FP: reason').some((x) => x.includes('neither observed nor a valid waiver'))).toBe(true);

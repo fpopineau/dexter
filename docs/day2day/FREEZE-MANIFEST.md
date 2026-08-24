@@ -75,13 +75,14 @@ freeze identity is therefore split:
 - Broker-observation rows must BEGIN with a status word the audit
   matches: `observed YYYY-MM-DD SYMBOL <details>` for a real
   observation (a REAL calendar date, a ticker-shaped symbol, and — on
-  the OCA and mixed-TIF rows — at least TWO broker order ids like
-  `#101/#102`, because every interaction there involves multiple
-  orders), or `WAIVED <initials>: <reason>` (exactly `WAIVED`,
-  uppercase) where the protocol allows a waiver (WP2, WP11, and the
-  partial-expiry row only with the WP2 row observed). `not observed`,
-  blanks, and any other phrasing fail. The OCA row and the first two
-  mixed-TIF rows are NOT waivable.
+  the OCA and mixed-TIF rows — at least THREE DISTINCT broker order ids
+  like `#100/#101/#102`: the parent/close plus the target and stop
+  legs; distinctness is NUMERIC, so `#1/#01/#001` counts as one), or
+  `WAIVED <initials>: <reason>` (exactly `WAIVED`, uppercase) where the
+  protocol allows a waiver (WP2, WP11, and the partial-expiry row only
+  with the WP2 row observed). `not observed`, blanks, and any other
+  phrasing fail. The OCA row and the first two mixed-TIF rows are NOT
+  waivable.
 - The tag must be ANNOTATED (`git tag -a validation-freeze-1 -m …`) —
   its tagger timestamp IS the sample window start; a lightweight tag
   fails the final evaluation. `Tagged at (UTC)` must match the tagger

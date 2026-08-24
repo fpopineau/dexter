@@ -274,11 +274,25 @@ if (tagExists) {
         // REMOTE tag — the protocol instructs pushing it and recording
         // the object sha in the journal; this pin makes a local retag
         // tamper-EVIDENT even before that.
+        // Review-29 P1: the pin FAILS CLOSED. Only a genuine ENOENT is a
+        // first sighting; a corrupt or unreadable pin refuses to re-pin
+        // (delete-and-retag must not mint a fresh trusted anchor), and the
+        // write is exclusive ('wx') so a racing evaluation cannot
+        // overwrite an existing pin.
         const pinPath = join(dataDir, 'freeze-tag-pin.json');
+        let pinRaw: string | null = null;
+        let pinMissing = false;
         try {
-            const pin = JSON.parse(readFileSync(pinPath, 'utf-8')) as { tag?: string; tagObjectSha?: string };
-            if (pin.tag !== FREEZE_TAG || typeof pin.tagObjectSha !== 'string') {
-                verdictFails.push('freeze anchor: freeze-tag-pin.json is malformed — cannot verify the tag was not moved');
+            pinRaw = readFileSync(pinPath, 'utf-8');
+        } catch (err) {
+            if ((err as NodeJS.ErrnoException).code === 'ENOENT') pinMissing = true;
+            else verdictFails.push(`freeze anchor: pin unreadable (${err instanceof Error ? err.message : err}) — refusing to re-pin over an error`);
+        }
+        if (pinRaw !== null) {
+            let pin: { tag?: string; tagObjectSha?: string } | null = null;
+            try { pin = JSON.parse(pinRaw) as { tag?: string; tagObjectSha?: string }; } catch { pin = null; }
+            if (pin === null || pin.tag !== FREEZE_TAG || typeof pin.tagObjectSha !== 'string' || !/^[0-9a-f]{40}$/.test(pin.tagObjectSha)) {
+                verdictFails.push('freeze anchor: freeze-tag-pin.json is CORRUPT — refusing to treat as first sighting; restore it from the journal or remote');
             } else if (pin.tagObjectSha !== resolved.tagObjectSha) {
                 verdictFails.push(
                     `freeze anchor: the tag OBJECT changed since first pinned (${pin.tagObjectSha.slice(0, 12)}… → ` +
@@ -287,14 +301,31 @@ if (tagExists) {
             } else {
                 console.log(`freeze anchor: tag object ${resolved.tagObjectSha.slice(0, 12)}… matches the first-sighting pin`);
             }
-        } catch {
-            // First sighting: pin it. (writeFileSync import below.)
+        } else if (pinMissing) {
             try {
-                writeFileSync(pinPath, JSON.stringify({ tag: FREEZE_TAG, tagObjectSha: resolved.tagObjectSha, pinnedAt: new Date().toISOString() }, null, 2));
+                writeFileSync(pinPath, JSON.stringify({ tag: FREEZE_TAG, tagObjectSha: resolved.tagObjectSha, pinnedAt: new Date().toISOString() }, null, 2), { flag: 'wx' });
                 console.log(`freeze anchor: FIRST SIGHTING — pinned tag object ${resolved.tagObjectSha} to ${pinPath}. Push the tag to origin and record this sha in the validation journal.`);
             } catch (err) {
                 verdictFails.push(`freeze anchor: could not pin the tag object sha (${err instanceof Error ? err.message : err})`);
             }
+        }
+        // Review-29 P1: the REMOTE tag is the mandatory immutable anchor —
+        // machine-compared, not just documented. A missing remote tag, an
+        // unreachable remote, or a differing remote object each fail the
+        // final evaluation (TOFU alone dies to pin-delete + retag).
+        const remoteOut = git(['ls-remote', 'origin', `refs/tags/${FREEZE_TAG}`]);
+        const remoteSha = remoteOut !== null ? (remoteOut.trim().split(/\s+/)[0] ?? '') : '';
+        if (remoteOut === null) {
+            verdictFails.push('freeze anchor: the remote (origin) could not be queried — the mandatory remote tag anchor is unverifiable');
+        } else if (!/^[0-9a-f]{40}$/.test(remoteSha)) {
+            verdictFails.push(`freeze anchor: the tag is NOT on origin — push it (git push origin ${FREEZE_TAG}); the remote copy is the mandatory immutable anchor`);
+        } else if (remoteSha !== resolved.tagObjectSha) {
+            verdictFails.push(
+                `freeze anchor: the REMOTE tag object (${remoteSha.slice(0, 12)}…) differs from the local one ` +
+                `(${resolved.tagObjectSha.slice(0, 12)}…) — the local tag was moved, or the remote was force-updated`,
+            );
+        } else {
+            console.log(`freeze anchor: remote tag object matches (origin/${FREEZE_TAG})`);
         }
     } else {
         verdictFails.push(`final window: ${resolved.reason}`);

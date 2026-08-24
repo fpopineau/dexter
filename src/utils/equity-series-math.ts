@@ -228,7 +228,9 @@ export function auditFreezeManifest(
             } else {
                 if (!isRealDate(m[1])) problems.push(`observation '${obs.key}' has an impossible date '${m[1]}'`);
                 if (!isTickerShaped(m[2])) problems.push(`observation '${obs.key}' has a non-ticker symbol '${m[2]}'`);
-                const ids = new Set(v.match(/#\d+/g) ?? []).size;
+                // Review-29: normalize NUMERICALLY — #1/#01/#001 are one
+                // order id in three costumes, not three orders.
+                const ids = new Set((v.match(/#\d+/g) ?? []).map((x) => BigInt(x.slice(1)).toString())).size;
                 if (ids < obs.minOrderIds) {
                     problems.push(`observation '${obs.key}' records ${ids} DISTINCT broker order id(s) — at least ${obs.minOrderIds} required (parent/close + target + stop)`);
                 }
