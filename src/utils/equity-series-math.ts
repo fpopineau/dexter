@@ -122,13 +122,17 @@ const MANIFEST_REQUIRED_FIELDS: Array<{ key: string; validate?: (v: string) => s
     { key: 'Scorer-weights provenance' },
     { key: 'risk-rules.live.yaml` ratified' },
 ];
-const MANIFEST_OBSERVATIONS: Array<{ key: string; waivable: boolean | 'requires-wp2'; needsOrderIds: boolean }> = [
-    { key: 'OCA-joined close', waivable: false, needsOrderIds: true },
-    { key: 'unfilled DAY parent expiry', waivable: false, needsOrderIds: true },
-    { key: 'fully filled DAY parent', waivable: false, needsOrderIds: true },
-    { key: 'PARTIALLY filled DAY parent', waivable: 'requires-wp2', needsOrderIds: true },
-    { key: 'WP2 partial-fill resize', waivable: true, needsOrderIds: false },
-    { key: 'WP11 buffered finalize', waivable: true, needsOrderIds: false },
+// minOrderIds (review-27): every broker-interaction observation involves
+// at least TWO orders — an OCA close and its cancelled sibling, a parent
+// and its removed/surviving children — so one lone id is under-specified
+// evidence.
+const MANIFEST_OBSERVATIONS: Array<{ key: string; waivable: boolean | 'requires-wp2'; minOrderIds: number }> = [
+    { key: 'OCA-joined close', waivable: false, minOrderIds: 2 },
+    { key: 'unfilled DAY parent expiry', waivable: false, minOrderIds: 2 },
+    { key: 'fully filled DAY parent', waivable: false, minOrderIds: 2 },
+    { key: 'PARTIALLY filled DAY parent', waivable: 'requires-wp2', minOrderIds: 2 },
+    { key: 'WP2 partial-fill resize', waivable: true, minOrderIds: 0 },
+    { key: 'WP11 buffered finalize', waivable: true, minOrderIds: 0 },
 ];
 const PLACEHOLDER_MARKERS = ['_pending_', '_REQUIRED', '_observation or explicit waiver'];
 
@@ -187,14 +191,25 @@ export function auditFreezeManifest(
     // only where the protocol allows it.
     // ANCHORED grammar (the template documents it): the value must BEGIN
     // with its status word — a waiver whose free-text reason mentions
-    // 'observed' must not classify as an observation.
+    // 'observed' must not classify as an observation. Review-27: waivers
+    // anchor on the EXACT word WAIVED — 'waives'/'waiving'/lowercase are
+    // not the documented status and read as invalid.
     const obsStatus = (v: string | null): 'observed' | 'waived' | 'invalid' => {
         if (v === null || !isFilled(v)) return 'invalid';
         if (/^not\s+observed/i.test(v)) return 'invalid';
         if (/^observed\b/i.test(v)) return 'observed';
-        if (/^waiv/i.test(v)) return 'waived';
+        if (/^WAIVED\b/.test(v)) return 'waived';
         return 'invalid';
     };
+    // Review-27: a REAL calendar date (2026-99-99 must fail) and a
+    // ticker-shaped symbol — the round-trip through Date catches
+    // impossible months/days the regex shape cannot.
+    const isRealDate = (d: string): boolean => {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return false;
+        const t = new Date(`${d}T00:00:00Z`);
+        return Number.isFinite(t.getTime()) && t.toISOString().startsWith(d);
+    };
+    const isTickerShaped = (s: string): boolean => /^[A-Z][A-Z0-9.\-]{0,9}$/.test(s);
     const wp2 = obsStatus(find('WP2 partial-fill resize'));
     for (const obs of MANIFEST_OBSERVATIONS) {
         const v = find(obs.key);
@@ -206,14 +221,20 @@ export function auditFreezeManifest(
         // the broker interaction is the thing observed); a waiver must
         // carry initials and a reason. Bare 'observed'/'WAIVED' fail.
         if (s === 'observed') {
-            if (!/^observed\s+\d{4}-\d{2}-\d{2}\s+\S+\s+\S/i.test(v)) {
+            const m = /^observed\s+(\d{4}-\d{2}-\d{2})\s+(\S+)\s+\S/i.exec(v);
+            if (m === null) {
                 problems.push(`observation '${obs.key}' lacks the required evidence ('${v}' — grammar: observed YYYY-MM-DD SYMBOL <details>)`);
-            } else if (obs.needsOrderIds && !/#\d+/.test(v)) {
-                problems.push(`observation '${obs.key}' must record the broker order id(s) (#123)`);
+            } else {
+                if (!isRealDate(m[1])) problems.push(`observation '${obs.key}' has an impossible date '${m[1]}'`);
+                if (!isTickerShaped(m[2])) problems.push(`observation '${obs.key}' has a non-ticker symbol '${m[2]}'`);
+                const ids = (v.match(/#\d+/g) ?? []).length;
+                if (ids < obs.minOrderIds) {
+                    problems.push(`observation '${obs.key}' records ${ids} broker order id(s) — at least ${obs.minOrderIds} required (every broker interaction here involves multiple orders)`);
+                }
             }
         }
         if (s === 'waived') {
-            if (!/^waiv\w*\s+\S+\s*:\s*\S/i.test(v)) {
+            if (!/^WAIVED\s+\S+\s*:\s*\S/.test(v)) {
                 problems.push(`waiver on '${obs.key}' lacks initials and a reason ('${v}' — grammar: WAIVED <initials>: <reason>)`);
             }
             if (obs.waivable === false) problems.push(`'${obs.key}' is NOT waivable — a real paper observation is required`);

@@ -908,3 +908,29 @@ content. Both now hold as written below.
 | REQ-VAL-034 | window/epoch-hash/tagged-at branches are git glue at tag time (honest ledger; each failure string distinct); auditFreezeManifest epochSha/taggedAtMs parsing rides the complete-fixture suite |
 | REQ-VAL-035 | scorer suite: resolution sums to 1; an in-process override MOVES the digest (restored in finally); required-null → fingerprint null; every-surface loop covers scorerWeights |
 | REQ-VAL-036 | audit suite: complete fixture (dates+symbols+ids) passes; the review-25 negative cases still fail; grammar teeth exercised via the fixture's own values |
+
+## Review-27 response (2026-08-24) — the tagger clock, evidence-grade grammar v2
+
+- REQ-VAL-037 (corrects REQ-VAL-034's clock): the final window anchors
+  to the ANNOTATED tag's TAGGER timestamp, never the tagged commit's
+  time. `git log -1 --format=%ct <tag>` returns the COMMIT clock — the
+  manifest commit can precede the tag by hours and that interval's
+  trades would leak into "since the tag"; a lightweight tag has no
+  creation time at all. `resolveFreezeTagTime`: `git cat-file -t` must
+  say `tag` (lightweight → rejected by name), the window comes from
+  `for-each-ref %(taggerdate:unix)`, and the manifest's 'Tagged at
+  (UTC)' must agree with the tagger clock within 10 MINUTES (was 24h —
+  wide enough to re-open the same hole). The manifest instructs: tag
+  immediately after committing the manifest, with `git tag -a`.
+- REQ-VAL-038 (grammar v2): observation dates must be REAL calendar
+  dates (2026-99-99 and 2026-02-30 fail via ISO round-trip), the symbol
+  must be ticker-shaped (`^[A-Z][A-Z0-9.\-]{0,9}$`), the OCA and all
+  three mixed-TIF rows need at least TWO broker order ids (every
+  interaction there involves multiple orders — one lone id is
+  under-specified), and waivers anchor on exactly `WAIVED` (uppercase;
+  'waived'/'waives' read as invalid).
+
+| REQ | Test |
+|---|---|
+| REQ-VAL-037 | REAL temp-repo test: commit at 10:00, annotated tag at 14:00 → resolver returns 14:00 (the tagger clock) and provably not 10:00; lightweight tag rejected with LIGHTWEIGHT named; missing tag unresolvable |
+| REQ-VAL-038 | grammar suite: two impossible dates, lowercase symbol, single order id, 'waived'/'waives' each fail with the specific message; the full grammar passes |

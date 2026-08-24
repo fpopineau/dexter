@@ -290,8 +290,8 @@ describe('auditFreezeManifest (review-24/25 — a schema audit, not substring co
 | Scorer-weights provenance | pinned 2026-08-11 run (FP) |
 | \`risk-rules.live.yaml\` ratified | FP 2026-08-25 |
 | OCA-joined close cancels its siblings broker-side | observed 2026-08-25 AAPL #101/#102 |
-| Mixed-TIF bracket: unfilled DAY parent expiry removes the dormant GTC children | observed 2026-08-25 MU #201 |
-| Mixed-TIF bracket: fully filled DAY parent leaves both GTC exits active overnight | observed 2026-08-26 NVDA #301 |
+| Mixed-TIF bracket: unfilled DAY parent expiry removes the dormant GTC children | observed 2026-08-25 MU #201/#202 |
+| Mixed-TIF bracket: fully filled DAY parent leaves both GTC exits active overnight | observed 2026-08-26 NVDA #301/#303 |
 | Mixed-TIF bracket: PARTIALLY filled DAY parent at expiry leaves correctly sized GTC protection | WAIVED FP: hard to stage; WP2 observed |
 | WP2 partial-fill resize | observed 2026-08-26 NVDA resize #302 |
 | WP11 buffered finalize events | WAIVED FP: harness coverage accepted |
@@ -395,5 +395,66 @@ describe('scorer weights in the identity (review-26)', () => {
         } finally {
             setActiveWeights(null);
         }
+    });
+});
+
+describe('resolveFreezeTagTime on a REAL repository (review-27 — the TAGGER clock, never the commit clock)', () => {
+    test('annotated tag yields its tagger timestamp; lightweight and missing tags are rejected', async () => {
+        const { resolveFreezeTagTime } = await import('./strategy-fingerprint.js');
+        const { execFileSync } = await import('node:child_process');
+        const dir = mkdtempSync(join(tmpdir(), 'dexter-tagtime-'));
+        const env = { ...process.env, GIT_AUTHOR_DATE: '2026-08-25T10:00:00Z', GIT_COMMITTER_DATE: '2026-08-25T10:00:00Z' };
+        const g = (args: string[], e = env) => execFileSync('git', args, { cwd: dir, env: e });
+        g(['init', '-q']);
+        g(['config', 'user.email', 'test@dexter']);
+        g(['config', 'user.name', 'dexter-test']);
+        g(['config', 'commit.gpgsign', 'false']);
+        g(['config', 'tag.gpgsign', 'false']);
+        writeFileSync(join(dir, 'a.txt'), 'x');
+        g(['add', '.']);
+        g(['commit', '-qm', 'baseline']);
+
+        // The tag is created FOUR HOURS after the commit — the review-27
+        // hole: `git log` reports 10:00 and leaks the interval's trades.
+        const tagEnv = { ...env, GIT_COMMITTER_DATE: '2026-08-25T14:00:00Z' };
+        g(['tag', '-a', 'validation-freeze-1', '-m', 'freeze'], tagEnv);
+        const r = await resolveFreezeTagTime('validation-freeze-1', dir);
+        expect(r.ok).toBe(true);
+        if (r.ok) {
+            expect(r.tagTimeMs).toBe(Date.parse('2026-08-25T14:00:00Z')); // the TAGGER clock
+            expect(r.tagTimeMs).not.toBe(Date.parse('2026-08-25T10:00:00Z')); // never the commit clock
+        }
+
+        // A lightweight tag has no creation timestamp — rejected by type.
+        g(['tag', 'light-tag']);
+        const light = await resolveFreezeTagTime('light-tag', dir);
+        expect(light.ok).toBe(false);
+        if (!light.ok) expect(light.reason).toContain('LIGHTWEIGHT');
+
+        // A missing tag is unresolvable.
+        expect((await resolveFreezeTagTime('no-such-tag', dir)).ok).toBe(false);
+    });
+});
+
+describe('evidence grammar tightenings (review-27)', () => {
+    test('impossible dates, non-ticker symbols, single order ids and non-WAIVED status words all fail', async () => {
+        const { auditFreezeManifest } = await import('@/utils/equity-series-math.js');
+        const exp = { tag: 'validation-freeze-1', deployableClasses: ['intraday'] };
+        const base = `| Freeze tag | validation-freeze-1 |
+| OCA-joined close cancels its siblings broker-side | VALUE |
+`;
+        const probe = (value: string) => auditFreezeManifest(base.replace('VALUE', value), exp).problems;
+        // 2026-99-99 matches the date SHAPE but is not a calendar date.
+        expect(probe('observed 2026-99-99 AAPL #1/#2').some((x) => x.includes('impossible date'))).toBe(true);
+        expect(probe('observed 2026-02-30 AAPL #1/#2').some((x) => x.includes('impossible date'))).toBe(true);
+        // Arbitrary lowercase token is not a ticker.
+        expect(probe('observed 2026-08-25 whatever #1/#2').some((x) => x.includes('non-ticker symbol'))).toBe(true);
+        // ONE order id under-specifies a multi-order broker interaction.
+        expect(probe('observed 2026-08-25 AAPL #101 only').some((x) => x.includes('at least 2 required'))).toBe(true);
+        // 'waived'/'waives' are not the documented status — exactly WAIVED.
+        expect(probe('waived FP: reason').some((x) => x.includes('neither observed nor a valid waiver'))).toBe(true);
+        expect(probe('waives FP: reason').some((x) => x.includes('neither observed nor a valid waiver'))).toBe(true);
+        // The full grammar still passes.
+        expect(probe('observed 2026-08-25 AAPL #101/#102').some((x) => x.includes("'OCA-joined close'"))).toBe(false);
     });
 });

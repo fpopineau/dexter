@@ -54,6 +54,29 @@ async function execGit(args: string[], cwd: string): Promise<string | null> {
     }
 }
 
+/** Review-27: the freeze WINDOW anchor is the tag's own immutable
+ *  TAGGER timestamp. `git log -1 --format=%ct <tag>` returns the tagged
+ *  COMMIT's time — which can precede the tag by hours, leaking the
+ *  interval's trades into "since the tag" — and a lightweight tag has
+ *  no creation timestamp at all. Only an ANNOTATED tag (git tag -a) is
+ *  acceptable; its taggerdate is immutable tag content. */
+export async function resolveFreezeTagTime(
+    tag: string,
+    cwd = process.cwd(),
+): Promise<{ ok: true; tagTimeMs: number } | { ok: false; reason: string }> {
+    const type = await execGit(['cat-file', '-t', `refs/tags/${tag}`], cwd);
+    if (type === null) return { ok: false, reason: `tag ${tag} unresolvable` };
+    if (type !== 'tag') {
+        return {
+            ok: false,
+            reason: `tag ${tag} is ${type === 'commit' ? 'LIGHTWEIGHT' : `'${type}'`} — an ANNOTATED tag (git tag -a) is required: only its tagger timestamp is an immutable freeze clock`,
+        };
+    }
+    const t = await execGit(['for-each-ref', '--format=%(taggerdate:unix)', `refs/tags/${tag}`], cwd);
+    if (t === null || !/^\d+$/.test(t)) return { ok: false, reason: `tagger timestamp of ${tag} unresolvable` };
+    return { ok: true, tagTimeMs: Number(t) * 1000 };
+}
+
 /** The paths that shape runtime behavior. Code identity is derived from
  *  THESE (tree/blob hashes at HEAD + their working-tree drift), never
  *  from the commit SHA — review-22: HEAD made the freeze manifest

@@ -73,11 +73,20 @@ freeze identity is therefore split:
   the SHA-256 rows must contain the 64-hex digest; `exit_style` =
   `target` or `ratchet`.
 - Broker-observation rows must BEGIN with a status word the audit
-  matches: `observed <date> <symbol> <order ids / details>` for a real
-  observation, or `WAIVED <initials>: <reason>` where the protocol
-  allows a waiver (WP2, WP11, and the partial-expiry row only with the
-  WP2 row observed). `not observed`, blanks, and any other phrasing
-  fail. The OCA row and the first two mixed-TIF rows are NOT waivable.
+  matches: `observed YYYY-MM-DD SYMBOL <details>` for a real
+  observation (a REAL calendar date, a ticker-shaped symbol, and — on
+  the OCA and mixed-TIF rows — at least TWO broker order ids like
+  `#101/#102`, because every interaction there involves multiple
+  orders), or `WAIVED <initials>: <reason>` (exactly `WAIVED`,
+  uppercase) where the protocol allows a waiver (WP2, WP11, and the
+  partial-expiry row only with the WP2 row observed). `not observed`,
+  blanks, and any other phrasing fail. The OCA row and the first two
+  mixed-TIF rows are NOT waivable.
+- The tag must be ANNOTATED (`git tag -a validation-freeze-1 -m …`) —
+  its tagger timestamp IS the sample window start; a lightweight tag
+  fails the final evaluation. `Tagged at (UTC)` must match the tagger
+  timestamp within 10 minutes: create the tag right after committing
+  this manifest.
 - Deleting a row does not bypass the audit — a missing required row is
   its own failure.
 

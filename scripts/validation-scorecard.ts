@@ -254,10 +254,17 @@ const FREEZE_TAG = 'validation-freeze-1';
 const MANIFEST_REPO_PATH = 'docs/day2day/FREEZE-MANIFEST.md';
 const tagExists = (git(['tag', '-l', FREEZE_TAG]) ?? '').trim().length > 0;
 const finalMode = process.argv.includes('--final') || tagExists;
+// Review-27: the window anchors to the ANNOTATED tag's TAGGER timestamp
+// — `git log` gives the tagged commit's time, which can precede the tag
+// by hours (leaking that interval's trades into "since the tag"), and a
+// lightweight tag has no creation time at all. A lightweight or
+// unresolvable tag poisons the window and fails.
 let tagTimeMs: number | null = null;
 if (tagExists) {
-    const t = (git(['log', '-1', '--format=%ct', FREEZE_TAG]) ?? '').trim();
-    tagTimeMs = /^\d+$/.test(t) ? Number(t) * 1000 : null;
+    const { resolveFreezeTagTime } = await import('../src/services/strategy-fingerprint.js');
+    const resolved = await resolveFreezeTagTime(FREEZE_TAG);
+    if (resolved.ok) tagTimeMs = resolved.tagTimeMs;
+    else verdictFails.push(`final window: ${resolved.reason}`);
 }
 
 const sinceArg = process.argv[2];
@@ -859,11 +866,14 @@ if (fpValues.length > 0) {
                         verdictFails.push(`freeze identity: performance-epoch.json hash ${currentEpochSha.slice(0, 12)}… != the hash recorded in the tagged manifest — the epoch was reset or modified after the tag`);
                     }
                 }
-                // The manifest's Tagged-at must agree with the git tag clock.
+                // The manifest's Tagged-at must agree with the TAGGER clock —
+                // review-27: a tight tolerance (10 min), because the manifest
+                // is written moments before the tag is placed; anything wider
+                // re-opens the commit-before-tag interval.
                 if (audit.taggedAtMs === null) {
                     verdictFails.push("freeze manifest: 'Tagged at (UTC)' is not a parseable timestamp");
-                } else if (tagTimeMs !== null && Math.abs(audit.taggedAtMs - tagTimeMs) > 24 * 3_600_000) {
-                    verdictFails.push(`freeze manifest: 'Tagged at (UTC)' differs from the git tag time by more than 24h`);
+                } else if (tagTimeMs !== null && Math.abs(audit.taggedAtMs - tagTimeMs) > 10 * 60_000) {
+                    verdictFails.push(`freeze manifest: 'Tagged at (UTC)' differs from the tag's tagger timestamp by more than 10 minutes`);
                 }
                 if (audit.baselineSha === null) {
                     verdictFails.push('freeze identity: the tagged manifest declares no behavioral baseline SHA');
