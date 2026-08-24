@@ -260,6 +260,48 @@ export function auditFreezeManifest(
     return { fingerprint, baselineSha, epochSha, taggedAtMs, problems };
 }
 
+/** Review-31, pure: does the RUNNING gateway's own attestation prove the
+ *  shadow-live profile? The scorecard's deployable line prints the yaml
+ *  regardless of what the process loaded — only the gateway's own record
+ *  can confirm it. Expected under a correct shadow-live run: paper
+ *  account, DEXTER_RISK_PROFILE=live, the LIVE daily-loss and per-trade
+ *  bars, and a fingerprint matching the evaluation's. Staleness beyond
+ *  maxAgeMs means the heartbeat died (is the gateway running?). */
+export function auditRuntimeAttestation(
+    att: {
+        at?: number; profileEnv?: string | null; accountType?: string;
+        maxDailyLossPct?: number; maxRiskPerTradePct?: number;
+        strategyFingerprint?: string | null;
+    } | null,
+    expected: { maxDailyLossPct: number; maxRiskPerTradePct: number; currentFp: string | null; nowMs: number; maxAgeMs: number },
+): string[] {
+    if (att === null) {
+        return ['runtime attestation missing/unreadable — the gateway has not attested its profile (restart it; it writes runtime-attestation.json at boot and hourly)'];
+    }
+    const problems: string[] = [];
+    if (typeof att.at !== 'number' || expected.nowMs - att.at > expected.maxAgeMs) {
+        problems.push(`runtime attestation is STALE (${typeof att.at === 'number' ? `${Math.round((expected.nowMs - att.at) / 60_000)} min old` : 'no timestamp'}) — the heartbeat died; is the gateway running?`);
+    }
+    if (att.accountType !== 'paper') {
+        problems.push(`runtime attestation: account type '${att.accountType ?? 'missing'}' — the shadow-live sample must run on a verified PAPER account`);
+    }
+    if (att.profileEnv !== 'live') {
+        problems.push(`runtime attestation: gateway env DEXTER_RISK_PROFILE is '${att.profileEnv ?? 'unset'}', not 'live' — the process is NOT in shadow-live`);
+    }
+    if (att.maxDailyLossPct !== expected.maxDailyLossPct || att.maxRiskPerTradePct !== expected.maxRiskPerTradePct) {
+        problems.push(
+            `runtime attestation: the RUNNING gateway trades under daily-loss ${att.maxDailyLossPct ?? '?'}% / per-trade ${att.maxRiskPerTradePct ?? '?'}% ` +
+            `— the live profile requires ${expected.maxDailyLossPct}% / ${expected.maxRiskPerTradePct}% (the process loaded the wrong rules)`,
+        );
+    }
+    if (att.strategyFingerprint === null || att.strategyFingerprint === undefined) {
+        problems.push('runtime attestation: the gateway could not resolve its own strategy fingerprint');
+    } else if (expected.currentFp !== null && att.strategyFingerprint !== expected.currentFp) {
+        problems.push(`runtime attestation: the gateway's fingerprint ${att.strategyFingerprint} differs from the evaluation's ${expected.currentFp} — the running process is not this strategy`);
+    }
+    return problems;
+}
+
 export interface PortfolioDrawdown {
     /** Worst peak-to-trough of marked equity inside the window, % of the peak
      *  (rounded to 0.01%). */

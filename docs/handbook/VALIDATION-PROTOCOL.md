@@ -172,12 +172,17 @@ positive expectancy after costs, not improved loss control.
    profile until the fingerprint mismatch surfaced.
 4. One clean gateway RESTART with the configuration above: YAML
    validation passes, calendar coverage ok, no adoption-sweep
-   surprises, and the boot log / scorecard CONFIRMS the live profile is
-   active (the scorecard's deployable-classes line must read the live
-   flags and daily-loss bar). Only then send `performance reset` — one
-   clean epoch at the live scale, created by the correctly-profiled
-   gateway. The scorecard fails any sample whose epoch NetLiq is not
-   live-scale.
+   surprises, and the RUNNING gateway's profile is confirmed via its
+   RUNTIME ATTESTATION (review-31: the scorecard's deployable-classes
+   line prints the yaml and cannot know what the process loaded; the
+   gateway writes `.dexter/data/runtime-attestation.json` at boot and
+   hourly — account type, profile env, effective daily-loss/per-trade
+   bars, its own fingerprint — and the scorecard's "runtime
+   attestation" line must read CONFIRMED, failing on missing/stale/
+   wrong-profile/wrong-account/mismatched-fingerprint records). Only
+   then send `performance reset` — one clean epoch at the live scale,
+   created by the correctly-profiled gateway. The scorecard fails any
+   sample whose epoch NetLiq is not live-scale.
 5. **Tagging procedure — the LAST step (review-27/28/29: the tag IS the
    sample clock, and the epoch must be FROZEN BEFORE it — a
    `performance reset` after the tag changes the epoch hash the

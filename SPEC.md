@@ -1024,3 +1024,25 @@ content. Both now hold as written below.
 | REQ | Test |
 |---|---|
 | REQ-VAL-043 | verifyFreezeAnchor fake-deps suites (all 10 branches) + bare-origin integration (pre-push bite, post-push clean, retag double-scream) |
+
+## Review-31 response (2026-08-24) — the gateway attests its own profile
+
+- REQ-VAL-044: the scorecard's deployable-classes line prints the YAML —
+  it cannot know what the RUNNING process loaded (the review-31 hole:
+  an operator sees the expected line while the gateway still trades
+  paper rules; the fingerprint would catch it only after mis-collected
+  sample days). The gateway now writes a RUNTIME ATTESTATION
+  (`.dexter/data/runtime-attestation.json`) at boot, again ~90s later
+  once the account verifies, and hourly as a liveness heartbeat:
+  profile env as the process sees it, verified account + type, the
+  EFFECTIVE daily-loss and per-trade bars it trades under, and its own
+  strategy fingerprint. `auditRuntimeAttestation` (pure) fails a
+  missing, stale (>2h — the heartbeat died), non-paper-account,
+  non-live-env, wrong-rules or fingerprint-mismatched record; the
+  scorecard prints CONFIRMED only when the running gateway itself
+  proves shadow-live. Protocol step 4 now points at this line instead
+  of the yaml-derived one.
+
+| REQ | Test |
+|---|---|
+| REQ-VAL-044 | auditRuntimeAttestation suite (pass + all seven failure modes incl. the exact review-31 scenario: env unset, paper bars, yaml looks right); writeRuntimeAttestation smoke (well-formed record, honest 'unverified' account pre-IBKR); gateway start/stop wiring is boot glue (honest ledger) |

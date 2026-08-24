@@ -67,7 +67,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dayBlockBootstrapLcb } from '../src/utils/day-bootstrap.js';
-import { auditFreezeManifest, etDayOf, exposureCoverageGaps, fingerprintFreezeCheck, fingerprintPurity, parseEquitySeries, portfolioDrawdown, type SessionWindow } from '../src/utils/equity-series-math.js';
+import { auditFreezeManifest, auditRuntimeAttestation, etDayOf, exposureCoverageGaps, fingerprintFreezeCheck, fingerprintPurity, parseEquitySeries, portfolioDrawdown, type SessionWindow } from '../src/utils/equity-series-math.js';
 import { calendarCoverageStatus, isMarketHalfDay, isMarketHoliday } from '../src/utils/market-hours.js';
 import { DEFAULT_RULES, parseFlatYaml, type RiskRules } from '../src/tools/ibkr/risk-rules.js';
 
@@ -93,7 +93,7 @@ const isKnownSource = (s: string) => KNOWN_SOURCES.has(s) || s.startsWith('cron:
 /** Classes enabled on LIVE DAY ONE (REQ-VAL-008/011) — read from the live
  *  rule files themselves, so the verdict's scope IS the deployable config:
  *  flipping a class flag changes what must pass, not just what trades. */
-function liveConfig(): { classes: Set<string>; line: string; dailyLossPct: number } {
+function liveConfig(): { classes: Set<string>; line: string; dailyLossPct: number; riskPerTradePct: number } {
     const cfgDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src/config');
     const merged = {
         ...DEFAULT_RULES,
@@ -110,9 +110,10 @@ function liveConfig(): { classes: Set<string>; line: string; dailyLossPct: numbe
         // yaml's halving to 1.5 — the drawdown bar would have passed at up
         // to 6% against a 3% reality. The CONFIG is the pin.
         dailyLossPct: merged.max_daily_loss_pct,
+        riskPerTradePct: merged.max_risk_per_trade_pct,
     };
 }
-const { classes: DEPLOYABLE_CLASSES, line: deployableLine, dailyLossPct: LIVE_DAILY_LOSS_PCT } = liveConfig();
+const { classes: DEPLOYABLE_CLASSES, line: deployableLine, dailyLossPct: LIVE_DAILY_LOSS_PCT, riskPerTradePct: LIVE_RISK_PER_TRADE_PCT } = liveConfig();
 
 interface Row {
     id: string; symbol: string; trade_class: string | null; source: string;
@@ -938,6 +939,26 @@ if (fpValues.length > 0) {
     const freeze = fingerprintFreezeCheck({ sampleFp, currentFp, manifestFp, requireManifest: finalMode });
     console.log(`freeze identity: sample=${sampleFp ?? 'n/a'} current=${currentFp ?? 'UNRESOLVABLE'} manifest=${manifestFp ?? 'not filled'} [${manifestSource}${finalMode ? ' — FINAL, manifest required' : ''}]${freeze.ok ? ' — MATCH' : ''}`);
     for (const p of freeze.problems) verdictFails.push(`freeze identity: ${p}`);
+
+    // Review-31: the deployable line above prints the YAML — only the
+    // RUNNING gateway's own attestation proves what the process loaded.
+    // Missing, stale (heartbeat is hourly; 2h = dead), wrong-profile,
+    // wrong-account and fingerprint-mismatched records each fail.
+    let attestation: Parameters<typeof auditRuntimeAttestation>[0] = null;
+    try {
+        attestation = JSON.parse(readFileSync(join(dataDir, 'runtime-attestation.json'), 'utf-8')) as NonNullable<Parameters<typeof auditRuntimeAttestation>[0]>;
+    } catch { attestation = null; }
+    const attProblems = auditRuntimeAttestation(attestation, {
+        maxDailyLossPct: LIVE_DAILY_LOSS_PCT,
+        maxRiskPerTradePct: LIVE_RISK_PER_TRADE_PCT,
+        currentFp,
+        nowMs: Date.now(),
+        maxAgeMs: 2 * 3_600_000,
+    });
+    if (attProblems.length === 0 && attestation !== null) {
+        console.log(`runtime attestation: live profile on paper account CONFIRMED by the running gateway (fingerprint ${attestation.strategyFingerprint}, ${Math.round((Date.now() - (attestation.at ?? 0)) / 60_000)} min old)`);
+    }
+    for (const p of attProblems) verdictFails.push(p);
 }
 
 // Review-18: the DB-level one-thesis guarantee is real only when its
