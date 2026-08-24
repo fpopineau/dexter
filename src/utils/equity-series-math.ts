@@ -269,16 +269,37 @@ export function auditFreezeManifest(
  *  maxAgeMs means the heartbeat died (is the gateway running?). */
 export function auditRuntimeAttestation(
     att: {
-        at?: number; profileEnv?: string | null; accountType?: string;
+        at?: number; pid?: number; profileEnv?: string | null; accountType?: string;
         maxDailyLossPct?: number; maxRiskPerTradePct?: number;
-        strategyFingerprint?: string | null;
+        strategyFingerprint?: string | null; stopped?: boolean;
     } | null,
-    expected: { maxDailyLossPct: number; maxRiskPerTradePct: number; currentFp: string | null; nowMs: number; maxAgeMs: number },
+    expected: {
+        maxDailyLossPct: number; maxRiskPerTradePct: number;
+        currentFp: string | null; nowMs: number; maxAgeMs: number;
+        /** Review-32: liveness of the attested PID — false = not running,
+         *  null = undeterminable; both fail (a fresh FILE is not a
+         *  running PROCESS). */
+        pidAlive: boolean | null;
+    },
 ): string[] {
     if (att === null) {
-        return ['runtime attestation missing/unreadable — the gateway has not attested its profile (restart it; it writes runtime-attestation.json at boot and hourly)'];
+        return ['runtime attestation missing/unreadable — the gateway has not attested its profile (restart it; it writes runtime-attestation.json at boot and every 15 min)'];
     }
     const problems: string[] = [];
+    // Review-32 P2: an unresolvable EXPECTED fingerprint must fail closed
+    // — comparing nothing to something proved nothing, and the old code
+    // let an arbitrary attested fingerprint qualify for CONFIRMED.
+    if (expected.currentFp === null) {
+        problems.push('runtime attestation: the evaluator could not resolve its own expected fingerprint — the attestation cannot be verified');
+    }
+    if (att.stopped === true) {
+        problems.push('runtime attestation: the gateway attests an ORDERLY STOP — it is not running');
+    }
+    if (expected.pidAlive === false) {
+        problems.push(`runtime attestation: the attested PID ${att.pid ?? '?'} is NOT running — the record outlived its gateway`);
+    } else if (expected.pidAlive === null) {
+        problems.push('runtime attestation: the attested PID’s liveness could not be determined (fail closed)');
+    }
     if (typeof att.at !== 'number' || expected.nowMs - att.at > expected.maxAgeMs) {
         problems.push(`runtime attestation is STALE (${typeof att.at === 'number' ? `${Math.round((expected.nowMs - att.at) / 60_000)} min old` : 'no timestamp'}) — the heartbeat died; is the gateway running?`);
     }

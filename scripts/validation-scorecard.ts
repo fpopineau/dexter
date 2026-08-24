@@ -830,6 +830,20 @@ if (weeks.size < 6) verdictFails.push(`calendar breadth ${weeks.size} < 6 ISO we
 // deploy is a DIFFERENT strategy, not more data — and an absent stamp
 // means the instrumentation cannot prove otherwise. The single surviving
 // value is what the freeze manifest records.
+// Review-32 P1: the evaluator's OWN fingerprint must be computed in the
+// SAME resolution context the gateway runs in. The connection layer
+// calls setAccountProfile('paper') when the paper account verifies, and
+// DEXTER_RISK_PROFILE=live escalates on top (shadow-live); a standalone
+// evaluator never sees the account event, resolves the PAPER rules, and
+// would compute a fingerprint no correct gateway can ever match. Mirror
+// the verified-paper context through the SHARED setter before hashing.
+let currentFp: string | null = null;
+try {
+    const { setAccountProfile } = await import('../src/tools/ibkr/risk-rules.js');
+    setAccountProfile('paper');
+    currentFp = await (await import('../src/services/strategy-fingerprint.js')).strategyFingerprint();
+} catch { currentFp = null; }
+
 const fpValues = [...rows.map((r) => r.strategy_fingerprint), ...(seriesFingerprints ?? [])];
 if (fpValues.length > 0) {
     const fp = fingerprintPurity(fpValues);
@@ -842,10 +856,6 @@ if (fpValues.length > 0) {
     // the fingerprint of THIS evaluating runtime, and the manifest's
     // recorded one once it is filled.
     const sampleFp = fp.ok ? fp.distinct[0] : null;
-    let currentFp: string | null = null;
-    try {
-        currentFp = await (await import('../src/services/strategy-fingerprint.js')).strategyFingerprint();
-    } catch { currentFp = null; }
     // Review-22/23: once the freeze tag exists (or on an explicit --final
     // run) the manifest is MANDATORY and is read FROM THE TAG — the
     // working-tree copy is mutable after tagging (docs edits deliberately
@@ -940,26 +950,39 @@ if (fpValues.length > 0) {
     console.log(`freeze identity: sample=${sampleFp ?? 'n/a'} current=${currentFp ?? 'UNRESOLVABLE'} manifest=${manifestFp ?? 'not filled'} [${manifestSource}${finalMode ? ' — FINAL, manifest required' : ''}]${freeze.ok ? ' — MATCH' : ''}`);
     for (const p of freeze.problems) verdictFails.push(`freeze identity: ${p}`);
 
-    // Review-31: the deployable line above prints the YAML — only the
-    // RUNNING gateway's own attestation proves what the process loaded.
-    // Missing, stale (heartbeat is hourly; 2h = dead), wrong-profile,
-    // wrong-account and fingerprint-mismatched records each fail.
-    let attestation: Parameters<typeof auditRuntimeAttestation>[0] = null;
-    try {
-        attestation = JSON.parse(readFileSync(join(dataDir, 'runtime-attestation.json'), 'utf-8')) as NonNullable<Parameters<typeof auditRuntimeAttestation>[0]>;
-    } catch { attestation = null; }
-    const attProblems = auditRuntimeAttestation(attestation, {
-        maxDailyLossPct: LIVE_DAILY_LOSS_PCT,
-        maxRiskPerTradePct: LIVE_RISK_PER_TRADE_PCT,
-        currentFp,
-        nowMs: Date.now(),
-        maxAgeMs: 2 * 3_600_000,
-    });
-    if (attProblems.length === 0 && attestation !== null) {
-        console.log(`runtime attestation: live profile on paper account CONFIRMED by the running gateway (fingerprint ${attestation.strategyFingerprint}, ${Math.round((Date.now() - (attestation.at ?? 0)) / 60_000)} min old)`);
-    }
-    for (const p of attProblems) verdictFails.push(p);
 }
+
+// Review-31/32: the deployable line above prints the YAML — and this
+// audit runs UNCONDITIONALLY (review-32 P2: it used to sit inside the
+// fingerprint block and was skipped on a clean pre-sample run, the exact
+// moment the protocol needs runtime confirmation). — only the
+// RUNNING gateway's own attestation proves what the process loaded.
+// Missing, stale (heartbeat is hourly; 2h = dead), wrong-profile,
+// wrong-account and fingerprint-mismatched records each fail.
+let attestation: Parameters<typeof auditRuntimeAttestation>[0] = null;
+try {
+    attestation = JSON.parse(readFileSync(join(dataDir, 'runtime-attestation.json'), 'utf-8')) as NonNullable<Parameters<typeof auditRuntimeAttestation>[0]>;
+} catch { attestation = null; }
+// Review-32: a fresh FILE is not a running PROCESS — probe the attested
+// PID (signal 0: ESRCH = gone; EPERM = alive but ours to not touch).
+let pidAlive: boolean | null = null;
+if (attestation !== null && typeof attestation.pid === 'number') {
+    try { process.kill(attestation.pid, 0); pidAlive = true; }
+    catch (err) { pidAlive = (err as NodeJS.ErrnoException).code === 'EPERM' ? true : false; }
+}
+const attProblems = auditRuntimeAttestation(attestation, {
+    maxDailyLossPct: LIVE_DAILY_LOSS_PCT,
+    maxRiskPerTradePct: LIVE_RISK_PER_TRADE_PCT,
+    currentFp,
+    nowMs: Date.now(),
+    // 3× the 15-min heartbeat: a dead gateway is caught within ~45 min.
+    maxAgeMs: 45 * 60_000,
+    pidAlive,
+});
+if (attProblems.length === 0 && attestation !== null) {
+    console.log(`runtime attestation: live profile on paper account CONFIRMED by the running gateway (fingerprint ${attestation.strategyFingerprint}, ${Math.round((Date.now() - (attestation.at ?? 0)) / 60_000)} min old)`);
+}
+for (const p of attProblems) verdictFails.push(p);
 
 // Review-18: the DB-level one-thesis guarantee is real only when its
 // partial unique index actually exists — migration deliberately survives

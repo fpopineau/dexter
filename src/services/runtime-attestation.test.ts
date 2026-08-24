@@ -5,22 +5,38 @@ import { auditRuntimeAttestation } from '@/utils/equity-series-math.js';
 describe('auditRuntimeAttestation (review-31 — only the RUNNING gateway can prove its profile)', () => {
     const NOW = 1_800_000_000_000;
     const GOOD = {
-        at: NOW - 30 * 60_000, // 30 min — inside the 2h heartbeat window
+        at: NOW - 10 * 60_000, // 10 min — inside the 45-min window (3× the 15-min heartbeat)
+        pid: 12345,
         profileEnv: 'live',
         accountType: 'paper',
         maxDailyLossPct: 1.5,
         maxRiskPerTradePct: 0.5,
         strategyFingerprint: 'abc123abc123',
     };
-    const EXPECTED = { maxDailyLossPct: 1.5, maxRiskPerTradePct: 0.5, currentFp: 'abc123abc123', nowMs: NOW, maxAgeMs: 2 * 3_600_000 };
+    const EXPECTED = { maxDailyLossPct: 1.5, maxRiskPerTradePct: 0.5, currentFp: 'abc123abc123', nowMs: NOW, maxAgeMs: 45 * 60_000, pidAlive: true as boolean | null };
 
-    test('a fresh, live-profile, paper-account, fingerprint-matching attestation passes', () => {
+    test('a fresh, live-profile, paper-account, PID-alive, fingerprint-matching attestation passes', () => {
         expect(auditRuntimeAttestation(GOOD, EXPECTED)).toEqual([]);
+    });
+
+    test('review-32 liveness teeth: stopped, dead PID, unknown PID, and a null EXPECTED fingerprint each fail', () => {
+        // An orderly shutdown is not a running gateway.
+        expect(auditRuntimeAttestation({ ...GOOD, stopped: true }, EXPECTED)
+            .some((p) => p.includes('ORDERLY STOP'))).toBe(true);
+        // A fresh FILE is not a running PROCESS.
+        expect(auditRuntimeAttestation(GOOD, { ...EXPECTED, pidAlive: false })
+            .some((p) => p.includes('NOT running'))).toBe(true);
+        expect(auditRuntimeAttestation(GOOD, { ...EXPECTED, pidAlive: null })
+            .some((p) => p.includes('liveness could not be determined'))).toBe(true);
+        // Comparing nothing to something proves nothing — the old code let
+        // ANY attested fingerprint reach CONFIRMED when currentFp was null.
+        expect(auditRuntimeAttestation(GOOD, { ...EXPECTED, currentFp: null })
+            .some((p) => p.includes('could not resolve its own expected fingerprint'))).toBe(true);
     });
 
     test('every failure mode is named: missing, stale, wrong account, wrong profile, wrong rules, fingerprint issues', () => {
         expect(auditRuntimeAttestation(null, EXPECTED)[0]).toContain('runtime attestation missing');
-        expect(auditRuntimeAttestation({ ...GOOD, at: NOW - 3 * 3_600_000 }, EXPECTED)
+        expect(auditRuntimeAttestation({ ...GOOD, at: NOW - 3_600_000 }, EXPECTED)
             .some((p) => p.includes('STALE'))).toBe(true);
         expect(auditRuntimeAttestation({ ...GOOD, accountType: 'LIVE' }, EXPECTED)
             .some((p) => p.includes('PAPER account'))).toBe(true);

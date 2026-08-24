@@ -19,7 +19,10 @@ import { join } from 'node:path';
 import { logger } from '@/utils';
 import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
 
-const HEARTBEAT_MS = 60 * 60_000;
+// 15-min heartbeat (review-32: a shorter beat shrinks the window where a
+// crashed gateway still looks attested; the scorecard treats >45 min as
+// dead).
+const HEARTBEAT_MS = 15 * 60_000;
 const POST_CONNECT_DELAY_MS = 90_000;
 
 export interface RuntimeAttestation {
@@ -33,13 +36,16 @@ export interface RuntimeAttestation {
     swingEnabled: boolean;
     earningsBetEnabled: boolean;
     strategyFingerprint: string | null;
+    /** Review-32: set by the ORDERLY shutdown write — a stopped gateway
+     *  must never read as "confirmed running". */
+    stopped?: boolean;
 }
 
 export function attestationPath(): string {
     return join(process.env.DEXTER_DATA_DIR || join('.dexter', 'data'), 'runtime-attestation.json');
 }
 
-export async function writeRuntimeAttestation(): Promise<RuntimeAttestation | null> {
+export async function writeRuntimeAttestation(opts?: { stopped?: boolean }): Promise<RuntimeAttestation | null> {
     try {
         const rules = getRiskRules();
         let account: string | null = null;
@@ -59,6 +65,7 @@ export async function writeRuntimeAttestation(): Promise<RuntimeAttestation | nu
             swingEnabled: rules.swing_enabled,
             earningsBetEnabled: rules.earnings_bet_enabled,
             strategyFingerprint: await strategyFingerprint(),
+            ...(opts?.stopped ? { stopped: true } : {}),
         };
         writeFileSync(attestationPath(), JSON.stringify(record, null, 2));
         return record;
@@ -69,19 +76,29 @@ export async function writeRuntimeAttestation(): Promise<RuntimeAttestation | nu
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
+let postConnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 /** Start the attestation writer (idempotent): boot write, a post-connect
- *  re-write with the verified account, then an hourly heartbeat. */
+ *  re-write with the verified account, then a 15-min heartbeat. */
 export function startRuntimeAttestation(): void {
     if (timer) return;
     void writeRuntimeAttestation();
     if (process.env.NODE_ENV !== 'test') {
-        setTimeout(() => { void writeRuntimeAttestation(); }, POST_CONNECT_DELAY_MS);
+        postConnectTimer = setTimeout(() => { postConnectTimer = null; void writeRuntimeAttestation(); }, POST_CONNECT_DELAY_MS);
     }
     timer = setInterval(() => { void writeRuntimeAttestation(); }, HEARTBEAT_MS);
-    logger.info(`[runtime-attestation] started: profile/account/fingerprint attested to ${attestationPath()} (hourly heartbeat)`);
+    logger.info(`[runtime-attestation] started: profile/account/fingerprint attested to ${attestationPath()} (${HEARTBEAT_MS / 60_000}-min heartbeat)`);
 }
 
+/** Review-32: clear BOTH timers (the post-connect timeout used to
+ *  survive shutdown and could refresh the record afterwards) and mark
+ *  the record stopped — an orderly shutdown must never read as a
+ *  running gateway. */
 export function stopRuntimeAttestation(): void {
-    if (timer) { clearInterval(timer); timer = null; }
+    if (postConnectTimer) { clearTimeout(postConnectTimer); postConnectTimer = null; }
+    if (timer) {
+        clearInterval(timer);
+        timer = null;
+        void writeRuntimeAttestation({ stopped: true });
+    }
 }

@@ -1046,3 +1046,35 @@ content. Both now hold as written below.
 | REQ | Test |
 |---|---|
 | REQ-VAL-044 | auditRuntimeAttestation suite (pass + all seven failure modes incl. the exact review-31 scenario: env unset, paper bars, yaml looks right); writeRuntimeAttestation smoke (well-formed record, honest 'unverified' account pre-IBKR); gateway start/stop wiring is boot glue (honest ledger) |
+
+## Review-32 response (2026-08-24) — matched fingerprint context, unconditional attestation, real liveness
+
+- REQ-VAL-045 (corrects REQ-VAL-044's comparison): the evaluator
+  computes its expected fingerprint in the SAME resolution context as
+  the gateway. The connection layer calls setAccountProfile('paper')
+  when the paper account verifies and DEXTER_RISK_PROFILE=live
+  escalates on top; a standalone evaluator never sees the account event,
+  resolved the PAPER rules, and computed a fingerprint no correct
+  gateway could match (the reviewer reproduced the divergence). The
+  scorecard now mirrors verified-paper through the SHARED
+  setAccountProfile before hashing — one resolution path, no duplicate.
+- The attestation audit runs UNCONDITIONALLY (review-32 P2): it sat
+  inside the fingerprint block and was skipped on a clean pre-sample
+  run — the exact moment the protocol requires runtime confirmation.
+  currentFp is hoisted; the audit is top-level.
+- REQ-VAL-046 (liveness): a fresh FILE is not a running PROCESS. The
+  scorecard probes the attested PID (signal 0; EPERM = alive), the
+  audit fails a dead PID, an undeterminable PID (fail closed), and an
+  ORDERLY-STOP record (stopRuntimeAttestation now clears BOTH timers —
+  the 90s post-connect timeout used to survive shutdown and could
+  refresh the record — and writes a stopped-marked attestation). The
+  heartbeat tightens to 15 min with a 45-min staleness bar (3×), so a
+  crashed gateway is caught within ~45 min instead of 2h.
+- REQ-VAL-047 (fail-closed comparison): a null EVALUATOR fingerprint is
+  its own failure — the old code disabled the comparison and let an
+  arbitrary attested fingerprint reach CONFIRMED (reviewer-reproduced).
+
+| REQ | Test |
+|---|---|
+| REQ-VAL-045 | context wiring is scorecard glue over the profile suite's tested setter (honest ledger); the divergence closes by construction — one shared resolution path |
+| REQ-VAL-046/047 | audit suite: stopped record, dead PID, unknown-PID fail-closed, null-currentFp each named; pass path requires pidAlive; writer test unchanged (stopped absent by default); timer cleanup is the stop function's contract |
