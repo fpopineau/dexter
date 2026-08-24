@@ -474,3 +474,106 @@ describe('evidence grammar tightenings (review-27)', () => {
         expect(probe('observed 2026-08-25 AAPL #100/#101/#102').some((x) => x.includes("'OCA-joined close'"))).toBe(false);
     });
 });
+
+describe('verifyFreezeAnchor (review-30 — every fail-closed branch, executable)', () => {
+    const SHA_A = 'a'.repeat(40);
+    const SHA_B = 'b'.repeat(40);
+    const pinFor = (sha: string) => JSON.stringify({ tag: 'validation-freeze-1', tagObjectSha: sha });
+    const enoent = () => { const e = new Error('ENOENT') as NodeJS.ErrnoException; e.code = 'ENOENT'; throw e; };
+    const deps = (over: Partial<import('./strategy-fingerprint.js').FreezeAnchorDeps>) => ({
+        readPin: () => pinFor(SHA_A),
+        writePinExclusive: () => { /* ok */ },
+        lsRemoteTag: () => `${SHA_A}\trefs/tags/validation-freeze-1`,
+        ...over,
+    });
+
+    test('happy path: pin match + remote match → two notes, zero problems', async () => {
+        const { verifyFreezeAnchor } = await import('./strategy-fingerprint.js');
+        const r = verifyFreezeAnchor('validation-freeze-1', SHA_A, deps({}));
+        expect(r.problems).toEqual([]);
+        expect(r.notes.some((n) => n.includes('matches the first-sighting pin'))).toBe(true);
+        expect(r.notes.some((n) => n.includes('remote tag object matches'))).toBe(true);
+    });
+
+    test('first sighting: ENOENT pins exclusively; a write failure is a problem', async () => {
+        const { verifyFreezeAnchor } = await import('./strategy-fingerprint.js');
+        let written: string | null = null;
+        const ok = verifyFreezeAnchor('validation-freeze-1', SHA_A, deps({
+            readPin: enoent,
+            writePinExclusive: (c) => { written = c; },
+        }));
+        expect(ok.problems).toEqual([]);
+        expect(written).not.toBeNull();
+        expect(JSON.parse(written!).tagObjectSha).toBe(SHA_A);
+        const writeFail = verifyFreezeAnchor('validation-freeze-1', SHA_A, deps({
+            readPin: enoent,
+            writePinExclusive: () => { throw new Error('EEXIST'); }, // raced — 'wx' refused
+        }));
+        expect(writeFail.problems.some((p) => p.includes('could not pin'))).toBe(true);
+    });
+
+    test('fail closed: corrupt pin, unreadable pin, moved tag — none re-pin', async () => {
+        const { verifyFreezeAnchor } = await import('./strategy-fingerprint.js');
+        let rePinned = false;
+        const trap = { writePinExclusive: () => { rePinned = true; } };
+        const corrupt = verifyFreezeAnchor('validation-freeze-1', SHA_A, deps({ ...trap, readPin: () => 'not json{{' }));
+        expect(corrupt.problems.some((p) => p.includes('CORRUPT'))).toBe(true);
+        const wrongShape = verifyFreezeAnchor('validation-freeze-1', SHA_A, deps({ ...trap, readPin: () => '{"tag":"other"}' }));
+        expect(wrongShape.problems.some((p) => p.includes('CORRUPT'))).toBe(true);
+        const ioError = verifyFreezeAnchor('validation-freeze-1', SHA_A, deps({ ...trap, readPin: () => { throw new Error('EACCES'); } }));
+        expect(ioError.problems.some((p) => p.includes('refusing to re-pin over an error'))).toBe(true);
+        const moved = verifyFreezeAnchor('validation-freeze-1', SHA_B, deps({ ...trap }));
+        expect(moved.problems.some((p) => p.includes('FORCE-MOVED'))).toBe(true);
+        expect(rePinned).toBe(false); // the delete/corrupt/retag laundering path never mints a new anchor
+    });
+
+    test('remote authority: unreachable, missing, and differing each fail; only a match passes', async () => {
+        const { verifyFreezeAnchor } = await import('./strategy-fingerprint.js');
+        expect(verifyFreezeAnchor('validation-freeze-1', SHA_A, deps({ lsRemoteTag: () => null }))
+            .problems.some((p) => p.includes('could not be queried'))).toBe(true);
+        expect(verifyFreezeAnchor('validation-freeze-1', SHA_A, deps({ lsRemoteTag: () => '' }))
+            .problems.some((p) => p.includes('NOT on origin'))).toBe(true);
+        expect(verifyFreezeAnchor('validation-freeze-1', SHA_A, deps({ lsRemoteTag: () => `${SHA_B}\trefs/tags/validation-freeze-1` }))
+            .problems.some((p) => p.includes('REMOTE tag object') && p.includes('differs'))).toBe(true);
+    });
+
+    test('INTEGRATION: the real deps against a temp repo with a bare origin', async () => {
+        const { verifyFreezeAnchor, makeFreezeAnchorDeps, resolveFreezeTagTime } = await import('./strategy-fingerprint.js');
+        const { execFileSync } = await import('node:child_process');
+        const work = mkdtempSync(join(tmpdir(), 'dexter-anchor-'));
+        const bare = mkdtempSync(join(tmpdir(), 'dexter-origin-'));
+        execFileSync('git', ['init', '-q', '--bare'], { cwd: bare });
+        const g = (...args: string[]) => execFileSync('git', args, { cwd: work });
+        g('init', '-q');
+        g('config', 'user.email', 't@dexter'); g('config', 'user.name', 't');
+        g('config', 'commit.gpgsign', 'false'); g('config', 'tag.gpgsign', 'false');
+        writeFileSync(join(work, 'a.txt'), 'x');
+        g('add', '.'); g('commit', '-qm', 'baseline');
+        g('remote', 'add', 'origin', bare);
+        g('tag', '-a', 'validation-freeze-1', '-m', 'freeze');
+
+        const resolved = await resolveFreezeTagTime('validation-freeze-1', work);
+        expect(resolved.ok).toBe(true);
+        if (!resolved.ok) return;
+        const pinPath = join(work, 'pin.json');
+        const realDeps = makeFreezeAnchorDeps('validation-freeze-1', work, pinPath);
+
+        // Before the push: the remote-anchor requirement BITES.
+        const beforePush = verifyFreezeAnchor('validation-freeze-1', resolved.tagObjectSha, realDeps);
+        expect(beforePush.problems.some((p) => p.includes('NOT on origin'))).toBe(true);
+
+        // After the push: first sighting pins, remote matches — clean.
+        g('push', '-q', 'origin', 'validation-freeze-1');
+        const afterPush = verifyFreezeAnchor('validation-freeze-1', resolved.tagObjectSha, realDeps);
+        expect(afterPush.problems).toEqual([]);
+
+        // A force-retag against the surviving pin AND the remote: both scream.
+        g('tag', '-af', 'validation-freeze-1', '-m', 'moved');
+        const moved = await resolveFreezeTagTime('validation-freeze-1', work);
+        expect(moved.ok).toBe(true);
+        if (!moved.ok) return;
+        const afterRetag = verifyFreezeAnchor('validation-freeze-1', moved.tagObjectSha, realDeps);
+        expect(afterRetag.problems.some((p) => p.includes('FORCE-MOVED'))).toBe(true);
+        expect(afterRetag.problems.some((p) => p.includes('REMOTE tag object') && p.includes('differs'))).toBe(true);
+    });
+});

@@ -30,8 +30,9 @@
  * discovered skill's SKILL.md content.
  */
 
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync as execFileSyncNode } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { readFileSync as readFileSyncNode, writeFileSync as writeFileSyncNode } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -85,6 +86,92 @@ export async function resolveFreezeTagTime(
     const obj = await execGit(['for-each-ref', '--format=%(objectname)', `refs/tags/${tag}`], cwd);
     if (obj === null || !/^[0-9a-f]{40}$/.test(obj)) return { ok: false, reason: `tag object sha of ${tag} unresolvable` };
     return { ok: true, tagTimeMs: Number(t) * 1000, tagObjectSha: obj };
+}
+
+/** Review-29/30: the freeze-anchor verification — TOFU pin + mandatory
+ *  remote — behind INJECTED operations so every fail-closed branch is
+ *  executable in the harness (the scorecard's inline version had none).
+ *  Contract: only a genuine ENOENT is a first sighting (a corrupt or
+ *  unreadable pin refuses to re-pin — delete-and-retag must not mint a
+ *  fresh trusted anchor); the pin is created exclusively; the REMOTE
+ *  annotated-tag object must exist and equal the local one. */
+export interface FreezeAnchorDeps {
+    /** Read the pin file; throw with code ENOENT when absent. */
+    readPin(): string;
+    /** Create the pin exclusively ('wx' semantics); throw if it exists. */
+    writePinExclusive(content: string): void;
+    /** Raw `git ls-remote origin refs/tags/<tag>` stdout, or null on any failure. */
+    lsRemoteTag(): string | null;
+}
+
+export function verifyFreezeAnchor(
+    tag: string,
+    localTagObjectSha: string,
+    deps: FreezeAnchorDeps,
+): { problems: string[]; notes: string[] } {
+    const problems: string[] = [];
+    const notes: string[] = [];
+    let pinRaw: string | null = null;
+    let pinMissing = false;
+    try {
+        pinRaw = deps.readPin();
+    } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') pinMissing = true;
+        else problems.push(`freeze anchor: pin unreadable (${err instanceof Error ? err.message : err}) — refusing to re-pin over an error`);
+    }
+    if (pinRaw !== null) {
+        let pin: { tag?: string; tagObjectSha?: string } | null = null;
+        try { pin = JSON.parse(pinRaw) as { tag?: string; tagObjectSha?: string }; } catch { pin = null; }
+        if (pin === null || pin.tag !== tag || typeof pin.tagObjectSha !== 'string' || !/^[0-9a-f]{40}$/.test(pin.tagObjectSha)) {
+            problems.push('freeze anchor: freeze-tag-pin.json is CORRUPT — refusing to treat as first sighting; restore it from the journal or remote');
+        } else if (pin.tagObjectSha !== localTagObjectSha) {
+            problems.push(
+                `freeze anchor: the tag OBJECT changed since first pinned (${pin.tagObjectSha.slice(0, 12)}… → ` +
+                `${localTagObjectSha.slice(0, 12)}…) — the tag was FORCE-MOVED; the freeze anchor is broken`,
+            );
+        } else {
+            notes.push(`freeze anchor: tag object ${localTagObjectSha.slice(0, 12)}… matches the first-sighting pin`);
+        }
+    } else if (pinMissing) {
+        try {
+            deps.writePinExclusive(JSON.stringify({ tag, tagObjectSha: localTagObjectSha, pinnedAt: new Date().toISOString() }, null, 2));
+            notes.push(`freeze anchor: FIRST SIGHTING — pinned tag object ${localTagObjectSha}. Push the tag to origin and record this sha in the validation journal.`);
+        } catch (err) {
+            problems.push(`freeze anchor: could not pin the tag object sha (${err instanceof Error ? err.message : err})`);
+        }
+    }
+    const remoteOut = deps.lsRemoteTag();
+    const remoteSha = remoteOut !== null ? (remoteOut.trim().split(/\s+/)[0] ?? '') : '';
+    if (remoteOut === null) {
+        problems.push('freeze anchor: the remote (origin) could not be queried — the mandatory remote tag anchor is unverifiable');
+    } else if (!/^[0-9a-f]{40}$/.test(remoteSha)) {
+        problems.push(`freeze anchor: the tag is NOT on origin — push it (git push origin ${tag}); the remote copy is the mandatory immutable anchor`);
+    } else if (remoteSha !== localTagObjectSha) {
+        problems.push(
+            `freeze anchor: the REMOTE tag object (${remoteSha.slice(0, 12)}…) differs from the local one ` +
+            `(${localTagObjectSha.slice(0, 12)}…) — the local tag was moved, or the remote was force-updated`,
+        );
+    } else {
+        notes.push(`freeze anchor: remote tag object matches (origin/${tag})`);
+    }
+    return { problems, notes };
+}
+
+/** The real operations for verifyFreezeAnchor — sync fs + git, bound to
+ *  a working directory and pin path. Exported so the integration test
+ *  can run the SAME deps against a temporary repo with a bare origin. */
+export function makeFreezeAnchorDeps(tag: string, cwd: string, pinPath: string): FreezeAnchorDeps {
+    return {
+        readPin: () => readFileSyncNode(pinPath, 'utf-8'),
+        writePinExclusive: (content: string) => writeFileSyncNode(pinPath, content, { flag: 'wx' }),
+        lsRemoteTag: () => {
+            try {
+                return execFileSyncNode('git', ['ls-remote', 'origin', `refs/tags/${tag}`], { cwd, timeout: 15_000 }).toString();
+            } catch {
+                return null;
+            }
+        },
+    };
 }
 
 /** The paths that shape runtime behavior. Code identity is derived from

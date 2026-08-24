@@ -162,15 +162,22 @@ positive expectancy after costs, not improved loss control.
    correctly sized protection (waivable only with the WP2 resize
    observation recorded). Record all three in the freeze manifest beside
    the OCA observation.
-3. One clean gateway boot: YAML validation passes, calendar coverage ok,
-   no adoption-sweep surprises. (The rules/calendar halves passed in the
-   2026-08-21 script run; confirm on the next real gateway start.)
-4. **Shadow-live in place (2026-08-22)**: operator ratifies the €10K
-   revision of `risk-rules.live.yaml` (REVIEW-marked), resets the paper
-   account NetLiq to ≈$11,700 in IBKR Account Management, sets
-   `DEXTER_RISK_PROFILE=live` in the gateway environment, then sends
-   `performance reset` — one clean epoch at the live scale. The scorecard
-   fails any sample whose epoch NetLiq is not live-scale.
+3. **Shadow-live CONFIGURED first (2026-08-22, ordered per review-30)**:
+   operator ratifies the €10K revision of `risk-rules.live.yaml`
+   (REVIEW-marked), resets the paper account NetLiq to ≈$11,700 in IBKR
+   Account Management, and sets `DEXTER_RISK_PROFILE=live` in the
+   gateway environment — ALL BEFORE the gateway starts. Environment
+   changes do not reach an already-running gateway: booting first and
+   configuring after would collect the "frozen" sample under the paper
+   profile until the fingerprint mismatch surfaced.
+4. One clean gateway RESTART with the configuration above: YAML
+   validation passes, calendar coverage ok, no adoption-sweep
+   surprises, and the boot log / scorecard CONFIRMS the live profile is
+   active (the scorecard's deployable-classes line must read the live
+   flags and daily-loss bar). Only then send `performance reset` — one
+   clean epoch at the live scale, created by the correctly-profiled
+   gateway. The scorecard fails any sample whose epoch NetLiq is not
+   live-scale.
 5. **Tagging procedure — the LAST step (review-27/28/29: the tag IS the
    sample clock, and the epoch must be FROZEN BEFORE it — a
    `performance reset` after the tag changes the epoch hash the

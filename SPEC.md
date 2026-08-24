@@ -994,3 +994,33 @@ content. Both now hold as written below.
 |---|---|
 | REQ-VAL-041 | pin/remote branches are final-evaluation git+fs glue (honest ledger; each failure string distinct and named); exclusive-create semantics are the 'wx' flag's contract |
 | REQ-VAL-042 | grammar suite: #1/#01/#001 fails as one distinct id; #1/#02/#003 passes as three |
+
+## Review-30 response (2026-08-24) — configure-then-boot, executable anchor branches, unambiguous journal
+
+- Protocol 3/4 REORDERED (P1): shadow-live is CONFIGURED first (ratify
+  yaml, reset account NetLiq, set DEXTER_RISK_PROFILE=live), and only
+  THEN the clean gateway restart — environment changes do not reach a
+  running gateway; the old order could have collected the "frozen"
+  sample under the paper profile until the fingerprint mismatch
+  surfaced. The restart step now requires CONFIRMING the active live
+  profile (boot log / the scorecard's deployable-classes line) before
+  `performance reset` creates the epoch.
+- REQ-VAL-043 (P2): the freeze-anchor logic is EXTRACTED behind
+  injected operations (`verifyFreezeAnchor(tag, localSha, deps)` with
+  readPin/writePinExclusive/lsRemoteTag; `makeFreezeAnchorDeps` binds
+  the real sync fs+git) and every fail-closed branch is executable:
+  happy path, ENOENT-first-sighting + exclusive-write race, corrupt
+  pin, wrong-shape pin, non-ENOENT IO error, moved tag (with a trap
+  asserting laundering never re-pins), remote unreachable/missing/
+  differing — plus an INTEGRATION test running the REAL deps against a
+  temp repo with a BARE origin: pre-push the remote requirement bites,
+  post-push the anchor is clean, and a force-retag makes both the pin
+  AND the remote scream. The scorecard block is now pure wiring.
+- Journal fixed (P3): "Tag SHA" → "Annotated tag OBJECT SHA" with the
+  exact for-each-ref command and the note that this value restores a
+  lost pin; the stale risk-pin numbers (1.0/3.0) corrected to the
+  first-tranche 0.5/1.5.
+
+| REQ | Test |
+|---|---|
+| REQ-VAL-043 | verifyFreezeAnchor fake-deps suites (all 10 branches) + bare-origin integration (pre-push bite, post-push clean, retag double-scream) |

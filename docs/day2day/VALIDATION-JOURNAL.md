@@ -22,12 +22,16 @@ window (new tag, fresh sample).
 
 ## Tag-time fingerprint (fill at `validation-freeze-1`)
 
-- Tag SHA: _pending_
+- Annotated tag OBJECT SHA (review-30 — NOT the commit SHA; this is
+  what restores `.dexter/data/freeze-tag-pin.json` if it is ever lost):
+  `git for-each-ref --format="%(objectname)" refs/tags/validation-freeze-1`
+  → _pending_
+- Strategy fingerprint (the scorecard prints it): _pending_
 - Model + provider: _pending_ (from `.dexter/settings.json` at tag time)
 - SHA-256 of `.dexter/RULES.md`: _pending_
 - Scorer-weights provenance line: _pending_
-- risk-rules pins: paper max_risk_per_trade_pct 0.25 / live 1.0 /
-  live max_daily_loss_pct 3.0 (re-verify against the yamls at tag time)
+- risk-rules pins: paper max_risk_per_trade_pct 0.25 / live 0.5 /
+  live max_daily_loss_pct 1.5 (re-verify against the yamls at tag time)
 
 ## Window log
 
