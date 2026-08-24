@@ -52,4 +52,10 @@ export default {
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
   coverageDirectory: 'coverage',
   verbose: true,
+  // Review-38: default parallelism (one worker per core) oversubscribes
+  // the machine — suites that shell out (git-based strategy fingerprints)
+  // or hammer sqlite crest the 5s default test timeout purely from
+  // contention (reviewer-bisected: the same tests pass isolated and at 4
+  // workers, faster than the failing default run). Cap, don't serialize.
+  maxWorkers: 4,
 };

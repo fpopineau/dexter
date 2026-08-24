@@ -1254,3 +1254,18 @@ content. Both now hold as written below.
 | REQ | Test |
 |---|---|
 | REQ-VAL-057 | position-actions-fetch suite: ReentrantCancelApi (reqPositions throws, cancelPositions synchronously emits positionEnd) — the wrapper still REJECTS, cancellation executes exactly once, zero residual listeners |
+
+## Review-38 response (2026-08-24) — Jest worker cap (harness calibration, no runtime change)
+
+- jest.config.js caps maxWorkers at 4 (reviewer-bisected): default
+  one-worker-per-core parallelism oversubscribes the machine, and
+  suites that shell out (git-based strategy fingerprints) or hammer
+  sqlite crest the 5s default test timeout purely from contention —
+  two proposal-creation suites failed at default parallelism and
+  passed both isolated and at 4 workers, with the capped run FASTER
+  than the failing default one. Capping addresses the cause
+  systematically instead of scattering 30s timeouts over every test
+  that indirectly computes a fingerprint. Verified 3× at the cap:
+  838/0, ~14s, no force-exit — under a concurrent compute-heavy
+  background workload on the host. No REQ: harness configuration
+  only; the bun harness (primary) is untouched.
