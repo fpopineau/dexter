@@ -88,7 +88,7 @@ describe('writeRuntimeAttestation (the gateway-side writer)', () => {
         // Pre-verification (no IBKR in tests): the account is honestly
         // unverified, never invented.
         expect(onDisk.accountType).toBe('unverified');
-    });
+    }, 30_000);
 
     test('review-33: stop AWAITS the stopped record, and racing running writes can never bury it', async () => {
         const { startRuntimeAttestation, stopRuntimeAttestation, writeRuntimeAttestation, attestationPath } =
@@ -108,7 +108,7 @@ describe('writeRuntimeAttestation (the gateway-side writer)', () => {
         expect((JSON.parse(readFileSync(attestationPath(), 'utf-8')) as { stopped?: boolean }).stopped).toBe(true);
         startRuntimeAttestation(); // re-arm cleanly for any later suite
         await stopRuntimeAttestation();
-    });
+    }, 30_000);
 
     test('review-34: a FAILED stopped-record write surfaces false — never a silent orderly shutdown', async () => {
         const { startRuntimeAttestation, stopRuntimeAttestation } = await import('./runtime-attestation.js');
@@ -130,7 +130,7 @@ describe('writeRuntimeAttestation (the gateway-side writer)', () => {
         // A restart re-arms the verdict and a healthy stop confirms.
         startRuntimeAttestation();
         expect(await stopRuntimeAttestation()).toBe(true);
-    });
+    }, 30_000);
 
     test('review-35: CONCURRENT stops share ONE verdict — never [false, true]', async () => {
         const { startRuntimeAttestation, stopRuntimeAttestation } = await import('./runtime-attestation.js');
@@ -150,5 +150,5 @@ describe('writeRuntimeAttestation (the gateway-side writer)', () => {
         // Healthy path: concurrent stops both confirm the marker.
         startRuntimeAttestation();
         expect(await Promise.all([stopRuntimeAttestation(), stopRuntimeAttestation()])).toEqual([true, true]);
-    });
+    }, 30_000);
 });

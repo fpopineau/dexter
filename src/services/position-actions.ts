@@ -97,7 +97,18 @@ export async function fetchPositions(api: import('@stoqey/ib').IBApi): Promise<L
         api.on(EventName.position, onPosition);
         api.on(EventName.positionEnd, onEnd);
         api.on(EventName.error, onError);
-        api.reqPositions();
+        try {
+            api.reqPositions();
+        } catch (err) {
+            // Review-36: a request that throws SYNCHRONOUSLY (disconnect
+            // mid-shutdown, missing capability) used to reject through the
+            // executor throw with the timeout and listeners still armed —
+            // the 10s timer outlived the caller (and force-killed Jest
+            // workers). Settle NOW and leave nothing behind.
+            clearTimeout(timeout);
+            cleanup();
+            reject(new Error(`positions request failed synchronously: ${err instanceof Error ? err.message : String(err)}`));
+        }
     });
 }
 
@@ -169,7 +180,17 @@ export async function fetchOpenOrdersFor(
         }
         api.on(EventName.openOrder, onOpen);
         api.on(EventName.openOrderEnd, onEnd);
-        api.reqAllOpenOrders();
+        try {
+            api.reqAllOpenOrders();
+        } catch {
+            // Review-36 (see fetchPositions): a synchronous request throw
+            // settles immediately as an INCOMPLETE view — this function's
+            // contract is fail-closed partiality (complete: false), never
+            // rejection, and consumers already refuse to act on it.
+            clearTimeout(timeout);
+            cleanup();
+            resolve({ orders: found, complete: false });
+        }
     });
 }
 

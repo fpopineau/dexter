@@ -1364,9 +1364,12 @@ async function checkMissedTriage(gen: number): Promise<void> {
         isTradingDay,
         closeMinutes,
     );
-    // Review-35: everything above is synchronous, so this single check is
-    // atomic with entering the order-capable run below — a catch-up
-    // dispatched before stop can never place orders or alert afterwards.
+    // Review-35/36: everything above is synchronous, so this check is
+    // atomic with ENTERING the order-capable run below — a catch-up whose
+    // lifecycle was stopped never begins it. A run that already passed
+    // this check is an IN-FLIGHT run: it may finish (and place orders)
+    // after stop, bounded by its own postconditions, exactly like a
+    // cron-fired run that was mid-flight at shutdown.
     if (gen !== lifecycleGen) return;
     if (action === 'run-late') {
         logger.warn('[eod-triage] today\'s pre-close slot was missed (gateway was down) — running catch-up triage now');

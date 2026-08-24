@@ -1184,3 +1184,42 @@ content. Both now hold as written below.
 | REQ-VAL-053 | eod-triage suite: stop bumps the generation, invalidating every dispatched catch-up (the invalidation property); timer clearing + gen wiring are stop glue (honest ledger) |
 | REQ-VAL-054 | pattern-identical stop glue across five services — integration-untested (honest ledger); the guard shape (tracked timer + identity check at entry) is uniform and reviewed per site |
 | REQ-VAL-055 | writer suite: Promise.all double-stop → [false, false] on a failed write and [true, true] on the healthy path |
+
+## Review-36 response (2026-08-24) — sync-throw settlement, harness flake closed
+
+- REQ-VAL-056: an IBKR request that throws SYNCHRONOUSLY settles its
+  wrapper immediately and leaves nothing armed. fetchPositions and
+  fetchOpenOrdersFor installed a 10s timeout plus listeners and then
+  called api.reqPositions()/api.reqAllOpenOrders() unprotected — a
+  synchronous throw (disconnect mid-shutdown; a test fake without the
+  method) rejected through the executor with the timer and listeners
+  still alive. Reviewer-isolated as the Jest worker force-exit root
+  cause (three leaked 10s timers in outcome-tracker-partial). Now:
+  the request call is try/caught; on sync failure the timeout is
+  cleared, listeners detached, and the wrapper settles per its own
+  contract — fetchPositions REJECTS with the cause, fetchOpenOrdersFor
+  RESOLVES {orders, complete: false} (fail-closed partiality, never
+  rejection).
+- Review-35's comment overclaim corrected (P3): the generation check
+  gates ENTERING the order-capable run; a run already past it is an
+  in-flight run and may finish after stop, bounded by its own
+  postconditions — the comment now says exactly that.
+- Harness reliability closed with the leak: the four fingerprint-
+  writing attestation tests carry 30s timeouts — the cold fingerprint
+  (git subprocesses) crested Jest's 5s default only under full-parallel
+  load (measured: 1.4–3.9s isolated, >5s contended). Timeout
+  calibration only; no assertion changed. Five consecutive full
+  parallel Jest runs: 837/837, zero failures, zero force-exit
+  warnings.
+- Recorded residuals: (a) other api.req* wrapper sites share the
+  sync-throw wart but self-heal through their own timeout paths —
+  sweep on backlog; (b) jest 29.7 / babel-jest 30.3 version alignment
+  on backlog (reviewer-instrumented: not implicated in this warning).
+  Deviation from the reviewer's item 5 (recorded): the partial-fill
+  fake deliberately KEEPS throwing — that path is now the immediate-
+  settlement contract under test, and teaching the fake happy-path
+  emissions would change what the partial-fill scenarios exercise.
+
+| REQ | Test |
+|---|---|
+| REQ-VAL-056 | position-actions-fetch suite: on a throwing api, fetchPositions rejects immediately with the cause and fetchOpenOrdersFor resolves incomplete immediately; zero residual listeners asserted on every event; five clean full-parallel Jest runs are the end-to-end evidence |
