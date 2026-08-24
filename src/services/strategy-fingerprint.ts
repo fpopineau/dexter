@@ -40,6 +40,7 @@ import { loadCronStore } from '../cron/store.js';
 import { discoverSkills } from '../skills/index.js';
 import { getSetting } from '../utils/config.js';
 import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
+import { getActiveWeightsInfo } from '@/tools/ibkr/signal-scorer.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -305,13 +306,20 @@ export interface FingerprintSurfaces {
     behaviorEnv: string;
     /** Review-24: judgmentConfigInput() — cron jobs + search preference. */
     judgmentConfig: string;
+    /** Review-26, REQUIRED: the scorer's EFFECTIVE weights + provenance
+     *  (canonical, via the scorer's own resolution: override > file >
+     *  defaults). scorer-weights.json directly moves composite scores,
+     *  ranking and trigger eligibility — an edited-and-restarted weights
+     *  file is a different selection policy. Null = unresolvable →
+     *  fingerprint fails closed. */
+    scorerWeights: string | null;
 }
 
 /** Pure core: null when any REQUIRED surface is null; else the 12-hex
  *  digest. Exported for the harness — the required/optional split is
  *  the review-19 contract under test. */
 export function fingerprintFromSurfaces(s: FingerprintSurfaces): string | null {
-    if (s.effectiveRules === null || s.codeIdentity === null || s.providerModel === null) return null;
+    if (s.effectiveRules === null || s.codeIdentity === null || s.providerModel === null || s.scorerWeights === null) return null;
     return createHash('sha256')
         .update(s.effectiveRules).update('\u0000')
         .update(s.codeIdentity).update('\u0000')
@@ -320,7 +328,8 @@ export function fingerprintFromSurfaces(s: FingerprintSurfaces): string | null {
         .update(s.rules ?? 'absent').update('\u0000')
         .update(s.skills).update('\u0000')
         .update(s.behaviorEnv).update('\u0000')
-        .update(s.judgmentConfig)
+        .update(s.judgmentConfig).update('\u0000')
+        .update(s.scorerWeights)
         .digest('hex')
         .slice(0, 12);
 }
@@ -345,5 +354,12 @@ export async function strategyFingerprint(): Promise<string | null> {
         const modelId = getSetting<string | null>('modelId', null);
         if (provider && modelId) providerModel = `${provider}:${modelId}`;
     } catch { /* required surface unavailable → null fingerprint */ }
-    return fingerprintFromSurfaces({ effectiveRules, codeIdentity: code, providerModel, soul, rules, skills, behaviorEnv: behaviorEnvInput(), judgmentConfig: judgmentConfigInput() });
+    // Review-26: the scorer's effective weights via ITS OWN resolution —
+    // defaults, file weights and in-process overrides cannot drift from
+    // the fingerprint implementation. Required: unresolvable → null.
+    let scorerWeights: string | null = null;
+    try {
+        scorerWeights = stableJson(getActiveWeightsInfo());
+    } catch { /* required surface unavailable → null fingerprint */ }
+    return fingerprintFromSurfaces({ effectiveRules, codeIdentity: code, providerModel, soul, rules, skills, behaviorEnv: behaviorEnvInput(), judgmentConfig: judgmentConfigInput(), scorerWeights });
 }

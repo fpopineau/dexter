@@ -122,20 +122,20 @@ const MANIFEST_REQUIRED_FIELDS: Array<{ key: string; validate?: (v: string) => s
     { key: 'Scorer-weights provenance' },
     { key: 'risk-rules.live.yaml` ratified' },
 ];
-const MANIFEST_OBSERVATIONS: Array<{ key: string; waivable: boolean | 'requires-wp2' }> = [
-    { key: 'OCA-joined close', waivable: false },
-    { key: 'unfilled DAY parent expiry', waivable: false },
-    { key: 'fully filled DAY parent', waivable: false },
-    { key: 'PARTIALLY filled DAY parent', waivable: 'requires-wp2' },
-    { key: 'WP2 partial-fill resize', waivable: true },
-    { key: 'WP11 buffered finalize', waivable: true },
+const MANIFEST_OBSERVATIONS: Array<{ key: string; waivable: boolean | 'requires-wp2'; needsOrderIds: boolean }> = [
+    { key: 'OCA-joined close', waivable: false, needsOrderIds: true },
+    { key: 'unfilled DAY parent expiry', waivable: false, needsOrderIds: true },
+    { key: 'fully filled DAY parent', waivable: false, needsOrderIds: true },
+    { key: 'PARTIALLY filled DAY parent', waivable: 'requires-wp2', needsOrderIds: true },
+    { key: 'WP2 partial-fill resize', waivable: true, needsOrderIds: false },
+    { key: 'WP11 buffered finalize', waivable: true, needsOrderIds: false },
 ];
 const PLACEHOLDER_MARKERS = ['_pending_', '_REQUIRED', '_observation or explicit waiver'];
 
 export function auditFreezeManifest(
     man: string,
     expected: { tag: string; deployableClasses: string[] },
-): { fingerprint: string | null; baselineSha: string | null; problems: string[] } {
+): { fingerprint: string | null; baselineSha: string | null; epochSha: string | null; taggedAtMs: number | null; problems: string[] } {
     const problems: string[] = [];
     // Belt: any placeholder marker anywhere is unfilled work.
     for (const marker of PLACEHOLDER_MARKERS) {
@@ -168,6 +168,20 @@ export function auditFreezeManifest(
     })();
     const tagRow = find('Freeze tag');
     if (tagRow !== expected.tag) problems.push(`recorded freeze tag '${tagRow ?? 'missing'}' != '${expected.tag}'`);
+    // Review-26: the tagged epoch hash and tag time are IDENTITY — the
+    // caller compares them against the live epoch file and the git tag
+    // timestamp (a post-tag `performance reset` must be detectable).
+    const epochSha = (() => {
+        const v = find('SHA-256 of `performance-epoch.json`');
+        const m = v !== null ? /([0-9a-f]{64})/.exec(v) : null;
+        return m?.[1] ?? null;
+    })();
+    const taggedAtMs = (() => {
+        const v = find('Tagged at (UTC)');
+        if (v === null) return null;
+        const t = Date.parse(v);
+        return Number.isFinite(t) ? t : null;
+    })();
 
     // Broker observations: 'observed …' (never 'not observed'); 'WAIVED …'
     // only where the protocol allows it.
@@ -187,9 +201,25 @@ export function auditFreezeManifest(
         const s = obsStatus(v);
         if (v === null) { problems.push(`broker-observation row missing: '${obs.key}'`); continue; }
         if (s === 'invalid') { problems.push(`observation '${obs.key}' is neither observed nor a valid waiver ('${v}')`); continue; }
-        if (s === 'waived' && obs.waivable === false) problems.push(`'${obs.key}' is NOT waivable — a real paper observation is required`);
-        if (s === 'waived' && obs.waivable === 'requires-wp2' && wp2 !== 'observed') {
-            problems.push(`'${obs.key}' waiver requires the WP2 partial-fill resize observation to be recorded as observed`);
+        // Review-26 P2: the status word alone is not EVIDENCE. An
+        // observation must carry date + symbol + details (order ids where
+        // the broker interaction is the thing observed); a waiver must
+        // carry initials and a reason. Bare 'observed'/'WAIVED' fail.
+        if (s === 'observed') {
+            if (!/^observed\s+\d{4}-\d{2}-\d{2}\s+\S+\s+\S/i.test(v)) {
+                problems.push(`observation '${obs.key}' lacks the required evidence ('${v}' — grammar: observed YYYY-MM-DD SYMBOL <details>)`);
+            } else if (obs.needsOrderIds && !/#\d+/.test(v)) {
+                problems.push(`observation '${obs.key}' must record the broker order id(s) (#123)`);
+            }
+        }
+        if (s === 'waived') {
+            if (!/^waiv\w*\s+\S+\s*:\s*\S/i.test(v)) {
+                problems.push(`waiver on '${obs.key}' lacks initials and a reason ('${v}' — grammar: WAIVED <initials>: <reason>)`);
+            }
+            if (obs.waivable === false) problems.push(`'${obs.key}' is NOT waivable — a real paper observation is required`);
+            if (obs.waivable === 'requires-wp2' && wp2 !== 'observed') {
+                problems.push(`'${obs.key}' waiver requires the WP2 partial-fill resize observation to be recorded as observed`);
+            }
         }
     }
 
@@ -203,7 +233,7 @@ export function auditFreezeManifest(
             problems.push(`manifest scope records '${c}' but it is not enabled`);
         }
     }
-    return { fingerprint, baselineSha, problems };
+    return { fingerprint, baselineSha, epochSha, taggedAtMs, problems };
 }
 
 export interface PortfolioDrawdown {

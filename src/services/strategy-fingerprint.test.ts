@@ -11,6 +11,7 @@ describe('fingerprintFromSurfaces (review-19 — required identity fails CLOSED,
         providerModel: 'anthropic:claude-sonnet-5', soul: 'soul', rules: 'rules', skills: 'skills',
         behaviorEnv: 'EOD_TRIAGE=unset',
         judgmentConfig: 'cron:[]|search:unset',
+        scorerWeights: '{"source":"defaults"}',
     };
 
     test('all surfaces present → deterministic 12-hex', () => {
@@ -23,6 +24,8 @@ describe('fingerprintFromSurfaces (review-19 — required identity fails CLOSED,
         expect(fingerprintFromSurfaces({ ...ALL, effectiveRules: null })).toBeNull();
         expect(fingerprintFromSurfaces({ ...ALL, codeIdentity: null })).toBeNull();
         expect(fingerprintFromSurfaces({ ...ALL, providerModel: null })).toBeNull();
+        // Review-26: scorer weights are selection policy — required.
+        expect(fingerprintFromSurfaces({ ...ALL, scorerWeights: null })).toBeNull();
     });
 
     test('optional surfaces: absence is a DIFFERENT state, not a failure', () => {
@@ -35,7 +38,7 @@ describe('fingerprintFromSurfaces (review-19 — required identity fails CLOSED,
 
     test('every surface moves the digest', () => {
         const base = fingerprintFromSurfaces(ALL);
-        for (const key of ['effectiveRules', 'codeIdentity', 'providerModel', 'soul', 'rules', 'skills', 'behaviorEnv', 'judgmentConfig'] as const) {
+        for (const key of ['effectiveRules', 'codeIdentity', 'providerModel', 'soul', 'rules', 'skills', 'behaviorEnv', 'judgmentConfig', 'scorerWeights'] as const) {
             expect(fingerprintFromSurfaces({ ...ALL, [key]: 'CHANGED' })).not.toBe(base);
         }
     });
@@ -326,6 +329,26 @@ describe('auditFreezeManifest (review-24/25 — a schema audit, not substring co
         expect(auditFreezeManifest(filled, { tag: 'validation-freeze-1', deployableClasses: ['intraday', 'swing'] }).problems.some((x) => x.includes("'swing' not recorded"))).toBe(true);
     });
 
+    test('review-26: a status word without EVIDENCE fails the grammar', async () => {
+        const { auditFreezeManifest } = await import('@/utils/equity-series-math.js');
+        const exp = { tag: 'validation-freeze-1', deployableClasses: ['intraday'] };
+        // Bare 'observed' — no date, no symbol, no details.
+        const bareObs = filled.replace('observed 2026-08-25 AAPL #101/#102', 'observed');
+        expect(auditFreezeManifest(bareObs, exp).problems.some((x) => x.includes('lacks the required evidence'))).toBe(true);
+        // Date + symbol but NO order ids on a broker-interaction row.
+        const noIds = filled.replace('observed 2026-08-25 AAPL #101/#102', 'observed 2026-08-25 AAPL sibling cancel seen');
+        expect(auditFreezeManifest(noIds, exp).problems.some((x) => x.includes('order id'))).toBe(true);
+        // Bare 'WAIVED' — no initials, no reason.
+        const bareWaiver = filled.replace('WAIVED FP: harness coverage accepted', 'WAIVED');
+        expect(auditFreezeManifest(bareWaiver, exp).problems.some((x) => x.includes('lacks initials and a reason'))).toBe(true);
+        // The complete fixture's own values pass all grammars.
+        expect(auditFreezeManifest(filled, exp).problems).toEqual([]);
+        // Parsed identity fields for the review-26 window checks.
+        const a = auditFreezeManifest(filled, exp);
+        expect(a.epochSha).toBe('c'.repeat(64));
+        expect(a.taggedAtMs).toBe(Date.parse('2026-08-25T20:10:00Z'));
+    });
+
     test('the real template (all three placeholder variants) fails loudly', async () => {
         const { auditFreezeManifest } = await import('@/utils/equity-series-math.js');
         const { readFileSync } = await import('node:fs');
@@ -352,5 +375,25 @@ describe('memory policy in the identity (review-25)', () => {
         // The judgment surface always carries a memory section (settings or
         // the 'unset' sentinel = runtime defaults).
         expect(judgmentConfigInput()).toMatch(/\|memory:/);
+    });
+});
+
+describe('scorer weights in the identity (review-26)', () => {
+    test('the fingerprint carries the scorer OWN resolution — weights, source, provenance', async () => {
+        const { strategyFingerprint } = await import('./strategy-fingerprint.js');
+        const { getActiveWeightsInfo, setActiveWeights } = await import('@/tools/ibkr/signal-scorer.js');
+        // The surface uses getActiveWeightsInfo — assert the resolution
+        // exists and an in-process override (calibration) MOVES the digest.
+        const before = await strategyFingerprint();
+        const info = getActiveWeightsInfo();
+        expect(info.weights.momentum + info.weights.meanReversion + info.weights.volume + info.weights.trend).toBeCloseTo(1, 6);
+        setActiveWeights({ momentum: 0.7, meanReversion: 0.1, volume: 0.1, trend: 0.1 });
+        try {
+            const after = await strategyFingerprint();
+            // Either both null (identity unresolvable in this env) or different.
+            if (before !== null && after !== null) expect(after).not.toBe(before);
+        } finally {
+            setActiveWeights(null);
+        }
     });
 });

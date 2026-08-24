@@ -61,6 +61,7 @@
  */
 
 import 'dotenv/config';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -238,6 +239,27 @@ function lgamma(z: number): number {
 
 const db = await openDb();
 const verdictFails: string[] = [];
+
+// Review-26 P1: FINAL-MODE WINDOW AUTHORITY, resolved BEFORE anything
+// reads sinceMs. The old order let a mutable performance-epoch.json (or
+// an arbitrary CLI date) define the final window: a `performance reset`
+// after losses moved the epoch forward, excluded them, and still
+// produced a final verdict against the same tag. In final mode the
+// window starts at the GIT TAG TIMESTAMP — the one clock nothing
+// post-tag can move — and a conflicting `--since` is rejected.
+const git = (args: string[]): string | null => {
+    try { return execFileSync('git', args, { timeout: 10_000 }).toString(); } catch { return null; }
+};
+const FREEZE_TAG = 'validation-freeze-1';
+const MANIFEST_REPO_PATH = 'docs/day2day/FREEZE-MANIFEST.md';
+const tagExists = (git(['tag', '-l', FREEZE_TAG]) ?? '').trim().length > 0;
+const finalMode = process.argv.includes('--final') || tagExists;
+let tagTimeMs: number | null = null;
+if (tagExists) {
+    const t = (git(['log', '-1', '--format=%ct', FREEZE_TAG]) ?? '').trim();
+    tagTimeMs = /^\d+$/.test(t) ? Number(t) * 1000 : null;
+}
+
 const sinceArg = process.argv[2];
 let sinceMs: number;
 let windowLabel: string;
@@ -248,7 +270,30 @@ try {
     const b = JSON.parse(readFileSync(join(dataDir, 'performance-epoch.json'), 'utf-8')) as { netLiq?: number };
     if (typeof b.netLiq === 'number' && b.netLiq > 0) epochNetliq = b.netLiq;
 } catch { /* reported by the drawdown line */ }
-if (sinceArg && /^\d{4}-\d{2}-\d{2}(T[\d:.]+Z?)?$/.test(sinceArg)) {
+if (tagExists) {
+    // Final window: the tag's own clock. An epoch stamped AFTER the tag
+    // is a post-tag reset — the exact laundering path review-26 named.
+    if (tagTimeMs === null) {
+        sinceMs = Number.MAX_SAFE_INTEGER;
+        windowLabel = `since tag ${FREEZE_TAG} (UNRESOLVABLE — verdict fails)`;
+        verdictFails.push('final window: the tag timestamp could not be resolved');
+    } else {
+        sinceMs = tagTimeMs;
+        windowLabel = `since tag ${FREEZE_TAG} (${new Date(tagTimeMs).toISOString()} — authoritative final window)`;
+        if (sinceArg && /^\d{4}-\d{2}-\d{2}(T[\d:.]+Z?)?$/.test(sinceArg)) {
+            const requested = sinceArg.includes('T') ? Date.parse(sinceArg) : Date.parse(`${sinceArg}T00:00:00Z`);
+            if (requested !== tagTimeMs) {
+                verdictFails.push(`final window: explicit --since ${sinceArg} rejected — the window is tag-derived (${new Date(tagTimeMs).toISOString()})`);
+            }
+        }
+        try {
+            const b = JSON.parse(readFileSync(join(dataDir, 'performance-epoch.json'), 'utf-8')) as { epochMs?: number };
+            if (typeof b.epochMs === 'number' && b.epochMs > tagTimeMs) {
+                verdictFails.push(`final window: performance-epoch.json is stamped AFTER the tag (${new Date(b.epochMs).toISOString()}) — a post-tag reset excludes tagged-sample history`);
+            }
+        } catch { verdictFails.push('final window: performance-epoch.json unreadable — epoch consistency unproven'); }
+    }
+} else if (sinceArg && /^\d{4}-\d{2}-\d{2}(T[\d:.]+Z?)?$/.test(sinceArg)) {
     // Round-5 review: accept the exact tag TIMESTAMP, not just midnight —
     // a date-only argument floors to 00:00Z and admits pre-tag trades.
     sinceMs = sinceArg.includes('T') ? Date.parse(sinceArg) : Date.parse(`${sinceArg}T00:00:00Z`);
@@ -778,14 +823,6 @@ if (fpValues.length > 0) {
     // do not dirty the runtime identity), so trusting it would let a
     // post-tag edit make the manifest match anything. The working-tree
     // manifest serves ONLY explicitly-labelled pre-tag diagnostics.
-    const { execFileSync } = await import('node:child_process');
-    const git = (args: string[]): string | null => {
-        try { return execFileSync('git', args, { timeout: 10_000 }).toString(); } catch { return null; }
-    };
-    const FREEZE_TAG = 'validation-freeze-1';
-    const MANIFEST_REPO_PATH = 'docs/day2day/FREEZE-MANIFEST.md';
-    const tagExists = (git(['tag', '-l', FREEZE_TAG]) ?? '').trim().length > 0;
-    const finalMode = process.argv.includes('--final') || tagExists;
     const parseManifestFp = (man: string): string | null =>
         /Strategy fingerprint[^|\n]*\|\s*([0-9a-f]{12})\s*\|/.exec(man)?.[1] ?? null;
     let manifestFp: string | null = null;
@@ -808,6 +845,26 @@ if (fpValues.length > 0) {
                 const audit = auditFreezeManifest(tagged, { tag: FREEZE_TAG, deployableClasses: [...DEPLOYABLE_CLASSES] });
                 manifestFp = audit.fingerprint;
                 for (const p of audit.problems) verdictFails.push(`freeze manifest: ${p}`);
+                // Review-26 P1: the tagged epoch hash must equal the LIVE
+                // epoch file — a `performance reset` after the tag is a
+                // different denominator and a different window seed.
+                if (audit.epochSha !== null) {
+                    let currentEpochSha: string | null = null;
+                    try {
+                        currentEpochSha = createHash('sha256').update(readFileSync(join(dataDir, 'performance-epoch.json'))).digest('hex');
+                    } catch { /* unreadable */ }
+                    if (currentEpochSha === null) {
+                        verdictFails.push('freeze identity: performance-epoch.json unreadable — cannot compare with the tagged epoch hash');
+                    } else if (currentEpochSha !== audit.epochSha) {
+                        verdictFails.push(`freeze identity: performance-epoch.json hash ${currentEpochSha.slice(0, 12)}… != the hash recorded in the tagged manifest — the epoch was reset or modified after the tag`);
+                    }
+                }
+                // The manifest's Tagged-at must agree with the git tag clock.
+                if (audit.taggedAtMs === null) {
+                    verdictFails.push("freeze manifest: 'Tagged at (UTC)' is not a parseable timestamp");
+                } else if (tagTimeMs !== null && Math.abs(audit.taggedAtMs - tagTimeMs) > 24 * 3_600_000) {
+                    verdictFails.push(`freeze manifest: 'Tagged at (UTC)' differs from the git tag time by more than 24h`);
+                }
                 if (audit.baselineSha === null) {
                     verdictFails.push('freeze identity: the tagged manifest declares no behavioral baseline SHA');
                 } else if (git(['merge-base', '--is-ancestor', audit.baselineSha, FREEZE_TAG]) === null) {

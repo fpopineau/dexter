@@ -873,3 +873,38 @@ content. Both now hold as written below.
 | REQ-VAL-031 | audit suite vs a COMPLETE fixture: clean pass; deleted row, 'not observed', non-waivable waiver, WP2-dependency, malformed fingerprint, wrong tag, both scope directions each fail; the real template fails all three placeholder types |
 | REQ-VAL-032 | memory-policy suite (presence flags, secret value absent, memory section always present in the judgment surface); every-surface digest loop covers judgmentConfig |
 | REQ-VAL-033 | fail-closed branches are git glue at tag time (honest ledger) — each failure string is distinct and named |
+
+## Review-26 response (2026-08-24) — tag-anchored window, scorer weights in the identity, evidence-grade observations
+
+- REQ-VAL-034: the FINAL sample window is anchored to the GIT TAG CLOCK,
+  the one timestamp nothing post-tag can move. Once the tag exists:
+  sinceMs = the tag's commit time (resolved BEFORE any query runs); a
+  conflicting explicit `--since` is rejected; an epoch file stamped
+  AFTER the tag fails ("post-tag reset excludes tagged-sample history");
+  an unresolvable tag time poisons the window (sinceMs = MAX_SAFE_INT)
+  and fails. The tagged manifest's epoch hash must EQUAL the live
+  `performance-epoch.json` hash (a `performance reset` after losses can
+  no longer move the window forward under the same tag), and the
+  manifest's 'Tagged at (UTC)' must agree with the git tag time within
+  24h. auditFreezeManifest now returns epochSha and taggedAtMs for
+  these comparisons.
+- REQ-VAL-035: SCORER WEIGHTS are a required identity surface. The
+  fingerprint carries `getActiveWeightsInfo()` — the scorer's OWN
+  resolution (in-process override > scorer-weights.json > defaults),
+  with source, calibratedAt and reset provenance — as sorted-key
+  canonical JSON. Editing scorer-weights.json and restarting is a
+  different selection policy and now a different fingerprint;
+  unresolvable weights fail the fingerprint closed. (The manifest's
+  provenance ROW remains human context; the machine check is the
+  fingerprint surface.)
+- REQ-VAL-036 (P2): observation rows require EVIDENCE, not a status
+  word. Observed rows must match `observed YYYY-MM-DD SYMBOL <details>`
+  with broker order ids (#123) required on the OCA and all three
+  mixed-TIF rows; waivers must match `WAIVED <initials>: <reason>`.
+  Bare 'observed'/'WAIVED' fail with the grammar in the message.
+
+| REQ | Test |
+|---|---|
+| REQ-VAL-034 | window/epoch-hash/tagged-at branches are git glue at tag time (honest ledger; each failure string distinct); auditFreezeManifest epochSha/taggedAtMs parsing rides the complete-fixture suite |
+| REQ-VAL-035 | scorer suite: resolution sums to 1; an in-process override MOVES the digest (restored in finally); required-null → fingerprint null; every-surface loop covers scorerWeights |
+| REQ-VAL-036 | audit suite: complete fixture (dates+symbols+ids) passes; the review-25 negative cases still fail; grammar teeth exercised via the fixture's own values |
