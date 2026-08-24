@@ -9,6 +9,7 @@ describe('fingerprintFromSurfaces (review-19 — required identity fails CLOSED,
     const ALL = {
         effectiveRules: '{"a":1}', codeIdentity: 'f'.repeat(40),
         providerModel: 'anthropic:claude-sonnet-5', soul: 'soul', rules: 'rules', skills: 'skills',
+        behaviorEnv: 'EOD_TRIAGE=unset',
     };
 
     test('all surfaces present → deterministic 12-hex', () => {
@@ -33,9 +34,28 @@ describe('fingerprintFromSurfaces (review-19 — required identity fails CLOSED,
 
     test('every surface moves the digest', () => {
         const base = fingerprintFromSurfaces(ALL);
-        for (const key of ['effectiveRules', 'codeIdentity', 'providerModel', 'soul', 'rules', 'skills'] as const) {
+        for (const key of ['effectiveRules', 'codeIdentity', 'providerModel', 'soul', 'rules', 'skills', 'behaviorEnv'] as const) {
             expect(fingerprintFromSurfaces({ ...ALL, [key]: 'CHANGED' })).not.toBe(base);
         }
+    });
+});
+
+describe('behaviorEnvInput (review-23 — env-controlled policy is part of the identity)', () => {
+    test('policy values ride raw with an unset sentinel; capability env rides PRESENCE only, never the value', async () => {
+        const { behaviorEnvInput } = await import('./strategy-fingerprint.js');
+        const a = behaviorEnvInput({});
+        expect(a).toContain('EOD_TRIAGE=unset');
+        expect(a).toContain('ANTHROPIC_API_KEY:absent');
+        const b = behaviorEnvInput({ OPP_TRIGGER_SCORE: '85', ANTHROPIC_API_KEY: 'sk-secret-value' });
+        expect(b).toContain('OPP_TRIGGER_SCORE=85');
+        expect(b).toContain('ANTHROPIC_API_KEY:present');
+        expect(b).not.toContain('sk-secret-value'); // secrets NEVER enter the digest input
+        expect(b).not.toBe(a);
+        // The reviewer's exact concern: flipping a selection threshold or an
+        // EOD switch changes the identity.
+        expect(behaviorEnvInput({ EOD_TRIAGE: 'false' })).not.toBe(a);
+        expect(behaviorEnvInput({ UNIVERSE_EXTRA_SYMBOLS: 'GME' })).not.toBe(a);
+        expect(behaviorEnvInput({ CHASE_CONTINUATION: 'true' })).not.toBe(a);
     });
 });
 
@@ -168,7 +188,15 @@ describe('codeIdentity on a REAL temporary repository (review-21)', () => {
         writeFileSync(join(dir, 'src', 'a.ts'), 'runtime v2');
         g('add', 'src');
         g('commit', '-qm', 'runtime change');
-        expect(await codeIdentity(dir)).not.toBe(baseline);
+        const afterRuntime = await codeIdentity(dir);
+        expect(afterRuntime).not.toBe(baseline);
+
+        // Review-23: the LOCKFILE is part of the executable dependency
+        // graph — a lockfile-only commit must move the identity too.
+        writeFileSync(join(dir, 'bun.lock'), '{"lockfileVersion": 1}');
+        g('add', 'bun.lock');
+        g('commit', '-qm', 'lockfile only');
+        expect(await codeIdentity(dir)).not.toBe(afterRuntime);
     });
 });
 

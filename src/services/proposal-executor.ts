@@ -756,6 +756,22 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         };
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        // Review-23 P2: the IN-LOCK cutoff recheck throws before the id
+        // grant — no order exists, so this is a GATE refusal, not an
+        // execution failure. Same lifecycle as every other gate: release
+        // the claim (back to open), ledger the refusal. Everything else
+        // in this catch keeps failure semantics (an order may exist).
+        if (msg.startsWith('[session-gate]')) {
+            await releaseProposalClaim(p.id);
+            await recordRefusal({
+                symbol: p.symbol, direction: p.direction, entryType: p.entryType,
+                entry: p.entry, entryLimit: p.entryLimit, stop: p.stop, target: p.target,
+                quantity: p.quantity, score: p.score, reason: msg,
+                proposalAgeSec: Math.round((Date.now() - p.createdAt) / 1000),
+            }).catch(() => { /* ledger is best-effort */ });
+            logger.warn(`[proposal-executor] ${p.id} refused at placement (proposal stays open): ${msg}`);
+            return { ok: false, message: `⛔ ${p.id} NOT executed — ${msg}\nThe proposal remains OPEN.` };
+        }
         await setProposalStatus(p.id, 'failed', { note: msg });
         logger.error(`[proposal-executor] ${p.id} failed: ${msg}`);
         return { ok: false, message: `❌ ${p.id} NOT executed — ${msg}` };

@@ -772,24 +772,53 @@ if (fpValues.length > 0) {
     try {
         currentFp = await (await import('../src/services/strategy-fingerprint.js')).strategyFingerprint();
     } catch { currentFp = null; }
-    let manifestFp: string | null = null;
-    try {
-        const man = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../docs/day2day/FREEZE-MANIFEST.md'), 'utf-8');
-        const m = /Strategy fingerprint[^|\n]*\|\s*([0-9a-f]{12})\s*\|/.exec(man);
-        manifestFp = m ? m[1] : null;
-    } catch { manifestFp = null; }
-    // Review-22: once the freeze tag exists (or on an explicit --final
-    // run) the manifest is MANDATORY — a missing/unfilled/malformed
-    // manifest must fail an authoritative verdict, never pass as
-    // pre-tag diagnostics.
-    let tagExists = false;
-    try {
-        const { execFileSync } = await import('node:child_process');
-        tagExists = execFileSync('git', ['tag', '-l', 'validation-freeze-1'], { timeout: 10_000 }).toString().trim().length > 0;
-    } catch { /* git unavailable — --final still forces the requirement */ }
+    // Review-22/23: once the freeze tag exists (or on an explicit --final
+    // run) the manifest is MANDATORY and is read FROM THE TAG — the
+    // working-tree copy is mutable after tagging (docs edits deliberately
+    // do not dirty the runtime identity), so trusting it would let a
+    // post-tag edit make the manifest match anything. The working-tree
+    // manifest serves ONLY explicitly-labelled pre-tag diagnostics.
+    const { execFileSync } = await import('node:child_process');
+    const git = (args: string[]): string | null => {
+        try { return execFileSync('git', args, { timeout: 10_000 }).toString(); } catch { return null; }
+    };
+    const FREEZE_TAG = 'validation-freeze-1';
+    const MANIFEST_REPO_PATH = 'docs/day2day/FREEZE-MANIFEST.md';
+    const tagExists = (git(['tag', '-l', FREEZE_TAG]) ?? '').trim().length > 0;
     const finalMode = process.argv.includes('--final') || tagExists;
+    const parseManifestFp = (man: string): string | null =>
+        /Strategy fingerprint[^|\n]*\|\s*([0-9a-f]{12})\s*\|/.exec(man)?.[1] ?? null;
+    let manifestFp: string | null = null;
+    let manifestSource: string;
+    if (finalMode) {
+        manifestSource = `tag ${FREEZE_TAG}`;
+        if (!tagExists) {
+            manifestSource = 'MISSING TAG';
+            verdictFails.push(`freeze identity: --final requires the ${FREEZE_TAG} tag to exist`);
+        } else {
+            const tagged = git(['show', `${FREEZE_TAG}:${MANIFEST_REPO_PATH}`]);
+            if (tagged === null) {
+                verdictFails.push('freeze identity: manifest unreadable FROM THE TAG');
+            } else {
+                manifestFp = parseManifestFp(tagged);
+                // The tagged manifest must declare its behavioral baseline,
+                // and that baseline must actually be an ancestor of the tag.
+                const baseline = /Behavioral baseline commit SHA\s*\|\s*([0-9a-f]{40})/.exec(tagged)?.[1] ?? null;
+                if (baseline === null) {
+                    verdictFails.push('freeze identity: the tagged manifest declares no behavioral baseline SHA');
+                } else if (git(['merge-base', '--is-ancestor', baseline, FREEZE_TAG]) === null) {
+                    verdictFails.push(`freeze identity: declared baseline ${baseline.slice(0, 8)} is NOT an ancestor of the tag`);
+                }
+            }
+        }
+    } else {
+        manifestSource = 'working tree (pre-tag diagnostics)';
+        try {
+            manifestFp = parseManifestFp(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), `../${MANIFEST_REPO_PATH}`), 'utf-8'));
+        } catch { manifestFp = null; }
+    }
     const freeze = fingerprintFreezeCheck({ sampleFp, currentFp, manifestFp, requireManifest: finalMode });
-    console.log(`freeze identity: sample=${sampleFp ?? 'n/a'} current=${currentFp ?? 'UNRESOLVABLE'} manifest=${manifestFp ?? 'not filled'}${finalMode ? ' [FINAL — manifest required]' : ' (pre-tag diagnostics)'}${freeze.ok ? ' — MATCH' : ''}`);
+    console.log(`freeze identity: sample=${sampleFp ?? 'n/a'} current=${currentFp ?? 'UNRESOLVABLE'} manifest=${manifestFp ?? 'not filled'} [${manifestSource}${finalMode ? ' — FINAL, manifest required' : ''}]${freeze.ok ? ' — MATCH' : ''}`);
     for (const p of freeze.problems) verdictFails.push(`freeze identity: ${p}`);
 }
 

@@ -59,8 +59,52 @@ async function execGit(args: string[], cwd: string): Promise<string | null> {
  *  manifest changed HEAD and with it the fingerprint). A docs-only
  *  commit leaves every one of these objects — and so the identity —
  *  unchanged. */
-const RUNTIME_PATHS = ['src', 'scripts', 'package.json', 'bunfig.toml', 'tsconfig.json', 'SOUL.md'];
-const RUNTIME_UNTRACKED = /^(src|scripts)\/|^(package\.json|bunfig\.toml|tsconfig\.json|SOUL\.md)$/;
+const RUNTIME_PATHS = ['src', 'scripts', 'package.json', 'bun.lock', 'bunfig.toml', 'tsconfig.json', 'SOUL.md'];
+const RUNTIME_UNTRACKED = /^(src|scripts)\/|^(package\.json|bun\.lock|bunfig\.toml|tsconfig\.json|SOUL\.md)$/;
+
+/** Review-23: behavior-affecting ENVIRONMENT settings — trigger
+ *  thresholds, auto-execution selection, lifecycle switches, universe
+ *  overrides, the data-feed type. Changing any of these changes WHICH
+ *  trades enter the sample, so they are part of the strategy identity.
+ *  Hashed as RAW values with an 'unset' sentinel rather than re-deriving
+ *  each default here: duplicating ~40 defaults would drift from the real
+ *  ones (harness infidelity); raw hashing is over-sensitive (explicitly
+ *  setting a default ends a window) but never under-sensitive. Secrets
+ *  are NEVER hashed by value — capability env hashes presence only. */
+const BEHAVIOR_ENV = [
+    'DEXTER_RISK_PROFILE', 'IBKR_PORT', 'IBKR_ALLOW_LIVE', 'IBKR_MARKET_DATA_TYPE',
+    'AUTO_EXECUTE_PAPER', 'AUTO_EXECUTE_MAX_PER_DAY', 'AUTO_EXECUTE_MIN_SCORE',
+    'AUTO_PROTECT', 'PROFIT_TRAIL', 'CHASE_CONTINUATION', 'KILL_SWITCH_GUARDIAN',
+    'EOD_TRIAGE', 'EOD_EARNINGS_GUARD', 'EOD_MACRO_WARNING',
+    'ENTRY_EXPIRY_GRACE_MIN', 'STALE_ENTRY_MAX_DAYS',
+    'OPPORTUNITY_ENGINE', 'OPP_TRIGGER_SCORE', 'OPP_TRIGGER_MAX_PER_DAY', 'OPP_TRIGGER_COOLDOWN_MIN',
+    'OPP_TOP_N', 'OPP_MAX_CANDIDATES', 'OPP_MARKET_CAP_MIN', 'OPP_MARKET_CAP_MAX',
+    'OPP_DEEP_TRIGGER_MARGIN', 'OPP_EVENT_BOOST_MIN_PCT', 'OPP_MOVER_ALERT_PCT', 'OPP_MOVER_ALERT_RVOL',
+    'OPP_SENTINEL', 'OPP_SENTINEL_CADENCE_MIN', 'OPP_SENTINEL_MOVE_PCT',
+    'OPP_DAWN_CADENCE_MIN', 'OPP_DAWN_START_ET', 'OPP_HEALTH_EMPTY_CYCLES', 'OPP_REACTOR_RELIEF',
+    'OPP_BREADTH_MAX_PER_DAY', 'OPP_BREADTH_COOLDOWN_MIN', 'OPP_BREADTH_MIN_WATCHED',
+    'OPP_BREADTH_THRESHOLD_RELIEF', 'OPP_BREADTH_CAP_BONUS',
+    'OPP_BREADTH_VEHICLE_BROAD', 'OPP_BREADTH_VEHICLE_SEMI', 'OPP_BREADTH_VEHICLE_CRYPTO',
+    'REGIME_PREARM_MAX_PER_DAY', 'REGIME_PREARM_COOLDOWN_MIN',
+    'UNIVERSE_SWEEP', 'UNIVERSE_CAP_MIN', 'UNIVERSE_EXTRA_SYMBOLS',
+    'NEWS_PULSE', 'NEWS_PULSE_WINDOW_MIN', 'NEWS_PULSE_MIN_ARTICLES', 'NEWS_PULSE_MIN_DOMAINS',
+    'NEWS_PULSE_MAX_SYMBOLS', 'NEWS_PULSE_BATCH_SIZE', 'NEWS_PULSE_BACKOFF_MIN',
+] as const;
+/** Data/model capability presence — a provider appearing or vanishing
+ *  changes what judgment can see, but the VALUE is a secret and never
+ *  enters the digest. */
+const CAPABILITY_ENV = [
+    'ANTHROPIC_API_KEY', 'FINANCIAL_DATASETS_API_KEY', 'EXASEARCH_API_KEY',
+    'X_BEARER_TOKEN', 'OLLAMA_BASE_URL', 'VLLM_BASE_URL',
+] as const;
+
+/** Review-23, pure: the typed non-secret snapshot of behavior-affecting
+ *  environment. Exported for the harness. */
+export function behaviorEnvInput(env: Record<string, string | undefined> = process.env): string {
+    const policy = BEHAVIOR_ENV.map((k) => `${k}=${env[k]?.trim() ?? 'unset'}`);
+    const caps = CAPABILITY_ENV.map((k) => `${k}:${env[k] ? 'present' : 'absent'}`);
+    return [...policy, ...caps].join('|');
+}
 
 /** Review-20/21, pure: split `git status --porcelain=v1 -z` output into
  *  "tracked files changed" and "runtime-relevant untracked paths".
@@ -196,6 +240,9 @@ export interface FingerprintSurfaces {
     soul: string | null;
     rules: string | null;
     skills: string;
+    /** Review-23: behaviorEnvInput() — always resolvable (sentinels for
+     *  unset), so plain string. */
+    behaviorEnv: string;
 }
 
 /** Pure core: null when any REQUIRED surface is null; else the 12-hex
@@ -209,7 +256,8 @@ export function fingerprintFromSurfaces(s: FingerprintSurfaces): string | null {
         .update(s.providerModel).update('\u0000')
         .update(s.soul ?? 'absent').update('\u0000')
         .update(s.rules ?? 'absent').update('\u0000')
-        .update(s.skills)
+        .update(s.skills).update('\u0000')
+        .update(s.behaviorEnv)
         .digest('hex')
         .slice(0, 12);
 }
@@ -234,5 +282,5 @@ export async function strategyFingerprint(): Promise<string | null> {
         const modelId = getSetting<string | null>('modelId', null);
         if (provider && modelId) providerModel = `${provider}:${modelId}`;
     } catch { /* required surface unavailable → null fingerprint */ }
-    return fingerprintFromSurfaces({ effectiveRules, codeIdentity: code, providerModel, soul, rules, skills });
+    return fingerprintFromSurfaces({ effectiveRules, codeIdentity: code, providerModel, soul, rules, skills, behaviorEnv: behaviorEnvInput() });
 }

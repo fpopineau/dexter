@@ -101,8 +101,20 @@ positive expectancy after costs, not improved loss control.
   refused); schedule-specific model overrides are caught by the
   per-trade `model` column, a recorded residual. The gateway must run
   from a CLEAN checkout: a runtime-dirty tree fingerprints as
-  `sha+dirty.<content-hash>` and the scorecard fails the evaluation —
-  the tag could not reconstruct the sampled behavior.
+  `tree.<hash>+dirty.<content-hash>` and the scorecard fails the
+  evaluation — the tag could not reconstruct the sampled behavior.
+  Review-23 additions: the fingerprint also covers `bun.lock` (a
+  dependency change is a behavior change) and a typed NON-SECRET
+  snapshot of every behavior-affecting environment setting (trigger
+  thresholds, auto-execution selection, EOD switches, universe
+  overrides, data-feed type; API keys ride as presence flags only) —
+  **EDITING `.env` MID-SAMPLE ENDS THE WINDOW**, including explicitly
+  setting a variable to its default. A FINAL evaluation (`--final`, or
+  automatically once the `validation-freeze-1` tag exists) requires the
+  tag, reads the manifest FROM THE TAG (`git show <tag>:…` — the
+  working-tree copy is mutable after tagging and is used only for
+  labelled pre-tag diagnostics), and verifies the declared baseline SHA
+  is an ancestor of the tag.
 - **The shadow swing record is EXPLORATORY** (2026-08-23): no official
   macro calendar exists yet, and adding one later changes the judgment
   inputs swings depend on. Enabling `swing_enabled` live therefore

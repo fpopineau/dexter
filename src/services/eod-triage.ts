@@ -673,7 +673,7 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
     if (isMarketHoliday(today)) return;
     // A preview (dryRun) stamps nothing and needs no lifecycle — the real
     // slot must still fire.
-    if (dryRun) return runEodTriageCore(today, true);
+    if (dryRun) { await runEodTriageCore(today, true); return; }
     // Review-20 P1: the old stamp-'ran'-at-start meant a broker throw
     // later in the run was only LOGGED — no operator alert, and the boot
     // catch-up saw today's stamp and refused to retry. Now: an in-memory
@@ -689,8 +689,18 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
     triageInFlight = true;
     markTriageRun(today, 'running');
     try {
-        await runEodTriageCore(today, false);
-        markTriageRun(today, 'completed');
+        const outcome = await runEodTriageCore(today, false);
+        // Review-23 P1: an unresolved flat-by-close violation is NOT a
+        // completed triage — a working DAY parent can still fill until
+        // the bell. Stamping 'failed' keeps the boot catch-up eligible
+        // (a restart before the bell retries); the 🚨 alert already
+        // named the symbols.
+        if (outcome.unresolvedViolations > 0) {
+            markTriageRun(today, 'failed');
+            logger.error(`[eod-triage] ${outcome.unresolvedViolations} flat-by-close violation(s) UNRESOLVED at completion — stamped 'failed' so a restart before the bell retries`);
+        } else {
+            markTriageRun(today, 'completed');
+        }
     } catch (err) {
         markTriageRun(today, 'failed');
         logger.error(`[eod-triage] run FAILED mid-flight: ${err instanceof Error ? err.stack ?? err.message : err}`);
@@ -704,7 +714,7 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
     }
 }
 
-async function runEodTriageCore(today: string, dryRun: boolean): Promise<void> {
+async function runEodTriageCore(today: string, dryRun: boolean): Promise<{ unresolvedViolations: number }> {
     // Adopted rows (WP3) are broker positions Dexter did not open and does
     // not manage — they exist so the caps see them. Triage closing one
     // would be adoption placing orders, which the adoption contract
@@ -722,7 +732,7 @@ async function runEodTriageCore(today: string, dryRun: boolean): Promise<void> {
     const api = await getIBApi();
     const positions = await fetchPositions(api);
     if (dayCandidates.length === 0 && gtcCandidates.length === 0 && unfilledGtc.length === 0
-        && unfilledDay.length === 0 && !positions.some((p) => p.quantity !== 0)) return;
+        && unfilledDay.length === 0 && !positions.some((p) => p.quantity !== 0)) return { unresolvedViolations: 0 };
     const lines: string[] = [];
     const closedSymbols = new Set<string>();
 
@@ -1101,6 +1111,9 @@ async function runEodTriageCore(today: string, dryRun: boolean): Promise<void> {
     // risk doubling an in-flight close, so the postcondition alerts
     // loudly instead of re-firing.
     let excessLine: string | null = null;
+    // Review-23: violations still standing after the retry cadence — the
+    // wrapper stamps 'failed' on a nonzero count.
+    let unresolvedViolations = 0;
     if (!dryRun) {
         // Fresh marks for held symbols the run has not priced yet
         // (adopted/manual books never enter the day loops).
@@ -1125,19 +1138,40 @@ async function runEodTriageCore(today: string, dryRun: boolean): Promise<void> {
         const problems: string[] = [];
         if (positionsSnapFailed) problems.push('the final POSITIONS snapshot FAILED — the postcondition ran on pre-action positions');
         if (!snap.complete) problems.push('the open-orders snapshot was INCOMPLETE — resting-entry exposure is unproven');
-        // Review-22 P1: a DAY :entry still working in the FINAL snapshot is
-        // a flat-by-close violation (a triage cancel failed or was missed —
-        // it can fill until the bell). One bounded retry through the safe
-        // primitive; a fill that won the race closes on the spot; anything
-        // still unresolved alarms.
-        if (built.dayEntryViolations.length > 0) {
-            const stillWorking: string[] = [];
-            for (const v of built.dayEntryViolations) {
+        // Review-22/23 P1: a DAY :entry still working in the FINAL snapshot
+        // is a flat-by-close violation (a triage cancel failed or was
+        // missed — it can fill until the bell). Retry on a BOUNDED CADENCE
+        // toward the bell: each round re-snapshots first (a leg that
+        // vanished — cancelled late, expired, or filled-and-closed — is no
+        // longer a violation), retries the cancel through the safe
+        // primitive, and closes a fill that won the race. Anything still
+        // unresolved after the last round raises the alarm AND makes the
+        // wrapper stamp the run 'failed' (review-23: an unresolved
+        // violation must never stamp 'completed' — a restart before the
+        // bell then retries). ~8 rounds x 45s from 15:53 reaches ~15:59.
+        let pendingViolations = built.dayEntryViolations;
+        const maxRounds = process.env.NODE_ENV === 'test' ? 1 : 8;
+        for (let round = 0; round < maxRounds && pendingViolations.length > 0; round++) {
+            if (round > 0) {
+                await new Promise((r) => setTimeout(r, 45_000));
+                // Fresh truth each round: is the parent still on the book?
+                const { fetchOpenOrderSnaps } = await import('./broker-adopt.js');
+                const re = await fetchOpenOrderSnaps(api).catch(() => null);
+                if (re !== null && re.complete) {
+                    const stillIds = new Set(re.orders
+                        .map((o) => /^(P-[0-9A-F]{4}):entry$/.exec(o.orderRef ?? '')?.[1])
+                        .filter((x): x is string => x !== undefined));
+                    pendingViolations = pendingViolations.filter((v) => stillIds.has(v.id));
+                    if (pendingViolations.length === 0) break;
+                }
+            }
+            const still: typeof pendingViolations = [];
+            for (const v of pendingViolations) {
                 const row = await getProposal(v.id).catch(() => null);
                 const cancelled = row !== null && await cancelEntryLeg(row, 'EOD postcondition — flat-by-close violation (DAY entry still working)')
                     .catch(() => false);
                 if (cancelled) {
-                    lines.push(`• ${v.symbol} (${v.id}): DAY entry was STILL WORKING after triage — cancelled on the postcondition retry.`);
+                    lines.push(`• ${v.symbol} (${v.id}): DAY entry was STILL WORKING after triage — cancelled on postcondition retry ${round + 1}.`);
                     continue;
                 }
                 const nowPos = (await fetchPositions(api).catch(() => [])).find((p) => p.symbol === v.symbol && p.quantity !== 0);
@@ -1145,15 +1179,17 @@ async function runEodTriageCore(today: string, dryRun: boolean): Promise<void> {
                     const outcome = await closePosition(v.symbol, 'EOD postcondition (flat by close — entry filled after triage)');
                     if (outcome.state === 'filled' && outcome.flat === true) {
                         closedSymbols.add(v.symbol);
-                        lines.push(`• ${v.symbol} (${v.id}): DAY entry FILLED after triage — closed on the postcondition retry.`);
+                        lines.push(`• ${v.symbol} (${v.id}): DAY entry FILLED after triage — closed on postcondition retry ${round + 1}.`);
                         continue;
                     }
                 }
-                stillWorking.push(`${v.symbol} (${v.id})`);
+                still.push(v);
             }
-            if (stillWorking.length > 0) {
-                problems.push(`flat-by-close VIOLATION: DAY entry parent(s) still working after triage: ${stillWorking.join(', ')} — cancel in TWS NOW or a late fill rides the night unvetted`);
-            }
+            pendingViolations = still;
+        }
+        if (pendingViolations.length > 0) {
+            unresolvedViolations = pendingViolations.length;
+            problems.push(`flat-by-close VIOLATION: DAY entry parent(s) still working after ${maxRounds} retry round(s): ${pendingViolations.map((v) => `${v.symbol} (${v.id})`).join(', ')} — cancel in TWS NOW or a late fill rides the night unvetted`);
         }
         const unpriceable = [...new Set([...markGaps, ...built.unpriced])];
         if (unpriceable.length > 0) problems.push(`unpriceable at market: ${unpriceable.join(', ')} (cost basis counted where available)`);
@@ -1196,6 +1232,7 @@ async function runEodTriageCore(today: string, dryRun: boolean): Promise<void> {
             ? `🔭 EOD PREVIEW (12 min before triage):\n${body}${footer}\nReply 'keep SYMBOL' before 15:52 to override a fail-closed close or cap trim (never the earnings guard).`
             : `🌇 EOD triage (pre-close):\n${body}${footer}`);
     }
+    return { unresolvedViolations };
 }
 
 // ---------------------------------------------------------------------------

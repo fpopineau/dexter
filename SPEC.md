@@ -743,3 +743,46 @@ content. Both now hold as written below.
 | REQ-EOD-009 | buildRevetBook violation suite (broker-DAY and row-DAY both returned, orphan-GTC still counted); the retry wiring is integration-untested (honest ledger) |
 | REQ-VAL-024 | real-repo docs-only invariance test + tree.<12hex> format tests; this checkout's smoke-run printed tree.…+dirty on the uncommitted tree and clean after commit |
 | REQ-VAL-025 | fingerprintFreezeCheck requireManifest suite (pre-tag null passes, final null FAILS, filled-match passes, mismatch fails); both scorecard modes smoke-verified |
+
+## Review-23 response (2026-08-24) — tag-authoritative manifest, env in the identity, honest triage completion, lockfile identity
+
+- REQ-VAL-026: the FINAL evaluation trusts only the TAGGED manifest.
+  `--final` (or the tag existing) requires `refs/tags/validation-freeze-1`
+  to exist, reads the manifest via `git show <tag>:docs/day2day/
+  FREEZE-MANIFEST.md` (the working-tree copy is mutable after tagging —
+  docs edits deliberately do not dirty runtime identity — and now serves
+  only labelled pre-tag diagnostics), and verifies the manifest's
+  declared behavioral baseline SHA is an ancestor of the tag. Missing
+  tag on --final, unreadable tagged manifest, undeclared baseline and
+  non-ancestor baseline each fail the verdict.
+- REQ-VAL-027: behavior-affecting ENVIRONMENT is part of the strategy
+  identity. `behaviorEnvInput()` (pure) snapshots ~55 policy variables
+  (trigger thresholds, auto-execution selection, chase/EOD/guardian
+  switches, universe overrides, data-feed type, expiry windows) as raw
+  values with an 'unset' sentinel, plus capability PRESENCE flags for
+  API keys and model endpoints — secret VALUES never enter the digest
+  (tested). Raw-value hashing is deliberately over-sensitive (explicitly
+  setting a default ends a window) and never under-sensitive; deriving
+  defaults in the fingerprint would drift from the real ones. Editing
+  .env mid-sample now ends the window.
+- REQ-EOD-010: an unresolved flat-by-close violation can no longer
+  stamp 'completed'. The postcondition retries on a bounded cadence
+  toward the bell (up to 8 rounds × 45s, re-snapshotting first each
+  round so a leg that vanished stops counting); anything still working
+  after the last round alarms AND makes the wrapper stamp the run
+  'failed' — a gateway restart before the bell retries (stampCountsAsRan
+  already treats 'failed' as not-ran).
+- REQ-VAL-028: `bun.lock` joins RUNTIME_PATHS and the untracked matcher
+  — a lockfile-only dependency change moves the code identity (proven
+  in the real-repo test).
+- P2: a session-gate refusal at PLACEMENT (the in-lock cutoff recheck)
+  now has gate-refusal semantics — claim released (proposal stays
+  open), refusal ledgered — instead of marking the proposal 'failed';
+  no order exists at that point (the gate throws before the id grant).
+
+| REQ | Test |
+|---|---|
+| REQ-VAL-026 | scorecard smoke both modes: pre-tag prints [working tree (pre-tag diagnostics)]; --final without the tag FAILS with "requires the validation-freeze-1 tag" + manifest-REQUIRED; tag-read/ancestry glue exercised at tag time |
+| REQ-VAL-027 | behaviorEnvInput suite (unset sentinel, presence-only for secrets, threshold/switch/universe changes move the digest, secret value never in the input); every-surface loop includes behaviorEnv |
+| REQ-EOD-010 | test-gated to 1 round in suites; stampCountsAsRan already pins 'failed'→retry; the cadence loop is wall-clock glue (honest ledger) |
+| REQ-VAL-028 | real-repo test: lockfile-only commit changes codeIdentity |
