@@ -179,6 +179,26 @@ export interface OvernightVetResult {
  * cannot be priced are returned in `unpriced` — the caller must alarm,
  * not pass.
  */
+/** Review-24, pure: how does one flat-by-close violation resolve this
+ *  round? An ABSENT parent is NOT resolution — it may have FILLED
+ *  between snapshots (the exact race review-24 named). Resolution
+ *  requires positive proof: the caller confirms a cancel, confirms a
+ *  close to flat, or BOTH a complete order view without the parent AND
+ *  a successful positions fetch without the symbol (two coherent
+ *  observations: no order, no position). Anything unprovable keeps the
+ *  violation pending. */
+export function classifyViolationResolution(input: {
+    /** null = the order view was incomplete or failed. */
+    parentStillWorking: boolean | null;
+    /** Signed qty for the symbol (0 = flat); null = positions fetch failed. */
+    positionQty: number | null;
+}): 'retry-cancel' | 'close-position' | 'resolved' | 'unproven' {
+    if (input.parentStillWorking === true) return 'retry-cancel';
+    if (input.parentStillWorking === null) return 'unproven';
+    if (input.positionQty === null) return 'unproven';
+    return input.positionQty !== 0 ? 'close-position' : 'resolved';
+}
+
 /** Review-21, pure: union two open-order snapshots by orderId. An order
  *  present in EITHER view is exposure-in-waiting — placed between the
  *  first snap and the positions fetch (outside Dexter: TWS, another
@@ -1138,58 +1158,77 @@ async function runEodTriageCore(today: string, dryRun: boolean): Promise<{ unres
         const problems: string[] = [];
         if (positionsSnapFailed) problems.push('the final POSITIONS snapshot FAILED — the postcondition ran on pre-action positions');
         if (!snap.complete) problems.push('the open-orders snapshot was INCOMPLETE — resting-entry exposure is unproven');
-        // Review-22/23 P1: a DAY :entry still working in the FINAL snapshot
-        // is a flat-by-close violation (a triage cancel failed or was
-        // missed — it can fill until the bell). Retry on a BOUNDED CADENCE
-        // toward the bell: each round re-snapshots first (a leg that
-        // vanished — cancelled late, expired, or filled-and-closed — is no
-        // longer a violation), retries the cancel through the safe
-        // primitive, and closes a fill that won the race. Anything still
-        // unresolved after the last round raises the alarm AND makes the
-        // wrapper stamp the run 'failed' (review-23: an unresolved
-        // violation must never stamp 'completed' — a restart before the
-        // bell then retries). ~8 rounds x 45s from 15:53 reaches ~15:59.
+        // Review-22/23/24 P1: a DAY :entry still working in the FINAL
+        // snapshot is a flat-by-close violation (a triage cancel failed or
+        // was missed — it can fill until the bell). Retry on a cadence
+        // BOUNDED BY THE ACTUAL BELL (review-24: eight blind 45s rounds
+        // could outlive a delayed run's session; sleeps are capped so the
+        // last round still leaves ~1 min to act), re-proving each round
+        // with PAIRED observations: an absent parent is NOT resolution —
+        // it may have FILLED between snapshots — so resolution requires a
+        // confirmed cancel, a confirmed close-to-flat, or a complete
+        // order view without the parent AND a positions fetch without the
+        // symbol (classifyViolationResolution). Anything still unresolved
+        // raises the alarm AND makes the wrapper stamp the run 'failed'
+        // (a restart before the bell then retries).
         let pendingViolations = built.dayEntryViolations;
+        const closeMinutesEt = isMarketHalfDay(today) ? HALF_DAY_CLOSE_MINUTES_ET : FULL_DAY_CLOSE_MINUTES_ET;
+        const deadlineMin = closeMinutesEt - 1; // a close order still needs time to fill
+        const etNowMin = (): number => {
+            const d = new Date(new Date().toLocaleString('en-US', { timeZone: ET }));
+            return d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60;
+        };
         const maxRounds = process.env.NODE_ENV === 'test' ? 1 : 8;
         for (let round = 0; round < maxRounds && pendingViolations.length > 0; round++) {
+            let ordersView: { orders: BrokerOrderSnap[]; complete: boolean } | null = snap;
             if (round > 0) {
-                await new Promise((r) => setTimeout(r, 45_000));
-                // Fresh truth each round: is the parent still on the book?
+                if (process.env.NODE_ENV !== 'test' && etNowMin() >= deadlineMin) break; // past the last actionable moment
+                const sleepMs = Math.min(45_000, Math.max(0, (deadlineMin - etNowMin()) * 60_000));
+                await new Promise((r) => setTimeout(r, sleepMs));
                 const { fetchOpenOrderSnaps } = await import('./broker-adopt.js');
-                const re = await fetchOpenOrderSnaps(api).catch(() => null);
-                if (re !== null && re.complete) {
-                    const stillIds = new Set(re.orders
-                        .map((o) => /^(P-[0-9A-F]{4}):entry$/.exec(o.orderRef ?? '')?.[1])
-                        .filter((x): x is string => x !== undefined));
-                    pendingViolations = pendingViolations.filter((v) => stillIds.has(v.id));
-                    if (pendingViolations.length === 0) break;
-                }
+                ordersView = await fetchOpenOrderSnaps(api).catch(() => null);
             }
+            const posView = await fetchPositions(api).catch(() => null);
+            const workingIds = ordersView !== null && ordersView.complete
+                ? new Set(ordersView.orders
+                    .map((o) => /^(P-[0-9A-F]{4}):entry$/.exec(o.orderRef ?? '')?.[1])
+                    .filter((x): x is string => x !== undefined))
+                : null;
             const still: typeof pendingViolations = [];
             for (const v of pendingViolations) {
-                const row = await getProposal(v.id).catch(() => null);
-                const cancelled = row !== null && await cancelEntryLeg(row, 'EOD postcondition — flat-by-close violation (DAY entry still working)')
-                    .catch(() => false);
-                if (cancelled) {
-                    lines.push(`• ${v.symbol} (${v.id}): DAY entry was STILL WORKING after triage — cancelled on postcondition retry ${round + 1}.`);
-                    continue;
-                }
-                const nowPos = (await fetchPositions(api).catch(() => [])).find((p) => p.symbol === v.symbol && p.quantity !== 0);
-                if (nowPos && !closedSymbols.has(v.symbol)) {
+                const cls = classifyViolationResolution({
+                    parentStillWorking: workingIds === null ? null : workingIds.has(v.id),
+                    positionQty: posView === null ? null : (posView.find((q) => q.symbol === v.symbol)?.quantity ?? 0),
+                });
+                if (cls === 'retry-cancel') {
+                    const row = await getProposal(v.id).catch(() => null);
+                    const cancelled = row !== null && await cancelEntryLeg(row, 'EOD postcondition — flat-by-close violation (DAY entry still working)')
+                        .catch(() => false);
+                    if (cancelled) {
+                        lines.push(`• ${v.symbol} (${v.id}): DAY entry was STILL WORKING after triage — cancelled on postcondition retry ${round + 1}.`);
+                        continue;
+                    }
+                    still.push(v);
+                } else if (cls === 'close-position') {
+                    if (closedSymbols.has(v.symbol)) { still.push(v); continue; } // a "flat" symbol showing a position again is operator territory
                     const outcome = await closePosition(v.symbol, 'EOD postcondition (flat by close — entry filled after triage)');
                     if (outcome.state === 'filled' && outcome.flat === true) {
                         closedSymbols.add(v.symbol);
                         lines.push(`• ${v.symbol} (${v.id}): DAY entry FILLED after triage — closed on postcondition retry ${round + 1}.`);
                         continue;
                     }
+                    still.push(v);
+                } else if (cls === 'resolved') {
+                    lines.push(`• ${v.symbol} (${v.id}): late DAY entry resolved — no working order and no position (paired snapshots).`);
+                } else {
+                    still.push(v); // unproven — keep until the observations cohere
                 }
-                still.push(v);
             }
             pendingViolations = still;
         }
         if (pendingViolations.length > 0) {
             unresolvedViolations = pendingViolations.length;
-            problems.push(`flat-by-close VIOLATION: DAY entry parent(s) still working after ${maxRounds} retry round(s): ${pendingViolations.map((v) => `${v.symbol} (${v.id})`).join(', ')} — cancel in TWS NOW or a late fill rides the night unvetted`);
+            problems.push(`flat-by-close VIOLATION unresolved at the bell deadline: ${pendingViolations.map((v) => `${v.symbol} (${v.id})`).join(', ')} — cancel/flatten in TWS NOW; a late fill rides the night unvetted`);
         }
         const unpriceable = [...new Set([...markGaps, ...built.unpriced])];
         if (unpriceable.length > 0) problems.push(`unpriceable at market: ${unpriceable.join(', ')} (cost basis counted where available)`);

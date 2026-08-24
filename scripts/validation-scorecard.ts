@@ -66,7 +66,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dayBlockBootstrapLcb } from '../src/utils/day-bootstrap.js';
-import { etDayOf, exposureCoverageGaps, fingerprintFreezeCheck, fingerprintPurity, parseEquitySeries, portfolioDrawdown, type SessionWindow } from '../src/utils/equity-series-math.js';
+import { auditFreezeManifest, etDayOf, exposureCoverageGaps, fingerprintFreezeCheck, fingerprintPurity, parseEquitySeries, portfolioDrawdown, type SessionWindow } from '../src/utils/equity-series-math.js';
 import { calendarCoverageStatus, isMarketHalfDay, isMarketHoliday } from '../src/utils/market-hours.js';
 import { DEFAULT_RULES, parseFlatYaml, type RiskRules } from '../src/tools/ibkr/risk-rules.js';
 
@@ -800,14 +800,31 @@ if (fpValues.length > 0) {
             if (tagged === null) {
                 verdictFails.push('freeze identity: manifest unreadable FROM THE TAG');
             } else {
-                manifestFp = parseManifestFp(tagged);
-                // The tagged manifest must declare its behavioral baseline,
-                // and that baseline must actually be an ancestor of the tag.
-                const baseline = /Behavioral baseline commit SHA\s*\|\s*([0-9a-f]{40})/.exec(tagged)?.[1] ?? null;
-                if (baseline === null) {
+                // Review-24: the WHOLE manifest is enforced mechanically —
+                // every unfilled placeholder (ratification, observations,
+                // waivers, epoch fields), the recorded tag name, and the
+                // recorded deployable scope. Fingerprint parsing alone let
+                // a template full of _pending_ rows pass a final verdict.
+                const audit = auditFreezeManifest(tagged, { tag: FREEZE_TAG, deployableClasses: [...DEPLOYABLE_CLASSES] });
+                manifestFp = audit.fingerprint;
+                for (const p of audit.problems) verdictFails.push(`freeze manifest: ${p}`);
+                if (audit.baselineSha === null) {
                     verdictFails.push('freeze identity: the tagged manifest declares no behavioral baseline SHA');
-                } else if (git(['merge-base', '--is-ancestor', baseline, FREEZE_TAG]) === null) {
-                    verdictFails.push(`freeze identity: declared baseline ${baseline.slice(0, 8)} is NOT an ancestor of the tag`);
+                } else if (git(['merge-base', '--is-ancestor', audit.baselineSha, FREEZE_TAG]) === null) {
+                    verdictFails.push(`freeze identity: declared baseline ${audit.baselineSha.slice(0, 8)} is NOT an ancestor of the tag`);
+                } else {
+                    // Ancestry alone proves order, not content: the
+                    // baseline→tag interval must change ONLY the manifest
+                    // (the manifest's own documented rule, now enforced).
+                    const changed = (git(['diff', '--name-only', `${audit.baselineSha}..${FREEZE_TAG}`]) ?? '')
+                        .split('\n').map((s) => s.trim()).filter((s) => s.length > 0);
+                    const offenders = changed.filter((path) => path !== MANIFEST_REPO_PATH);
+                    if (offenders.length > 0) {
+                        verdictFails.push(
+                            `freeze identity: baseline→tag diff touches non-manifest path(s): ` +
+                            `${offenders.slice(0, 5).join(', ')}${offenders.length > 5 ? ', …' : ''} — the tag is not a manifest-only commit over its baseline`,
+                        );
+                    }
                 }
             }
         }

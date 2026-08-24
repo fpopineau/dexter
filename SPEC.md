@@ -786,3 +786,46 @@ content. Both now hold as written below.
 | REQ-VAL-027 | behaviorEnvInput suite (unset sentinel, presence-only for secrets, threshold/switch/universe changes move the digest, secret value never in the input); every-surface loop includes behaviorEnv |
 | REQ-EOD-010 | test-gated to 1 round in suites; stampCountsAsRan already pins 'failed'→retry; the cadence loop is wall-clock glue (honest ledger) |
 | REQ-VAL-028 | real-repo test: lockfile-only commit changes codeIdentity |
+
+## Review-24 response (2026-08-24) — fills are not resolutions, bell-bounded retries, judgment config in the identity, full manifest audit
+
+- REQ-EOD-011: an ABSENT parent is not a resolution.
+  `classifyViolationResolution` (pure): a parent gone from a COMPLETE
+  order view with a position behind it FILLED between snapshots — close
+  it; resolution requires positive proof (confirmed cancel, confirmed
+  close-to-flat, or paired observations: complete order view without
+  the parent AND successful positions fetch without the symbol);
+  anything unprovable stays pending. The old order-ID filter treated a
+  vanished (possibly filled) parent as resolved and could stamp
+  'completed' over a live position.
+- REQ-EOD-012: the retry cadence is bounded by the ACTUAL bell — each
+  round checks the real ET clock against close − 1 min (half-day aware)
+  and caps its sleep to what remains, so a delayed run stops retrying
+  while a close can still fill and the alarm goes out BEFORE the last
+  actionable moment, not after. The 8-round cap survives as a backstop.
+- REQ-VAL-029: mutable judgment configuration is in the fingerprint.
+  `judgmentConfigInput()` (pure): canonical cron-job behavior fields
+  (name, enabled, schedule, active hours, fulfillment, prompt message,
+  model/provider, iteration budget — bookkeeping timestamps and random
+  ids excluded, sorted for order-independence; a missing/corrupt store
+  canonicalizes to zero jobs, exactly what the runtime loads) plus the
+  web-search provider preference. CAPABILITY_ENV gains
+  PERPLEXITY/TAVILY/LANGSEARCH keys (presence only) — the web-search
+  registry exposes providers by their presence. Editing a cron job
+  mid-sample now ends the window.
+- REQ-VAL-030: the final evaluation audits the WHOLE tagged manifest.
+  `auditFreezeManifest` (pure): every `_pending_`/`_REQUIRED`/
+  `_observation or explicit waiver_` placeholder fails with its count;
+  the recorded freeze-tag name must equal the tag; the recorded
+  deployable scope must name exactly the enabled classes (both
+  directions checked); fingerprint and baseline parsed for the git-side
+  checks. The scorecard additionally verifies the baseline→tag diff
+  touches ONLY the manifest file — ancestry proves order, the diff
+  proves content.
+
+| REQ | Test |
+|---|---|
+| REQ-EOD-011 | classifyViolationResolution table suite (filled-between-snapshots → close; paired-proof → resolved; anything unprovable → pending); the loop wiring is wall-clock glue (honest ledger) |
+| REQ-EOD-012 | deadline math is wall-clock glue over the tested cutoff/catch-up constants (honest ledger) |
+| REQ-VAL-029 | judgmentConfigInput determinism/shape; behaviorEnvInput presence flags for the three new keys with the secret value asserted absent |
+| REQ-VAL-030 | auditFreezeManifest suite: filled manifest audits clean; template fails on every placeholder type, missing identity fields, wrong tag, both scope mismatch directions; the git diff/ancestry glue fires at tag time |

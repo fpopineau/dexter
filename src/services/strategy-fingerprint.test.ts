@@ -10,6 +10,7 @@ describe('fingerprintFromSurfaces (review-19 — required identity fails CLOSED,
         effectiveRules: '{"a":1}', codeIdentity: 'f'.repeat(40),
         providerModel: 'anthropic:claude-sonnet-5', soul: 'soul', rules: 'rules', skills: 'skills',
         behaviorEnv: 'EOD_TRIAGE=unset',
+        judgmentConfig: 'cron:[]|search:unset',
     };
 
     test('all surfaces present → deterministic 12-hex', () => {
@@ -34,7 +35,7 @@ describe('fingerprintFromSurfaces (review-19 — required identity fails CLOSED,
 
     test('every surface moves the digest', () => {
         const base = fingerprintFromSurfaces(ALL);
-        for (const key of ['effectiveRules', 'codeIdentity', 'providerModel', 'soul', 'rules', 'skills', 'behaviorEnv'] as const) {
+        for (const key of ['effectiveRules', 'codeIdentity', 'providerModel', 'soul', 'rules', 'skills', 'behaviorEnv', 'judgmentConfig'] as const) {
             expect(fingerprintFromSurfaces({ ...ALL, [key]: 'CHANGED' })).not.toBe(base);
         }
     });
@@ -240,5 +241,72 @@ describe('fingerprintPurity (STRICT format — review-19)', () => {
         expect(fingerprintPurity(['ABC123ABC123']).ok).toBe(false); // uppercase is not the format
         expect(fingerprintPurity([]).ok).toBe(false);               // nothing seen = nothing certified
         expect(fingerprintPurity([null]).distinct).toEqual(['ABSENT']);
+    });
+});
+
+describe('judgmentConfigInput (review-24 — cron jobs and search preference are judgment inputs)', () => {
+    test('canonical, deterministic, and carries the cron + search surfaces', async () => {
+        const { judgmentConfigInput } = await import('./strategy-fingerprint.js');
+        const a = judgmentConfigInput();
+        expect(a).toBe(judgmentConfigInput()); // deterministic for one runtime state
+        expect(a).toMatch(/^cron:\[/);
+        expect(a).toContain('|search:');
+    });
+
+    test('review-24 capability additions: the web-search provider keys ride as presence flags', async () => {
+        const { behaviorEnvInput } = await import('./strategy-fingerprint.js');
+        const none = behaviorEnvInput({});
+        expect(none).toContain('PERPLEXITY_API_KEY:absent');
+        expect(none).toContain('TAVILY_API_KEY:absent');
+        expect(none).toContain('LANGSEARCH_API_KEY:absent');
+        const withKeys = behaviorEnvInput({ PERPLEXITY_API_KEY: 'pk-secret' });
+        expect(withKeys).toContain('PERPLEXITY_API_KEY:present');
+        expect(withKeys).not.toContain('pk-secret');
+        expect(withKeys).not.toBe(none);
+    });
+});
+
+describe('auditFreezeManifest (review-24 — a template full of _pending_ must not pass a FINAL verdict)', () => {
+    const filled = `# Freeze manifest
+| Freeze tag | validation-freeze-1 |
+| Behavioral baseline commit SHA | ${'a'.repeat(40)} |
+| Strategy fingerprint (scorecard prints it) | abc123abc123 |
+| Epoch NetLiq (frozen denominator) | 12257 |
+| OCA-joined close cancels its siblings broker-side | observed 2026-08-25 AAPL #101/#102 (FP) |
+- The deployable verdict scope at tag time (record them here): intraday
+`;
+
+    test('a fully filled manifest audits clean and yields the identity fields', async () => {
+        const { auditFreezeManifest } = await import('@/utils/equity-series-math.js');
+        const a = auditFreezeManifest(filled, { tag: 'validation-freeze-1', deployableClasses: ['intraday'] });
+        expect(a.problems).toEqual([]);
+        expect(a.fingerprint).toBe('abc123abc123');
+        expect(a.baselineSha).toBe('a'.repeat(40));
+    });
+
+    test('every unfilled placeholder, a wrong tag, and a wrong scope are each named', async () => {
+        const { auditFreezeManifest } = await import('@/utils/equity-series-math.js');
+        const template = `| Freeze tag | _pending_ |
+| Behavioral baseline commit SHA | _pending_ |
+| Strategy fingerprint (scorecard prints it) | _pending_ |
+| OCA-joined close | _REQUIRED — record the paper observation_ |
+| WP2 partial-fill resize | _observation or explicit waiver_ |
+- scope (record them here): _pending_
+`;
+        const a = auditFreezeManifest(template, { tag: 'validation-freeze-1', deployableClasses: ['intraday'] });
+        expect(a.problems.some((p) => p.includes("'_pending_'"))).toBe(true);
+        expect(a.problems.some((p) => p.includes("'_REQUIRED'"))).toBe(true);
+        expect(a.problems.some((p) => p.includes("'_observation or explicit waiver_'"))).toBe(true);
+        expect(a.problems.some((p) => p.includes('fingerprint not recorded'))).toBe(true);
+        expect(a.problems.some((p) => p.includes('baseline SHA not recorded'))).toBe(true);
+        expect(a.problems.some((p) => p.includes('freeze tag'))).toBe(true);
+        expect(a.problems.some((p) => p.includes("'intraday' not recorded"))).toBe(true);
+
+        // Scope mismatches cut both ways: an enabled class must be recorded,
+        // and a recorded class must be enabled.
+        const wrongScope = auditFreezeManifest(filled, { tag: 'validation-freeze-1', deployableClasses: ['intraday', 'swing'] });
+        expect(wrongScope.problems.some((p) => p.includes("'swing' not recorded"))).toBe(true);
+        const extraScope = auditFreezeManifest(filled.replace('record them here): intraday', 'record them here): intraday, swing'), { tag: 'validation-freeze-1', deployableClasses: ['intraday'] });
+        expect(extraScope.problems.some((p) => p.includes("records 'swing' but it is not enabled"))).toBe(true);
     });
 });

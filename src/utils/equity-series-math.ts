@@ -96,6 +96,42 @@ export function fingerprintFreezeCheck(input: {
     return { ok: problems.length === 0, problems };
 }
 
+/** Review-24, pure: the mechanical audit of a TAGGED freeze manifest.
+ *  Parsing only the fingerprint let a manifest full of `_pending_`
+ *  placeholders — unratified rules, unrecorded observations — pass a
+ *  final evaluation. Every unfilled placeholder is a problem; the
+ *  recorded tag must match; the recorded deployable scope must name
+ *  exactly the enabled classes. Returns whatever identity fields it
+ *  could parse so the caller can run the git-side checks (ancestry,
+ *  manifest-only diff). */
+export function auditFreezeManifest(
+    man: string,
+    expected: { tag: string; deployableClasses: string[] },
+): { fingerprint: string | null; baselineSha: string | null; problems: string[] } {
+    const problems: string[] = [];
+    for (const marker of ['_pending_', '_REQUIRED', '_observation or explicit waiver_']) {
+        const n = man.split(marker).length - 1;
+        if (n > 0) problems.push(`${n} unfilled '${marker}' placeholder(s)`);
+    }
+    const fingerprint = /Strategy fingerprint[^|\n]*\|\s*([0-9a-f]{12})\s*\|/.exec(man)?.[1] ?? null;
+    if (fingerprint === null) problems.push('strategy fingerprint not recorded');
+    const baselineSha = /Behavioral baseline commit SHA\s*\|\s*([0-9a-f]{40})/.exec(man)?.[1] ?? null;
+    if (baselineSha === null) problems.push('behavioral baseline SHA not recorded');
+    const tagRow = /\|\s*Freeze tag\s*\|\s*([^|\n]+)\|/.exec(man)?.[1]?.trim() ?? null;
+    if (tagRow !== expected.tag) problems.push(`recorded freeze tag '${tagRow ?? 'missing'}' != '${expected.tag}'`);
+    const scope = /record them here\)?:?\s*([^\n]*)/.exec(man)?.[1]?.trim() ?? '';
+    const KNOWN_CLASSES = ['intraday', 'swing', 'earnings-bet'];
+    for (const c of expected.deployableClasses) {
+        if (!scope.includes(c)) problems.push(`enabled class '${c}' not recorded in the manifest's deployable scope`);
+    }
+    for (const c of KNOWN_CLASSES) {
+        if (!expected.deployableClasses.includes(c) && scope.includes(c)) {
+            problems.push(`manifest scope records '${c}' but it is not enabled`);
+        }
+    }
+    return { fingerprint, baselineSha, problems };
+}
+
 export interface PortfolioDrawdown {
     /** Worst peak-to-trough of marked equity inside the window, % of the peak
      *  (rounded to 0.01%). */

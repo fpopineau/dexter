@@ -537,3 +537,21 @@ describe('unionOrderSnaps (review-21 — the placement barrier for the postcondi
         expect(unionOrderSnaps({ orders: [], complete: true }, { orders: [], complete: false }).complete).toBe(false);
     });
 });
+
+describe('classifyViolationResolution (review-24 — an absent parent may have FILLED)', () => {
+    test('resolution requires positive proof: cancel, close, or paired no-order/no-position observations', async () => {
+        const { classifyViolationResolution } = await import('./eod-triage.js');
+        // Parent still on the book → keep cancelling.
+        expect(classifyViolationResolution({ parentStillWorking: true, positionQty: null })).toBe('retry-cancel');
+        // Parent gone + position EXISTS → it filled between snapshots: close it.
+        expect(classifyViolationResolution({ parentStillWorking: false, positionQty: 10 })).toBe('close-position');
+        expect(classifyViolationResolution({ parentStillWorking: false, positionQty: -5 })).toBe('close-position');
+        // Parent gone + positions fetched + flat → two coherent observations: resolved.
+        expect(classifyViolationResolution({ parentStillWorking: false, positionQty: 0 })).toBe('resolved');
+        // Anything unprovable keeps the violation pending — the review-24
+        // race: a vanished order treated as resolved without a position
+        // check let a filled entry stamp the run completed.
+        expect(classifyViolationResolution({ parentStillWorking: null, positionQty: 0 })).toBe('unproven');
+        expect(classifyViolationResolution({ parentStillWorking: false, positionQty: null })).toBe('unproven');
+    });
+});

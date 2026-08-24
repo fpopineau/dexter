@@ -114,7 +114,15 @@ positive expectancy after costs, not improved loss control.
   tag, reads the manifest FROM THE TAG (`git show <tag>:…` — the
   working-tree copy is mutable after tagging and is used only for
   labelled pre-tag diagnostics), and verifies the declared baseline SHA
-  is an ancestor of the tag.
+  is an ancestor of the tag. Review-24: the final evaluation audits the
+  WHOLE tagged manifest mechanically — every unfilled `_pending_`/
+  `_REQUIRED`/waiver placeholder fails, the recorded tag name and
+  deployable-class scope must match, and the baseline→tag diff must
+  touch ONLY the manifest file. The fingerprint additionally covers the
+  cron jobs (`.dexter/cron/jobs.json` behavior fields — prompt, model,
+  schedule, enabled state, iteration budget), the web-search provider
+  preference and all search-capability presence flags — **EDITING CRON
+  JOBS MID-SAMPLE ENDS THE WINDOW**, same as `.env`.
 - **The shadow swing record is EXPLORATORY** (2026-08-23): no official
   macro calendar exists yet, and adding one later changes the judgment
   inputs swings depend on. Enabling `swing_enabled` live therefore

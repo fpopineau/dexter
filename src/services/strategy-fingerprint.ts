@@ -36,6 +36,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadRulesDocument, loadSoulDocument } from '@/agent/prompts.js';
+import { loadCronStore } from '../cron/store.js';
 import { discoverSkills } from '../skills/index.js';
 import { getSetting } from '../utils/config.js';
 import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
@@ -95,6 +96,7 @@ const BEHAVIOR_ENV = [
  *  enters the digest. */
 const CAPABILITY_ENV = [
     'ANTHROPIC_API_KEY', 'FINANCIAL_DATASETS_API_KEY', 'EXASEARCH_API_KEY',
+    'PERPLEXITY_API_KEY', 'TAVILY_API_KEY', 'LANGSEARCH_API_KEY',
     'X_BEARER_TOKEN', 'OLLAMA_BASE_URL', 'VLLM_BASE_URL',
 ] as const;
 
@@ -104,6 +106,39 @@ export function behaviorEnvInput(env: Record<string, string | undefined> = proce
     const policy = BEHAVIOR_ENV.map((k) => `${k}=${env[k]?.trim() ?? 'unset'}`);
     const caps = CAPABILITY_ENV.map((k) => `${k}:${env[k] ? 'present' : 'absent'}`);
     return [...policy, ...caps].join('|');
+}
+
+/** Review-24: mutable JUDGMENT configuration outside env and settings —
+ *  the cron jobs (`.dexter/cron/jobs.json`) hand the agent its prompt,
+ *  model/provider, schedule, active hours and iteration budget, so an
+ *  edited job is a different strategy under the same code. Canonical:
+ *  behavior fields only (runtime bookkeeping — timestamps, last-run
+ *  state, random ids — excluded), sorted for order-independence. The
+ *  search-provider PREFERENCE rides along (its capability keys hash as
+ *  presence in behaviorEnvInput). A missing or corrupt jobs file
+ *  canonicalizes to zero jobs — exactly what the runtime loads from it. */
+export function judgmentConfigInput(): string {
+    let cron = 'cron:[]';
+    try {
+        const jobs = loadCronStore().jobs.map((j) => ({
+            name: j.name,
+            enabled: j.enabled,
+            schedule: j.schedule,
+            fulfillment: j.fulfillment,
+            activeHours: j.activeHours ?? null,
+            message: j.payload?.message ?? null,
+            model: j.payload?.model ?? null,
+            modelProvider: j.payload?.modelProvider ?? null,
+            maxIterations: j.payload?.maxIterations ?? null,
+        }));
+        jobs.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+        cron = `cron:${JSON.stringify(jobs)}`;
+    } catch { /* store unreadable → runtime loads zero jobs → the sentinel matches */ }
+    let search = 'search:unset';
+    try {
+        search = `search:${getSetting<string | null>('webSearchPreferredProvider', null) ?? 'unset'}`;
+    } catch { /* settings unreadable */ }
+    return `${cron}|${search}`;
 }
 
 /** Review-20/21, pure: split `git status --porcelain=v1 -z` output into
@@ -243,6 +278,8 @@ export interface FingerprintSurfaces {
     /** Review-23: behaviorEnvInput() — always resolvable (sentinels for
      *  unset), so plain string. */
     behaviorEnv: string;
+    /** Review-24: judgmentConfigInput() — cron jobs + search preference. */
+    judgmentConfig: string;
 }
 
 /** Pure core: null when any REQUIRED surface is null; else the 12-hex
@@ -257,7 +294,8 @@ export function fingerprintFromSurfaces(s: FingerprintSurfaces): string | null {
         .update(s.soul ?? 'absent').update('\u0000')
         .update(s.rules ?? 'absent').update('\u0000')
         .update(s.skills).update('\u0000')
-        .update(s.behaviorEnv)
+        .update(s.behaviorEnv).update('\u0000')
+        .update(s.judgmentConfig)
         .digest('hex')
         .slice(0, 12);
 }
@@ -282,5 +320,5 @@ export async function strategyFingerprint(): Promise<string | null> {
         const modelId = getSetting<string | null>('modelId', null);
         if (provider && modelId) providerModel = `${provider}:${modelId}`;
     } catch { /* required surface unavailable → null fingerprint */ }
-    return fingerprintFromSurfaces({ effectiveRules, codeIdentity: code, providerModel, soul, rules, skills, behaviorEnv: behaviorEnvInput() });
+    return fingerprintFromSurfaces({ effectiveRules, codeIdentity: code, providerModel, soul, rules, skills, behaviorEnv: behaviorEnvInput(), judgmentConfig: judgmentConfigInput() });
 }
