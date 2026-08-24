@@ -429,7 +429,10 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
       stopProfitTrail();
       stopStaleEntrySweeper();
       stopEquitySeries();
-      stopRuntimeAttestation();
+      // Review-33: AWAITED — the stopped marker must be on disk before
+      // shutdown proceeds (the write chain also blocks any in-flight
+      // heartbeat from burying it).
+      await stopRuntimeAttestation();
       stopKillSwitchGuardian();
       stopExcursionSweeper();
       stopEodTriage();

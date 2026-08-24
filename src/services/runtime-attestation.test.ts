@@ -34,6 +34,25 @@ describe('auditRuntimeAttestation (review-31 — only the RUNNING gateway can pr
             .some((p) => p.includes('could not resolve its own expected fingerprint'))).toBe(true);
     });
 
+    test('review-33: future-dated records, non-finite timestamps and malformed PIDs fail', () => {
+        // A record dated a day AHEAD stayed "fresh" forever under the
+        // one-sided check (clock rollback / malformed record).
+        expect(auditRuntimeAttestation({ ...GOOD, at: NOW + 24 * 3_600_000 }, EXPECTED)
+            .some((p) => p.includes('in the FUTURE'))).toBe(true);
+        // Small clock skew is tolerated.
+        expect(auditRuntimeAttestation({ ...GOOD, at: NOW + 60_000 }, EXPECTED)).toEqual([]);
+        expect(auditRuntimeAttestation({ ...GOOD, at: Number.NaN }, EXPECTED)
+            .some((p) => p.includes('no usable timestamp'))).toBe(true);
+        // PID 0 targets the caller's own process group and "succeeds" on
+        // Windows — shape fails before liveness is asked.
+        expect(auditRuntimeAttestation({ ...GOOD, pid: 0 }, EXPECTED)
+            .some((p) => p.includes('not a valid process id'))).toBe(true);
+        expect(auditRuntimeAttestation({ ...GOOD, pid: 1.5 }, EXPECTED)
+            .some((p) => p.includes('not a valid process id'))).toBe(true);
+        expect(auditRuntimeAttestation({ ...GOOD, pid: -4 }, EXPECTED)
+            .some((p) => p.includes('not a valid process id'))).toBe(true);
+    });
+
     test('every failure mode is named: missing, stale, wrong account, wrong profile, wrong rules, fingerprint issues', () => {
         expect(auditRuntimeAttestation(null, EXPECTED)[0]).toContain('runtime attestation missing');
         expect(auditRuntimeAttestation({ ...GOOD, at: NOW - 3_600_000 }, EXPECTED)
@@ -68,5 +87,23 @@ describe('writeRuntimeAttestation (the gateway-side writer)', () => {
         // Pre-verification (no IBKR in tests): the account is honestly
         // unverified, never invented.
         expect(onDisk.accountType).toBe('unverified');
+    });
+
+    test('review-33: stop AWAITS the stopped record, and racing running writes can never bury it', async () => {
+        const { startRuntimeAttestation, stopRuntimeAttestation, writeRuntimeAttestation, attestationPath } =
+            await import('./runtime-attestation.js');
+        startRuntimeAttestation();
+        // A running write STILL IN FLIGHT when stop is called (the exact
+        // reproduced race: async fingerprint hashing finishes after the
+        // stop and used to overwrite the stopped marker).
+        const inflight = writeRuntimeAttestation();
+        await stopRuntimeAttestation(); // returns only once stopped:true is ON DISK
+        expect((JSON.parse(readFileSync(attestationPath(), 'utf-8')) as { stopped?: boolean }).stopped).toBe(true);
+        await inflight;
+        // A running write enqueued AFTER the stop no-ops entirely.
+        expect(await writeRuntimeAttestation()).toBeNull();
+        expect((JSON.parse(readFileSync(attestationPath(), 'utf-8')) as { stopped?: boolean }).stopped).toBe(true);
+        startRuntimeAttestation(); // re-arm cleanly for any later suite
+        await stopRuntimeAttestation();
     });
 });

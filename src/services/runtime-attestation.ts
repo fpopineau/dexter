@@ -9,9 +9,10 @@
  * under shadow-live the dual deviation forces swing/bets true), the
  * profile env as the process sees it, the verified account and its
  * type, and the process's own strategy fingerprint. Written at boot,
- * re-written ~90s later (once the account has verified) and hourly as a
- * liveness heartbeat — the scorecard fails a missing, stale, wrong-
- * profile, wrong-account or fingerprint-mismatched attestation.
+ * re-written ~90s later (once the account has verified) and every 15
+ * minutes as a liveness heartbeat — the scorecard fails a missing,
+ * stale (>45 min), future-dated, stopped-marked, dead-or-invalid-PID,
+ * wrong-profile, wrong-account or fingerprint-mismatched attestation.
  */
 
 import { writeFileSync } from 'node:fs';
@@ -45,34 +46,48 @@ export function attestationPath(): string {
     return join(process.env.DEXTER_DATA_DIR || join('.dexter', 'data'), 'runtime-attestation.json');
 }
 
-export async function writeRuntimeAttestation(opts?: { stopped?: boolean }): Promise<RuntimeAttestation | null> {
-    try {
-        const rules = getRiskRules();
-        let account: string | null = null;
+// Review-33: writes are SERIALIZED through a promise chain, and once a
+// stopped write is requested no later-running write commits — the old
+// fire-and-forget stop could return before the stopped record existed,
+// and an in-flight heartbeat (fingerprint hashing is async) could then
+// overwrite it with a running record.
+let writeChain: Promise<unknown> = Promise.resolve();
+let stoppedFinal = false;
+
+export function writeRuntimeAttestation(opts?: { stopped?: boolean }): Promise<RuntimeAttestation | null> {
+    const run = async (): Promise<RuntimeAttestation | null> => {
+        if (stoppedFinal && !opts?.stopped) return null; // a running write must never bury the stop marker
         try {
-            const { getVerifiedSingleAccount } = await import('@/tools/ibkr/connection.js');
-            account = getVerifiedSingleAccount();
-        } catch { /* boot write before the account verifies — the 90s re-write fills it */ }
-        const { strategyFingerprint } = await import('./strategy-fingerprint.js');
-        const record: RuntimeAttestation = {
-            at: Date.now(),
-            pid: process.pid,
-            profileEnv: process.env.DEXTER_RISK_PROFILE?.trim() ?? null,
-            account,
-            accountType: account === null ? 'unverified' : account.toUpperCase().startsWith('D') ? 'paper' : 'LIVE',
-            maxDailyLossPct: rules.max_daily_loss_pct,
-            maxRiskPerTradePct: rules.max_risk_per_trade_pct,
-            swingEnabled: rules.swing_enabled,
-            earningsBetEnabled: rules.earnings_bet_enabled,
-            strategyFingerprint: await strategyFingerprint(),
-            ...(opts?.stopped ? { stopped: true } : {}),
-        };
-        writeFileSync(attestationPath(), JSON.stringify(record, null, 2));
-        return record;
-    } catch (err) {
-        logger.warn(`[runtime-attestation] write failed: ${err instanceof Error ? err.message : err}`);
-        return null;
-    }
+            const rules = getRiskRules();
+            let account: string | null = null;
+            try {
+                const { getVerifiedSingleAccount } = await import('@/tools/ibkr/connection.js');
+                account = getVerifiedSingleAccount();
+            } catch { /* boot write before the account verifies — the 90s re-write fills it */ }
+            const { strategyFingerprint } = await import('./strategy-fingerprint.js');
+            const record: RuntimeAttestation = {
+                at: Date.now(),
+                pid: process.pid,
+                profileEnv: process.env.DEXTER_RISK_PROFILE?.trim() ?? null,
+                account,
+                accountType: account === null ? 'unverified' : account.toUpperCase().startsWith('D') ? 'paper' : 'LIVE',
+                maxDailyLossPct: rules.max_daily_loss_pct,
+                maxRiskPerTradePct: rules.max_risk_per_trade_pct,
+                swingEnabled: rules.swing_enabled,
+                earningsBetEnabled: rules.earnings_bet_enabled,
+                strategyFingerprint: await strategyFingerprint(),
+                ...(opts?.stopped ? { stopped: true } : {}),
+            };
+            writeFileSync(attestationPath(), JSON.stringify(record, null, 2));
+            return record;
+        } catch (err) {
+            logger.warn(`[runtime-attestation] write failed: ${err instanceof Error ? err.message : err}`);
+            return null;
+        }
+    };
+    const p = writeChain.then(run, run);
+    writeChain = p;
+    return p;
 }
 
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -82,6 +97,7 @@ let postConnectTimer: ReturnType<typeof setTimeout> | null = null;
  *  re-write with the verified account, then a 15-min heartbeat. */
 export function startRuntimeAttestation(): void {
     if (timer) return;
+    stoppedFinal = false; // an in-process restart re-arms running writes
     void writeRuntimeAttestation();
     if (process.env.NODE_ENV !== 'test') {
         postConnectTimer = setTimeout(() => { postConnectTimer = null; void writeRuntimeAttestation(); }, POST_CONNECT_DELAY_MS);
@@ -90,15 +106,17 @@ export function startRuntimeAttestation(): void {
     logger.info(`[runtime-attestation] started: profile/account/fingerprint attested to ${attestationPath()} (${HEARTBEAT_MS / 60_000}-min heartbeat)`);
 }
 
-/** Review-32: clear BOTH timers (the post-connect timeout used to
- *  survive shutdown and could refresh the record afterwards) and mark
- *  the record stopped — an orderly shutdown must never read as a
- *  running gateway. */
-export function stopRuntimeAttestation(): void {
+/** Review-32/33: clear BOTH timers (the post-connect timeout used to
+ *  survive shutdown and could refresh the record afterwards), latch
+ *  stoppedFinal BEFORE enqueuing (any in-flight running write ahead in
+ *  the chain no-ops at run time), and AWAIT the stopped write — the
+ *  caller returns only once the stop marker is on disk. */
+export async function stopRuntimeAttestation(): Promise<void> {
     if (postConnectTimer) { clearTimeout(postConnectTimer); postConnectTimer = null; }
     if (timer) {
         clearInterval(timer);
         timer = null;
-        void writeRuntimeAttestation({ stopped: true });
+        stoppedFinal = true;
+        await writeRuntimeAttestation({ stopped: true });
     }
 }

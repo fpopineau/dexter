@@ -1078,3 +1078,38 @@ content. Both now hold as written below.
 |---|---|
 | REQ-VAL-045 | context wiring is scorecard glue over the profile suite's tested setter (honest ledger); the divergence closes by construction — one shared resolution path |
 | REQ-VAL-046/047 | audit suite: stopped record, dead PID, unknown-PID fail-closed, null-currentFp each named; pass path requires pidAlive; writer test unchanged (stopped absent by default); timer cleanup is the stop function's contract |
+
+## Review-33 response (2026-08-24) — serialized shutdown, two-sided freshness, PID shape
+
+- REQ-VAL-048 (corrects REQ-VAL-046's race): attestation writes are
+  SERIALIZED through a promise chain, `stoppedFinal` latches BEFORE the
+  stopped write is enqueued (an in-flight running write — async
+  fingerprint hashing — no-ops at run time instead of burying the
+  marker; one already past the check is simply overwritten by the
+  chained stopped write), a running write enqueued after the stop
+  returns null, and `stopRuntimeAttestation()` is AWAITED by the
+  gateway shutdown — the caller returns only once `stopped: true` is
+  on disk. The exact reproduced race (immediate missing record, then a
+  late running record over the marker) is now a test.
+- REQ-VAL-049: freshness is TWO-SIDED — a future-dated record (clock
+  rollback or malformed timestamp) stayed "fresh" indefinitely under
+  the one-sided age check. Non-finite timestamps fail as unusable;
+  future skew beyond 2 minutes fails as FUTURE-dated; ≤1 min skew
+  passes.
+- REQ-VAL-050: PID shape precedes liveness — pid 0 targets the
+  caller's own process group and `process.kill(0, 0)` succeeds on
+  Windows, so a malformed record could satisfy the probe. The audit
+  fails non-positive/non-safe-integer PIDs on shape; the scorecard
+  probes only valid ones. Recorded residual: PID reuse inside the
+  45-min window can alias a recycled process — the stopped marker and
+  15-min heartbeat bound the ambiguity; a process-start-time identity
+  would close it fully and stays on the backlog.
+- Docs synchronized: the module header, protocol step 4 and scorecard
+  comments all state the 15-min heartbeat / 45-min bar and enumerate
+  the stopped/PID/future-dated checks.
+
+| REQ | Test |
+|---|---|
+| REQ-VAL-048 | writer suite: in-flight write racing stop never buries the marker (awaited stop → stopped on disk), post-stop running write no-ops, restart re-arms |
+| REQ-VAL-049 | audit suite: +24h fails FUTURE, +1min passes, NaN fails as unusable |
+| REQ-VAL-050 | audit suite: pid 0 / 1.5 / −4 each fail on shape |

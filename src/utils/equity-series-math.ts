@@ -295,13 +295,22 @@ export function auditRuntimeAttestation(
     if (att.stopped === true) {
         problems.push('runtime attestation: the gateway attests an ORDERLY STOP — it is not running');
     }
-    if (expected.pidAlive === false) {
-        problems.push(`runtime attestation: the attested PID ${att.pid ?? '?'} is NOT running — the record outlived its gateway`);
+    // Review-33: PID zero satisfies process.kill(0, 0) on some platforms
+    // — a malformed pid must fail on SHAPE before liveness is even asked.
+    if (typeof att.pid !== 'number' || !Number.isSafeInteger(att.pid) || att.pid <= 0) {
+        problems.push(`runtime attestation: attested PID '${att.pid ?? 'missing'}' is not a valid process id`);
+    } else if (expected.pidAlive === false) {
+        problems.push(`runtime attestation: the attested PID ${att.pid} is NOT running — the record outlived its gateway`);
     } else if (expected.pidAlive === null) {
         problems.push('runtime attestation: the attested PID’s liveness could not be determined (fail closed)');
     }
-    if (typeof att.at !== 'number' || expected.nowMs - att.at > expected.maxAgeMs) {
-        problems.push(`runtime attestation is STALE (${typeof att.at === 'number' ? `${Math.round((expected.nowMs - att.at) / 60_000)} min old` : 'no timestamp'}) — the heartbeat died; is the gateway running?`);
+    // Review-33: freshness is TWO-SIDED — a future-dated record (clock
+    // rollback, malformed timestamp) would otherwise stay "fresh"
+    // indefinitely. Small skew tolerated (2 min); non-finite fails.
+    if (typeof att.at !== 'number' || !Number.isFinite(att.at) || expected.nowMs - att.at > expected.maxAgeMs) {
+        problems.push(`runtime attestation is STALE (${typeof att.at === 'number' && Number.isFinite(att.at) ? `${Math.round((expected.nowMs - att.at) / 60_000)} min old` : 'no usable timestamp'}) — the heartbeat died; is the gateway running?`);
+    } else if (att.at - expected.nowMs > 2 * 60_000) {
+        problems.push(`runtime attestation is dated ${Math.round((att.at - expected.nowMs) / 60_000)} min in the FUTURE — clock rollback or malformed record`);
     }
     if (att.accountType !== 'paper') {
         problems.push(`runtime attestation: account type '${att.accountType ?? 'missing'}' — the shadow-live sample must run on a verified PAPER account`);

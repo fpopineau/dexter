@@ -173,13 +173,16 @@ positive expectancy after costs, not improved loss control.
 4. One clean gateway RESTART with the configuration above: YAML
    validation passes, calendar coverage ok, no adoption-sweep
    surprises, and the RUNNING gateway's profile is confirmed via its
-   RUNTIME ATTESTATION (review-31: the scorecard's deployable-classes
+   RUNTIME ATTESTATION (review-31/33: the scorecard's deployable-classes
    line prints the yaml and cannot know what the process loaded; the
-   gateway writes `.dexter/data/runtime-attestation.json` at boot and
-   hourly — account type, profile env, effective daily-loss/per-trade
-   bars, its own fingerprint — and the scorecard's "runtime
-   attestation" line must read CONFIRMED, failing on missing/stale/
-   wrong-profile/wrong-account/mismatched-fingerprint records). Only
+   gateway writes `.dexter/data/runtime-attestation.json` at boot,
+   ~90s after the account verifies, and every 15 MINUTES as a liveness
+   heartbeat — account type, profile env, effective daily-loss/
+   per-trade bars, PID, its own fingerprint; orderly shutdown awaits a
+   final `stopped: true` record. The scorecard's "runtime attestation"
+   line must read CONFIRMED, failing on missing, stale (>45 min),
+   FUTURE-DATED, stopped-marked, dead-or-invalid-PID, wrong-profile,
+   wrong-account, or mismatched-fingerprint records). Only
    then send `performance reset` — one clean epoch at the live scale,
    created by the correctly-profiled gateway. The scorecard fails any
    sample whose epoch NetLiq is not live-scale.

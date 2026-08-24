@@ -963,10 +963,16 @@ let attestation: Parameters<typeof auditRuntimeAttestation>[0] = null;
 try {
     attestation = JSON.parse(readFileSync(join(dataDir, 'runtime-attestation.json'), 'utf-8')) as NonNullable<Parameters<typeof auditRuntimeAttestation>[0]>;
 } catch { attestation = null; }
-// Review-32: a fresh FILE is not a running PROCESS — probe the attested
-// PID (signal 0: ESRCH = gone; EPERM = alive but ours to not touch).
+// Review-32/33: a fresh FILE is not a running PROCESS — probe the
+// attested PID (signal 0: ESRCH = gone; EPERM = alive but not ours).
+// Only a POSITIVE SAFE INTEGER is probed: pid 0 targets the caller's
+// own process group and "succeeds" on Windows (the audit fails invalid
+// shapes on its own). Residual (recorded): PID reuse inside the 45-min
+// window can alias a recycled process; the stopped-marker and heartbeat
+// bound that ambiguity.
 let pidAlive: boolean | null = null;
-if (attestation !== null && typeof attestation.pid === 'number') {
+if (attestation !== null && typeof attestation.pid === 'number'
+    && Number.isSafeInteger(attestation.pid) && attestation.pid > 0) {
     try { process.kill(attestation.pid, 0); pidAlive = true; }
     catch (err) { pidAlive = (err as NodeJS.ErrnoException).code === 'EPERM' ? true : false; }
 }
