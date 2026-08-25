@@ -1296,3 +1296,27 @@ recorded first post-sample work package — NOT built now.
 | REQ-SCAN-001 | opportunity-engine suite: pre-open 100K vs all regular phases 500K; env overrides bind per session; garbage/negative fall back |
 | REQ-SCAN-002 | wrapper default — config change, honest ledger (asserted by the subscription builder's default path, not separately tested) |
 | REQ-SCAN-003 | scheduler glue over archiveBars' tested useRTH pass-through — integration-untested (honest ledger); first accrual verifiable in market-archive.db after today's 16:20 ET run |
+
+## Incident 2026-08-25 — silent triage miss, post-bell watchdog (REQ-EOD-014)
+
+The 15:52 ET main triage job silently never fired on 2026-08-25: the
+process was provably alive (5-min equity samples bracket the slot at
+19:48:06Z and 19:53:07Z), the 15:40 preview job fired, the half-day
+calendar is correct for the date, the single-flight guard logs when it
+skips and logged nothing — zero trace at the slot. P-6C90 (BZ, +1.94%
+at preview) rode overnight against flat-by-close with only its GTC
+bracket as protection. Root cause not reproducible from logs (croner
+9.1.0 job death is the leading hypothesis); the defense assumes any
+job can die silently.
+
+- REQ-EOD-014: a post-bell WATCHDOG re-runs the boot catch-up decision
+  at 16:10 ET (13:10 half days) — a completed stamp is a silent no-op;
+  a missing/failed/still-running stamp raises the 🚨 TRIAGE MISSED
+  alert the same evening instead of at the next reboot. 10 min past
+  the bell so a legitimately long main run stamps first. All triage
+  cron jobs now carry a croner catch handler that logs a thrown
+  callback loudly (the silent-death mode this incident exposed).
+
+| REQ | Test |
+|---|---|
+| REQ-EOD-014 | decision core is triageCatchUpAction (existing suite: post-close + not-ran → alert-missed; ran → none; missed-alerted stamps once/day via stampCountsAsRan); watchdog cron wiring + catch handler are start/stop glue (honest ledger) — first live proof is the 16:10 ET no-op line after a completed triage |

@@ -1389,6 +1389,20 @@ let job: Cron | null = null;
 let halfDayJob: Cron | null = null;
 let previewJob: Cron | null = null;
 let previewHalfDayJob: Cron | null = null;
+// Incident 2026-08-25 (P1): the 15:52 main job silently never fired —
+// process provably alive (5-min equity samples bracket the slot), the
+// 15:40 preview job fired, half-day calendar correct, zero trace at
+// 15:52 — and BZ rode overnight against flat-by-close (GTC exits were
+// its only protection). Root cause not reproducible from logs; the
+// DEFENSE is a post-bell WATCHDOG: re-run the boot catch-up check at
+// 16:10 ET (13:10 half days — 10 min past the bell so a legitimately
+// long main run finishes stamping first). A completed stamp makes it a
+// silent no-op; a missing/failed/running stamp raises the 🚨 MISSED
+// alert within minutes instead of at the next reboot.
+let watchdogJob: Cron | null = null;
+let watchdogHalfJob: Cron | null = null;
+const WATCHDOG_CRON_FULL = '10 16 * * 1-5';
+const WATCHDOG_CRON_HALF = '10 13 * * 1-5';
 // Review-35 (P1): the boot catch-up used to be an UNTRACKED setTimeout —
 // it survived stopEodTriage() and could fire runEodTriageOnce (market
 // close orders) after gateway shutdown. The timer is now tracked and
@@ -1415,21 +1429,42 @@ function slotMatchesToday(halfDaySlot: boolean): boolean {
 /** Start the pre-close triage (idempotent; no-op when disabled). */
 export function startEodTriage(): void {
     if (job || !isEodTriageEnabled()) return;
-    job = new Cron(TRIAGE_CRON_FULL, { timezone: ET }, () => {
+    // Incident 2026-08-25: croner's default swallows nothing — but a
+    // callback that THROWS synchronously without `catch` can kill the
+    // job's chain with zero trace. Every triage job now logs its own
+    // death loudly instead of dying silent.
+    const cronOpts = {
+        timezone: ET,
+        catch: (err: unknown) => logger.error(`[eod-triage] cron callback threw: ${err}`),
+    };
+    job = new Cron(TRIAGE_CRON_FULL, cronOpts, () => {
         if (!slotMatchesToday(false)) return; // half-day: 12:52 already ran
         runEodTriageOnce().catch((err) => logger.error(`[eod-triage] run failed: ${err}`));
     });
-    halfDayJob = new Cron(TRIAGE_CRON_HALF, { timezone: ET }, () => {
+    halfDayJob = new Cron(TRIAGE_CRON_HALF, cronOpts, () => {
         if (!slotMatchesToday(true)) return; // normal day: wait for 15:52
         runEodTriageOnce().catch((err) => logger.error(`[eod-triage] half-day run failed: ${err}`));
     });
-    previewJob = new Cron(PREVIEW_CRON_FULL, { timezone: ET }, () => {
+    previewJob = new Cron(PREVIEW_CRON_FULL, cronOpts, () => {
         if (!slotMatchesToday(false)) return;
         runEodTriageOnce(true).catch((err) => logger.error(`[eod-triage] preview failed: ${err}`));
     });
-    previewHalfDayJob = new Cron(PREVIEW_CRON_HALF, { timezone: ET }, () => {
+    previewHalfDayJob = new Cron(PREVIEW_CRON_HALF, cronOpts, () => {
         if (!slotMatchesToday(true)) return;
         runEodTriageOnce(true).catch((err) => logger.error(`[eod-triage] half-day preview failed: ${err}`));
+    });
+    // Post-bell watchdog (incident 2026-08-25): the boot catch-up check,
+    // re-run minutes after the close. Reuses the tested decision core
+    // (triageCatchUpAction): completed stamp → silent no-op; anything
+    // else → the 🚨 MISSED alert fires TONIGHT, not at the next reboot.
+    const watchdogGen = lifecycleGen;
+    watchdogJob = new Cron(WATCHDOG_CRON_FULL, cronOpts, () => {
+        if (!slotMatchesToday(false)) return;
+        checkMissedTriage(watchdogGen).catch((err) => logger.error(`[eod-triage] watchdog check failed: ${err}`));
+    });
+    watchdogHalfJob = new Cron(WATCHDOG_CRON_HALF, cronOpts, () => {
+        if (!slotMatchesToday(true)) return;
+        checkMissedTriage(watchdogGen).catch((err) => logger.error(`[eod-triage] watchdog check failed: ${err}`));
     });
     logger.info(
         '[eod-triage] scheduled 15:52 ET (12:52 on half-days): close losing-and-fading DAY positions; keep the rest for protected overnight' +
@@ -1452,6 +1487,8 @@ export function startEodTriage(): void {
 export function stopEodTriage(): void {
     lifecycleGen++; // review-35: invalidate any catch-up already dispatched or queued
     if (catchUpTimer) { clearTimeout(catchUpTimer); catchUpTimer = null; }
+    if (watchdogHalfJob) { watchdogHalfJob.stop(); watchdogHalfJob = null; }
+    if (watchdogJob) { watchdogJob.stop(); watchdogJob = null; }
     if (previewHalfDayJob) { previewHalfDayJob.stop(); previewHalfDayJob = null; }
     if (previewJob) { previewJob.stop(); previewJob = null; }
     if (halfDayJob) { halfDayJob.stop(); halfDayJob = null; }
