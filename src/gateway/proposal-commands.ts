@@ -274,7 +274,13 @@ export async function handleProposalCommand(body: string): Promise<string | null
         // as if it were dollars and blinded the live-scale band check.
         const netLiqUsd = await getNetLiquidation();
         const b = setPerformanceBaseline('manual reset', netLiqUsd);
-        return `📊 Performance baseline reset to ${new Date(b.epochMs).toISOString().slice(0, 16).replace('T', ' ')} UTC.\n` +
+        // Timezone audit 2026-08-25: operator wall-clock events read in
+        // Paris time, labeled — never UTC.
+        const parisStamp = new Date(b.epochMs).toLocaleString('en-GB', {
+            timeZone: 'Europe/Paris', year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', minute: '2-digit', hour12: false,
+        });
+        return `📊 Performance baseline reset to ${parisStamp} Paris.\n` +
             (b.netLiq !== undefined
                 ? `Frozen denominator: $${b.netLiq.toFixed(2)} USD — sanity-check this against the live target band before tagging.\n`
                 : `⚠️ USD NetLiq unavailable — NO denominator frozen; re-run the reset once IBKR is reachable.\n`) +

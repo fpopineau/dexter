@@ -643,11 +643,17 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
             proposalAgeSec: Math.round((Date.now() - p.createdAt) / 1000),
             livePrice: liveLast,
         }).catch(() => { /* ledger is best-effort — never blocks the refusal path */ });
+        // Timezone audit 2026-08-25: this expiry rendered as a raw UTC ISO
+        // timestamp in WhatsApp and the dashboard banner — operator-facing
+        // times are ET (market clock) or Paris, always labeled, never UTC.
+        const expiresEt = new Date(p.expiresAt).toLocaleTimeString('en-US', {
+            timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false,
+        });
         return {
             ok: false,
             message:
                 `⛔ ${p.id} NOT executed — ${msg}\n` +
-                `The proposal remains OPEN (expires ${new Date(p.expiresAt).toISOString()}); ` +
+                `The proposal remains OPEN (expires ${expiresEt} ET); ` +
                 `resolve the issue and reply 'accept ${p.id}' to retry.`,
             ...(err instanceof ChaseRefusalError ? { chaseKind: err.kind } : {}),
         };
