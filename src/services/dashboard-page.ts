@@ -251,8 +251,16 @@ function renderOverview(o){
       if(p.status==='open') acts = '<button class="act ok" data-action="accept" data-id="'+p.id+'">accept</button>'+
         '<button class="act" data-action="reject" data-id="'+p.id+'">reject</button>';
       else if(p.status==='executed') acts = '<button class="act warn" data-action="cancel" data-id="'+p.id+'">cancel</button>';
+      // 2026-08-25: "executed" means the BRACKET IS PLACED, not that the
+      // entry filled (operator read P-5414's resting BNS limit as a
+      // position that never appeared). Placed-but-unfilled says so; a
+      // fill shows its actual price.
+      var st = p.status;
+      if(p.status==='executed'||p.status==='executing'){
+        st = p.entryFillPrice!=null ? 'filled @'+fmt(p.entryFillPrice) : p.status+' · entry working';
+      }
       return '<tr class="row" data-sym="'+p.symbol+'"><td>'+p.id+'</td><td><b>'+p.symbol+'</b> '+p.direction+'</td>'+
-        '<td class="r dim">@'+fmt(p.entry)+'</td><td class="chip">'+p.status+(p.score?' · '+p.score:'')+'</td>'+
+        '<td class="r dim">@'+fmt(p.entry)+'</td><td class="chip">'+st+(p.score?' · '+p.score:'')+'</td>'+
         '<td class="r">'+acts+'</td></tr>'; }).join('');
   el('proposals').innerHTML = props || '<tr><td class="dim">none</td></tr>';
 
