@@ -1304,19 +1304,22 @@ export function getPerformanceBaseline(): PerformanceBaseline | null {
     }
 }
 
-/** Stamp a new baseline at now. Overwrites any previous one. */
-export function setPerformanceBaseline(note?: string): PerformanceBaseline {
-    // Freeze the drawdown denominator with the epoch (round-5 review):
-    // today's captured NetLiq is the equity the sample starts from.
-    let netLiq: number | undefined;
-    try {
-        const dataDir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
-        const b = JSON.parse(readFileSync(join(dataDir, 'netliq-baseline.json'), 'utf-8')) as { netLiq?: number };
-        if (typeof b.netLiq === 'number' && b.netLiq > 0) netLiq = b.netLiq;
-    } catch { /* no capture yet — scorecard reports the gap loudly */ }
+/** Stamp a new baseline at now. Overwrites any previous one.
+ *
+ *  Currency incident 2026-08-25: this used to copy netliq-baseline.json,
+ *  which the daily-loss guard DELIBERATELY keeps in the account's BASE
+ *  currency (EUR here) — the epoch then froze €12,257 where every
+ *  consumer (live-scale band, drawdown seed vs the USD equity series)
+ *  assumes USD, and the band check passed on a unit coincidence while
+ *  the account was really $14.3K. The caller now supplies the
+ *  USD-CONVERTED NetLiq (getNetLiquidation()); no value → the epoch is
+ *  written without a denominator and the scorecard reports that gap
+ *  loudly rather than trusting a mislabeled one. */
+export function setPerformanceBaseline(note?: string, netLiqUsd?: number | null): PerformanceBaseline {
+    const netLiq = typeof netLiqUsd === 'number' && netLiqUsd > 0 ? netLiqUsd : undefined;
     const baseline: PerformanceBaseline = { epochMs: Date.now(), ...(note ? { note } : {}), ...(netLiq !== undefined ? { netLiq } : {}) };
     writeFileSync(baselinePath(), JSON.stringify(baseline, null, 2));
-    logger.info(`[proposals] performance baseline reset to ${new Date(baseline.epochMs).toISOString()}${note ? ` (${note})` : ''}${netLiq !== undefined ? `, NetLiq ${netLiq} frozen as denominator` : ' — WARNING: no NetLiq capture to freeze'}`);
+    logger.info(`[proposals] performance baseline reset to ${new Date(baseline.epochMs).toISOString()}${note ? ` (${note})` : ''}${netLiq !== undefined ? `, NetLiq ${netLiq} USD frozen as denominator` : ' — WARNING: no USD NetLiq supplied, no denominator frozen'}`);
     return baseline;
 }
 

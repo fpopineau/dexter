@@ -21,7 +21,7 @@
  *   performance reset       stamp a new baseline NOW (non-destructive)
  */
 
-import { getDailyLossStatus } from '@/services/daily-loss-guard.js';
+import { getDailyLossStatus, getNetLiquidation } from '@/services/daily-loss-guard.js';
 import { acceptProposal, rejectProposal } from '@/services/proposal-executor.js';
 import {
     formatPerformanceReport,
@@ -269,8 +269,15 @@ export async function handleProposalCommand(body: string): Promise<string | null
     // Non-destructive: stamps a baseline so reports judge the current
     // gate stack on its own record; all labeled history stays in the DB.
     if (PERF_RESET_RE.test(body)) {
-        const b = setPerformanceBaseline('manual reset');
+        // Currency incident 2026-08-25: the denominator must be the
+        // USD-converted NetLiq — the base-currency capture froze €12,257
+        // as if it were dollars and blinded the live-scale band check.
+        const netLiqUsd = await getNetLiquidation();
+        const b = setPerformanceBaseline('manual reset', netLiqUsd);
         return `📊 Performance baseline reset to ${new Date(b.epochMs).toISOString().slice(0, 16).replace('T', ' ')} UTC.\n` +
+            (b.netLiq !== undefined
+                ? `Frozen denominator: $${b.netLiq.toFixed(2)} USD — sanity-check this against the live target band before tagging.\n`
+                : `⚠️ USD NetLiq unavailable — NO denominator frozen; re-run the reset once IBKR is reachable.\n`) +
             `Reports now start here; nothing was deleted — 'performance all' shows the full history.`;
     }
 

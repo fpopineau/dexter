@@ -1320,3 +1320,32 @@ job can die silently.
 | REQ | Test |
 |---|---|
 | REQ-EOD-014 | decision core is triageCatchUpAction (existing suite: post-close + not-ran → alert-missed; ran → none; missed-alerted stamps once/day via stampCountsAsRan); watchdog cron wiring + catch handler are start/stop glue (honest ledger) — first live proof is the 16:10 ET no-op line after a completed triage |
+
+## Currency incident 2026-08-25 — the epoch denominator is USD (REQ-VAL-058)
+
+Operator reported a phantom +$2,085 NetLiq jump. Diagnosis: no jump ever
+existed — the equity series read ~$14,299 continuously while the epoch
+froze 12,257 three minutes after a 14,298 sample. The account's BASE
+currency is EUR: setPerformanceBaseline copied netliq-baseline.json,
+which the daily-loss guard DELIBERATELY keeps base-currency for its
+same-currency P&L proxy (WP8), so the epoch froze €12,257 labeled as
+dollars. Every consumer assumes USD: the live-scale band check passed
+on a unit coincidence (€12,257 sits inside the USD band) while the
+account is really ~$14.3K — 22% above the shadow-live target — and the
+drawdown curve was seeded with a mixed-unit denominator.
+
+- REQ-VAL-058: the performance epoch freezes a USD-CONVERTED NetLiq
+  supplied by the caller ('performance reset' fetches
+  getNetLiquidation(), which FX-converts at the boundary). No USD value
+  → the epoch is written WITHOUT a denominator (the scorecard reports
+  that gap loudly); zero/negative refused. The reset reply now prints
+  the frozen dollar figure so the operator sanity-checks it against
+  the band at reset time, not at tag time.
+- Operator actions recorded: re-size the paper account to the true
+  live target (base currency EUR → €10,000), then 'performance reset'
+  again — the current epoch (12257.11, EUR mislabeled) is invalid and
+  the account is above target; both must be corrected before the tag.
+
+| REQ | Test |
+|---|---|
+| REQ-VAL-058 | trade-proposals suite: caller-supplied USD stored; null → no denominator (loudly absent); zero refused; command wiring (fetch + reply) is router glue over getNetLiquidation's tested conversion (honest ledger) |

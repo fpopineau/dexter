@@ -585,3 +585,21 @@ describe('assertTestDataDirIsTemp (REQ-TEST-001 — the production DB is unreach
         expect(() => assertTestDataDirIsTemp(undefined, 'production', tmp)).not.toThrow();
     });
 });
+
+describe('performance baseline denominator (currency incident 2026-08-25)', () => {
+    test('the epoch freezes the CALLER-supplied USD NetLiq — never a base-currency file read', () => {
+        // The old code copied netliq-baseline.json, which the daily-loss
+        // guard keeps in the account's BASE currency (EUR) — the epoch
+        // froze €12,257 labeled as dollars and the live-scale band check
+        // passed on a unit coincidence while the account was $14.3K.
+        const withUsd = setPerformanceBaseline('usd supplied', 14298.53);
+        expect(getPerformanceBaseline()?.netLiq).toBe(14298.53);
+        expect(withUsd.netLiq).toBe(14298.53);
+        // No USD value → NO denominator, loudly absent — never a guess.
+        const withoutUsd = setPerformanceBaseline('fetch failed', null);
+        expect(withoutUsd.netLiq).toBeUndefined();
+        expect(getPerformanceBaseline()?.netLiq).toBeUndefined();
+        // Zero/negative are refused as nonsense, same as absent.
+        expect(setPerformanceBaseline('zero', 0).netLiq).toBeUndefined();
+    });
+});
