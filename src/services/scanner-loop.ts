@@ -103,7 +103,10 @@ export async function runScan(
     const capBelowMm = options.marketCapBelow !== undefined ? options.marketCapBelow / 1e6 : undefined;
 
     const subscription: ScannerSubscription = {
-        numberOfRows: options.numberOfRows ?? 25,
+        // Scan-coverage slice A (2026-08-25): 50 is IBKR's scanner maximum
+        // — 25 rows across four overlapping codes yielded ~25 distinct
+        // symbols per cycle, half the reachable breadth.
+        numberOfRows: options.numberOfRows ?? 50,
         instrument: (options.instrument ?? 'STK') as unknown as ScannerSubscription['instrument'],
         locationCode: (options.locationCode ?? 'STK.US.MAJOR') as unknown as ScannerSubscription['locationCode'],
         scanCode: ibScanCode,

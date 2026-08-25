@@ -227,6 +227,22 @@ function triggerMaxPerDay(): number {
 
 /** Optional market-cap band for engine scans (USD). Unset = unchanged
  *  default behavior (scanner-loop's $500M floor, no ceiling). */
+/** Scan-coverage slice A (2026-08-25): the cumulative-volume scan floor
+ *  is SESSION-AWARE. The flat 500K floor was session-blind — at 07:00 ET
+ *  almost nothing has traded 500K yet, and the pre-open gap/gainer scans
+ *  starved down to mega-liquid names and ETFs (operator-verified against
+ *  an independent screener: 1 of 21 pre-market movers visible; AMD at
+ *  177K pre-market volume died on OUR filter, not IBKR's). Pre-market
+ *  uses a floor sized to pre-market volumes; regular hours keep the
+ *  original bar. Both knobs are in the strategy fingerprint's behaviorEnv
+ *  list — editing them mid-sample ends the window. */
+export function scanVolumeFloor(phase: EnginePhase): number {
+    const isPreOpen = phase === 'pre-open';
+    const env = Number(process.env[isPreOpen ? 'OPP_SCAN_VOLUME_FLOOR_PREMARKET' : 'OPP_SCAN_VOLUME_FLOOR']);
+    if (Number.isFinite(env) && env >= 0) return env;
+    return isPreOpen ? 100_000 : 500_000;
+}
+
 function marketCapBand(): { marketCapAbove?: number; marketCapBelow?: number } {
     const min = Number(process.env.OPP_MARKET_CAP_MIN);
     const max = Number(process.env.OPP_MARKET_CAP_MAX);
@@ -512,7 +528,7 @@ async function runCycleInner(forcePhase?: EnginePhase): Promise<OpportunitySnaps
         const capBand = marketCapBand();
         await Promise.all(plan.scans.map(async ({ code, direction }) => {
             try {
-                const results = await runScan(code, { aboveVolume: 500_000, ...capBand });
+                const results = await runScan(code, { aboveVolume: scanVolumeFloor(plan.phase), ...capBand });
                 for (const r of results) {
                     if (!r.symbol || r.secType !== 'STK') continue;
                     const existing = found.get(r.symbol);

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { triggerEligibility } from './opportunity-engine.js';
+import { scanVolumeFloor, triggerEligibility } from './opportunity-engine.js';
 
 const BASE = {
     onBreadthWatchlist: false,
@@ -82,5 +82,46 @@ describe('trigger staleness refusal (WP10 — stale data fires nothing)', () => 
     });
     test('fresh candidates are unaffected', () => {
         expect(triggerEligibility({ ...BASE, stale: false }).eligible).toBe(true);
+    });
+});
+
+describe('scanVolumeFloor (scan-coverage slice A — the volume floor is session-aware)', () => {
+    const restore: Record<string, string | undefined> = {
+        OPP_SCAN_VOLUME_FLOOR: process.env.OPP_SCAN_VOLUME_FLOOR,
+        OPP_SCAN_VOLUME_FLOOR_PREMARKET: process.env.OPP_SCAN_VOLUME_FLOOR_PREMARKET,
+    };
+    const reset = () => {
+        for (const [k, v] of Object.entries(restore)) {
+            if (v === undefined) delete process.env[k];
+            else process.env[k] = v;
+        }
+    };
+
+    test('pre-open uses the pre-market floor; every regular phase keeps the 500K bar', () => {
+        reset();
+        delete process.env.OPP_SCAN_VOLUME_FLOOR;
+        delete process.env.OPP_SCAN_VOLUME_FLOOR_PREMARKET;
+        // The session-blind 500K floor at 07:00 ET starved pre-open scans
+        // to mega-liquid names (1 of 21 independent-screener movers seen).
+        expect(scanVolumeFloor('pre-open')).toBe(100_000);
+        for (const phase of ['open-drive', 'midday', 'pre-close', 'idle'] as const) {
+            expect(scanVolumeFloor(phase)).toBe(500_000);
+        }
+    });
+
+    test('env overrides bind per session, and garbage falls back to defaults', () => {
+        try {
+            process.env.OPP_SCAN_VOLUME_FLOOR_PREMARKET = '250000';
+            process.env.OPP_SCAN_VOLUME_FLOOR = '750000';
+            expect(scanVolumeFloor('pre-open')).toBe(250_000);
+            expect(scanVolumeFloor('midday')).toBe(750_000);
+            process.env.OPP_SCAN_VOLUME_FLOOR_PREMARKET = 'not-a-number';
+            expect(scanVolumeFloor('pre-open')).toBe(100_000);
+            // Negative floors are nonsense, not zero-is-disabled semantics.
+            process.env.OPP_SCAN_VOLUME_FLOOR = '-5';
+            expect(scanVolumeFloor('open-drive')).toBe(500_000);
+        } finally {
+            reset();
+        }
     });
 });

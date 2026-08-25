@@ -88,8 +88,15 @@ export async function runArchiveOnce(): Promise<void> {
     }
     logger.info(`[archive-scheduler] archiving ${symbols.length} symbol(s): ${symbols.join(', ')}`);
 
-    const oneMin = await archiveBars({ symbols, barSize: '1 min', duration: '1 D' });
-    const fiveMin = await archiveBars({ symbols, barSize: '5 mins', duration: '2 D' });
+    // Scan-coverage slice A (2026-08-25): extended hours INCLUDED
+    // (useRTH: false) — pre/post-market bars accrue from today so the
+    // planned PMRVOL feature (median pre-market volume at the same clock
+    // time, slice B) has history to stand on. Bars are keyed
+    // (symbol, bar_size, time), so extended-hours rows coexist with RTH
+    // rows; the daily-bar consumers (pattern scanner) are untouched and
+    // the dashboard chart simply gains the pre-market candles.
+    const oneMin = await archiveBars({ symbols, barSize: '1 min', duration: '1 D', useRTH: false });
+    const fiveMin = await archiveBars({ symbols, barSize: '5 mins', duration: '2 D', useRTH: false });
 
     const count = (r: Record<string, number>) => Object.values(r).filter((n) => n >= 0).reduce((a, b) => a + b, 0);
     const failures = Object.entries(oneMin).filter(([, n]) => n < 0).map(([s]) => s);

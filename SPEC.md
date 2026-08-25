@@ -1269,3 +1269,30 @@ content. Both now hold as written below.
   838/0, ~14s, no force-exit — under a concurrent compute-heavy
   background workload on the host. No REQ: harness configuration
   only; the bun harness (primary) is untouched.
+
+## Scan-coverage slice A (2026-08-25) — session-aware pre-market breadth
+
+Operator-verified gap (independent screener, 2026-08-25 pre-market): 1 of
+21 movers visible to the pre-open scan. Root cause: a session-blind
+cumulative-volume floor. Slice B (PM feature enrichment: gap/from-open
+separation, range position, PMRVOL, earnings-population join) is the
+recorded first post-sample work package — NOT built now.
+
+- REQ-SCAN-001: the scan volume floor is SESSION-AWARE — pre-open scans
+  use a floor sized to pre-market volumes (default 100K), every regular
+  phase keeps 500K. Env knobs OPP_SCAN_VOLUME_FLOOR /
+  OPP_SCAN_VOLUME_FLOOR_PREMARKET are in the fingerprint's behaviorEnv
+  list (editing them mid-sample ends the window); garbage or negative
+  values fall back to defaults.
+- REQ-SCAN-002: scanner rows default to 50 (IBKR's maximum) — 25 across
+  four overlapping codes yielded ~25 distinct symbols per cycle.
+- REQ-SCAN-003: the 16:20 archive job stores intraday bars WITH extended
+  hours (useRTH: false) so PMRVOL history accrues from 2026-08-25.
+  Daily-bar consumers (pattern scanner) untouched; bars are keyed
+  (symbol, bar_size, time) so extended-hours rows coexist.
+
+| REQ | Test |
+|---|---|
+| REQ-SCAN-001 | opportunity-engine suite: pre-open 100K vs all regular phases 500K; env overrides bind per session; garbage/negative fall back |
+| REQ-SCAN-002 | wrapper default — config change, honest ledger (asserted by the subscription builder's default path, not separately tested) |
+| REQ-SCAN-003 | scheduler glue over archiveBars' tested useRTH pass-through — integration-untested (honest ledger); first accrual verifiable in market-archive.db after today's 16:20 ET run |
