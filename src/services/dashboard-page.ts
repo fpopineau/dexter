@@ -44,7 +44,15 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   button.act { padding:0 6px; font-size:10px; margin-left:3px; }
   button.act.ok { border-color:var(--green); color:var(--green); }
   button.act.warn { border-color:var(--red); color:var(--red); }
+  /* Action feedback (2026-08-25): a gate refusal used to render as the
+     same small orange line as everything else, ~21s after the click (the
+     halt probe's best-effort timeout) — operator accepted P-5807 three
+     times without ever seeing the refusal. Outcomes are now styled:
+     refusals are a persistent red banner (click to dismiss), successes
+     green and transient, pending states name the ~20s gate latency. */
   #actionmsg { font-size:11px; color:var(--orange); padding:6px 4px; min-height:16px; white-space:pre-wrap; }
+  #actionmsg.ok { color:var(--green); }
+  #actionmsg.fail { color:#fff; background:var(--red); border-radius:4px; padding:8px 10px; font-size:12px; font-weight:600; cursor:pointer; }
 </style>
 </head>
 <body>
@@ -281,17 +289,27 @@ function refresh(){
   fetch('/api/overview').then(function(r){ return r.json(); }).then(renderOverview).catch(function(){});
 }
 
-function toast(msg){ el('actionmsg').textContent = msg; }
+var toastTimer = null;
+// kind: '' pending (orange), 'ok' transient green, 'fail' persistent red
+// banner — a refusal must outlive the operator's glance, not race it.
+function toast(msg, kind){
+  var m = el('actionmsg');
+  m.textContent = msg;
+  m.className = kind || '';
+  if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+  if (kind === 'ok') toastTimer = setTimeout(function(){ m.textContent=''; m.className=''; }, 8000);
+}
 
 function act(payload, confirmText){
   if(confirmText && !window.confirm(confirmText)) return;
-  toast('… ' + payload.action + ' ' + (payload.id || payload.symbol || ''));
+  toast('⏳ ' + payload.action + ' ' + (payload.id || payload.symbol || '') +
+    ' — gates running (can take ~20s), result appears here');
   fetch('/api/action', { method:'POST',
     headers:{ 'content-type':'application/json', 'x-dexter-token': window.DEXTER_TOKEN },
     body: JSON.stringify(payload) })
     .then(function(r){ return r.json(); })
-    .then(function(d){ toast(d.message || 'done'); refresh(); })
-    .catch(function(e){ toast('action failed: ' + e); });
+    .then(function(d){ toast(d.message || 'done', d.ok === false ? 'fail' : 'ok'); refresh(); })
+    .catch(function(e){ toast('action failed: ' + e, 'fail'); });
 }
 
 document.addEventListener('click', function(ev){
@@ -308,6 +326,13 @@ document.addEventListener('click', function(ev){
     if(tgt!==null && tgt!=='') p.target = Number(tgt);
     act(p, null);
   }
+});
+
+// A refusal banner stays until the operator dismisses it (or a new action
+// replaces it) — click to clear.
+el('actionmsg').addEventListener('click', function(){
+  var m = el('actionmsg');
+  if (m.className === 'fail') { m.textContent = ''; m.className = ''; }
 });
 
 el('tf1m').addEventListener('click', function(){ state.tf='1min'; setTf(); });
