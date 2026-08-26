@@ -11,6 +11,7 @@ import { onAutoProtect, onTradeClosed } from '@/services/outcome-tracker.js';
 import { onBenchmarkReport } from '@/services/benchmark.js';
 import { onEodTriage } from '@/services/eod-triage.js';
 import { onKillSwitchAlert } from '@/services/kill-switch-guardian.js';
+import { onFlatExitSweep } from '@/services/flat-exit-sweeper.js';
 import { onProfitTrailAlert } from '@/services/profit-trail.js';
 import { formatProposalLine, type TradeProposal } from '@/services/trade-proposals.js';
 import { logger } from '@/utils';
@@ -134,6 +135,25 @@ export function registerOutcomeAlerts(): void {
     });
 
     // Kill-switch guardian (review 2026-08-23): latch + entry-cancel report.
+    // Orphaned-exit sweeps (incident 2026-08-26: exits resting on a flat
+    // account opened a naked short) — same delivery contract as the
+    // kill-switch alerts.
+    onFlatExitSweep(async (message) => {
+        const session = findTargetSession();
+        if (!session?.lastTo || !session?.lastAccountId) {
+            logger.warn('[outcome-alerts] no WhatsApp delivery target, skipping flat-exit-sweep alert');
+            return;
+        }
+        try {
+            assertOutboundAllowed({ to: session.lastTo, accountId: session.lastAccountId });
+        } catch {
+            logger.warn('[outcome-alerts] outbound blocked, skipping flat-exit-sweep alert');
+            return;
+        }
+        await sendMessageWhatsApp({ to: session.lastTo, body: message, accountId: session.lastAccountId });
+        logger.info('[outcome-alerts] flat-exit-sweep alert delivered');
+    });
+
     onKillSwitchAlert(async (message) => {
         const session = findTargetSession();
         if (!session?.lastTo || !session?.lastAccountId) {

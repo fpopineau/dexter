@@ -1377,3 +1377,37 @@ epoch).
 |---|---|
 | REQ-RISK-001 | command wiring is router glue over clearTradingHalt (logs 'manually cleared') + reanchorNetLiqBaseline — integration-untested (honest ledger); first live proof is the operator clearing today's false halt |
 | REQ-RISK-002 | latch suite unchanged and green (records without currency stay broker-free and immediate — the timeout regression during development proved the branch stays offline); EUR conversion path is display glue (honest ledger) |
+
+## Incident 2026-08-26 — the BZ naked short, flat-account exit sweep (REQ-RISK-003)
+
+An IBKR paper-account reset wiped the LONG 134 BZ position but left its
+GTC exits armed at the broker. Six hours later (the boot reconciliation
+had timed out; nothing else watched) the target leg filled against the
+flat account at the opening print and OPENED A NAKED SHORT — no human
+and no gate decided that trade. Downstream machinery behaved correctly:
+OCA cancelled the sibling, the tracker closed the row (economically
+fictional +$183.58 — the real long's value was already banked into the
+reset), reconciliation adopted the unexplained short, alerted, and
+blocked accepts pending protection; the operator closed it manually
+(realized cost ≈ −$208). The missing defense was upstream.
+
+- REQ-RISK-003: a flat-account exit sweep runs every 5 min: COMPLETE
+  broker order snapshot, then verified positions (orders-first race
+  order — an entry fill between snapshots lands in positions and
+  vetoes), select dexter exit orders (:tp/:stop, P-XXXX and protect-
+  refs) on symbols with NO position and NO working dexter entry
+  parent, and cancel them broker-confirmed — only after the SAME
+  orphan (identical id set) is seen on two consecutive ticks.
+  Fail-closed: incomplete snapshot or failed positions fetch skips the
+  tick AND resets the latch. Foreign orders are never touched (a
+  manually staged TWS bracket must survive). A leg that FILLED before
+  cancel triggers a 🚨 check-positions-now alert. FLAT_EXIT_SWEEP=false
+  disables; the flag is in the fingerprint's behaviorEnv list.
+- Also: getDailyLossStatus's healthy branch exports dailyPnL and
+  limitDollars USD-converted (they were raw base currency beside a
+  converted netLiquidation — 'halt status' printed a € limit with $
+  framing). Internal halt math stays base-consistent (WP8).
+
+| REQ | Test |
+|---|---|
+| REQ-RISK-003 | flat-exit-sweeper suite: BZ scenario orphaned; BNS dormant-children-under-parent vetoed; held position either sign keeps exits (zero-qty row = flat); foreign/close- refs never selected; protect- refs sweep; per-symbol isolation; two-tick latch (arm → confirm, changed ids re-latch, key order-insensitive). Broker glue (lock, snapshots, confirmCancelDetailed) reuses guardian-tested primitives — wiring integration-untested (honest ledger) |

@@ -477,16 +477,27 @@ export async function getDailyLossStatus(): Promise<DailyLossStatus> {
     // FX rate refuses fail-safe: a cap computed in the wrong currency is
     // worse than a refused accept (transient — retries when FX is back).
     let netLiqUsd: number;
+    let dailyPnLUsd: number;
+    let limitDollarsUsd: number;
     try {
         const { convertToUsd } = await import('@/tools/ibkr/fx.js');
         netLiqUsd = await convertToUsd(netLiq, netLiqCurrency);
+        // Currency audit 2026-08-26: dailyPnL and limitDollars exported RAW
+        // base currency next to a converted netLiquidation — 'halt status'
+        // printed a € limit with $ framing. The internal halt math above
+        // stays base-consistent (WP8); only the EXPORTS convert. (The
+        // just-tripped return above still carries base figures for one
+        // status call; the next call reads the latch record, which
+        // converts from its stored currency tag.)
+        dailyPnLUsd = await convertToUsd(dailyPnL, netLiqCurrency);
+        limitDollarsUsd = await convertToUsd(limitDollars, netLiqCurrency);
     } catch (err) {
         const reason = `NetLiquidation is in ${netLiqCurrency} and the FX rate is unavailable (${err instanceof Error ? err.message : err})`;
         logger.error(`[daily-loss-guard] ${reason} — refusing new orders`);
         return { halted: true, latched: false, reason, limitPct };
     }
 
-    return { halted: false, dailyPnL, netLiquidation: netLiqUsd, limitPct, limitDollars };
+    return { halted: false, dailyPnL: dailyPnLUsd, netLiquidation: netLiqUsd, limitPct, limitDollars: limitDollarsUsd };
 }
 
 /**

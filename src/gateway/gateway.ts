@@ -43,6 +43,7 @@ import { startProfitTrail, stopProfitTrail } from '@/services/profit-trail.js';
 import { catchUpPatternScan } from '@/services/pattern-scanner.js';
 import { startExcursionSweeper, stopExcursionSweeper } from '@/services/excursion-sweeper.js';
 import { startStaleEntrySweeper, stopStaleEntrySweeper } from '@/services/stale-entry-sweeper.js';
+import { startFlatExitSweeper, stopFlatExitSweeper } from '@/services/flat-exit-sweeper.js';
 import { startEquitySeries, stopEquitySeries } from '@/services/equity-series.js';
 import { startKillSwitchGuardian, stopKillSwitchGuardian } from '@/services/kill-switch-guardian.js';
 import { startRuntimeAttestation, stopRuntimeAttestation } from '@/services/runtime-attestation.js';
@@ -312,6 +313,7 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     startProfitTrail();
     // Reclaim position slots from brackets whose entry never filled.
     startStaleEntrySweeper();
+    startFlatExitSweeper();
     // Marked NetLiq series (REQ-VAL-006): the validation scorecard judges
     // PORTFOLIO drawdown from this series, not from closed trades.
     startEquitySeries();
@@ -428,6 +430,7 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
       // profit-trail and EOD triage can place market orders post-stop.
       stopProfitTrail();
       stopStaleEntrySweeper();
+      stopFlatExitSweeper();
       stopEquitySeries();
       stopKillSwitchGuardian();
       stopExcursionSweeper();
