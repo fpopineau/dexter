@@ -1349,3 +1349,31 @@ drawdown curve was seeded with a mixed-unit denominator.
 | REQ | Test |
 |---|---|
 | REQ-VAL-058 | trade-proposals suite: caller-supplied USD stored; null → no denominator (loudly absent); zero refused; command wiring (fetch + reply) is router glue over getNetLiquidation's tested conversion (honest ledger) |
+
+## False-halt operability 2026-08-26 (REQ-RISK-001..002)
+
+The predicted false halt fired: the €10K paper resize landed between the
+04:00 ET baseline capture (€12,461) and the first gate check — the
+proxy read −15% and latched. Correct latch behavior on stale input, but
+the operator had NO sanctioned way out: clearTradingHalt() existed with
+zero callers, clearing without re-anchoring would re-trip on the next
+check, and the latched dashboard echoed the trip record's BASE-currency
+figures labeled as dollars (€10,589 shown as $10,589 beside a $12,347
+epoch).
+
+- REQ-RISK-001: `halt clear` (WhatsApp) is the deliberate operator
+  override for a FALSE halt: clears the latch via clearTradingHalt()
+  AND re-anchors today's baseline at current equity
+  (reanchorNetLiqBaseline — base currency, WP8-consistent); a failed
+  re-anchor is reported with the re-trip warning. Real-loss halts are
+  the operator's judgment to leave standing.
+- REQ-RISK-002: the halt record stores its currency; the latched
+  status converts figures to USD for display using the stored tag —
+  no broker round-trip in the latched branch (latch reads must never
+  block on IBKR), records without a tag are USD, and an unavailable
+  rate hides the figure rather than mislabeling it.
+
+| REQ | Test |
+|---|---|
+| REQ-RISK-001 | command wiring is router glue over clearTradingHalt (logs 'manually cleared') + reanchorNetLiqBaseline — integration-untested (honest ledger); first live proof is the operator clearing today's false halt |
+| REQ-RISK-002 | latch suite unchanged and green (records without currency stay broker-free and immediate — the timeout regression during development proved the branch stays offline); EUR conversion path is display glue (honest ledger) |

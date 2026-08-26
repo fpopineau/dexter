@@ -29,6 +29,10 @@ interface HaltRecord {
     dailyPnL: number;
     netLiquidation: number;
     trippedAt: string;
+    /** Currency the record's figures are denominated in (the guard's
+     *  internal math is BASE currency, WP8). Absent = USD (records
+     *  predating 2026-08-26, and USD-base accounts). */
+    currency?: string;
 }
 
 function haltFilePath(): string {
@@ -192,6 +196,31 @@ export async function captureNetLiqBaseline(): Promise<void> {
     }
 }
 
+/** Deliberate operator re-anchor of TODAY's baseline at current equity
+ *  (base currency). Exists for exactly one situation: an out-of-band
+ *  account change (deposit/withdrawal/paper resize) made the session
+ *  baseline factually wrong, so the daily-loss proxy measures the
+ *  administrative change as a "loss" (2026-08-26: a €10K resize read as
+ *  −15% and latched a false halt; clearing the latch without re-anchoring
+ *  would re-trip on the next gate check). Returns the new base-currency
+ *  baseline, or null when equity is unreadable (nothing overwritten). */
+export async function reanchorNetLiqBaseline(): Promise<number | null> {
+    try {
+        const api = await getIBApi();
+        const account = await detectAccount(api);
+        const { value } = await fetchNetLiquidation(api, account);
+        if (!(value > 0)) return null;
+        const rec: NetLiqBaseline = { date: tradingDate(), netLiq: value, capturedAt: new Date().toISOString() };
+        writeFileSync(baselinePath(), JSON.stringify(rec, null, 2));
+        memoryBaseline = rec;
+        logger.warn(`[daily-loss-guard] baseline RE-ANCHORED by operator at ${value.toFixed(2)} (base currency) for ${rec.date}`);
+        return value;
+    } catch (err) {
+        logger.warn(`[daily-loss-guard] baseline re-anchor failed: ${err}`);
+        return null;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // IBKR daily P&L + net liquidation (compact one-shot fetchers)
 // ---------------------------------------------------------------------------
@@ -348,12 +377,37 @@ export async function getDailyLossStatus(): Promise<DailyLossStatus> {
 
     const active = getActiveHalt();
     if (active) {
+        // Currency audit 2026-08-26: the trip record's numbers are BASE
+        // currency (the guard's internal math is deliberately base, WP8)
+        // — echoing them here made the halted dashboard read "€10,589
+        // labeled $" while the epoch said $12,347. Convert for DISPLAY;
+        // an unavailable rate degrades to undefined (dashboard hides the
+        // figure) rather than showing a mislabeled one. The latch itself
+        // is untouched.
+        // The record CARRIES its currency (absent = USD, no lookup needed
+        // — also keeps this branch broker-free for latch tests and dead
+        // connections; a latched status must never block on IBKR).
+        let netLiqUsd: number | undefined =
+            Number.isFinite(active.netLiquidation) ? active.netLiquidation : undefined;
+        let dailyPnLUsd: number | undefined =
+            Number.isFinite(active.dailyPnL) ? active.dailyPnL : undefined;
+        if (active.currency && active.currency !== 'USD') {
+            try {
+                const { convertToUsd } = await import('@/tools/ibkr/fx.js');
+                if (netLiqUsd !== undefined) netLiqUsd = await convertToUsd(netLiqUsd, active.currency);
+                if (dailyPnLUsd !== undefined) dailyPnLUsd = await convertToUsd(dailyPnLUsd, active.currency);
+            } catch {
+                // Rate unavailable: hide rather than mislabel.
+                netLiqUsd = undefined;
+                dailyPnLUsd = undefined;
+            }
+        }
         return {
             halted: true,
             latched: true,
             reason: `Trading halted since ${active.trippedAt}: ${active.reason}`,
-            dailyPnL: active.dailyPnL,
-            netLiquidation: active.netLiquidation,
+            dailyPnL: dailyPnLUsd,
+            netLiquidation: netLiqUsd,
             limitPct,
         };
     }
@@ -411,6 +465,7 @@ export async function getDailyLossStatus(): Promise<DailyLossStatus> {
             dailyPnL,
             netLiquidation: netLiq,
             trippedAt: new Date().toISOString(),
+            currency: netLiqCurrency,
         };
         writeHalt(rec);
         logger.error(`[daily-loss-guard] KILL-SWITCH TRIPPED: ${rec.reason}`);

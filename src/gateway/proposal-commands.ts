@@ -15,13 +15,14 @@
  *   close SYM [SYM…]        market-close full position(s), cancelling their exits (risk-reducing)
  *   cancel P-XXXX|SYM       cancel an executed-but-unfilled bracket (risk-reducing)
  *   halt status             show the daily-loss kill-switch state
+ *   halt clear              operator override: clear a FALSE halt + re-anchor today's baseline
  *   performance [N]         closed-trade P&L summary over the last N days (default 7),
  *                           measured from the baseline when one is set
  *   performance all [N]     same, ignoring the baseline (full history)
  *   performance reset       stamp a new baseline NOW (non-destructive)
  */
 
-import { getDailyLossStatus, getNetLiquidation } from '@/services/daily-loss-guard.js';
+import { clearTradingHalt, getDailyLossStatus, getNetLiquidation, reanchorNetLiqBaseline } from '@/services/daily-loss-guard.js';
 import { acceptProposal, rejectProposal } from '@/services/proposal-executor.js';
 import {
     formatPerformanceReport,
@@ -65,6 +66,7 @@ export function parseCloseSymbols(arg: string): string[] | null {
 }
 const CANCEL_RE = /^\s*cancel\s+(P-[A-Za-z0-9]{4}|[A-Za-z.]{1,6})\s*$/i;
 const HALT_RE = /^\s*halt\s+status\s*$/i;
+const HALT_CLEAR_RE = /^\s*halt\s+clear\s*$/i;
 const PERF_RE = /^\s*(performance|perf)(?:\s+(all))?(?:\s+(\d{1,3})\s*d?)?\s*$/i;
 const PERF_RESET_RE = /^\s*(performance|perf)\s+reset\s*$/i;
 
@@ -300,6 +302,21 @@ export async function handleProposalCommand(body: string): Promise<string | null
         return s.halted
             ? `⛔ Trading HALTED — ${s.reason}`
             : `✅ Trading allowed. Daily P&L ${s.dailyPnL?.toFixed(0) ?? '?'} / limit -${s.limitDollars?.toFixed(0) ?? '?'} (${s.limitPct}% of ${s.netLiquidation?.toFixed(0) ?? '?'}).`;
+    }
+
+    // Deliberate operator override for a FALSE halt (2026-08-26: a paper
+    // resize read as −15% and latched). Clears the latch AND re-anchors
+    // today's baseline at current equity — without the re-anchor the very
+    // next gate check re-trips on the same stale baseline. Real-loss
+    // halts should stand: this is for administrative equity changes.
+    if (HALT_CLEAR_RE.test(body)) {
+        const cleared = clearTradingHalt();
+        if (!cleared) return 'ℹ️ No active halt to clear.';
+        const newBaseline = await reanchorNetLiqBaseline();
+        return `🔓 Trading halt CLEARED (operator override).\n` +
+            (newBaseline !== null
+                ? `Today's baseline re-anchored at ${newBaseline.toFixed(2)} (account base currency) — the daily-loss limit now measures from current equity.`
+                : `⚠️ Baseline re-anchor FAILED — the guard may re-trip on the stale baseline; retry 'halt clear' once IBKR responds.`);
     }
 
     return null;

@@ -295,6 +295,7 @@ tokens). Anything else goes to the agent as a normal question.
 | `cancel P-XXXX` or `cancel SYM` | | Cancel an executed-but-unfilled bracket — `orders` shows each bracket's P-id (refused once the entry has filled — use `close`) |
 | `performance` | `perf`, `performance 30` | Closed-trade summary (default 7 days) |
 | `halt status` | | Kill-switch state + daily P&L headroom |
+| `halt clear` | | Operator override for a FALSE halt (deposit/resize read as a loss): clears the latch and re-anchors today's baseline at current equity. Real-loss halts should stand. |
 
 Examples of agent (non-command) usage: "what's in the latest scan?",
 "why did you propose SOUN?", "show my positions".
