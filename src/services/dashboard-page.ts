@@ -239,10 +239,25 @@ function renderOverview(o){
       '<button class="act warn" data-action="close" data-sym="'+p.symbol+'">close</button></td></tr>'; }).join('');
   el('positions').innerHTML = pos || '<tr><td class="dim">flat</td></tr>';
 
-  var ord = (o.orders||[]).map(function(x){
-    var px = x.limitPrice || x.auxPrice || '';
-    return '<tr class="row" data-sym="'+x.symbol+'"><td>#'+(x.orderId||'?')+'</td><td>'+x.action+' '+x.quantity+' <b>'+x.symbol+'</b></td>'+
-      '<td class="r">'+x.orderType+(px?' @'+px:'')+'</td><td class="chip">'+(x.status||'')+'</td></tr>'; }).join('');
+  // 2026-08-26: group by symbol with a structure label, mirroring the
+  // WhatsApp 'orders' reply — three raw SNAP rows (2 BUY + 1 SELL) read
+  // as a conflict until you know it's a SHORT bracket: one working
+  // entry plus two dormant exits with every side flipped.
+  var bySym = {};
+  (o.orders||[]).forEach(function(x){ (bySym[x.symbol] = bySym[x.symbol] || []).push(x); });
+  var ord = Object.keys(bySym).map(function(sym){
+    var group = bySym[sym];
+    var sides = {};
+    group.forEach(function(x){ sides[x.action] = true; });
+    var label = '';
+    if(Object.keys(sides).length > 1) label = 'bracket — entry still working, exits dormant until it fills';
+    else if(group.length > 1) label = 'exits protecting the position (OCA: one fills, the other cancels)';
+    var head = label ? '<tr class="dim"><td></td><td colspan="3"><b>'+sym+'</b> · '+label+'</td></tr>' : '';
+    return head + group.map(function(x){
+      var px = x.limitPrice || x.auxPrice || '';
+      return '<tr class="row" data-sym="'+x.symbol+'"><td>#'+(x.orderId||'?')+'</td><td>'+x.action+' '+x.quantity+' <b>'+x.symbol+'</b></td>'+
+        '<td class="r">'+x.orderType+(px?' @'+px:'')+'</td><td class="chip">'+(x.status||'')+'</td></tr>'; }).join('');
+  }).join('');
   el('orders').innerHTML = ord || '<tr><td class="dim">none</td></tr>';
 
   var props = (o.proposals||[]).filter(function(p){ return ['open','executing','executed'].indexOf(p.status)>=0; })
