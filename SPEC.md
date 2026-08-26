@@ -1433,3 +1433,10 @@ policy's real cost during the sample; slice B's earnings-reaction
 population features (recorded post-sample WP) are the structural home
 for the fix (e.g. exempting fresh post-print reactions from extension
 muting in the first hour, gated on the earnings-calendar join).
+
+Addendum 2026-08-26 (same residual, second data point): SNAP — operator
+confirms the reaction short was right but LATE; first surfaced in the
+breadth movers at 09:36 ET, proposed 12:07 ET at 5.50 into the bounce;
+the bounce never came and the entry expired unfilled. Same root cause
+(extension-muted reaction movers), same disposition: quantify in the
+refusal ledger, fix structurally in slice B.
