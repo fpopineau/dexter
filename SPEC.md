@@ -1411,3 +1411,25 @@ blocked accepts pending protection; the operator closed it manually
 | REQ | Test |
 |---|---|
 | REQ-RISK-003 | flat-exit-sweeper suite: BZ scenario orphaned; BNS dormant-children-under-parent vetoed; held position either sign keeps exits (zero-qty row = flat); foreign/close- refs never selected; protect- refs sweep; per-symbol isolation; two-tick latch (arm → confirm, changed ids re-latch, key order-insensitive). Broker glue (lock, snapshots, confirmCancelDetailed) reuses guardian-tested primitives — wiring integration-untested (honest ledger) |
+
+## Recorded residual 2026-08-26 — reaction movers are extension-muted in the entry window
+
+Operator-observed (QFIN, one data point — deliberately NOT patched
+pre-tag): a post-earnings reaction short first appeared 6 min after the
+open at 10.14 with price at VWAP (the ideal bounce-entry zone,
+9.90-10.00) scoring 61, but the extension gate's anti-chase boost
+suppression (>3x ATR) muted the score below the trigger bar precisely
+while the entry was best; the trigger fired 3 hours later at ~9.4x and
+the (correctly rule-11-built) proposal could only rest 9.55 into the
+bounce — ~0.40/share of geometry lost upstream of judgment. The
+anti-chase policy and the bounce rule are compatible in principle (a
+resting limit into the bounce is not chasing), but the scorer cannot
+distinguish a fresh post-print reaction from a mid-day runner.
+
+Decision (operator, 2026-08-26): record, do not patch before the tag —
+a scoring change calibrated on n=1 days before the freeze is overfit
+risk. The refusal ledger and the counterfactual replay accumulate the
+policy's real cost during the sample; slice B's earnings-reaction
+population features (recorded post-sample WP) are the structural home
+for the fix (e.g. exempting fresh post-print reactions from extension
+muting in the first hour, gated on the earnings-calendar join).
