@@ -73,6 +73,14 @@ const NON_FATAL_CODES = new Set<number>([
     // scanner subscription is cancelled after it failed to establish
     // (scanner-loop's cleanup cancels unconditionally). Informational.
     365,
+    // 399 — "Order Message": IBKR's generic order WARNING wrapper ("your
+    // order will not be placed at the exchange until 09:30", lot-size
+    // notes…). Incident 2026-08-27: the ack path read it as a rejection
+    // and auto-exec marked every pre-market dawn proposal 'failed' at
+    // placement (NVDA/NVDL queued-for-the-open brackets killed at 04:08
+    // ET). Genuine refusals arrive as their own codes or as
+    // Inactive/Cancelled statuses, which the ack watches independently.
+    399,
     10090, 10091, 10167,
 ]);
 

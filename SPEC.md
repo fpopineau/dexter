@@ -1468,3 +1468,33 @@ with no acceptance timestamp or 10b5-1 indicator — the restore does
 not change any universe-wide insider discovery-lane design (the SEC
 Form 4 feed remains the right backbone for that; FD serves per-symbol
 research checks).
+
+## Coverage note + incident 2026-08-27 — six operator winners, warning-399 rejections (REQ-RISK-004)
+
+Operator-supplied winners (intraday, ~14:00 ET): PLTR +4.7, COIN +4.7,
+NET +7.1, NVDA +8.7, FTNT +9.0, MSTR +12.0. Dexter's attitude, traced:
+
+- NVDA: caught at DAWN (04:06 ET, score 71, RVOL 8 — the slice-A dawn
+  scan working), triggered rank 81, proposal P-12AE created 04:08 —
+  and KILLED by the warning-399 defect below. NVDL identically
+  (P-1C92). Two more triggers intraday (LLM not-actionable at 10:43;
+  take-level geometry refusals at 13:35, "tape faster than quotes").
+- COIN/NET/FTNT: seen 16-17x, best scores 58-63 — below the 75 trigger
+  bar all day. Third/fourth/fifth data points on the sub-threshold
+  modest-mover class (slice B).
+- PLTR/MSTR: never surfaced — extremes-list blindness (even +12% MSTR
+  missed the saturated top-50 gainer lists on an NVDA-gap day). More
+  slice-B large-cap-lane evidence.
+
+- REQ-RISK-004: IBKR code 399 ("Order Message" — the generic order
+  WARNING wrapper, e.g. "your order will not be placed at the exchange
+  until 09:30" on every pre-market DAY placement) is NON-FATAL. The
+  ack path read it as a rejection, so auto-exec marked every dawn
+  proposal 'failed' at placement — structurally, every morning.
+  Genuine refusals are unaffected: they arrive as their own codes
+  (201, 110, …) or as Inactive/Cancelled statuses, which the ack
+  watches independently of the error event.
+
+| REQ | Test |
+|---|---|
+| REQ-RISK-004 | order-ack suite: 399 before PreSubmitted → acked, no rejection, permId kept; real code 201 still rejects; Inactive AFTER a 399 still rejects (the status path is untouched) |

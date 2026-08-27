@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { EventEmitter } from 'node:events';
 import { EventName } from '@stoqey/ib';
-import { classifyCancelRejection, confirmCancel } from './order-ack.js';
+import { classifyCancelRejection, confirmCancel, watchOrderAcks } from './order-ack.js';
 
 // Round-5 review (2026-08-21): confirmCancel mapped IBKR 10148 to
 // 'cancelled'. 10148 is "cannot be cancelled, state: <X>" — most often
@@ -85,5 +85,39 @@ describe('confirmCancel', () => {
             queueMicrotask(() => api.emit(EventName.error, new Error('state: Filled'), 10148, 999));
         };
         expect(await confirmCancel(api as never, 7, 100)).toBe('unconfirmed');
+    });
+});
+
+describe('watchOrderAcks vs warning 399 (incident 2026-08-27 — dawn placements read as rejections)', () => {
+    test('a 399 order warning does not reject; the ack settles acked on PreSubmitted', async () => {
+        const api = new FakeApi();
+        const watch = watchOrderAcks(api as never, [11]);
+        // IBKR's queued-for-the-open warning arrives BEFORE any status —
+        // the old classification turned it into a rejection and auto-exec
+        // marked every pre-market dawn proposal 'failed' at placement.
+        api.emit(EventName.error, new Error('Votre ordre ne sera pas placé à l’échange avant que 2026-08-27 09:30:00 US/Eastern.'), 399, 11);
+        api.emit(EventName.orderStatus, 11, 'PreSubmitted', 0, 8, 0, 77001);
+        const legs = await watch.settle(500);
+        expect(legs[0].rejection).toBeNull();
+        expect(legs[0].acked).toBe(true);
+        expect(legs[0].permId).toBe(77001);
+    });
+
+    test('a REAL rejection code still rejects immediately', async () => {
+        const api = new FakeApi();
+        const watch = watchOrderAcks(api as never, [12]);
+        api.emit(EventName.error, new Error('Order rejected - reason: margin'), 201, 12);
+        const legs = await watch.settle(500);
+        expect(legs[0].rejection?.code).toBe(201);
+        expect(legs[0].acked).toBe(false);
+    });
+
+    test('the status-path refusal detection is untouched: Inactive after a 399 still rejects', async () => {
+        const api = new FakeApi();
+        const watch = watchOrderAcks(api as never, [13]);
+        api.emit(EventName.error, new Error('Order Message: some warning'), 399, 13);
+        api.emit(EventName.orderStatus, 13, 'Inactive', 0, 8, 0, 0);
+        const legs = await watch.settle(500);
+        expect(legs[0].rejection?.reason).toContain('Inactive');
     });
 });
