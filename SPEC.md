@@ -1498,3 +1498,32 @@ NET +7.1, NVDA +8.7, FTNT +9.0, MSTR +12.0. Dexter's attitude, traced:
 | REQ | Test |
 |---|---|
 | REQ-RISK-004 | order-ack suite: 399 before PreSubmitted → acked, no rejection, permId kept; real code 201 still rejects; Inactive AFTER a 399 still rejects (the status path is untouched) |
+
+## Registered debate 2026-08-27 — capitalization vs significance in candidate surfacing
+
+Operator position (MSTR/PLTR case): very large caps should have a way
+to surface among smaller caps even when the expected gain is smaller —
+a +2.5% move in a $100B name can matter more than +15% in a $100M name.
+
+Analysis registered for the next iteration (slice B):
+- Percent-change extremes lists are implicitly cap-INVERSE: they
+  surface the highest-volatility names, which the spread/extension
+  gates then refuse — the funnel is biased toward candidates the
+  policy cannot trade while the deep-book names it prefers stay
+  invisible.
+- Proposed core metric: ATR-NORMALIZED move (dayMove% / dailyATR%) —
+  cap-blind, self-calibrating, and it ranks a 2.5-ATR megacap day
+  above a 1.2-ATR smallcap lottery. Secondary key: dollar volume (or
+  cap x RVOL), which captures both size and today's participation.
+- Interplay with the reaction-mover residual: significance decides
+  what SURFACES; entry geometry (rule 11 bounce logic) decides WHEN to
+  act; the anti-chase extension mute belongs to entry timing, not to
+  surfacing. The two residuals merge into this one principle.
+- Tempering fact: the take-policy floor (intraday needs dailyATR >~2%)
+  already excludes quiet megacaps at the gate — the beneficiary tier
+  is big AND volatile (MSTR/NVDA/COIN/PLTR class).
+- Cheap interim candidate: a dedicated large-cap scan lane
+  (marketCapAbove $10B, lower move threshold) via the existing
+  cap-band plumbing; the full fix is the significance-ranked composite.
+
+Decision: registered only — no behavior change before the tag.
