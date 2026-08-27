@@ -1440,3 +1440,31 @@ breadth movers at 09:36 ET, proposed 12:07 ET at 5.50 into the bounce;
 the bounce never came and the entry expired unfilled. Same root cause
 (extension-muted reaction movers), same disposition: quantify in the
 refusal ledger, fix structurally in slice B.
+
+## Recorded residual 2026-08-27 — FD data plan restored; snapshot rewire queued post-freeze
+
+Verified live (2026-08-27, direct probes): the Financial Datasets plan
+limitation behind the 403 circuit breaker (tripped live 2026-07-31) is
+gone — insider-trades, income-statements, and price-snapshot endpoints
+all return 200, with full typed Form 4 rows (transaction code/type,
+shares, price, value, holdings before/after, officer title,
+board-director flag) and midcap-band coverage (KTOS filing of
+2026-08-26; CALX). The tools need no code change to benefit: the
+breaker only trips on a live 4xx and re-probes hourly. The breaker
+STAYS — the plan has flipped once already.
+
+Queued change (deliberately NOT landed mid-sample): company-snapshot
+Step 3 switches from the free-form Nasdaq web_fetch interpretation to
+the typed get_insider_trades tool (1h cache), with the Nasdaq endpoint
+retained as the documented fallback; Step 4's "fundamental snapshot
+unavailable" branch becomes the exception path now that get_financials
+works. Rewiring an agent-visible research input during the freeze /
+burn-in window would muddy the observation sample — same pre-tag
+discipline as the extension-muting residual above.
+
+Scope notes: the FD endpoint is per-ticker only (tickerless date query
+→ 400 "Ticker is required") and reports filing_date at day granularity
+with no acceptance timestamp or 10b5-1 indicator — the restore does
+not change any universe-wide insider discovery-lane design (the SEC
+Form 4 feed remains the right backbone for that; FD serves per-symbol
+research checks).
