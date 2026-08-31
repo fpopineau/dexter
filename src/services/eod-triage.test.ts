@@ -577,3 +577,24 @@ describe('lifecycle generation (review-35 — the boot catch-up dies with stop)'
         expect(eodLifecycleGen()).toBe(genAtSchedule + 2);
     });
 });
+
+describe('shouldRetryTriageRun (incident 2026-08-31 — one bounded re-run, never racing the bell)', () => {
+    test('first failure with time on the clock retries; the second never does', async () => {
+        const { shouldRetryTriageRun } = await import('./eod-triage.js');
+        // 15:54 ET on a full day (close 16:00): 6 minutes left — retry.
+        expect(shouldRetryTriageRun(1, 15 * 60 + 54, 960)).toBe(true);
+        // Same clock, second failure: the single retry is spent.
+        expect(shouldRetryTriageRun(2, 15 * 60 + 54, 960)).toBe(false);
+    });
+
+    test('too close to the bell (or past it) never retries — a late re-run cannot finish', async () => {
+        const { shouldRetryTriageRun } = await import('./eod-triage.js');
+        expect(shouldRetryTriageRun(1, 15 * 60 + 59, 960)).toBe(false); // 1 min left
+        expect(shouldRetryTriageRun(1, 16 * 60 + 5, 960)).toBe(false);  // past the bell
+        // Boundary: exactly close-2 still retries.
+        expect(shouldRetryTriageRun(1, 15 * 60 + 58, 960)).toBe(true);
+        // Half-day close (13:00 = 780): 12:57 retries, 12:59 does not.
+        expect(shouldRetryTriageRun(1, 12 * 60 + 57, 780)).toBe(true);
+        expect(shouldRetryTriageRun(1, 12 * 60 + 59, 780)).toBe(false);
+    });
+});

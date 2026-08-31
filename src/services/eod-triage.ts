@@ -697,6 +697,22 @@ export function isMacroWarningEnabled(): boolean {
 
 let triageInFlight = false;
 
+// Incident 2026-08-31: IBKR's account-data/positions farm went dark for
+// ~6 minutes exactly in the close window; the run failed mid-flight at
+// 15:53 ET and only ALARMED — six usable minutes remained in which a
+// second attempt could have closed the stranded MNSO position. One
+// bounded re-run after a short backoff covers the transient-outage
+// class (the 30-90s blips seen all week) without ever racing the bell.
+const TRIAGE_RUN_RETRY_BACKOFF_MS = 45_000;
+
+/** Incident 2026-08-31 (exported for tests): a mid-flight run failure
+ *  earns ONE re-run — only the first failure, and only while at least
+ *  2 minutes remain before today's close (a retry that starts later
+ *  cannot finish its work before the bell). */
+export function shouldRetryTriageRun(attempt: number, nowMinutesEt: number, closeMinutesEt: number): boolean {
+    return attempt < 2 && nowMinutesEt <= closeMinutesEt - 2;
+}
+
 export async function runEodTriageOnce(dryRun = false): Promise<void> {
     const today = new Date().toLocaleDateString('en-CA', { timeZone: ET });
     if (isMarketHoliday(today)) return;
@@ -718,26 +734,43 @@ export async function runEodTriageOnce(dryRun = false): Promise<void> {
     triageInFlight = true;
     markTriageRun(today, 'running');
     try {
-        const outcome = await runEodTriageCore(today, false);
-        // Review-23 P1: an unresolved flat-by-close violation is NOT a
-        // completed triage — a working DAY parent can still fill until
-        // the bell. Stamping 'failed' keeps the boot catch-up eligible
-        // (a restart before the bell retries); the 🚨 alert already
-        // named the symbols.
-        if (outcome.unresolvedViolations > 0) {
-            markTriageRun(today, 'failed');
-            logger.error(`[eod-triage] ${outcome.unresolvedViolations} flat-by-close violation(s) UNRESOLVED at completion — stamped 'failed' so a restart before the bell retries`);
-        } else {
-            markTriageRun(today, 'completed');
+        let lastErr: unknown = null;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+            try {
+                const outcome = await runEodTriageCore(today, false);
+                // Review-23 P1: an unresolved flat-by-close violation is NOT a
+                // completed triage — a working DAY parent can still fill until
+                // the bell. Stamping 'failed' keeps the boot catch-up eligible
+                // (a restart before the bell retries); the 🚨 alert already
+                // named the symbols.
+                if (outcome.unresolvedViolations > 0) {
+                    markTriageRun(today, 'failed');
+                    logger.error(`[eod-triage] ${outcome.unresolvedViolations} flat-by-close violation(s) UNRESOLVED at completion — stamped 'failed' so a restart before the bell retries`);
+                } else {
+                    markTriageRun(today, 'completed');
+                    if (attempt > 1) logger.warn('[eod-triage] re-run SUCCEEDED — the first pass died on a transient broker-data failure');
+                }
+                lastErr = null;
+                break;
+            } catch (err) {
+                lastErr = err;
+                const et = new Date(new Date().toLocaleString('en-US', { timeZone: ET }));
+                const closeMins = isMarketHalfDay(today) ? HALF_DAY_CLOSE_MINUTES_ET : FULL_DAY_CLOSE_MINUTES_ET;
+                if (!shouldRetryTriageRun(attempt, et.getHours() * 60 + et.getMinutes(), closeMins)) break;
+                logger.error(`[eod-triage] run failed mid-flight (attempt ${attempt}): ${err instanceof Error ? err.message : err} — one re-run in ${TRIAGE_RUN_RETRY_BACKOFF_MS / 1000}s (transient broker-data outages usually recover in seconds)`);
+                await new Promise((r) => setTimeout(r, TRIAGE_RUN_RETRY_BACKOFF_MS));
+            }
         }
-    } catch (err) {
-        markTriageRun(today, 'failed');
-        logger.error(`[eod-triage] run FAILED mid-flight: ${err instanceof Error ? err.stack ?? err.message : err}`);
-        await notify(
-            `🚨 EOD TRIAGE FAILED mid-run (${err instanceof Error ? err.message : err}) — the book was NOT fully ` +
-            `vetted for overnight. Check TWS and close anything you would not hold; a gateway restart before the ` +
-            `bell retries automatically.`,
-        ).catch(() => { /* the alert failing must not mask the failed stamp */ });
+        if (lastErr !== null) {
+            const err = lastErr;
+            markTriageRun(today, 'failed');
+            logger.error(`[eod-triage] run FAILED mid-flight: ${err instanceof Error ? err.stack ?? err.message : err}`);
+            await notify(
+                `🚨 EOD TRIAGE FAILED mid-run (${err instanceof Error ? err.message : err}) — the book was NOT fully ` +
+                `vetted for overnight. Check TWS and close anything you would not hold; a gateway restart before the ` +
+                `bell retries automatically.`,
+            ).catch(() => { /* the alert failing must not mask the failed stamp */ });
+        }
     } finally {
         triageInFlight = false;
     }

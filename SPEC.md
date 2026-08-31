@@ -1527,3 +1527,32 @@ Analysis registered for the next iteration (slice B):
   cap-band plumbing; the full fix is the significance-ranked composite.
 
 Decision: registered only — no behavior change before the tag.
+
+## Incident 2026-08-31 — close-window data-farm outage, bounded triage re-run (REQ-EOD-015)
+
+IBKR's account-data/positions services went unresponsive ~15:50-15:57
+ET — exactly the close window — while the ORDER channel stayed healthy
+(SLB's exit cancels confirmed normally). Every consumer failed the same
+way in the same minutes: the triage's positions fetch (10s timeout),
+four profit-trail cycles, six reqPnL calls, the equity sampler (skipped
+— never faked), the guardian's snapshots, SLB's post-close
+verification (exit #26 unconfirmed, reconciliation retried), and the
+MNSO close (aborted in-lock before placing — refused to act on an
+unverifiable position). Every path failed CLOSED and LOUD: the run
+stamped 'failed', the 🚨 book-not-vetted alert fired, the 16:10
+watchdog independently flagged the stamp, and MNSO rode overnight
+under its GTC bracket — an unplanned but protected hold. The exposed
+gap: a mid-flight run failure only alarmed, while six usable minutes
+remained for a second attempt.
+
+- REQ-EOD-015: a mid-flight triage run failure earns ONE bounded
+  re-run after a 45s backoff — only the first failure, and only while
+  at least 2 minutes remain before today's close (half-day aware); a
+  successful re-run stamps 'completed' and says so; a failed one (or
+  no time) falls through to the existing failed-stamp + 🚨 alert path
+  unchanged. The single-flight latch is held across the backoff, so
+  cron double-fires still skip.
+
+| REQ | Test |
+|---|---|
+| REQ-EOD-015 | eod-triage suite: shouldRetryTriageRun matrix — attempt 1 with ≥2 min retries (boundary exact), attempt 2 never, ≤1 min / past-bell never, half-day close honored; the loop wiring is run-lifecycle glue over the tested decision (honest ledger) |
