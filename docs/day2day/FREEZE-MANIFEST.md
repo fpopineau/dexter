@@ -57,7 +57,7 @@ freeze identity is therefore split:
 
 | Path | Status |
 |---|---|
-| OCA-joined close cancels its siblings broker-side | observed 2026-08-26 BZ target leg filled at the open, OCA sibling stop broker-cancelled with no dexter action #1 #2 #3 (operator-accepted; exit-fill sibling-cancel variant, fired against a flat book after an account reset — the OCA mechanics are context-independent) |
+| OCA-joined close cancels its siblings broker-side | observed 2026-08-28 S EOD close joined the exit OCA group; close fill broker-cancelled the sibling exit #17 #18 #19 #23 (operator-accepted; in-position, the row's literal close-join variant — the exit-fill variant was also witnessed 2026-08-26 BZ #1 #2 #3) |
 | Mixed-TIF bracket: unfilled DAY parent expiry removes the dormant GTC children | _REQUIRED — record the paper observation (review-17: IBKR documents children held until the parent fills; expiry behavior is NOT documented)_ |
 | Mixed-TIF bracket: fully filled DAY parent leaves both GTC exits active overnight | _REQUIRED — record the paper observation_ |
 | Mixed-TIF bracket: PARTIALLY filled DAY parent at expiry leaves correctly sized GTC protection | _observation or explicit waiver (hard to stage on demand; waive only with the partial-fill resize (WP2) observation recorded)_ |
