@@ -1556,3 +1556,15 @@ remained for a second attempt.
 | REQ | Test |
 |---|---|
 | REQ-EOD-015 | eod-triage suite: shouldRetryTriageRun matrix — attempt 1 with ≥2 min retries (boundary exact), attempt 2 never, ≤1 min / past-bell never, half-day close honored; the loop wiring is run-lifecycle glue over the tested decision (honest ledger) |
+
+Coverage addendum 2026-09-01 (operator-supplied losers: DELL -7.0, NET
+-6.4, MSTR -6.1, COIN -6.0, FTNT -5.3): ALL FIVE SEEN — the Aug-27
+blindness class is gone post-slice-A (MSTR seen 12x from 09:40 ET,
+best 62; DELL 9x/58; FTNT 13x/56; COIN 7x/46; NET 4x/44) — but all
+sub-threshold against the 65-75 trigger bar, short side this time.
+The complex was partially monetized by design: crypto-breadth vehicle
+IBIT short closed +$14.35 (rule 6), SOXL breadth-triggered 2x. The
+slice-B question sharpens: the trigger bar filters out the entire
+5-7% single-name mover class in BOTH directions; the vehicle policy
+captures a sliver. Threshold calibration vs deliberate policy — to be
+answered from the accumulated ledger, not patched pre-tag.
