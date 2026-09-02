@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "gateway",
+      "runtimeExecutable": "C:\\Users\\Fabrice\\.local\\bin\\bun.exe",
+      "runtimeArgs": ["run", "gateway"],
+      "port": 8585
+    }
+  ]
+}
