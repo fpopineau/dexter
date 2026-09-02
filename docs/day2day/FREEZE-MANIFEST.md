@@ -59,7 +59,7 @@ freeze identity is therefore split:
 |---|---|
 | OCA-joined close cancels its siblings broker-side | observed 2026-08-28 S EOD close joined the exit OCA group; close fill broker-cancelled the sibling exit #17 #18 #19 #23 (operator-accepted; in-position, the row's literal close-join variant — the exit-fill variant was also witnessed 2026-08-26 BZ #1 #2 #3) |
 | Mixed-TIF bracket: unfilled DAY parent expiry removes the dormant GTC children | _REQUIRED — record the paper observation (review-17: IBKR documents children held until the parent fills; expiry behavior is NOT documented)_ |
-| Mixed-TIF bracket: fully filled DAY parent leaves both GTC exits active overnight | _REQUIRED — record the paper observation_ |
+| Mixed-TIF bracket: fully filled DAY parent leaves both GTC exits active overnight | observed 2026-08-31 MNSO fully filled DAY entry rode the bell; both GTC exits verified working at the broker overnight #27 #28 #29 (operator-accepted; unplanned hold via a failed triage close — the surviving stop EXECUTED next morning at 9.62, the ultimate proof the children lived through the night) |
 | Mixed-TIF bracket: PARTIALLY filled DAY parent at expiry leaves correctly sized GTC protection | _observation or explicit waiver (hard to stage on demand; waive only with the partial-fill resize (WP2) observation recorded)_ |
 | WP2 partial-fill resize | _observation or explicit waiver_ |
 | WP11 buffered finalize events | _observation or explicit waiver_ |
