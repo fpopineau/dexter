@@ -110,6 +110,54 @@ How to run dexter around this:
    earns unattended live operation; for the paper phase, the manual
    Sunday login is simpler and safer.
 
+### 3.2 Autostart at logon and the independent watchdog
+
+Everything above assumes the stack was started; `scripts/ops/` makes that
+automatic and adds an outside observer. One-time install (idempotent,
+re-run after edits; remove with `uninstall-tasks.ps1`):
+
+```bash
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/ops/install-tasks.ps1
+```
+
+Two scheduled tasks are registered for the interactive user:
+
+- **`\Dexter\Stack`** — at logon (+30 s) runs `start-stack.ps1`: starts
+  IB Gateway (newest install under `C:\Local\IBGateway`; its login window
+  opens and **waits for password + 2FA** — autostart removes the
+  forgot-to-launch failure, not the login) and the dexter gateway in a
+  **visible console** (`run-gateway.cmd`, auto-restarts `bun run gateway`
+  10 s after a crash; close the window to stop it deliberately). Safe to
+  run by hand anytime — it skips whatever is already up.
+- **`\Dexter\Watchdog`** — every 5 minutes, hidden, runs
+  `scripts/ops/watchdog.ts`: a real API handshake against the Gateway
+  (`reqCurrentTime` on its own client id — a listening port with a silent
+  API, the post-failed-relogin zombie, counts as DOWN) plus a
+  `bun run gateway` process check. Two consecutive failures → 🔴 WhatsApp
+  alert; hourly re-alerts while down; 🟢 on recovery. State in
+  `.dexter/watchdog/state.json`, log in `.dexter/watchdog/watchdog.log`,
+  ad-hoc: `bun run scripts/ops/watchdog.ts --status`.
+
+The watchdog deliberately does **not** deliver through the gateway's own
+WhatsApp session — that session dies with the gateway, the exact outage
+it must survive. It uses [CallMeBot](https://www.callmebot.com/blog/free-api-whatsapp-messages/)
+(free, personal): add **+34 644 66 32 62** to contacts, WhatsApp it
+"I allow callmebot to send me messages", put the returned key and your
+phone in `.env` (`WATCHDOG_WHATSAPP_PHONE`, `WATCHDOG_CALLMEBOT_APIKEY`),
+then verify: `bun run scripts/ops/watchdog.ts --test-alert`.
+
+Known blind spot: tasks run only while logged on, so a box that reboots
+to the login screen (Windows Update at 04:00) silences the watchdog
+itself. Optional cover: create a [healthchecks.io](https://healthchecks.io)
+check (period 10 min), set `WATCHDOG_HEALTHCHECK_URL` — the watchdog
+pings it every round, pings stop when the box/watchdog dies, and
+healthchecks alerts from outside (its webhook integration can call the
+same CallMeBot URL to land that on WhatsApp too).
+
+Expected weekend rhythm: after the Sunday-01:00-ET token invalidation,
+the Gateway's next auto-restart leaves the API silent, so the watchdog's
+🔴 on Sunday morning **is the reminder** to do the §3.1 login ritual.
+
 ## 4. WhatsApp pairing
 
 ```bash
