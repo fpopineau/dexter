@@ -1568,3 +1568,28 @@ slice-B question sharpens: the trigger bar filters out the entire
 5-7% single-name mover class in BOTH directions; the vehicle policy
 captures a sliver. Threshold calibration vs deliberate policy — to be
 answered from the accumulated ledger, not patched pre-tag.
+
+## Observed residual 2026-09-03 — account-summary subscription leak (error 322)
+
+During flaky IBKR stretches the guard's NetLiq fetches leak account-
+summary subscriptions server-side (the cancel does not always land),
+until IBKR's cap returns error 322 ("maximum account summary requests
+exceeded") and summary requests fail — self-inflicting the
+"NetLiquidation unavailable" fail-safe until the nightly disconnect
+clears the subscriptions. Self-healing daily, fail-closed throughout;
+recorded for the chartered wrapper-hardening sweep (idempotent
+cleanup + confirmed desubscription belong to the same family as the
+sync-throw and detach-before-cancel fixes).
+
+## Ops note 2026-09-03 — API-staged observation bracket
+
+The operator has no TWS and a Client Portal web login bumps the IB
+Gateway session (single-session credentials) — so the row-2 staging
+bracket is placed through the already-authenticated Gateway on a
+transient third client id: scripts/ops/stage-bell-expiry.ts, OPERATOR-
+RUN only. Paper-account-only gate (refuses non-D accounts), 1 share,
+DAY parent at an unfillable limit, GTC children, no dexter refs (the
+sweeps see it as foreign), --cancel mode for the children-survive
+contingency. The observation's evidentiary value is unchanged: it
+witnesses BROKER behavior at the bell; the placement channel is
+irrelevant.
