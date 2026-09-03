@@ -15,6 +15,7 @@
 
 import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
 import { allocReqId, getIBApi, getManagedAccounts, isNonFatalIbkrError } from '@/tools/ibkr/connection.js';
+import { requestAccountSummary } from '@/tools/ibkr/account-summary.js';
 import { logger } from '@/utils';
 import { EventName } from '@stoqey/ib';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -289,48 +290,31 @@ function fetchDailyPnl(api: import('@stoqey/ib').IBApi, account: string): Promis
 
 /** Base-currency NetLiquidation WITH its currency tag (WP8 — the tag was
  *  discarded before, which is how EUR ran through USD cap math). */
-function fetchNetLiquidation(
+async function fetchNetLiquidation(
     api: import('@stoqey/ib').IBApi,
     account: string,
 ): Promise<{ value: number; currency: string }> {
-    const reqId = allocReqId();
-    return new Promise<{ value: number; currency: string }>((resolve, reject) => {
-        let value: number | null = null;
-        let currency = 'USD';
-        const timeout = setTimeout(() => {
-            finish();
-        }, PNL_TIMEOUT_MS);
-        const onSummary = (id: number, acct: string, tag: string, val: string, cur?: string) => {
-            if (id !== reqId) return;
-            if (tag === 'NetLiquidation' && (!account || acct === account)) {
-                const n = Number(val);
-                // Finite is not enough: the IBKR error sentinel is finite and
-                // would turn every %-of-NetLiq cap into a no-op downstream.
-                if (Number.isFinite(n) && n > 0 && n < 1e12) {
-                    value = n;
-                    if (typeof cur === 'string' && cur.trim()) currency = cur.trim().toUpperCase();
-                }
-            }
-        };
-        const onEnd = (id: number) => {
-            if (id !== reqId) return;
-            clearTimeout(timeout);
-            finish();
-        };
-        function finish() {
-            try { api.cancelAccountSummary(reqId); } catch { /* ignore */ }
-            cleanup();
-            if (value !== null) resolve({ value, currency });
-            else reject(new Error('[daily-loss-guard] NetLiquidation unavailable'));
+    // Leak fix 2026-09-03: the subscription lifecycle now lives in the
+    // shared requester (single-flight + exactly-once cancel) — this
+    // function only interprets the rows. The guard polls every ~60 s and
+    // used to open its own subscription each time, overlapping the
+    // dashboard's and the sampler's until IBKR's cap answered 322.
+    const rows = await requestAccountSummary(api, 'NetLiquidation', PNL_TIMEOUT_MS);
+    let value: number | null = null;
+    let currency = 'USD';
+    for (const r of rows) {
+        if (r.tag !== 'NetLiquidation') continue;
+        if (account && r.account !== account) continue;
+        const n = Number(r.value);
+        // Finite is not enough: the IBKR error sentinel is finite and
+        // would turn every %-of-NetLiq cap into a no-op downstream.
+        if (Number.isFinite(n) && n > 0 && n < 1e12) {
+            value = n;
+            if (typeof r.currency === 'string' && r.currency.trim()) currency = r.currency.trim().toUpperCase();
         }
-        function cleanup() {
-            api.off(EventName.accountSummary, onSummary);
-            api.off(EventName.accountSummaryEnd, onEnd);
-        }
-        api.on(EventName.accountSummary, onSummary);
-        api.on(EventName.accountSummaryEnd, onEnd);
-        api.reqAccountSummary(reqId, 'All', 'NetLiquidation');
-    });
+    }
+    if (value === null) throw new Error('[daily-loss-guard] NetLiquidation unavailable');
+    return { value, currency };
 }
 
 // ---------------------------------------------------------------------------

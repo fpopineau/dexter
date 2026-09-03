@@ -13,6 +13,7 @@ import { EventName } from '@stoqey/ib';
 import { z } from 'zod';
 import { formatToolResult } from '../types.js';
 import { allocReqId, getIBApi, isNonFatalIbkrError } from './connection.js';
+import { requestAccountSummary } from './account-summary.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -117,67 +118,25 @@ async function getAccountSummary(
     api: import('@stoqey/ib').IBApi,
     accountCode?: string,
 ): Promise<string> {
-    const reqId = allocReqId();
-    const entries: SummaryEntry[] = [];
-    let detectedAccount = '';
-
-    return new Promise<string>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-            api.cancelAccountSummary(reqId);
-            cleanup();
-            resolve(formatToolResult({ account: detectedAccount, entries, partial: true }));
-        }, ACCOUNT_TIMEOUT_MS);
-
-        const onAccountSummary = (
-            id: number,
-            account: string,
-            tag: string,
-            value: string,
-            currency: string,
-        ) => {
-            if (id !== reqId) return;
-            if (accountCode && account !== accountCode) return;
-            detectedAccount = account;
-            entries.push({ tag, value, currency });
-        };
-
-        const onAccountSummaryEnd = (id: number) => {
-            if (id !== reqId) return;
-            clearTimeout(timeout);
-            api.cancelAccountSummary(reqId);
-            cleanup();
-
-            // Convert to a friendlier object
-            const summary: Record<string, string | number> = { account: detectedAccount };
-            for (const e of entries) {
-                const num = Number(e.value);
-                summary[e.tag] = Number.isNaN(num) ? e.value : num;
-            }
-
-            resolve(formatToolResult(summary));
-        };
-
-        const onError = (err: Error, code: number, id: number) => {
-            if (id !== reqId && id !== -1) return;
-            if (isNonFatalIbkrError(code)) return;
-            clearTimeout(timeout);
-            api.cancelAccountSummary(reqId);
-            cleanup();
-            reject(new Error(`[IBKR] Account summary error ${code}: ${err.message}`));
-        };
-
-        function cleanup() {
-            api.off(EventName.accountSummary, onAccountSummary);
-            api.off(EventName.accountSummaryEnd, onAccountSummaryEnd);
-            api.off(EventName.error, onError);
-        }
-
-        api.on(EventName.accountSummary, onAccountSummary);
-        api.on(EventName.accountSummaryEnd, onAccountSummaryEnd);
-        api.on(EventName.error, onError);
-
-        api.reqAccountSummary(reqId, 'All', SUMMARY_TAGS);
-    });
+    // Leak fix 2026-09-03: subscription lifecycle (single-flight +
+    // exactly-once cancel) lives in the shared requester; this function
+    // only shapes the rows. Previously each call opened its own
+    // subscription, overlapping the guard's poller until IBKR's
+    // concurrent-subscription cap answered error 322.
+    const rows = await requestAccountSummary(api, SUMMARY_TAGS, ACCOUNT_TIMEOUT_MS);
+    const mine = accountCode ? rows.filter((r) => r.account === accountCode) : rows;
+    const detectedAccount = mine[0]?.account ?? '';
+    const summary: Record<string, string | number> = { account: detectedAccount };
+    for (const r of mine) {
+        const num = Number(r.value);
+        summary[r.tag] = Number.isNaN(num) ? r.value : num;
+    }
+    // An empty result means the request timed out with nothing delivered —
+    // report it as partial rather than as an account with no fields.
+    if (mine.length === 0) {
+        return formatToolResult({ account: '', entries: [], partial: true });
+    }
+    return formatToolResult(summary);
 }
 
 // ---------------------------------------------------------------------------

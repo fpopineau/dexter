@@ -1593,3 +1593,33 @@ sweeps see it as foreign), --cancel mode for the children-survive
 contingency. The observation's evidentiary value is unchanged: it
 witnesses BROKER behavior at the bell; the placement channel is
 irrelevant.
+
+## Fix 2026-09-03 — account-summary subscription leak (REQ-RISK-005)
+
+Measured: the IB Gateway process grew 718 MB → 9,323 MB over three days
+(~2.9 GB/day) and wedged TWICE — data services dead while the process
+kept holding port 4002, surviving operator restarts because the old
+process never exited. IBKR's own memory growth is part of it, but
+dexter was feeding it: error 322 ("maximum number of account summary
+requests exceeded; desubscribe to previous request first") proves
+account-summary subscriptions were accumulating server-side. Two
+independent implementations (the daily-loss guard polling NetLiq every
+~60 s, and the account tool behind the dashboard overview / positions /
+pnl) each allocated their own reqId, and under a slow Gateway each held
+its subscription for the full 10 s timeout — so the pollers overlapped,
+stacked, and exhausted the cap.
+
+- REQ-RISK-005: one shared requester
+  (src/tools/ibkr/account-summary.ts) owns the subscription lifecycle:
+  SINGLE-FLIGHT per tag set (concurrent callers share one live
+  subscription — the cap-exhaustion fix), EXACTLY-ONCE settle (cancel +
+  listener detach run once, on whichever of end/error/timeout arrives
+  first, detaching BEFORE cancelling so a synchronously-emitted end
+  cannot re-enter), and a cancel that is always attempted — including
+  when the request throws synchronously. Both call sites now only
+  interpret rows; their observable contracts are unchanged (guard
+  rejects on missing NetLiq; the tool reports partial on empty).
+
+| REQ | Test |
+|---|---|
+| REQ-RISK-005 | account-summary suite: 3 concurrent callers → ONE request + ONE cancel; sequential calls open fresh subscriptions; timeout still cancels and detaches every listener; sync throw rejects with nothing armed; error settles once (handler detached, no double-settle); different tag sets do not share |
