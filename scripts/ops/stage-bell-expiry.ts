@@ -48,8 +48,18 @@ async function withApi<T>(fn: (api: IBApi, account: string) => Promise<T>): Prom
             clearTimeout(timer);
             resolve(list.split(',').map((s) => s.trim()).filter(Boolean));
         });
+        // The account list is only PUSHED to some clients — a fresh client id
+        // must ask (dexter's own detectAccount does the same). Requesting on
+        // 'connected' covers both behaviours: a pushed list resolves first,
+        // otherwise the explicit request fetches it.
+        api.once(EventName.connected, () => {
+            try { api.reqManagedAccts(); } catch { /* the timeout reports it */ }
+        });
         api.on(EventName.error, (err: Error, code: number) => {
-            // 502 = nothing listening; anything at connect time is fatal here.
+            // Surface everything the Gateway says while connecting — a silent
+            // 20s timeout hides the real reason (client-id clash, read-only
+            // API, not-logged-in…).
+            if (code < 2000) console.error(`  [gateway says] ${code}: ${err.message}`);
             if (code === 502) { clearTimeout(timer); api.disconnect(); reject(err); }
         });
         api.connect(CLIENT_ID);
