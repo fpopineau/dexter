@@ -1623,3 +1623,18 @@ stacked, and exhausted the cap.
 | REQ | Test |
 |---|---|
 | REQ-RISK-005 | account-summary suite: 3 concurrent callers → ONE request + ONE cancel; sequential calls open fresh subscriptions; timeout still cancels and detaches every listener; sync throw rejects with nothing armed; error settles once (handler detached, no double-settle); different tag sets do not share |
+
+Coverage addendum 2026-09-03 (operator-supplied movers: MSTR +17.6,
+COIN +10.1, PLTR +7.7 — the SAME crypto-complex names that fell 5-6%
+on 09-01, reversing hard): MSTR seen 33x, best score 66 (long, at
++16%) — the closest any single name has come to the trigger bar in
+this class; PLTR seen 4x, best 55; COIN never surfaced (third
+consecutive miss for COIN specifically — its moves are large in
+percent but its scan-list presence is thin). Vehicles tracked the
+complex: IBIT 22x (best 63), BMNR 28x (best 60). Two-sided evidence
+now: the same names, sub-threshold in BOTH directions across a 5-6%
+fall and a 8-18% rally — the trigger bar, not the scanner, is what
+excludes this class. Feeds the slice-B threshold-calibration question
+and the registered capitalization-vs-significance debate (MSTR at
++17.6% with 2.7x RVOL scoring 66 is the sharpest single data point
+yet).
