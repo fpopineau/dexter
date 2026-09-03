@@ -14,7 +14,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+# GetFullPath normalises '..' WITHOUT resolving junctions — Resolve-Path
+# followed C:\Work (a junction) to C:\Volumes\9100Pro\Work..., a path form
+# where bun cannot resolve its preload and the gateway exits code 1.
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 
 function Write-Log([string]$msg) {
     Write-Output "[start-stack] $msg"

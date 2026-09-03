@@ -13,5 +13,6 @@ if not exist "%BUN%" set "BUN=bun"
 "%BUN%" run gateway
 echo.
 echo [%date% %time%] gateway exited with code %errorlevel% - restarting in 10s (close window to stop)
-timeout /t 10 /nobreak >nul
+rem Full path: MSYS/Git-Bash PATHs shadow Windows timeout.exe with GNU timeout.
+"%SystemRoot%\System32	imeout.exe" /t 10 /nobreak >nul
 goto loop
