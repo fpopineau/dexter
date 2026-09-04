@@ -1711,3 +1711,22 @@ open). This works against the IBKR-399 fix that deliberately enabled
 pre-market placement. Slice-B item: use the session-appropriate spread
 (or defer the check to the execution session) for orders queued into
 the open.
+
+Coverage addendum 2026-09-04 (operator: chipmakers bid — ARM +4.6,
+SMCI +4.2, ASML +4.1, MU +4.1): NONE of the four single names was ever
+seen; only the LEVERAGED VEHICLES were (SOXL 26x best 65 long, SOXS 32x
+best 64 short, NVDA 20x best 66). This is a sharper version of the
+extremes-list bias than the earlier addenda: on a +4% sector day the
+scan lists are dominated by 3x ETFs whose moves are mechanically ~3x
+the sector's, so the vehicles crowd out every underlying single name —
+and the vehicle scores (65/64) sat at the trigger bar while the real
+sector move went untraded. Compounding it, the previous session
+breadth-triggered SOXL SHORT into what became a semis rally, i.e. the
+vehicle lane traded the sector on the wrong side while the single names
+were invisible.
+
+Slice-B implication (joins the registered capitalization-vs-significance
+debate): ATR-normalised significance would rank a +4% MU/ASML above a
++12% 3x ETF move that carries the same underlying information, and a
+same-underlying dedupe (vehicle vs constituents) is needed so a lane
+does not both crowd out and mistrade its own sector.
