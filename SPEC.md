@@ -1730,3 +1730,12 @@ debate): ATR-normalised significance would rank a +4% MU/ASML above a
 +12% 3x ETF move that carries the same underlying information, and a
 same-underlying dedupe (vehicle vs constituents) is needed so a lane
 does not both crowd out and mistrade its own sector.
+
+Full-day close (same session, operator's evening list — MU +6.1, AMD
++4.7, SMCI +4.5, INTC +4.5, ASML +4.2, ARM +3.9): the pattern held to
+the bell. AMD/ASML/ARM never surfaced at all; MU appeared TWICE (best
+45) on a +6.1% day; SMCI reached 65 and INTC 60 — while the vehicles
+were seen 55x (SOXL) and 54x (SOXS). So on the day's cleanest sector
+move, the two 3x ETFs accounted for ~109 sightings and the six
+underlyings for 40, none triggering. The strongest single argument yet
+for significance-ranking over percent-ranking.
