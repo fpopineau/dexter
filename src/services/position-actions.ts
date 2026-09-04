@@ -19,6 +19,7 @@ import { BRACKET_ACK_TIMEOUT_MS } from '@/tools/ibkr/bracket.js';
 import { allocReqId, assertAccountsVerified, getIBApi, getVerifiedSingleAccount, isNonFatalIbkrError } from '@/tools/ibkr/connection.js';
 import { confirmCancel, watchOrderAcks, type CancelOutcome } from '@/tools/ibkr/order-ack.js';
 import { withOrderLock } from '@/tools/ibkr/order-lock.js';
+import { requestPositions, __resetPositionsForTests } from '@/tools/ibkr/positions.js';
 import { getNextValidOrderId } from '@/tools/ibkr/orders.js';
 import { getMarketSession, isTradeableSession } from '@/utils/market-hours.js';
 import { logger } from '@/utils';
@@ -59,91 +60,35 @@ export interface LivePosition {
     avgCost: number;
 }
 
-// Leak/contention fix 2026-09-04 (sibling of the account-summary fix):
-// IBKR supports ONE positions subscription per client — `reqPositions`
-// is a stream ended by `cancelPositions`, not a request/response pair.
-// Overlapping callers (adoption sweep, profit trail, triage, dashboard,
-// the close path) therefore stomp on each other: one caller's cancel
-// tears down another's stream, which then times out. Measured 2026-09-04:
-// 27 consecutive "positions request timed out" while account-summary —
-// already single-flighted — worked fine. Concurrent callers now share
-// one live subscription.
-let inFlightPositions: Promise<LivePosition[]> | null = null;
+// Contention fix 2026-09-04: the subscription lifecycle now lives in the
+// SHARED requester (src/tools/ibkr/positions.ts). Two independent
+// implementations of reqPositions existed — this one and the account
+// tool's — and since IBKR allows one positions stream per client, the
+// second subscriber's cancel tore down the first's stream. Both now go
+// through one single-flighted requester.
 
 /** Test hook: forget in-flight sharing between suites. */
 export function __resetPositionsInFlightForTests(): void {
-    inFlightPositions = null;
+    __resetPositionsForTests();
 }
 
-/** Fetch current positions (one-shot; concurrent callers share one
- *  subscription). */
-export function fetchPositions(api: import('@stoqey/ib').IBApi): Promise<LivePosition[]> {
-    if (inFlightPositions) return inFlightPositions;
-    const p = fetchPositionsOnce(api).finally(() => {
-        if (inFlightPositions === p) inFlightPositions = null;
-    });
-    inFlightPositions = p;
-    return p;
-}
-
-async function fetchPositionsOnce(api: import('@stoqey/ib').IBApi): Promise<LivePosition[]> {
-    const positions: LivePosition[] = [];
-    return new Promise<LivePosition[]>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-            cleanup();
-            reject(new Error('positions request timed out'));
-        }, 10_000);
-        const onPosition = (account: string, contract: Contract, pos: number, avgCost?: number) => {
-            if (pos === 0) return;
-            positions.push({
-                account,
-                symbol: contract.symbol ?? '',
-                quantity: pos,
-                avgCost: avgCost ?? 0,
-            });
-        };
-        const onEnd = () => {
-            clearTimeout(timeout);
-            cleanup();
-            resolve(positions);
-        };
-        const onError = (err: Error, code: number, id: number) => {
-            if (id !== -1) return;
-            if (isNonFatalIbkrError(code)) return;
-            clearTimeout(timeout);
-            cleanup();
-            reject(new Error(`positions error ${code}: ${err.message}`));
-        };
-        // Review-37: idempotent, and listeners detach BEFORE the cancel —
-        // cancelPositions() may synchronously emit positionEnd, and with
-        // listeners still attached that re-entered cleanup (stack
-        // overflow) and resolved [] through onEnd even though
-        // reqPositions() had thrown (reviewer-reproduced).
-        let cleaned = false;
-        function cleanup() {
-            if (cleaned) return;
-            cleaned = true;
-            api.off(EventName.position, onPosition);
-            api.off(EventName.positionEnd, onEnd);
-            api.off(EventName.error, onError);
-            try { api.cancelPositions(); } catch { /* ignore */ }
-        }
-        api.on(EventName.position, onPosition);
-        api.on(EventName.positionEnd, onEnd);
-        api.on(EventName.error, onError);
-        try {
-            api.reqPositions();
-        } catch (err) {
-            // Review-36: a request that throws SYNCHRONOUSLY (disconnect
-            // mid-shutdown, missing capability) used to reject through the
-            // executor throw with the timeout and listeners still armed —
-            // the 10s timer outlived the caller (and force-killed Jest
-            // workers). Settle NOW and leave nothing behind.
-            clearTimeout(timeout);
-            cleanup();
-            reject(new Error(`positions request failed synchronously: ${err instanceof Error ? err.message : String(err)}`));
-        }
-    });
+/** Fetch current positions (concurrent callers share one subscription).
+ *  Rejects only on a broker error or a synchronous request failure; a
+ *  timeout resolves with whatever arrived (callers that must not act on
+ *  a partial book use requestPositions() and check `complete`). */
+export async function fetchPositions(api: import('@stoqey/ib').IBApi): Promise<LivePosition[]> {
+    const snap = await requestPositions(api);
+    if (!snap.complete && snap.positions.length === 0) {
+        // Preserve the previous contract: an empty, unconfirmed book is a
+        // failure here, never "the account is flat".
+        throw new Error('positions request timed out');
+    }
+    return snap.positions.map((p) => ({
+        account: p.account,
+        symbol: p.symbol,
+        quantity: p.quantity,
+        avgCost: p.avgCost,
+    }));
 }
 
 function stockContract(symbol: string): Contract {

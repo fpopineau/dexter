@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { formatToolResult } from '../types.js';
 import { allocReqId, getIBApi, isNonFatalIbkrError } from './connection.js';
 import { requestAccountSummary } from './account-summary.js';
+import { requestPositions } from './positions.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -153,67 +154,20 @@ interface PositionEntry {
     avgCost: number;
 }
 
-async function getPositions(api: import('@stoqey/ib').IBApi): Promise<string> {
-    const positions: PositionEntry[] = [];
-
-    return new Promise<string>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-            api.cancelPositions();
-            cleanup();
-            resolve(formatToolResult({ positionCount: positions.length, positions, partial: true }));
-        }, ACCOUNT_TIMEOUT_MS);
-
-        const onPosition = (
-            account: string,
-            contract: Contract,
-            pos: number,
-            avgCost?: number,
-        ) => {
-            // Skip zero-quantity ghost positions
-            if (pos === 0) return;
-            positions.push({
-                account,
-                symbol: contract.symbol ?? '',
-                secType: contract.secType ?? '',
-                exchange: contract.exchange ?? contract.primaryExch ?? '',
-                currency: contract.currency ?? '',
-                quantity: pos,
-                avgCost: avgCost ?? 0,
-            });
-        };
-
-        const onPositionEnd = () => {
-            clearTimeout(timeout);
-            api.cancelPositions();
-            cleanup();
-            resolve(
-                formatToolResult({
-                    positionCount: positions.length,
-                    positions,
-                }),
-            );
-        };
-
-        const onError = (err: Error, code: number, id: number) => {
-            if (id !== -1) return;
-            if (isNonFatalIbkrError(code)) return;
-            clearTimeout(timeout);
-            api.cancelPositions();
-            cleanup();
-            reject(new Error(`[IBKR] Positions error ${code}: ${err.message}`));
-        };
-
-        function cleanup() {
-            api.off(EventName.position, onPosition);
-            api.off(EventName.positionEnd, onPositionEnd);
-            api.off(EventName.error, onError);
-        }
-
-        api.on(EventName.position, onPosition);
-        api.on(EventName.positionEnd, onPositionEnd);
-        api.on(EventName.error, onError);
-
-        api.reqPositions();
+async function getPositions(
+    api: import('@stoqey/ib').IBApi,
+    accountCode?: string,
+): Promise<string> {
+    // Contention fix 2026-09-04: this used to open its OWN reqPositions
+    // stream. IBKR allows one per client, so it and the services-side
+    // fetch tore down each other's — every adoption sweep timed out for
+    // hours. Both now share the single-flighted requester.
+    const snap = await requestPositions(api, ACCOUNT_TIMEOUT_MS);
+    const positions = accountCode ? snap.positions.filter((p) => p.account === accountCode) : snap.positions;
+    return formatToolResult({
+        positionCount: positions.length,
+        positions,
+        ...(snap.complete ? {} : { partial: true }),
     });
 }
 

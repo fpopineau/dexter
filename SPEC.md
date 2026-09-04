@@ -1661,3 +1661,28 @@ loser timed out.
 | REQ | Test |
 |---|---|
 | REQ-RISK-006 | position-actions-fetch suite: 3 concurrent callers → ONE reqPositions + ONE cancel with identical results; a later call opens a fresh subscription; a failed fetch clears the slot and the next caller succeeds |
+
+## Fix 2026-09-04 (corrects REQ-RISK-006) — ONE positions subscriber (REQ-RISK-007)
+
+REQ-RISK-006 single-flighted the services-side fetch but missed that a
+SECOND implementation existed in the account tool: two subscribers on
+one client, and `reqPositions` opens a per-client stream that
+`cancelPositions` tears down for everyone. The evidence that forced the
+correction: after a FRESH IB Gateway (844 MB) and a restarted dexter,
+positions still timed out every 60 s — every adoption sweep failing,
+reconciliation never completing, the close gate shut all morning —
+while a probe on a separate client id fetched positions in 17 ms.
+Gateway memory (the earlier hypothesis) was disproven; the contention
+was ours.
+
+- REQ-RISK-007: exactly one positions subscriber exists
+  (src/tools/ibkr/positions.ts). Both call sites delegate to it;
+  concurrent callers share one stream (correctness, not optimisation);
+  the snapshot carries `complete` so callers that must not act on a
+  partial book can tell a timeout from an empty account —
+  fetchPositions still throws on an unconfirmed empty book, preserving
+  "never mistake unverifiable for flat".
+
+| REQ | Test |
+|---|---|
+| REQ-RISK-007 | positions suite: 3 concurrent callers → ONE stream + ONE cancel, ghost rows dropped; timeout reports complete:false and still cancels/detaches; sync throw rejects with nothing armed; slot clears on settle; broker error settles once. position-actions-fetch suite unchanged and green (the throw-on-unconfirmed-empty contract preserved) |
