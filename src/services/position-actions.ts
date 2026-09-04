@@ -59,8 +59,34 @@ export interface LivePosition {
     avgCost: number;
 }
 
-/** Fetch current positions (one-shot). */
-export async function fetchPositions(api: import('@stoqey/ib').IBApi): Promise<LivePosition[]> {
+// Leak/contention fix 2026-09-04 (sibling of the account-summary fix):
+// IBKR supports ONE positions subscription per client — `reqPositions`
+// is a stream ended by `cancelPositions`, not a request/response pair.
+// Overlapping callers (adoption sweep, profit trail, triage, dashboard,
+// the close path) therefore stomp on each other: one caller's cancel
+// tears down another's stream, which then times out. Measured 2026-09-04:
+// 27 consecutive "positions request timed out" while account-summary —
+// already single-flighted — worked fine. Concurrent callers now share
+// one live subscription.
+let inFlightPositions: Promise<LivePosition[]> | null = null;
+
+/** Test hook: forget in-flight sharing between suites. */
+export function __resetPositionsInFlightForTests(): void {
+    inFlightPositions = null;
+}
+
+/** Fetch current positions (one-shot; concurrent callers share one
+ *  subscription). */
+export function fetchPositions(api: import('@stoqey/ib').IBApi): Promise<LivePosition[]> {
+    if (inFlightPositions) return inFlightPositions;
+    const p = fetchPositionsOnce(api).finally(() => {
+        if (inFlightPositions === p) inFlightPositions = null;
+    });
+    inFlightPositions = p;
+    return p;
+}
+
+async function fetchPositionsOnce(api: import('@stoqey/ib').IBApi): Promise<LivePosition[]> {
     const positions: LivePosition[] = [];
     return new Promise<LivePosition[]>((resolve, reject) => {
         const timeout = setTimeout(() => {

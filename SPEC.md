@@ -1638,3 +1638,26 @@ excludes this class. Feeds the slice-B threshold-calibration question
 and the registered capitalization-vs-significance debate (MSTR at
 +17.6% with 2.7x RVOL scoring 66 is the sharpest single data point
 yet).
+
+## Fix 2026-09-04 — positions-subscription contention (REQ-RISK-006)
+
+Sibling of REQ-RISK-005, found the morning after: with the
+account-summary leak fixed, NetLiq reads recovered while `positions`
+requests still timed out 27 times consecutively, keeping the
+reconciliation sweep INCOMPLETE and the close gate shut. Cause: IBKR
+supports ONE positions subscription per client — `reqPositions` opens a
+stream ended by `cancelPositions`, not a request/response pair — so
+overlapping callers (adoption sweep, profit trail, EOD triage, the
+dashboard, the close path) tore down each other's streams, and the
+loser timed out.
+
+- REQ-RISK-006: fetchPositions is SINGLE-FLIGHT — concurrent callers
+  share one live subscription; the shared slot clears on settle
+  (success or failure), so a later call always opens a fresh snapshot
+  and a failed fetch never poisons the next caller. The per-request
+  hardening from review-36/37 (sync-throw settlement, idempotent
+  detach-before-cancel cleanup) is unchanged underneath.
+
+| REQ | Test |
+|---|---|
+| REQ-RISK-006 | position-actions-fetch suite: 3 concurrent callers → ONE reqPositions + ONE cancel with identical results; a later call opens a fresh subscription; a failed fetch clears the slot and the next caller succeeds |

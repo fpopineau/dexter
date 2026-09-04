@@ -64,3 +64,54 @@ describe('fetch wrappers on a synchronously-throwing api (review-36)', () => {
         expect(api.listenerCount(EventName.error)).toBe(0);
     });
 });
+
+// Contention fix 2026-09-04: IBKR supports ONE positions subscription per
+// client, so overlapping callers tore down each other's streams (27
+// consecutive timeouts observed). Concurrent callers must share one.
+class CountingApi extends EventEmitter {
+    reqs = 0;
+    cancels = 0;
+    reqPositions(): void {
+        this.reqs++;
+        queueMicrotask(() => {
+            this.emit(EventName.position, 'DU1', { symbol: 'MU' }, 10, 100);
+            this.emit(EventName.positionEnd);
+        });
+    }
+    cancelPositions(): void { this.cancels++; }
+}
+
+describe('fetchPositions single-flight (2026-09-04 contention fix)', () => {
+    test('concurrent callers share ONE subscription', async () => {
+        const { fetchPositions, __resetPositionsInFlightForTests } = await import('./position-actions.js');
+        __resetPositionsInFlightForTests();
+        const api = new CountingApi();
+        const [a, b, c] = await Promise.all([
+            fetchPositions(api as never), fetchPositions(api as never), fetchPositions(api as never),
+        ]);
+        expect(api.reqs).toBe(1);
+        expect(api.cancels).toBe(1);
+        expect(a).toEqual([{ account: 'DU1', symbol: 'MU', quantity: 10, avgCost: 100 }]);
+        expect(b).toEqual(a);
+        expect(c).toEqual(a);
+    });
+
+    test('a later call opens a fresh subscription (snapshots stay current)', async () => {
+        const { fetchPositions, __resetPositionsInFlightForTests } = await import('./position-actions.js');
+        __resetPositionsInFlightForTests();
+        const api = new CountingApi();
+        await fetchPositions(api as never);
+        await fetchPositions(api as never);
+        expect(api.reqs).toBe(2);
+    });
+
+    test('a failure clears the shared slot — the next caller retries', async () => {
+        const { fetchPositions, __resetPositionsInFlightForTests } = await import('./position-actions.js');
+        __resetPositionsInFlightForTests();
+        const bad = new ThrowingApi();
+        await expect(fetchPositions(bad as never)).rejects.toThrow(/failed synchronously/);
+        const good = new CountingApi();
+        await expect(fetchPositions(good as never)).resolves.toHaveLength(1);
+        expect(good.reqs).toBe(1);
+    });
+});
