@@ -14,8 +14,19 @@
 #
 # Remove everything with uninstall-tasks.ps1.
 
+param(
+    # The Stack autostart depends on run-gateway.cmd, which does NOT yet
+    # start the stack end to end (tsx-under-cmd loader handoff, 2026-09-03).
+    # -WatchdogOnly installs the proven half; drop the switch once the
+    # wrapper is fixed AND observed starting the gateway.
+    [switch]$WatchdogOnly
+)
+
 $ErrorActionPreference = 'Stop'
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+# GetFullPath normalises '..' WITHOUT resolving junctions (Resolve-Path
+# follows C:\Work to its C:\Volumes target, a path form where bun cannot
+# resolve tsx's loader).
+$repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $userId = "$env:USERDOMAIN\$env:USERNAME"
 $bunExe = Join-Path $env:USERPROFILE '.local\bin\bun.exe'
 if (-not (Test-Path $bunExe)) { throw "bun.exe not found at $bunExe" }
@@ -28,6 +39,7 @@ $settingsCommon = @{
 }
 
 # --- \Dexter\Stack -----------------------------------------------------------
+if (-not $WatchdogOnly) {
 $stackTrigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
 $stackTrigger.Delay = 'PT30S'  # let network + user profile settle first
 $stackAction = New-ScheduledTaskAction `
@@ -40,6 +52,9 @@ $stackSettings = New-ScheduledTaskSettingsSet @settingsCommon -ExecutionTimeLimi
 Register-ScheduledTask -TaskPath '\Dexter' -TaskName 'Stack' `
     -Trigger $stackTrigger -Action $stackAction -Settings $stackSettings -Force | Out-Null
 Write-Output 'registered \Dexter\Stack (at logon +30s)'
+} else {
+    Write-Output 'SKIPPED \Dexter\Stack (-WatchdogOnly): the autostart wrapper is unproven'
+}
 
 # --- \Dexter\Watchdog --------------------------------------------------------
 # A once-trigger with a repetition interval and no duration repeats every
