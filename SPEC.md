@@ -1686,3 +1686,28 @@ was ours.
 | REQ | Test |
 |---|---|
 | REQ-RISK-007 | positions suite: 3 concurrent callers → ONE stream + ONE cancel, ghost rows dropped; timeout reports complete:false and still cancels/detaches; sync throw rejects with nothing armed; slot clears on settle; broker error settles once. position-actions-fetch suite unchanged and green (the throw-on-unconfirmed-empty contract preserved) |
+
+## Operator decision 2026-09-04 — sector cap 20% → 35% (shadow-live profile)
+
+Raised on the operator's instruction after the constraint bound
+repeatedly on a tech-led tape. At 15% × 4 slots the base 20% cap
+allowed ~1.3 positions per sector; 35% allows ~2.3. Recorded as a
+deliberate risk-appetite change, not a fix: correlated names make
+"four trades" closer to one bet, so the remaining guards carry more
+weight — the acceptance-time daily-loss HEADROOM gate (4 × 0.5% =
+2.0% worst case vs the 1.5% stop) still binds first intraday, and the
+20%-gap overnight stress still caps what may ride a night. Set in
+risk-rules.live.yaml only; the base profile keeps 20%. Fingerprint
+surface — it lands BEFORE the tag and is frozen with it. Revisit if
+the sample shows correlated stop-outs clustering.
+
+Residual observed the same morning (recorded, not patched): the
+microstructure spread gate tests the LIVE quote at acceptance, but a
+DAY limit accepted pre-market does not execute until the open, where
+the governing spread is the regular-session one. Pre-market accepts
+are therefore refused on a quote that will not price the fill (P-0EED
+PL: 0.69% vs the 0.5% cap at 08:35 ET, expiring 09:20 ET — before the
+open). This works against the IBKR-399 fix that deliberately enabled
+pre-market placement. Slice-B item: use the session-appropriate spread
+(or defer the check to the execution session) for orders queued into
+the open.
