@@ -122,6 +122,7 @@ export async function reactorWatchlist(): Promise<Set<string>> {
     return out;
 }
 import { ScanHealthMonitor, type HealthTransition } from './scan-health.js';
+import { buildSnapshotLanes, type SnapshotLanes } from './lane-rankers.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -157,6 +158,9 @@ export interface Opportunity {
     /** REQ-SCAN-004: price × session cumulative volume (USD) — the
      *  significance tie-breaker inside a rank band. Null when unmeasured. */
     dollarVolume: number | null;
+    /** WP8: daily ATR as % of the price (the significance denominator),
+     *  carried so the lane rankers read the same measure the engine used. */
+    dailyAtrPct: number | null;
 }
 
 export interface OpportunitySnapshot {
@@ -172,6 +176,10 @@ export interface OpportunitySnapshot {
     opportunities: Opportunity[];
     /** How many of the top entries are streamed in realtime. */
     topN: number;
+    /** REQ-DISC-002 (WP8): per-lane rankings over the same candidates —
+     *  a score is comparable only inside its lane. Absent on snapshots
+     *  persisted before WP8. */
+    lanes?: SnapshotLanes;
 }
 
 interface PhasePlan {
@@ -802,6 +810,7 @@ async function runCycleInner(forcePhase?: EnginePhase): Promise<OpportunitySnaps
                     // Opportunity instead of being computed and discarded.
                     stale: signal.freshness?.stale ?? false,
                     dollarVolume,
+                    dailyAtrPct: dailyAtrPct === null ? null : Math.round(dailyAtrPct * 100) / 100,
                 });
             }
             await sleep(SCORE_PACING_MS);
@@ -819,6 +828,10 @@ async function runCycleInner(forcePhase?: EnginePhase): Promise<OpportunitySnaps
             scored: opportunities.length,
             opportunities,
             topN: Math.min(topN(), opportunities.length),
+            // WP8 (REQ-DISC-002): the overnight lane's own ranking, pure and
+            // versioned — the Pre-Close Review reads it instead of the
+            // intraday composite.
+            lanes: buildSnapshotLanes(opportunities),
         };
 
         latestSnapshot = snapshot;

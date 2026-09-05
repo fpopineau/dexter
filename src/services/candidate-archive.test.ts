@@ -38,7 +38,7 @@ const CAPTURED = Date.UTC(2026, 8, 10, 19, 35, 0);
 function opp(over: Partial<OpportunitySnapshot['opportunities'][number]> = {}): OpportunitySnapshot['opportunities'][number] {
     return {
         symbol: 'MU', longName: 'Micron', direction: 'long', signalScore: 70, rating: 'buy', compositeRank: 78, price: 100, rvol: 2, atr: 1.2, rsi: 60,
-        vwap: 99, scanSources: ['TOP_PERC_GAIN'], dayMovePct: 4.2, stale: false, dollarVolume: 5e8, ...over,
+        vwap: 99, scanSources: ['TOP_PERC_GAIN'], dayMovePct: 4.2, stale: false, dollarVolume: 5e8, dailyAtrPct: 3, ...over,
     };
 }
 function snapshot(opps: OpportunitySnapshot['opportunities'], phase: OpportunitySnapshot['phase'] = 'pre-close', timestamp = CAPTURED - 5 * 60_000): OpportunitySnapshot {
@@ -83,6 +83,7 @@ describe('candidatesFromSnapshot / candidatesFromPatternScan (REQ-BENCH-001)', (
         expect(mu.lane).toBe('overnight');
         expect(mu.source).toMatch(/^opportunity-snapshot:pre-close@/);
         expect(mu.price).toBe(100);
+        expect(mu.rankerVersion).toBe('composite-v1'); // a snapshot without lane rankings keeps the composite, labelled
         expect(mu.stop).toBe(95.5); expect(mu.target).toBe(104.5);
         expect(mu.replayStatus).toBe('pending');
         // deadline: Friday 2026-09-11 10:00 ET = 14:00 UTC
@@ -90,6 +91,19 @@ describe('candidatesFromSnapshot / candidatesFromPatternScan (REQ-BENCH-001)', (
         expect(rows[1].reasons).toEqual(['counter-move']);
         expect(rows[1].replayStatus).toBe('skipped');
         expect(rows[1].stop).toBeNull();
+    });
+
+    test('REQ-DISC-003: with the WP8 lane ranking on the snapshot, the overnight row takes the lane score and its ranker version; an excluded row keeps the composite', async () => {
+        const { buildSnapshotLanes } = await import('./lane-rankers.js');
+        const opps = [opp(), opp({ symbol: 'AMD', dayMovePct: -1, compositeRank: 70 })];
+        const snap = { ...snapshot(opps), lanes: buildSnapshotLanes(opps) };
+        const rows = candidatesFromSnapshot(snap, { capturedAt: CAPTURED, rules, dailyAtr: new Map([['MU', 3], ['AMD', 4]]), earnings: new Map() });
+        const mu = rows.find((r) => r.symbol === 'MU')!;
+        expect(mu.rankerVersion).toBe('eod-continuation-v1');
+        expect(mu.rank).toBe(snap.lanes.overnight.ranked.find((r) => r.symbol === 'MU')!.score);
+        expect(mu.rank).not.toBe(78);
+        const amd = rows.find((r) => r.symbol === 'AMD')!;
+        expect(amd).toMatchObject({ rank: 70, rankerVersion: 'composite-v1', eligible: false });
     });
 
     test('cup lane: only cup matches, detector version + state kept, archived but not replayed; a stale scan is ineligible', () => {
@@ -104,7 +118,7 @@ describe('candidatesFromSnapshot / candidatesFromPatternScan (REQ-BENCH-001)', (
         };
         const rows = candidatesFromPatternScan(scan, { capturedAt: CAPTURED, rules, dailyAtr: new Map(), earnings: new Map() });
         expect(rows.map((r) => r.symbol)).toEqual(['CUP1']);
-        expect(rows[0]).toMatchObject({ lane: 'cup-and-handle', eligible: true, detectorVersion: 'v1', state: 'pivot-ready', entryType: 'STP_LMT', entry: 50, stop: 47, target: 56, replayStatus: 'skipped' });
+        expect(rows[0]).toMatchObject({ lane: 'cup-and-handle', eligible: true, detectorVersion: 'v1', state: 'pivot-ready', entryType: 'STP_LMT', entry: 50, stop: 47, target: 56, replayStatus: 'skipped', rankerVersion: 'detector-v1' });
         expect(rows[0].exitDeadline).not.toBeNull();
         const stale = candidatesFromPatternScan({ ...scan, ranAt: CAPTURED - 40 * 3_600_000 }, { capturedAt: CAPTURED, rules, dailyAtr: new Map(), earnings: new Map() });
         expect(stale[0].eligible).toBe(false);

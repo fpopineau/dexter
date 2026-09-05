@@ -92,6 +92,8 @@ export function buildEpochSample(proposals: TradeProposal[], epoch: EpochIdentit
             // REQ-LANE-006/007: the lane, or 'legacy' for a pre-contract row.
             strategyId: p.strategyId ?? 'legacy',
             score: p.score,
+            laneRank: p.laneRank,
+            rankerVersion: p.rankerVersion,
         };
         // Deployable = the classes enabled in the live config; a legacy row
         // (no lane) is never part of a lane cohort and is reported apart.

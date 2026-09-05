@@ -10,7 +10,7 @@ function row(over: Partial<TradeProposal> = {}): TradeProposal {
         id: 'P-0001', createdAt: T0 + 1000, expiresAt: T0 + 2, updatedAt: T0 + 3, status: 'closed', symbol: 'MU', direction: 'long', entryType: 'LMT', entry: 100,
         entryLimit: null, stop: 97, target: 106, quantity: 10, tif: 'DAY', tradeClass: 'intraday', worstCaseGapPct: null, score: 66, rationale: 'x', source: 'trigger',
         orderIds: [1, 2, 3], orderPermIds: null, plannedQuantity: null, model: 'anthropic:claude-sonnet-5', strategyFingerprint: 'abcdef123456',
-        strategyId: 'intraday', setupId: null, holdingHorizon: 'same-session', exitPolicyId: 'take-x', exitDeadline: null, deadlineClosedAt: null, detectorVersion: null, costToTargetPct: null, regime: null, note: null,
+        strategyId: 'intraday', setupId: null, holdingHorizon: 'same-session', exitPolicyId: 'take-x', exitDeadline: null, deadlineClosedAt: null, detectorVersion: null, costToTargetPct: null, laneRank: null, rankerVersion: null, regime: null, note: null,
         executedAt: T0 + 2000, entryFillPrice: 100, entryFilledAt: T0 + 3000, exitFillPrice: 106, exitReason: 'target', realizedPnl: 60, commissions: 2, closedAt: T0 + 3_600_000,
         keptOvernightAt: null, mfePct: null, maePct: null, extensionAtr: null, vwapDistPct: null, dayMovePct: null, minutesSinceOpen: null, takePct: 6, takePctSource: 'formula',
         postExitMfePct: null, postExitMaePct: null, takeCounterfactual: null, dailyAtrAtCreation: 4, triggerRank: 66, triggerBand: '60-74', autoExecuteAt: null, spreadDeferred: false,

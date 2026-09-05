@@ -14,7 +14,7 @@ const NOW = Date.UTC(2026, 8, 11, 21, 15, 0); // Friday 17:15 ET
 
 function row(over: Partial<CandidateRow> = {}): CandidateRow {
     return {
-        id: 1, day: '2026-09-10', lane: 'overnight', symbol: 'MU', direction: 'long', capturedAt: CAPTURED, source: 'opportunity-snapshot:pre-close@1', rank: 78,
+        id: 1, day: '2026-09-10', lane: 'overnight', symbol: 'MU', direction: 'long', capturedAt: CAPTURED, source: 'opportunity-snapshot:pre-close@1', rank: 78, rankerVersion: 'eod-continuation-v1',
         price: 100, dailyAtr: 3, dayMovePct: 4, eligible: true, reasons: [], levelsVersion: 'v1', entryType: 'MKT', entry: null, entryLimit: null, stop: 95.5, target: 104.5,
         exitDeadline: DEADLINE, detectorVersion: null, state: null, disposition: 'pending', dispositionRef: null, replayStatus: 'pending', barSource: null,
         fillAt: null, fillPrice: null, exitAt: null, exitPrice: null, outcome: null, gapPct: null, quantity: null, commissions: null, netUsd: null, netR: null,

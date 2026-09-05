@@ -32,6 +32,7 @@ import type { RiskRules } from '@/tools/ibkr/risk-rules.js';
 import { logger } from '@/utils';
 import { isMarketHoliday } from '@/utils/market-hours.js';
 import { laneExitDeadline } from './lane-contract.js';
+import { RANKER_VERSIONS } from './lane-rankers.js';
 import type { OpportunitySnapshot } from './opportunity-engine.js';
 import type { PatternScanSnapshot } from './pattern-scanner.js';
 import { formulaTakePct } from './proposal-risk-gate.js';
@@ -59,8 +60,11 @@ export interface CandidateRow {
     capturedAt: number;
     /** Where the row came from, with the source's own timestamp. */
     source: string;
-    /** compositeRank (overnight) or pattern score (cup). */
+    /** The lane's rank at capture: the overnight ranker's score (WP8), else
+     *  the composite; the pattern score for the cup lane. */
     rank: number | null;
+    /** REQ-DISC-003: which ranker produced `rank`. */
+    rankerVersion: string | null;
     /** Reference price observed at capture. */
     price: number;
     dailyAtr: number | null;
@@ -194,7 +198,7 @@ export interface CaptureContext {
     earnings: Map<string, boolean | null>;
 }
 
-function blankRow(base: Pick<CandidateRow, 'day' | 'lane' | 'symbol' | 'direction' | 'capturedAt' | 'source' | 'rank' | 'price' | 'dailyAtr' | 'dayMovePct' | 'eligible' | 'reasons'>): CandidateRow {
+function blankRow(base: Pick<CandidateRow, 'day' | 'lane' | 'symbol' | 'direction' | 'capturedAt' | 'source' | 'rank' | 'rankerVersion' | 'price' | 'dailyAtr' | 'dayMovePct' | 'eligible' | 'reasons'>): CandidateRow {
     return {
         ...base,
         levelsVersion: CANDIDATE_LEVELS_VERSION,
@@ -218,15 +222,22 @@ export function candidatesFromSnapshot(snapshot: OpportunitySnapshot, ctx: Captu
         if (!cur || o.compositeRank > cur.compositeRank) bySymbol.set(sym, o);
     }
     const rows: CandidateRow[] = [];
+    const lane = snapshot.lanes?.overnight ?? null;
     for (const [sym, o] of bySymbol) {
         const dailyAtr = ctx.dailyAtr.get(sym) ?? null;
         const verdict = overnightEligibility({
             symbol: sym, direction: o.direction, compositeRank: o.compositeRank, price: o.price, stale: o.stale,
             dayMovePct: o.dayMovePct, dailyAtr, earningsWithin2d: ctx.earnings.has(sym) ? (ctx.earnings.get(sym) ?? null) : null,
         }, ctx.rules);
+        // REQ-DISC-003: the lane's own score when the snapshot carries the
+        // lane ranking (WP8); an excluded or pre-WP8 row keeps the composite
+        // with its provenance — never a mixed cohort without a label.
+        const laneScore = lane?.ranked.find((r) => r.symbol.toUpperCase() === sym)?.score ?? null;
         const row = blankRow({
             day, lane: 'overnight', symbol: sym, direction: o.direction, capturedAt: ctx.capturedAt,
-            source: `opportunity-snapshot:${snapshot.phase}@${snapshot.timestamp}`, rank: o.compositeRank,
+            source: `opportunity-snapshot:${snapshot.phase}@${snapshot.timestamp}`,
+            rank: laneScore ?? o.compositeRank,
+            rankerVersion: laneScore !== null && lane ? lane.rankerVersion : RANKER_VERSIONS.intraday,
             price: o.price ?? 0, dailyAtr, dayMovePct: o.dayMovePct, eligible: verdict.eligible, reasons: verdict.reasons,
         });
         if (verdict.eligible && o.price !== null && dailyAtr !== null) {
@@ -254,8 +265,8 @@ export function candidatesFromPatternScan(scan: PatternScanSnapshot, ctx: Captur
         const verdict = cupEligibility({ scanRanAt: scan.ranAt, capturedAt: ctx.capturedAt, hasCup: true });
         const row = blankRow({
             day, lane: 'cup-and-handle', symbol: c.symbol.toUpperCase(), direction: 'long', capturedAt: ctx.capturedAt,
-            source: `pattern-scan@${scan.ranAt}`, rank: cup.score, price: c.close, dailyAtr: c.dailyAtr, dayMovePct: null,
-            eligible: verdict.eligible, reasons: verdict.reasons,
+            source: `pattern-scan@${scan.ranAt}`, rank: cup.score, rankerVersion: RANKER_VERSIONS['cup-and-handle'],
+            price: c.close, dailyAtr: c.dailyAtr, dayMovePct: null, eligible: verdict.eligible, reasons: verdict.reasons,
         });
         row.detectorVersion = cup.detectorVersion;
         row.state = cup.state;
@@ -346,6 +357,7 @@ async function getDb(): Promise<SqliteDatabase> {
             captured_at      INTEGER NOT NULL,
             source           TEXT NOT NULL,
             rank             REAL,
+            ranker_version   TEXT,
             price            REAL NOT NULL,
             daily_atr        REAL,
             day_move_pct     REAL,
@@ -383,12 +395,15 @@ async function getDb(): Promise<SqliteDatabase> {
         CREATE INDEX IF NOT EXISTS ix_candidates_lane_status ON candidates (lane, replay_status);
         CREATE INDEX IF NOT EXISTS ix_candidates_day ON candidates (day);
     `);
+    // WP8 column on a WP7 table: additive, idempotent (an archive created
+    // before the column existed gets it; SQLite refuses a duplicate add).
+    try { db.exec('ALTER TABLE candidates ADD COLUMN ranker_version TEXT'); } catch { /* already present */ }
     return db;
 }
 
 interface Row {
     id: number; day: string; lane: string; symbol: string; direction: string; captured_at: number; source: string; rank: number | null;
-    price: number; daily_atr: number | null; day_move_pct: number | null; eligible: number; reasons: string; levels_version: string;
+    ranker_version: string | null; price: number; daily_atr: number | null; day_move_pct: number | null; eligible: number; reasons: string; levels_version: string;
     entry_type: string; entry: number | null; entry_limit: number | null; stop: number | null; target: number | null; exit_deadline: number | null;
     detector_version: string | null; state: string | null; disposition: string; disposition_ref: string | null; replay_status: string;
     bar_source: string | null; fill_at: number | null; fill_price: number | null; exit_at: number | null; exit_price: number | null;
@@ -401,7 +416,7 @@ function fromRow(r: Row): CandidateRow {
     try { reasons = JSON.parse(r.reasons) as string[]; } catch { reasons = []; }
     return {
         id: r.id, day: r.day, lane: r.lane === 'cup-and-handle' ? 'cup-and-handle' : 'overnight', symbol: r.symbol,
-        direction: r.direction === 'short' ? 'short' : 'long', capturedAt: r.captured_at, source: r.source, rank: r.rank, price: r.price,
+        direction: r.direction === 'short' ? 'short' : 'long', capturedAt: r.captured_at, source: r.source, rank: r.rank, rankerVersion: r.ranker_version ?? null, price: r.price,
         dailyAtr: r.daily_atr, dayMovePct: r.day_move_pct, eligible: r.eligible === 1, reasons, levelsVersion: r.levels_version,
         entryType: r.entry_type === 'STP_LMT' ? 'STP_LMT' : 'MKT', entry: r.entry, entryLimit: r.entry_limit, stop: r.stop, target: r.target,
         exitDeadline: r.exit_deadline, detectorVersion: r.detector_version, state: r.state,
@@ -420,12 +435,12 @@ export async function insertCandidates(rows: CandidateRow[]): Promise<number> {
         const before = database.query<{ n: number }>(`SELECT COUNT(*) AS n FROM candidates WHERE day = ? AND lane = ? AND symbol = ?`).all(c.day, c.lane, c.symbol)[0]?.n ?? 0;
         if (before > 0) continue;
         database.query<void>(
-            `INSERT OR IGNORE INTO candidates (day, lane, symbol, direction, captured_at, source, rank, price, daily_atr, day_move_pct, eligible, reasons,
+            `INSERT OR IGNORE INTO candidates (day, lane, symbol, direction, captured_at, source, rank, ranker_version, price, daily_atr, day_move_pct, eligible, reasons,
                 levels_version, entry_type, entry, entry_limit, stop, target, exit_deadline, detector_version, state, disposition, disposition_ref,
                 replay_status, bar_source, fill_at, fill_price, exit_at, exit_price, outcome, gap_pct, quantity, commissions, net_usd, net_r, mfe_pct, mae_pct, replayed_at, note)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
-            c.day, c.lane, c.symbol, c.direction, c.capturedAt, c.source, c.rank, c.price, c.dailyAtr, c.dayMovePct, c.eligible ? 1 : 0, JSON.stringify(c.reasons),
+            c.day, c.lane, c.symbol, c.direction, c.capturedAt, c.source, c.rank, c.rankerVersion, c.price, c.dailyAtr, c.dayMovePct, c.eligible ? 1 : 0, JSON.stringify(c.reasons),
             c.levelsVersion, c.entryType, c.entry, c.entryLimit, c.stop, c.target, c.exitDeadline, c.detectorVersion, c.state, c.disposition, c.dispositionRef,
             c.replayStatus, c.barSource, c.fillAt, c.fillPrice, c.exitAt, c.exitPrice, c.outcome, c.gapPct, c.quantity, c.commissions, c.netUsd, c.netR, c.mfePct, c.maePct, c.replayedAt, c.note,
         );

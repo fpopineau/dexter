@@ -103,6 +103,10 @@ export interface RTrade {
      *  created before the contract existed. */
     strategyId: 'intraday' | 'overnight' | 'swing' | 'cup-and-handle' | 'earnings-bet' | 'legacy';
     score?: number | null;
+    /** REQ-DISC-003/004: the lane rank stamped at creation and its ranker —
+     *  rank→R is judged per lane, never pooled. */
+    laneRank?: number | null;
+    rankerVersion?: string | null;
 }
 
 /** REQ-SEQ-001: net USD over the planned risk at entry. Null = the basis is

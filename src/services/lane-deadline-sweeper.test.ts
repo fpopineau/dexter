@@ -9,7 +9,7 @@ function row(over: Partial<TradeProposal> = {}): TradeProposal {
         id: 'P-OVN1', createdAt: T0 - 20 * 3_600_000, expiresAt: T0 - 19 * 3_600_000, updatedAt: T0, status: 'executed', symbol: 'MU', direction: 'long',
         entryType: 'LMT', entry: 100, entryLimit: null, stop: 97, target: 106, quantity: 4, tif: 'GTC', tradeClass: 'swing', worstCaseGapPct: null, score: 66,
         rationale: 'x', source: 'cron:Pre-Close Review', orderIds: [1, 2, 3], orderPermIds: null, plannedQuantity: null, model: null, strategyFingerprint: null,
-        strategyId: 'overnight', setupId: 'eod-continuation', holdingHorizon: 'next-session', exitPolicyId: 'bracket+deadline', exitDeadline: T0, deadlineClosedAt: null, detectorVersion: null, costToTargetPct: null,
+        strategyId: 'overnight', setupId: 'eod-continuation', holdingHorizon: 'next-session', exitPolicyId: 'bracket+deadline', exitDeadline: T0, deadlineClosedAt: null, detectorVersion: null, costToTargetPct: null, laneRank: null, rankerVersion: null,
         regime: null, note: null, executedAt: T0 - 20 * 3_600_000, entryFillPrice: 100.1, entryFilledAt: T0 - 19.5 * 3_600_000, exitFillPrice: null, exitReason: null,
         realizedPnl: null, commissions: null, closedAt: null, keptOvernightAt: null, mfePct: null, maePct: null, extensionAtr: null, vwapDistPct: null, dayMovePct: null,
         minutesSinceOpen: null, takePct: null, takePctSource: null, postExitMfePct: null, postExitMaePct: null, takeCounterfactual: null, dailyAtrAtCreation: 4,

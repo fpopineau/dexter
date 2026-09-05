@@ -3443,3 +3443,146 @@ Plan decisions 1–6 (`docs/day2day/WP7-PLAN.md`) are implemented as written
 and await ratification at the review.
 
 Harness at landing: `bun test` 1102 pass (101 files), `tsc --noEmit` clean, Jest 1083 pass under Node. The read-only script runs without an archive ("no candidate archive yet").
+
+## Lane-conditional discovery and scoring (2026-09-05) — WP8
+
+Closes AUD-08 and the discovery half of AUD-07. One generic composite
+ranked every candidate for every consumer; the pre-close overnight
+selection read a list built for intraday momentum; the digest pooled the
+model's confidence scores across lanes; no chronological harness validated
+a ranking against outcomes independently of any weight choice. The
+intraday composite and the trigger bar are unchanged (ratified funnel).
+
+### Domain deltas
+
+- `src/services/lane-rankers.ts`: `RANKER_VERSIONS` (intraday
+  `composite-v1`, overnight `eod-continuation-v1`, cup `detector-v1`),
+  `scoreOvernight` / `rankOvernight` (pure), `buildSnapshotLanes`,
+  `laneRankFor(strategyId, symbol, sources)`.
+- `Opportunity.dailyAtrPct` (additive); `OpportunitySnapshot.lanes`
+  (additive, persisted in the snapshot JSON).
+- `opportunities` tool: `lane: "overnight"` returns the lane view.
+- Proposal columns `lane_rank REAL`, `ranker_version TEXT`; `RTrade.laneRank`
+  / `rankerVersion`; `LoopStatus.rankByLane` replaces `decile`.
+- `candidates.ranker_version` (WP7 archive) — the overnight row's rank is
+  the lane score when the snapshot carries lanes.
+- `scripts/validate-lane-ranker.ts`.
+
+### Requirements
+
+- REQ-DISC-001 (lane rankers, pure and versioned): the overnight ranker
+  `eod-continuation-v1` scores 0–100 = significance (0–40, |day move| /
+  daily ATR %, linear to 3×) + closing strength (0–20, price vs VWAP toward
+  the direction, linear to +2 %) + liquidity (0–20, log10 dollar volume,
+  $1M → 0, $100M → 20) + RVOL (0–20, linear to 3×); a stale, unpriced,
+  ATR-less, move-unknown or counter-move candidate is excluded (score
+  null) with the reason; a missing optional input scores 0 with a `note:`.
+  The intraday ranking is the engine's composite unchanged, named
+  `composite-v1`; the cup lane's is the detector score, `detector-v1`;
+  swing and earnings-bet have none.
+- REQ-DISC-002 (snapshot lanes): every snapshot carries `lanes.overnight`
+  (ranker version + the ranked rows, excluded rows last) over the same
+  scored candidates; the `opportunities` tool exposes it with `lane:
+  "overnight"` (factors, reasons, the composite as context only), and the
+  Pre-Close Review and the overnight skill read that view.
+- REQ-DISC-003 (provenance on proposals): at creation the tool resolves
+  the lane rank SERVER-SIDE — intraday: the trigger rank, else the latest
+  snapshot's composite; overnight: the latest snapshot's lane score; cup:
+  the pattern scan's cup score — and stamps `lane_rank` and
+  `ranker_version`; a symbol the ranker never saw gets a null rank with
+  the version recorded. The model cannot pass either. The epoch sample
+  carries both; the candidate archive's overnight rows take the lane score
+  and its version (the composite, labelled, when the snapshot predates
+  WP8 or the row was excluded).
+- REQ-DISC-004 (cohort-only comparability): the pooled "score deciles"
+  line is retired; the nightly status reports Spearman(lane rank, R) PER
+  LANE over the sample rows carrying a rank (the legacy lane from the
+  model's score, its only rank), with the ranker version, omitting lanes
+  with fewer than 5 pairs; never pooled across lanes.
+- REQ-DISC-005 (chronological validation): `scripts/validate-lane-ranker.ts`
+  gathers per lane every ranked outcome (closed ledger rows with a lane
+  rank; the settled overnight twins of the candidate archive), splits the
+  DAYS chronologically (first 60 % selection, last 40 % validation) and
+  reports on each half n, Spearman rank→R and the top-tercile-by-rank mean
+  R against the rest, with the ranker versions and the composite's weight
+  provenance; under 20 rows per half it says "insufficient"; it writes
+  nothing. A reweighting is earned only when the validation half agrees
+  with the selection half.
+- REQ-DISC-006 (flat sizing confidence): `sizing_half_mult` and
+  `sizing_low_mult` stay 1.0 on both profiles until REQ-DISC-005 shows a
+  lane's rank→R holds out of sample; the word "probability" is not used
+  for any lane score.
+
+### Invariants
+
+- A lane score is never compared to another lane's score, and never
+  enters a look, a ladder or a verdict.
+- The intraday composite and the trigger bar are unchanged by WP8 (the
+  fingerprint changes only through the additive `dailyAtrPct` field).
+- Provenance is stamped by the server; the model's inputs cannot set it.
+
+### Non-goals (WP8)
+
+New discovery scans (an intraday pullback lane needs its own scan family —
+the WP7 archive is where to measure it first); reweighting the scorer or
+the overnight ranker (the harness comes first); calibrated probabilities;
+a lane ranking for swing or earnings-bet.
+
+### Acceptance criteria
+
+- [x] factor pins, exclusions, ordering and per-lane provenance resolution (REQ-DISC-001/003)
+- [x] the snapshot carries the overnight lane and the tool exposes it (REQ-DISC-002)
+- [x] lane rank + ranker version persisted on proposals and carried into the sample (REQ-DISC-003)
+- [x] rank→R per lane, never pooled, in the digest and the scorecard (REQ-DISC-004)
+- [x] the harness runs read-only against the live data directory (REQ-DISC-005)
+- [x] sizing multipliers flat on both profiles (REQ-DISC-006)
+
+### Landed (2026-09-05) — WP8 precisions and traceability
+
+- REQ-DISC-001 precision: factor points are rounded to 0.1 and the score to
+  the unit; a short's closing strength is measured BELOW the VWAP (the
+  mirror). The ranker reads `Opportunity.dailyAtrPct`, the engine's own
+  significance denominator, so the lane score and the composite's move
+  term rest on one measure.
+- REQ-DISC-002 precision: `lanes` is built on every cycle whatever the
+  phase (cheap, pure) — the pre-close capture (WP7) reads the pre-close
+  snapshot's lane. A snapshot persisted before WP8 has no `lanes`; the
+  tool answers "call with action refresh" rather than ranking by the
+  composite under the lane's name.
+- REQ-DISC-003 precision: the trigger rank wins over the snapshot
+  composite for the intraday lane (a trigger-lane run knows the rank that
+  fired it); the cup lane reads the cup match's score even when a stronger
+  other pattern ranks the symbol (REQ-LANE-005 multi-match archive). The
+  candidate archive's `ranker_version` column is added to the WP7 table
+  with an idempotent ALTER (no archive exists yet in production).
+- REQ-DISC-004 precision: `rankByLane` runs over deployable AND shadow
+  rows (per lane), reports the most frequent ranker version among the
+  lane's ranked rows, and omits a lane under 5 pairs; the digest line
+  reads "Rank→R per lane (never pooled): …" or "n/a (fewer than 5 ranked
+  rows per lane)". `LoopStatus.decile` no longer exists (the scorecard's
+  print follows).
+- REQ-DISC-005 precision: R for ledger rows is (realized − commissions) /
+  (|fill − stop| × quantity); rows without a fill or a lane rank are out;
+  a ledger written before the WP8 migration is reported as such. Smoke-run
+  today: "no ranked outcomes yet", weight provenance printed from
+  `scorer-weights.json` (flat 0.25 ×4 with the rejected 2026-07-07
+  calibration on record).
+- REQ-DISC-006: verified by inspection — `sizing_half_mult` and
+  `sizing_low_mult` are 1.0 in `DEFAULT_RULES` and in the live profile.
+- Consumers: the Pre-Close Review message and `src/skills/overnight/SKILL.md`
+  § 4.1 read `opportunities` with lane "overnight". The Pre-Market Brief
+  and the trigger lane are unchanged.
+
+| REQ | Test |
+|---|---|
+| REQ-DISC-001 | `lane-rankers.test.ts` (factor pins at 2× ATR / +1 % VWAP / $100M / RVOL 2 → 70; caps → 100; short mirror; every exclusion reason; missing optional inputs) |
+| REQ-DISC-002 | `lane-rankers.test.ts` (`rankOvernight` order, excluded last; `buildSnapshotLanes` version); tool view by type |
+| REQ-DISC-003 | `lane-rankers.test.ts` (`laneRankFor`: trigger rank, composite fallback, lane score, cup score, swing/bet none, unseen symbol → null with version); `candidate-archive.test.ts` (lane score + version on the row, composite labelled for excluded/pre-WP8, cup `detector-v1`) |
+| REQ-DISC-004 | `loop/looks.test.ts` (`rankByLane`: +1 intraday, −1 overnight, legacy from score, swing omitted, < 5 pairs omitted); `loop/digest.test.ts` (the line) |
+| REQ-DISC-005 | `scripts/validate-lane-ranker.ts` smoke-run read-only |
+| REQ-DISC-006 | inspection (`DEFAULT_RULES`, `risk-rules.live.yaml`) |
+
+Plan decisions 1–6 (`docs/day2day/WP8-PLAN.md`) are implemented as written
+and await ratification at the review.
+
+Harness at landing: `bun test` 1110 pass (102 files), `tsc --noEmit` clean, Jest 1091 pass under Node; `scripts/validate-lane-ranker.ts` and `scripts/overnight-benchmark.ts` smoke-run read-only against the live data directory.

@@ -59,9 +59,24 @@ realtime stream (`ibkr-stream`, reconnect-safe).
 Starts/stops with the gateway when IBKR is configured; opt-out with
 `OPPORTUNITY_ENGINE=false`.
 
+**Lane rankings (WP8, 2026-09-05).** The composite is the INTRADAY lane's
+ranking (`composite-v1`; weight provenance = the scorer's `weightsSource`).
+Every snapshot also carries the overnight lane's own ranking
+(`src/services/lane-rankers.ts`, `eod-continuation-v1`: significance of the
+day move in daily-ATR units 0–40, closing strength vs VWAP toward the
+direction 0–20, liquidity by dollar volume 0–20, RVOL 0–20; stale, unpriced,
+ATR-less, counter-move or move-unknown names are excluded with the reason).
+The cup lane keeps the detector score (`detector-v1`). Every proposal gets its
+lane rank and ranker version stamped SERVER-SIDE at creation (`lane_rank`,
+`ranker_version`; intraday = the trigger rank); the nightly digest reports
+rank→R per lane, never pooled; `scripts/validate-lane-ranker.ts` is the
+chronological (selection / validation days) pass any reweighting must clear.
+
 ### Agent tools (registered when IBKR is configured)
 - **`opportunities`** — `latest` (cached snapshot) / `refresh` (run a cycle,
-  ~30–60 s). Advisory; snapshots taken while the market is closed carry
+  ~30–60 s); `lane: "overnight"` returns the overnight lane's own ranking
+  with factors and exclusion reasons (the Pre-Close Review reads it).
+  Advisory; snapshots taken while the market is closed carry
   `marketOpen=false`.
 - **`trade_proposals`** — `create` / `list` / `get` / `reject` /
   `performance`. Creating a proposal NEVER trades: it persists a record in

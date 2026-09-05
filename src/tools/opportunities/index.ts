@@ -30,6 +30,10 @@ Each opportunity carries: symbol, direction (long/short), signalScore (0-100 mul
 compositeRank (signal + RVOL bonus + multi-scanner presence), price, RVOL, ATR, RSI, VWAP,
 and which scanners surfaced it. Entries are sorted by compositeRank descending.
 
+Pass lane "overnight" to get the overnight lane's OWN ranking (EOD continuation: significance in
+ATR units, closing strength vs VWAP, liquidity, RVOL — excluded names carry their reason). Lane
+scores are comparable only inside their lane; the composite is intraday's ranking.
+
 Use 'latest' first; only 'refresh' if the snapshot is missing or stale (>15 min during market
 hours). Snapshots taken while the market is closed carry marketOpen=false — treat their data
 as stale context, not live signals. This tool is advisory and never places orders.
@@ -50,7 +54,47 @@ const OpportunitiesSchema = z.object({
         .max(25)
         .default(10)
         .describe('Maximum number of ranked opportunities to return. Defaults to 10.'),
+    lane: z
+        .enum(['overnight'])
+        .optional()
+        .describe("WP8: return the LANE's own ranking instead of the intraday composite — 'overnight' = the EOD-continuation ranking (significance in ATR units, closing strength vs VWAP, liquidity, RVOL; excluded names carry their reason). Use it for the pre-close overnight selection."),
 });
+
+/** REQ-DISC-002: the lane view — the same candidates, the lane's ranker. */
+function laneView(snapshot: OpportunitySnapshot, lane: 'overnight', limit: number) {
+    const l = snapshot.lanes?.[lane];
+    if (!l) {
+        return { error: `this snapshot carries no '${lane}' lane ranking (taken before WP8) — call with action "refresh"` };
+    }
+    const bySymbol = new Map(snapshot.opportunities.map((o) => [o.symbol, o]));
+    return {
+        timestamp: new Date(snapshot.timestamp).toISOString(),
+        ageSeconds: Math.round((Date.now() - snapshot.timestamp) / 1000),
+        phase: snapshot.phase,
+        marketOpen: snapshot.marketOpen,
+        lane,
+        rankerVersion: l.rankerVersion,
+        note: 'lane scores are comparable only inside this lane; the composite is shown for context, not for ranking',
+        ranked: l.ranked.slice(0, limit).map((r, i) => {
+            const o = bySymbol.get(r.symbol);
+            return {
+                rank: i + 1,
+                symbol: r.symbol,
+                direction: r.direction,
+                laneScore: r.score,
+                factors: r.factors,
+                reasons: r.reasons,
+                compositeRank: r.compositeRank,
+                price: o?.price ?? null,
+                dayMovePct: o?.dayMovePct ?? null,
+                dailyAtrPct: o?.dailyAtrPct ?? null,
+                vwap: o?.vwap ?? null,
+                rvol: o?.rvol ?? null,
+                dollarVolume: o?.dollarVolume ?? null,
+            };
+        }),
+    };
+}
 
 function trim(snapshot: OpportunitySnapshot, limit: number) {
     // News-pulse annotation (visibility only — never a scoring input): a
@@ -107,7 +151,7 @@ export function createOpportunitiesTool() {
             }
             if (action === 'refresh') {
                 const snapshot = await runCycleOnce();
-                return formatToolResult(trim(snapshot, input.limit));
+                return formatToolResult(input.lane ? laneView(snapshot, input.lane, input.limit) : trim(snapshot, input.limit));
             }
             const snapshot = getLatestSnapshot();
             if (!snapshot) {
@@ -120,7 +164,7 @@ export function createOpportunitiesTool() {
                         : 'The Opportunity Engine is not running (it starts with the gateway). Call with action "refresh" to run one cycle now.',
                 });
             }
-            return formatToolResult(trim(snapshot, input.limit));
+            return formatToolResult(input.lane ? laneView(snapshot, input.lane, input.limit) : trim(snapshot, input.limit));
         },
     });
 }

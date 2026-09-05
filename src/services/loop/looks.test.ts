@@ -175,3 +175,30 @@ describe('shadowLines (REQ-SEQ-006)', () => {
         expect(lines.find((l) => l.variant === 'weights-calibrated')?.status).toMatch(/inactive/);
     });
 });
+
+describe('rankByLane (REQ-DISC-004 — rank→R per lane, never pooled)', () => {
+    test('each lane correlates its own rank with R; the legacy lane uses the model score; lanes under 5 pairs are omitted', async () => {
+        const { rankByLane } = await import('./looks.js');
+        const row = (strategyId: RTrade['strategyId'], laneRank: number | null, netR: number, extra: Partial<RTrade> = {}): RTrade => ({
+            id: `${strategyId}-${laneRank}-${netR}`, entryDay: '2026-09-10', closedAt: T0, netR, netUsd: netR * 30, band: '60-74', tradeClass: 'intraday',
+            strategyId, laneRank, rankerVersion: laneRank === null ? null : strategyId === 'overnight' ? 'eod-continuation-v1' : 'composite-v1', ...extra,
+        });
+        const rows: RTrade[] = [
+            // intraday: rank and R move together
+            row('intraday', 60, -1), row('intraday', 65, -0.5), row('intraday', 70, 0.2), row('intraday', 75, 0.8), row('intraday', 80, 1.5),
+            // overnight: inverse — must NOT be averaged away by pooling with intraday
+            row('overnight', 90, -1), row('overnight', 80, -0.4), row('overnight', 70, 0.1), row('overnight', 60, 0.9), row('overnight', 50, 1.2),
+            // legacy: only the model score exists
+            row('legacy', null, -0.5, { score: 60 }), row('legacy', null, 0.1, { score: 65 }), row('legacy', null, 0.4, { score: 70 }), row('legacy', null, 0.9, { score: 75 }), row('legacy', null, 1.1, { score: 80 }),
+            // swing: no rank → omitted
+            row('swing', null, 1),
+        ];
+        const lines = rankByLane(rows);
+        expect(lines.map((l) => [l.strategyId, l.rankerVersion, l.n])).toEqual([['intraday', 'composite-v1', 5], ['overnight', 'eod-continuation-v1', 5], ['legacy', 'score', 5]]);
+        expect(lines[0].rho).toBeCloseTo(1, 6);
+        expect(lines[1].rho).toBeCloseTo(-1, 6);
+        expect(lines[2].rho).toBeCloseTo(1, 6);
+        // four intraday pairs → omitted
+        expect(rankByLane(rows.filter((r) => r.strategyId === 'intraday').slice(0, 4))).toEqual([]);
+    });
+});

@@ -70,8 +70,47 @@ export interface LoopStatus {
     lanes: Array<{ strategyId: RTrade['strategyId']; stats: RunningStats }>;
     drawdown: { epochNetLiq: number; minNetLiq: number; pct: number; samples: number } | null;
     anomalies: string[];
-    decile: { rho: number; p: number; n: number } | null;
+    /** REQ-DISC-004: rank→R per lane from the lane rank — NEVER pooled
+     *  across lanes (the pooled "score deciles" line is retired). */
+    rankByLane: LaneRankLine[];
     stoppedThisPass: string | null;
+}
+
+export interface LaneRankLine {
+    strategyId: RTrade['strategyId'];
+    rankerVersion: string | null;
+    rho: number;
+    p: number;
+    n: number;
+}
+
+/** Fewer pairs than this and a rank correlation says nothing. */
+export const MIN_RANK_PAIRS = 5;
+
+/** REQ-DISC-004: Spearman(rank, R) per lane over the rows carrying a lane
+ *  rank; the legacy lane (no ranker) uses the model's score, its only
+ *  rank. Lanes with fewer than MIN_RANK_PAIRS pairs are omitted. */
+export function rankByLane(trades: RTrade[]): LaneRankLine[] {
+    const order: RTrade['strategyId'][] = ['intraday', 'overnight', 'swing', 'cup-and-handle', 'earnings-bet', 'legacy'];
+    const out: LaneRankLine[] = [];
+    for (const strategyId of order) {
+        const rows = trades.filter((t) => t.strategyId === strategyId);
+        const pairs: Array<[number, number]> = [];
+        const versions = new Map<string, number>();
+        for (const t of rows) {
+            const rank = strategyId === 'legacy' ? t.score ?? null : t.laneRank ?? null;
+            if (rank === null || rank === undefined) continue;
+            pairs.push([rank, t.netR]);
+            const v = strategyId === 'legacy' ? 'score' : t.rankerVersion ?? 'unknown';
+            versions.set(v, (versions.get(v) ?? 0) + 1);
+        }
+        if (pairs.length < MIN_RANK_PAIRS) continue;
+        const s = spearman(pairs);
+        if (!s) continue;
+        const rankerVersion = [...versions.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+        out.push({ strategyId, rankerVersion, rho: s.rho, p: s.p, n: s.n });
+    }
+    return out;
 }
 
 export interface LooksDeps {
@@ -133,7 +172,7 @@ export async function runNightlyLooks(deps: LooksDeps): Promise<LoopStatus> {
     const base: LoopStatus = {
         at: deps.now, epoch: rec, constantsOk: true, sample: null, shadowSample: null, openInCohort: 0, looksThisPass: [],
         band: null, shadow: [], ladder: { state: ladderState, rung, ceilingPct, effectivePct: Math.min(rung, ceilingPct), eligibility: null },
-        models: [], lanes: [], drawdown: null, anomalies: [], decile: null, stoppedThisPass: null,
+        models: [], lanes: [], drawdown: null, anomalies: [], rankByLane: [], stoppedThisPass: null,
     };
     if (!rec) {
         base.anomalies.push('no epoch started — `epoch new` opens epoch 1 (the looks evaluate nothing until then)');
@@ -208,7 +247,6 @@ export async function runNightlyLooks(deps: LooksDeps): Promise<LoopStatus> {
     recordStepUpEligibility(eligibility, deps.now, deps.dataDir);
 
     const simRows = await deps.listSimRows(rec.startedAt);
-    const decilePairs = sample.trades.filter((t) => t.score != null).map((t) => [t.score as number, t.netR] as [number, number]);
 
     return {
         ...base,
@@ -225,7 +263,8 @@ export async function runNightlyLooks(deps: LooksDeps): Promise<LoopStatus> {
         lanes: laneStats([...sample.trades, ...sample.shadowTrades]),
         drawdown,
         anomalies,
-        decile: spearman(decilePairs),
+        // REQ-DISC-004: per lane over every sample row (deployable + shadow), never pooled.
+        rankByLane: rankByLane([...sample.trades, ...sample.shadowTrades]),
         stoppedThisPass,
     };
 }

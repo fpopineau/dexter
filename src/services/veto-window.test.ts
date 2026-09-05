@@ -7,7 +7,7 @@ function due(id: string, at: number): TradeProposal {
         id, createdAt: at - 60_000, expiresAt: at + 3600_000, updatedAt: at, status: 'open', symbol: id.slice(2), direction: 'long',
         entryType: 'LMT', entry: 20, entryLimit: null, stop: 19, target: 22, quantity: 10, tif: 'DAY', tradeClass: 'intraday',
         worstCaseGapPct: null, score: 65, rationale: 'x', source: 'trigger', orderIds: null, orderPermIds: null,
-        plannedQuantity: null, model: null, strategyFingerprint: null, strategyId: null, setupId: null, holdingHorizon: null, exitPolicyId: null, exitDeadline: null, deadlineClosedAt: null, detectorVersion: null, costToTargetPct: null, regime: null, note: null, executedAt: null, entryFillPrice: null, entryFilledAt: null,
+        plannedQuantity: null, model: null, strategyFingerprint: null, strategyId: null, setupId: null, holdingHorizon: null, exitPolicyId: null, exitDeadline: null, deadlineClosedAt: null, detectorVersion: null, costToTargetPct: null, laneRank: null, rankerVersion: null, regime: null, note: null, executedAt: null, entryFillPrice: null, entryFilledAt: null,
         exitFillPrice: null, exitReason: null, realizedPnl: null, commissions: null, closedAt: null, keptOvernightAt: null,
         mfePct: null, maePct: null, extensionAtr: null, vwapDistPct: null, dayMovePct: null, minutesSinceOpen: null,
         takePct: null, takePctSource: null, postExitMfePct: null, postExitMaePct: null, takeCounterfactual: null,

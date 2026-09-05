@@ -126,7 +126,10 @@ export function buildStatusSection(inp: DigestInputs): string[] {
     // REQ-LANE-006: one line per lane with rows (the verdict stays on the deployable sample).
     if (st.lanes.length) lines.push(`Lanes: ${st.lanes.map((l) => `${l.strategyId} n ${l.stats.n} ΣR ${num(l.stats.sumR)} PF ${num(l.stats.profitFactor)}`).join(' · ')}`);
     if (st.models.length) lines.push(`Judgment: ${st.models.join(', ')}`);
-    lines.push(`Score deciles: ${st.decile ? `Spearman rho ${st.decile.rho.toFixed(2)} (p ${st.decile.p.toFixed(3)}, n ${st.decile.n})` : 'n/a'}`);
+    // REQ-DISC-004: rank→R per lane, provenance shown, never pooled.
+    lines.push(`Rank→R per lane (never pooled): ${st.rankByLane.length
+        ? st.rankByLane.map((l) => `${l.strategyId} ${l.rankerVersion ?? '?'} rho ${l.rho.toFixed(2)} (p ${l.p.toFixed(3)}, n ${l.n})`).join(' · ')
+        : 'n/a (fewer than 5 ranked rows per lane)'}`);
     if (e.promotionPending) lines.push(`Promotion pending: ${e.promotionPending.variant} — apply the change, restart, 'epoch new'`);
     for (const a of st.anomalies) lines.push(`⚠ ${a}`);
     return lines;

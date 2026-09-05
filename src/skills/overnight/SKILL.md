@@ -118,9 +118,12 @@ when candidates qualify, not only an action plan. Two lanes, both inside
 the 15:00–16:00 window:
 
 ### 4.1 Overnight Setups (at most 2) — the OVERNIGHT lane
-From the opportunities snapshot and the watchlist: candidates whose move
-has a stated reason to survive the night (catalyst, pattern
-continuation). Prefer lower-ATR names; check `earnings_calendar`
+From the `opportunities` tool called with lane "overnight" — the lane's
+OWN ranking (EOD continuation: significance in ATR units, closing
+strength vs VWAP, liquidity, RVOL; an excluded name carries its reason;
+a lane score compares only inside this lane, the intraday composite is
+context) — and the watchlist: candidates whose move has a stated reason
+to survive the night (catalyst, pattern continuation). Prefer lower-ATR names; check `earnings_calendar`
 (withinDays 2) and `event_risk` (macro binaries) first. Register with
 `trade_proposals`: `strategyId` "overnight", `setupId` (e.g.
 "eod-continuation"), `tif` "GTC" so the exits survive the close, quantity

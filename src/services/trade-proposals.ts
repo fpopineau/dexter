@@ -94,6 +94,9 @@ export interface TradeProposal {
     detectorVersion: string | null;
     /** REQ-SIZE-003: estimated round-trip cost / gross gain at target (%), at creation. */
     costToTargetPct: number | null;
+    /** REQ-DISC-003: the lane's rank for the symbol at creation (server-side) and its ranker. */
+    laneRank: number | null;
+    rankerVersion: string | null;
     /** Market-regime tag at creation (protocol breadth criterion). */
     regime: string | null;
     /** Failure or rejection detail. */
@@ -559,6 +562,10 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     // WP6 (REQ-SIZE-003): estimated round-trip cost as % of the gross gain
     // at target, at creation — the cost dimension the ledger lacked.
     ['cost_to_target_pct', 'REAL'],
+    // WP8 (REQ-DISC-003): the lane rank stamped server-side and its
+    // ranker version — scores compare only inside a lane.
+    ['lane_rank', 'REAL'],
+    ['ranker_version', 'TEXT'],
 ];
 
 /** Replay/instrumentation columns added after the refusals-table release. */
@@ -637,6 +644,8 @@ interface Row {
     deadline_closed_at: number | null;
     detector_version: string | null;
     cost_to_target_pct: number | null;
+    lane_rank: number | null;
+    ranker_version: string | null;
     regime: string | null;
     note: string | null;
     executed_at: number | null;
@@ -700,6 +709,8 @@ function fromRow(r: Row): TradeProposal {
         deadlineClosedAt: r.deadline_closed_at ?? null,
         detectorVersion: r.detector_version ?? null,
         costToTargetPct: r.cost_to_target_pct ?? null,
+        laneRank: r.lane_rank ?? null,
+        rankerVersion: r.ranker_version ?? null,
         regime: r.regime ?? null,
         note: r.note,
         executedAt: r.executed_at ?? null,
@@ -765,6 +776,9 @@ export interface CreateProposalInput {
     detectorVersion?: string | null;
     /** REQ-SIZE-003: the creation-time cost-to-target estimate (%). */
     costToTargetPct?: number | null;
+    /** REQ-DISC-003: lane rank + ranker version, resolved server-side. */
+    laneRank?: number | null;
+    rankerVersion?: string | null;
     /** Take-at-x% override (WP-EXIT): the model's x within the take band;
      *  omitted = the ATR formula. Gate-validated, then stamped. */
     takePct?: number;
@@ -916,8 +930,8 @@ export async function createProposal(
           entry, entry_limit, stop, target, quantity, tif, trade_class, worst_case_gap_pct,
           score, rationale, source, order_ids, note,
           extension_atr, vwap_dist_pct, day_move_pct, minutes_since_open,
-          strategy_id, setup_id, holding_horizon, exit_policy_id, detector_version, cost_to_target_pct)
-         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          strategy_id, setup_id, holding_horizon, exit_policy_id, detector_version, cost_to_target_pct, lane_rank, ranker_version)
+         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
         id, now, expiry, now,
         input.symbol.trim().toUpperCase(), input.direction, input.entryType,
@@ -928,7 +942,7 @@ export async function createProposal(
         input.entryContext?.extensionAtr ?? null, input.entryContext?.vwapDistPct ?? null,
         input.entryContext?.dayMovePct ?? null, input.entryContext?.minutesSinceOpen ?? null,
         lane.contract.strategyId, lane.contract.setupId, lane.contract.holdingHorizon, lane.contract.exitPolicyId,
-        input.detectorVersion ?? null, input.costToTargetPct ?? null,
+        input.detectorVersion ?? null, input.costToTargetPct ?? null, input.laneRank ?? null, input.rankerVersion ?? null,
     );
 
     // Judgment-purity stamp (review 2026-08-21): record which model

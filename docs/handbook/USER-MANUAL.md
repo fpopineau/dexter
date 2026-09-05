@@ -421,6 +421,18 @@ creation gate by construction; the acceptance gate re-checks with fresh
 broker marks and refuses on drift. Nothing ever resizes a proposal after
 acceptance.
 
+**Lane rankings (2026-09-05):** a score compares only inside its lane. The
+scanner's composite is the intraday ranking; the pre-close overnight
+selection reads the `opportunities` tool with lane "overnight" (EOD
+continuation: significance in ATR units, closing strength vs VWAP,
+liquidity, RVOL, with exclusion reasons); the cup lane keeps its detector
+score. Each proposal records its lane rank and the ranker version that
+produced it, stamped by the server. The nightly digest's "Rank→R per lane"
+line replaces the old pooled score deciles; `bun run
+scripts/validate-lane-ranker.ts` is the chronological check (selection
+days vs validation days) that any change to a ranker's weights must pass
+first. Sizing confidence stays flat.
+
 Swings and earnings bets require GTC brackets and a `company-snapshot`
 card; earnings bets additionally require the `earnings_bet_intel`
 evidence bar (≥8 prints, ≥75% consistency, ≥1 external signal) and are

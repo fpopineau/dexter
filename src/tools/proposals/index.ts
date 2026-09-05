@@ -209,12 +209,22 @@ export function createTradeProposalsTool() {
                             : undefined;
 
                         // REQ-LANE-005: the detector version of a pattern lane.
+                        // REQ-DISC-003 (WP8): the lane rank and its ranker, resolved
+                        // SERVER-SIDE from the run context, the latest snapshot and
+                        // the pattern scan — the model never passes a rank.
+                        const { getLatestPatternScan } = await import('@/services/pattern-scanner.js');
+                        const { getLatestSnapshot } = await import('@/services/opportunity-engine.js');
+                        const { laneRankFor } = await import('@/services/lane-rankers.js');
+                        const patternScan = getLatestPatternScan();
                         let detectorVersion: string | null = null;
                         if (lane.strategyId === 'cup-and-handle') {
-                            const { getLatestPatternScan } = await import('@/services/pattern-scanner.js');
-                            const snap = getLatestPatternScan();
-                            detectorVersion = snap?.candidates.find((c) => c.symbol.toUpperCase() === input.symbol.toUpperCase())?.detectorVersion ?? snap?.detectorVersion ?? null;
+                            detectorVersion = patternScan?.candidates.find((c) => c.symbol.toUpperCase() === input.symbol.toUpperCase())?.detectorVersion ?? patternScan?.detectorVersion ?? null;
                         }
+                        const provenance = laneRankFor(lane.strategyId, input.symbol, {
+                            triggerRank: currentTriggerRank(),
+                            snapshot: getLatestSnapshot(),
+                            patternScan,
+                        });
 
                         // WP6 (REQ-SIZE-001): the book context — the SAME
                         // sums the acceptance gate reads, built from the
@@ -322,6 +332,8 @@ export function createTradeProposalsTool() {
                             setupId: input.setupId,
                             detectorVersion,
                             costToTargetPct,
+                            laneRank: provenance.laneRank,
+                            rankerVersion: provenance.rankerVersion,
                             takePct: input.takePct,
                             worstCaseGapPct: input.worstCaseGapPct,
                             score: input.score,

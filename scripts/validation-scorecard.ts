@@ -106,7 +106,7 @@ if (process.argv.includes('--look')) {
         if (st.band) console.log(`band '${st.band.band}': n ${st.band.n}, net $${st.band.netUsd.toFixed(2)}, PF ${f(st.band.profitFactor, 2)} — bar ${st.band.barMet === null ? 'not yet judged (n < 20)' : st.band.barMet ? 'MET' : 'NOT MET (blocks ACCEPT)'}`);
         if (st.drawdown) console.log(`drawdown from epoch: ${st.drawdown.pct.toFixed(2)}% (min $${st.drawdown.minNetLiq.toFixed(0)} over ${st.drawdown.samples} samples; hard stop −5%)`);
         console.log(`ladder: rung ${st.ladder.rung}%${st.ladder.eligibility ? ` — ${st.ladder.eligibility.eligible ? `STEP-UP to ${st.ladder.eligibility.nextRung}% ELIGIBLE (${st.ladder.eligibility.reason})` : `next ${st.ladder.eligibility.nextRung ?? '—'}% at n ≥ ${st.ladder.eligibility.milestone ?? '—'} (${st.ladder.eligibility.reason})`}` : ''}`);
-        console.log(`score deciles: ${st.decile ? `Spearman rho ${st.decile.rho.toFixed(3)} p ${st.decile.p.toFixed(3)} n ${st.decile.n}` : 'n/a'}`);
+        console.log(`rank→R per lane (never pooled): ${st.rankByLane.length ? st.rankByLane.map((l) => `${l.strategyId} ${l.rankerVersion ?? '?'} rho ${l.rho.toFixed(3)} p ${l.p.toFixed(3)} n ${l.n}`).join(' · ') : 'n/a'}`);
         console.log('shadow vs incumbent:');
         for (const s of st.shadow) {
             console.log(`  ${s.variant}: ${s.status !== 'active' ? s.status : s.summary ? `n ${s.summary.n} (${s.summary.days}d) ΣR ${f(s.summary.sumR, 2)} meanR ${f(s.summary.meanR)}${s.diff ? ` · daily ΔR LCB ${f(s.diff.lcb)} median ${f(s.diff.median)}` : ''}${s.candidate ? ' · PROMOTION CANDIDATE' : ''}` : 'no rows'}`);

@@ -9,7 +9,7 @@ function proposal(overrides: Partial<TradeProposal> = {}): TradeProposal {
     return {
         id: 'P-0001', createdAt: T0, expiresAt: T0 + 1, updatedAt: T0, status: 'closed', symbol: 'MU', direction: 'long', entryType: 'LMT', entry: 100,
         entryLimit: null, stop: 97, target: 106, quantity: 10, tif: 'DAY', tradeClass: 'intraday', worstCaseGapPct: null, score: 66, rationale: 'x', source: 'trigger',
-        orderIds: [1, 2, 3], orderPermIds: null, plannedQuantity: null, model: null, strategyFingerprint: null, strategyId: null, setupId: null, holdingHorizon: null, exitPolicyId: null, exitDeadline: null, deadlineClosedAt: null, detectorVersion: null, costToTargetPct: null, regime: null, note: null, executedAt: T0, entryFillPrice: 100.05, entryFilledAt: T0 + 60_000,
+        orderIds: [1, 2, 3], orderPermIds: null, plannedQuantity: null, model: null, strategyFingerprint: null, strategyId: null, setupId: null, holdingHorizon: null, exitPolicyId: null, exitDeadline: null, deadlineClosedAt: null, detectorVersion: null, costToTargetPct: null, laneRank: null, rankerVersion: null, regime: null, note: null, executedAt: T0, entryFillPrice: 100.05, entryFilledAt: T0 + 60_000,
         exitFillPrice: 106, exitReason: 'target', realizedPnl: 59.5, commissions: 2, closedAt: T0 + 3_600_000, keptOvernightAt: null, mfePct: null, maePct: null,
         extensionAtr: null, vwapDistPct: null, dayMovePct: null, minutesSinceOpen: null, takePct: 6, takePctSource: 'formula', postExitMfePct: null, postExitMaePct: null,
         takeCounterfactual: null, dailyAtrAtCreation: 4, triggerRank: 66, triggerBand: '60-74', autoExecuteAt: null, spreadDeferred: false, ...overrides,
@@ -33,7 +33,7 @@ const status: LoopStatus = {
         { strategyId: 'overnight', stats: { n: 2, days: 2, sumR: -0.4, meanR: -0.2, profitFactor: 0.5, netUsd: -12, netUsdCostsDoubled: null, nextLook: 25, informational: true } },
     ],
     drawdown: { epochNetLiq: 12_000, minNetLiq: 11_880, pct: -1, samples: 300 },
-    decile: { rho: 0.12, p: 0.4, n: 7 },
+    rankByLane: [{ strategyId: 'intraday', rankerVersion: 'composite-v1', rho: 0.12, p: 0.4, n: 7 }],
 };
 
 const inputs: DigestInputs = {
@@ -86,7 +86,7 @@ describe('loop digest (REQ-DIGEST-001..005)', () => {
         expect(st.some((l) => l.includes('Ladder: rung 0.25%') && l.includes('effective risk 0.25% (ceiling 0.5%)') && l.includes('n ≥ 25'))).toBe(true);
         expect(st.some((l) => l.startsWith('Judgment: anthropic:claude-sonnet-5'))).toBe(true);
         expect(st.some((l) => l.startsWith('Lanes: intraday n 7') && l.includes('overnight n 2'))).toBe(true);
-        expect(st.some((l) => l.includes('Spearman rho 0.12'))).toBe(true);
+        expect(st.some((l) => l.startsWith('Rank→R per lane (never pooled): intraday composite-v1 rho 0.12'))).toBe(true);
     });
 
     test('WhatsApp format caps each section at 12 lines and points to the dashboard for the rest', () => {
