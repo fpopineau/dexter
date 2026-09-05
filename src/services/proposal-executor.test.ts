@@ -587,6 +587,12 @@ describe('REQ-LIVE-006: on a live account the disabled classes are sim-only (nev
             // On the live profile the class gate refuses a NEW swing row outright.
             await expect(createProposal({ symbol: 'SWNH', direction: 'long', entryType: 'LMT', entry: 100, stop: 97.5, target: 106, quantity: 10, score: 70, rationale: 'live swing 2', source: 'test', tradeClass: 'swing' }, ATR_CTX))
                 .rejects.toThrow(/swing class is disabled/);
+            // AUD-10: with NO epoch file the live verdict refuses — absent is not running.
+            const noEpoch = await autoExecuteProposal(swing.id);
+            expect(noEpoch.ok).toBe(false);
+            expect(noEpoch.message).toMatch(/no RUNNING epoch/);
+            expect((await getProposal(swing.id))?.status).toBe('open');
+            writeFileSync(join(dir, 'epoch-state.json'), JSON.stringify({ id: 'epoch-1', startedAt: 1, fingerprint: 'fp', status: 'running' }));
             const out = await autoExecuteProposal(swing.id);
             expect(out.ok).toBe(false);
             expect(out.message).toContain('sim-only');
@@ -596,6 +602,7 @@ describe('REQ-LIVE-006: on a live account the disabled classes are sim-only (nev
             expect((await listRefusalsSince(since)).some((r) => r.symbol === 'SWNG' && r.reason.includes('sim-only'))).toBe(true);
         } finally {
             rmSync(join(dir, 'live-switch.json'), { force: true });
+            rmSync(join(dir, 'epoch-state.json'), { force: true });
             __setManagedAccountsForTests([]);
             setAccountProfile('paper');
             if (prevAllow === undefined) delete process.env.IBKR_ALLOW_LIVE; else process.env.IBKR_ALLOW_LIVE = prevAllow;

@@ -37,6 +37,9 @@ export interface OperatorDeps {
     /** REQ-LADDER-003 / REQ-LIVE-006: on a live account the cutover epoch
      *  always restarts at the bottom rung — `carry` is refused. */
     liveAccount: () => boolean;
+    /** The ratified per-trade ceiling (%): a rung above it is never applied
+     *  (AUD-09 — effective risk is min(rung, ceiling)). */
+    ceilingPct: () => number;
 }
 
 export interface LoopOperator {
@@ -63,12 +66,12 @@ export function createOperator(deps: OperatorDeps): LoopOperator {
             const status = await deps.looks();
             const el = status.ladder.eligibility;
             if (!el || !el.eligible || el.nextRung === null) {
-                return `⛔ ladder step-up not available: ${el?.reason ?? 'no evidence'}.\n${ladderStatusLine(deps.dataDir, el)}`;
+                return `⛔ ladder step-up not available: ${el?.reason ?? 'no evidence'}.\n${ladderStatusLine(deps.dataDir, el, deps.ceilingPct())}`;
             }
             if (!confirm) {
                 arm('ladder up');
                 return [
-                    `📈 Ladder step-up ELIGIBLE: rung ${status.ladder.rung}% → ${el.nextRung}% (${el.reason}).`,
+                    `📈 Ladder step-up ELIGIBLE: rung ${status.ladder.rung}% → ${el.nextRung}% (${el.reason}). Effective risk after the step: ${Math.min(el.nextRung, deps.ceilingPct())}% (ceiling ${deps.ceilingPct()}%).`,
                     `Evidence: n ${status.sample?.n ?? 0}, ΣR ${status.sample?.sumR.toFixed(2) ?? '—'}, PF ${status.sample && Number.isFinite(status.sample.profitFactor) ? status.sample.profitFactor.toFixed(2) : '—'}, epoch ${status.epoch?.id ?? '—'} ${status.epoch?.status ?? ''}.`,
                     `After the step the automatic step-down arms at −5% of the marked NetLiq. Reply 'ladder up confirm' within ${CONFIRM_TTL_MS / 60_000} min to apply.`,
                 ].join('\n');
@@ -77,7 +80,7 @@ export function createOperator(deps: OperatorDeps): LoopOperator {
             const markedNetLiq = await deps.netLiqUsd();
             const r = stepUp({
                 now: deps.now(), dataDir: deps.dataDir, journal: deps.journal, markedNetLiq,
-                evidence: { n: status.sample?.n ?? 0, sumR: status.sample?.sumR ?? 0, stopActive: status.epoch?.status === 'stopped' },
+                evidence: { n: status.sample?.n ?? 0, sumR: status.sample?.sumR ?? 0, stopActive: status.epoch?.status === 'stopped', ceilingPct: deps.ceilingPct() },
             });
             return r.message;
         },
@@ -149,17 +152,19 @@ let liveOperator: LoopOperator | null = null;
  *  pull the broker layer, which unit tests never touch). */
 export async function liveLoopOperator(): Promise<LoopOperator> {
     if (liveOperator) return liveOperator;
-    const [{ getNetLiquidation }, { strategyFingerprint }, { setPerformanceBaseline }, { appendJournalLine }, nightly, { getManagedAccounts, isLivePort }] = await Promise.all([
+    const [{ getNetLiquidation }, { strategyFingerprint }, { setPerformanceBaseline }, { appendJournalLine }, nightly, { getManagedAccounts, isLivePort }, { getRiskRules }] = await Promise.all([
         import('../daily-loss-guard.js'),
         import('../strategy-fingerprint.js'),
         import('../trade-proposals.js'),
         import('./journal.js'),
         import('./nightly.js'),
         import('@/tools/ibkr/connection.js'),
+        import('@/tools/ibkr/risk-rules.js'),
     ]);
     liveOperator = createOperator({
         now: Date.now,
         liveAccount: () => isLivePort() || getManagedAccounts().some((a) => !a.toUpperCase().startsWith('D')),
+        ceilingPct: () => getRiskRules().max_risk_per_trade_pct,
         netLiqUsd: () => getNetLiquidation().catch(() => null),
         fingerprint: () => strategyFingerprint().catch(() => null),
         looks: () => nightly.runLooksLive(),

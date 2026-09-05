@@ -25,7 +25,7 @@ import { createIbkrMarketData } from '@/tools/ibkr/market-data.js';
 import { logger } from '@/utils';
 import { getMarketSession, intradayEntryCutoffReached, isMarketHalfDay, isTradeableSession, MarketSession } from '@/utils/market-hours.js';
 import { assertDailyLossOk, getActiveHalt } from './daily-loss-guard.js';
-import { assertEpochRunning, epochGateVerdict, readEpochState } from './epoch-state.js';
+import { assertEpochRunning, readEpochState } from './epoch-state.js';
 import { isLiveEnabled } from './live-switch.js';
 import { oppositeDirectionConflict } from './vehicle-complexes.js';
 import { replayMissedExecutions, trackExecutedProposal } from './outcome-tracker.js';
@@ -930,7 +930,7 @@ export function autoExecVerdict(s: AutoExecState): AutoExecVerdict {
         return { ok: false, reason: `live auto-execution refused — the active rule profile is '${s.profile}', not 'live'` };
     }
     if (!s.epochOk) {
-        return { ok: false, reason: 'live auto-execution refused — the epoch is stopped (new entries paused until the next epoch starts)' };
+        return { ok: false, reason: "live auto-execution refused — no RUNNING epoch (none started, or stopped): live automation needs an epoch ('epoch new')" };
     }
     if (s.haltLatched) {
         return { ok: false, reason: 'live auto-execution refused — the daily-loss halt is latched' };
@@ -938,15 +938,22 @@ export function autoExecVerdict(s: AutoExecState): AutoExecVerdict {
     return { ok: true, account: 'live' };
 }
 
-/** The verdict over the RUNNING process state. */
+/** The verdict over the RUNNING process state.
+ *
+ *  Audit 2026-09-05 (AUD-10): the accept-path latch (REQ-RISK-010) treats an
+ *  ABSENT epoch file as "intake open" — the WP1 inert seam for paper. The
+ *  LIVE verdict (REQ-LIVE-001) requires a RUNNING epoch: absent is not
+ *  running. The paper branch of `autoExecVerdict` never reads `epochOk`,
+ *  so paper semantics are unchanged. */
 function currentAutoExecVerdict(): AutoExecVerdict {
+    const epoch = readEpochState();
     return autoExecVerdict({
         livePort: isLivePort(),
         accounts: getManagedAccounts(),
         allowLiveEnv: (process.env.IBKR_ALLOW_LIVE ?? '').trim().toLowerCase() === 'true',
         liveSwitchEnabled: isLiveEnabled(),
         profile: getAccountProfile(),
-        epochOk: epochGateVerdict(readEpochState()).ok,
+        epochOk: epoch.kind === 'present' && epoch.state.status === 'running',
         haltLatched: getActiveHalt() !== null,
     });
 }

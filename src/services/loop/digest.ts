@@ -121,8 +121,9 @@ export function buildStatusSection(inp: DigestInputs): string[] {
         lines.push(`Last look n=${last.n}: ${last.decision} (LCB ${num(last.lcb, 3)}, UCB95 ${num(last.ucb95, 3)})`);
     }
     if (st.drawdown) lines.push(`Drawdown from epoch: ${st.drawdown.pct.toFixed(2)}% (min $${st.drawdown.minNetLiq.toFixed(0)} vs $${st.drawdown.epochNetLiq.toFixed(0)}, ${st.drawdown.samples} samples; hard stop at −5%)`);
-    lines.push(`Ladder: rung ${st.ladder.rung}%${st.ladder.state?.lastStepUpNetLiq ? ` · step-down mark $${st.ladder.state.lastStepUpNetLiq.toFixed(0)}` : ''}${st.ladder.eligibility ? ` · ${st.ladder.eligibility.eligible ? `STEP-UP to ${st.ladder.eligibility.nextRung}% ELIGIBLE — 'ladder up'` : `next ${st.ladder.eligibility.nextRung ?? '—'}% at n ≥ ${st.ladder.eligibility.milestone ?? '—'}`}` : ''}`);
+    lines.push(`Ladder: rung ${st.ladder.rung}% · effective risk ${st.ladder.effectivePct}% (ceiling ${st.ladder.ceilingPct}%)${st.ladder.state?.lastStepUpNetLiq ? ` · step-down mark $${st.ladder.state.lastStepUpNetLiq.toFixed(0)}` : ''}${st.ladder.eligibility ? ` · ${st.ladder.eligibility.eligible ? `STEP-UP to ${st.ladder.eligibility.nextRung}% ELIGIBLE — 'ladder up'` : st.ladder.eligibility.reason.includes('ceiling') ? `at the ceiling — no further rung has effect` : `next ${st.ladder.eligibility.nextRung ?? '—'}% at n ≥ ${st.ladder.eligibility.milestone ?? '—'}`}` : ''}`);
     if (st.shadowSample) lines.push(`Shadow-only classes (apart): n ${st.shadowSample.n}, ΣR ${num(st.shadowSample.sumR)}, net ${usd(st.shadowSample.netUsd)}`);
+    if (st.models.length) lines.push(`Judgment: ${st.models.join(', ')}`);
     lines.push(`Score deciles: ${st.decile ? `Spearman rho ${st.decile.rho.toFixed(2)} (p ${st.decile.p.toFixed(3)}, n ${st.decile.n})` : 'n/a'}`);
     if (e.promotionPending) lines.push(`Promotion pending: ${e.promotionPending.variant} — apply the change, restart, 'epoch new'`);
     for (const a of st.anomalies) lines.push(`⚠ ${a}`);

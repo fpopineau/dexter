@@ -20,6 +20,7 @@ function trades(rs: number[], opts: { days?: number; band?: '60-74' | '75+' | nu
     return rs.map((r, i) => ({
         id: `P-${String(i).padStart(4, '0')}`,
         entryDay: `2026-09-${String(10 + (i % days)).padStart(2, '0')}`,
+        closedAt: 1_000_000 + i * 60_000, // close order = array order
         netR: r,
         netUsd: r * 30,
         band: opts.band ?? '60-74',
@@ -97,6 +98,22 @@ describe('evaluateLook (REQ-SEQ-002/003)', () => {
         expect(t.decision).not.toBe('ACCEPT');
     });
 
+    test('AUD-12: a look evaluates the PREFIX of the first lookN trades in close order — later closes never change it', () => {
+        const good = Array.from({ length: 25 }, (_, i) => (i % 5 === 0 ? -1 : 1.5));
+        const withLaterLosses = trades([...good, -3, -3, -3, -3, -3], { days: 12 });
+        const look25 = evaluateLook(withLaterLosses, 25);
+        expect(look25.n).toBe(25);
+        expect(look25.decision).toBe('ACCEPT');
+        expect(look25.sumR).toBeCloseTo(evaluateLook(trades(good, { days: 12 }), 25).sumR, 9);
+        // the order is by closedAt, not by array position
+        const shuffled = [...withLaterLosses].reverse();
+        expect(evaluateLook(shuffled, 25).sumR).toBeCloseTo(look25.sumR, 9);
+        // two boundaries crossed between runs evaluate two distinct prefixes
+        const sixty = trades(Array.from({ length: 60 }, (_, i) => (i < 25 ? 1 : -1)), { days: 20 });
+        expect(evaluateLook(sixty, 25).sumR).toBeCloseTo(25, 9);
+        expect(evaluateLook(sixty, 50).sumR).toBeCloseTo(0, 9);
+    });
+
     test('later looks use their own confidence (97.5 / 96 / 95) and n below 5 entry days is NOT EVALUABLE', () => {
         const r50 = evaluateLook(trades(Array.from({ length: 50 }, () => 1), { days: 20 }), 50);
         expect(r50.lookConfidence).toBe(0.975);
@@ -147,6 +164,16 @@ describe('ladder rules (REQ-LADDER-001/002)', () => {
         expect(ladderEligibility({ n: 60, sumR: 5, rung: 0.5, stopActive: false })).toEqual({ eligible: true, nextRung: 0.75, milestone: 50, reason: 'n 60 ≥ 50, net R +5.00, no active stop' });
         expect(ladderEligibility({ n: 60, sumR: 5, rung: 0.75, stopActive: false })).toEqual({ eligible: false, nextRung: 1.0, milestone: 100, reason: 'n 60 < 100' });
         expect(ladderEligibility({ n: 150, sumR: 5, rung: 1.0, stopActive: false })).toEqual({ eligible: false, nextRung: null, milestone: null, reason: 'top rung' });
+    });
+
+    test('AUD-09: a rung above the ratified ceiling is never offered (effective risk = min(rung, ceiling))', async () => {
+        const { effectiveRiskPct } = await import('./sequential-test.js');
+        const capped = ladderEligibility({ n: 60, sumR: 5, rung: 0.5, stopActive: false, ceilingPct: 0.5 });
+        expect(capped.eligible).toBe(false);
+        expect(capped.reason).toContain('ceiling');
+        expect(ladderEligibility({ n: 25, sumR: 5, rung: 0.25, stopActive: false, ceilingPct: 0.5 }).eligible).toBe(true);
+        expect(effectiveRiskPct(0.75, 0.5)).toBe(0.5);
+        expect(effectiveRiskPct(0.25, 0.5)).toBe(0.25);
     });
 
     test('stepDownDue at −5% from the last step-up mark; hardStopDue at −5% from the epoch NetLiq', () => {

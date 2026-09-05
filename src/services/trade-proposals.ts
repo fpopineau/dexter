@@ -73,6 +73,10 @@ export interface TradeProposal {
     /** Model id that proposed the trade (review 2026-08-21) — the frozen
      *  sample's judgment-purity check reads this. */
     model: string | null;
+    /** Strategy fingerprint stamped at creation (review-17/19; null = the
+     *  identity was unresolved). The epoch sample refuses rows whose
+     *  fingerprint differs from the epoch's (audit 2026-09-05, AUD-11). */
+    strategyFingerprint: string | null;
     /** Market-regime tag at creation (protocol breadth criterion). */
     regime: string | null;
     /** Failure or rejection detail. */
@@ -592,6 +596,7 @@ interface Row {
     order_perm_ids: string | null;
     planned_quantity: number | null;
     model: string | null;
+    strategy_fingerprint: string | null;
     regime: string | null;
     note: string | null;
     executed_at: number | null;
@@ -646,6 +651,7 @@ function fromRow(r: Row): TradeProposal {
         orderPermIds: r.order_perm_ids ? (JSON.parse(r.order_perm_ids) as Array<number | null>) : null,
         plannedQuantity: r.planned_quantity ?? null,
         model: r.model ?? null,
+        strategyFingerprint: r.strategy_fingerprint ?? null,
         regime: r.regime ?? null,
         note: r.note,
         executedAt: r.executed_at ?? null,

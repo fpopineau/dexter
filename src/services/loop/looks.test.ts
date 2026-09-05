@@ -13,7 +13,7 @@ const T0 = Date.UTC(2026, 8, 10, 14, 0, 0);
 const DAY = 86_400_000;
 
 function rtrades(rs: number[], band: '60-74' | '75+' = '75+'): RTrade[] {
-    return rs.map((r, i) => ({ id: `P-${i}`, entryDay: `2026-09-${String(10 + (i % 12)).padStart(2, '0')}`, netR: r, netUsd: r * 30, band, tradeClass: 'intraday', score: 60 + (i % 30) }));
+    return rs.map((r, i) => ({ id: `P-${i}`, entryDay: `2026-09-${String(10 + (i % 12)).padStart(2, '0')}`, closedAt: T0 + i * 60_000, netR: r, netUsd: r * 30, band, tradeClass: 'intraday', score: 60 + (i % 30) }));
 }
 
 function simRow(variant: string, id: string, netR: number, dayOffset: number): SimTrade {
@@ -24,7 +24,7 @@ function simRow(variant: string, id: string, netR: number, dayOffset: number): S
     };
 }
 
-function harness(sample: Partial<EpochSample> = {}, opts: { equity?: EquitySample[]; triageFailed?: boolean; sim?: SimTrade[] } = {}) {
+function harness(sample: Partial<EpochSample> = {}, opts: { equity?: EquitySample[]; triageFailed?: boolean; sim?: SimTrade[]; ceilingPct?: number } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'dexter-looks-'));
     const journal: string[] = [];
     const alerts: string[] = [];
@@ -32,7 +32,8 @@ function harness(sample: Partial<EpochSample> = {}, opts: { equity?: EquitySampl
     const deps: LooksDeps = {
         now: T0 + 5 * DAY,
         dataDir: dir,
-        loadSample: async () => ({ trades: [], shadowTrades: [], anomalies: [], openInCohort: 0, ...sample }),
+        ceilingPct: opts.ceilingPct ?? 1.0,
+        loadSample: async () => ({ trades: [], shadowTrades: [], anomalies: [], openInCohort: 0, models: [], unmodelled: 0, ...sample }),
         listSimRows: async () => opts.sim ?? [],
         equitySeries: () => opts.equity ?? [{ ts: T0 + 1000, netLiq: 12_000 }],
         triageFailedToday: () => opts.triageFailed ?? false,
@@ -45,7 +46,7 @@ function harness(sample: Partial<EpochSample> = {}, opts: { equity?: EquitySampl
 describe('runNightlyLooks (REQ-SEQ-002/003/007, REQ-EPOCH-002)', () => {
     test('no epoch → nothing evaluated, one anomaly naming `epoch new`', async () => {
         const dir = mkdtempSync(join(tmpdir(), 'dexter-looks-none-'));
-        const st = await runNightlyLooks({ now: T0, dataDir: dir, loadSample: async () => ({ trades: [], shadowTrades: [], anomalies: [], openInCohort: 0 }), listSimRows: async () => [], equitySeries: () => [], triageFailedToday: () => false, journal: () => {} });
+        const st = await runNightlyLooks({ now: T0, dataDir: dir, ceilingPct: 0.5, loadSample: async () => ({ trades: [], shadowTrades: [], anomalies: [], openInCohort: 0, models: [], unmodelled: 0 }), listSimRows: async () => [], equitySeries: () => [], triageFailedToday: () => false, journal: () => {} });
         expect(st.epoch).toBeNull();
         expect(st.anomalies[0]).toContain('epoch new');
     });
@@ -85,7 +86,8 @@ describe('runNightlyLooks (REQ-SEQ-002/003/007, REQ-EPOCH-002)', () => {
 
     test("REQ-SEQ-007: a strong deployable sample cannot ACCEPT while the '60-74' band reads negative at n ≥ 20", async () => {
         const good = rtrades(Array.from({ length: 26 }, (_, i) => (i % 5 === 0 ? -1 : 1.5)), '75+');
-        const badBand = rtrades(Array.from({ length: 20 }, () => -0.2), '60-74').map((t, i) => ({ ...t, id: `B-${i}`, entryDay: `2026-09-${String(10 + (i % 12)).padStart(2, '0')}` }));
+        // The band rows close AFTER the first 25 (the look evaluates the close-order prefix — AUD-12); the band bar is judged on the whole sample.
+        const badBand = rtrades(Array.from({ length: 20 }, () => -0.2), '60-74').map((t, i) => ({ ...t, id: `B-${i}`, closedAt: T0 + (100 + i) * 60_000, entryDay: `2026-09-${String(10 + (i % 12)).padStart(2, '0')}` }));
         const h = harness({ trades: [...good, ...badBand] });
         const st = await runNightlyLooks(h.deps);
         // 46 trades → looks 25 evaluated; the band withholds ACCEPT
@@ -118,6 +120,32 @@ describe('runNightlyLooks (REQ-SEQ-002/003/007, REQ-EPOCH-002)', () => {
         // eligibility still computed (n 30 ≥ 25, net R > 0, no stop)
         expect(st.ladder.eligibility?.eligible).toBe(true);
         expect(readEpochRecord(h.dir)?.stepUpEligible?.nextRung).toBe(0.5);
+    });
+
+    test('AUD-09: with the live ceiling at 0.5% a step-up beyond it is never queued; the status carries rung, ceiling and effective risk', async () => {
+        const h = harness({ trades: rtrades(Array.from({ length: 60 }, () => 1)) }, { ceilingPct: 0.5 });
+        const { writeLadderState } = await import('./ladder-control.js');
+        writeLadderState({ rung: 0.5, since: 'x', lastStepUpNetLiq: 12_000 }, h.dir);
+        const st = await runNightlyLooks(h.deps);
+        expect(st.ladder.rung).toBe(0.5);
+        expect(st.ladder.ceilingPct).toBe(0.5);
+        expect(st.ladder.effectivePct).toBe(0.5);
+        expect(st.ladder.eligibility?.eligible).toBe(false);
+        expect(st.ladder.eligibility?.reason).toContain('ceiling');
+        expect(readEpochRecord(h.dir)?.stepUpEligible).toBeNull();
+    });
+
+    test('AUD-11: the sample loader receives the epoch fingerprint, and its anomalies freeze the looks', async () => {
+        let seenFp = null as string | null;
+        const h = harness({ trades: rtrades(Array.from({ length: 30 }, () => 1)) });
+        const st = await runNightlyLooks({
+            ...h.deps,
+            loadSample: async (_ms, fp) => { seenFp = fp; return { trades: rtrades(Array.from({ length: 30 }, () => 1)), shadowTrades: [], anomalies: ['P-X MU: fingerprint aaaaaaaaaaaa ≠ epoch fp — mixed identity in the cohort'], openInCohort: 0, models: ['m1', 'm2'], unmodelled: 0 }; },
+        });
+        expect(seenFp).toBe('fp');
+        expect(st.looksThisPass).toEqual([]);
+        expect(st.models).toEqual(['m1', 'm2']);
+        expect(st.anomalies[0]).toContain('mixed identity');
     });
 
     test('the hard stop is re-checked at night from the marked series', async () => {

@@ -105,7 +105,7 @@ The signal scorer combines:
 - **Momentum** — MACD slope, RSI trend, price vs EMAs
 - **Mean reversion** — distance from VWAP/Bollinger midline, RSI extremes
 - **Volume confirmation** — RVOL, volume trend alignment
-- **Sentiment** — recent news tone
+- **Trend alignment** — EMA stack, price position in structure (the scorer computes no news sentiment; verify the catalyst yourself)
 
 **Threshold:** Only proceed with candidates scoring **≥ 60/100**.
 

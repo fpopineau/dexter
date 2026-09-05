@@ -14,7 +14,8 @@ function statusWith(over: Partial<LoopStatus> = {}, dir?: string): LoopStatus {
         at: T0, epoch: dir ? readEpochRecord(dir) : null, constantsOk: true, openInCohort: 0, looksThisPass: [], anomalies: [], stoppedThisPass: null, shadowSample: null,
         sample: { n: 30, days: 12, sumR: 9.5, meanR: 0.32, profitFactor: 1.8, netUsd: 285, nextLook: 50, informational: true },
         band: null, shadow: [], drawdown: null, decile: null,
-        ladder: { state: readLadderState(dir), rung: readLadderState(dir)?.rung ?? 0.25, eligibility: { eligible: true, nextRung: 0.5, milestone: 25, reason: 'n 30 ≥ 25, net R 9.50 > 0' } },
+        ladder: { state: readLadderState(dir), rung: readLadderState(dir)?.rung ?? 0.25, ceilingPct: 1.0, effectivePct: readLadderState(dir)?.rung ?? 0.25, eligibility: { eligible: true, nextRung: 0.5, milestone: 25, reason: 'n 30 ≥ 25, net R 9.50 > 0' } },
+        models: [],
         ...over,
     };
 }
@@ -34,6 +35,7 @@ function harness(opts: { netLiq?: number | null; fp?: string | null; status?: (d
         journal: (l) => { journal.push(l); },
         digest: async () => 'DIGEST',
         liveAccount: () => opts.liveAccount ?? false,
+        ceilingPct: () => 1.0,
     };
     return { dir, deps, journal, baselines, op: createOperator(deps), advance: (ms: number) => { now += ms; } };
 }
@@ -97,7 +99,7 @@ describe('ladder up (REQ-LADDER-001)', () => {
         expect(readLadderState(h.dir)).toMatchObject({ rung: 0.5, lastStepUpNetLiq: 12_000 });
         expect(h.journal.some((l) => l.includes('STEP-UP'))).toBe(true);
 
-        const notEligible = harness({ status: (d) => statusWith({ ladder: { state: null, rung: 0.25, eligibility: { eligible: false, nextRung: 0.5, milestone: 25, reason: 'n 7 < 25' } } }, d) });
+        const notEligible = harness({ status: (d) => statusWith({ ladder: { state: null, rung: 0.25, ceilingPct: 1.0, effectivePct: 0.25, eligibility: { eligible: false, nextRung: 0.5, milestone: 25, reason: 'n 7 < 25' } } }, d) });
         expect(await notEligible.op.ladderUp(false)).toContain('not available: n 7 < 25');
 
         const noNetLiq = harness({ netLiq: null });

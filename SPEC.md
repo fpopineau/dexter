@@ -2597,7 +2597,9 @@ identity untouched.
 - REQ-SEQ-002/003 precision: a look is evaluated over the whole in-epoch
   sample on the night its count first reaches the boundary (several trades
   may close the same day: the look is labelled by the boundary, computed
-  on n). Each boundary is evaluated once (`looksDone`). Under 5 entry days
+  on n). Each boundary is evaluated once (`looksDone`). [SUPERSEDED the
+  same day by the audit response below (AUD-12): the look evaluates the
+  PREFIX of the first `lookN` trades in close order.] Under 5 entry days
   the look is NOT-EVALUABLE and is still recorded (it will not re-fire).
   The constants hash of the running module must equal the epoch's — a
   mismatch makes every look NOT EVALUABLE until a new epoch.
@@ -2763,3 +2765,111 @@ dir (verified at landing: the switch reads OFF).
 | REQ-LIVE-007 | `trade-proposals.test.ts` — due listing in creation order, not-yet-due / rejected / expired excluded, cleared stamp; `veto-window.test.ts` — refused rows counted, sweep continues; `loop-control.test.ts` — claimed row → `refuse-claimed` naming cancel/kill |
 | REQ-LIVE-008 | `proposal-executor.test.ts` — live verdict matrix (WP1), due path does not re-defer and reaches the gates; `loop/live-switch-control.test.ts` — system-side OFF after `live on` on an epoch stop |
 | REQ-LIVE-009 | doc change, no test; smoke: `live status` and the challenge rendered from the real data dir (no switch file → OFF; no epoch → says so) |
+
+## Audit 2026-09-05 response — point-by-point verdicts, fixes landed, plan for the rest
+
+The operator's `AUDIT.md` (dated 2026-09-05, reference `dacaa63`) examined
+strategy coherence, instructions, selection, sizing, protection, exits and
+the new validation path. Each finding was verified against HEAD before this
+response; verdicts below are evidence-based, fixes are pre-epoch (epoch 1
+has not opened — `epoch new` was refused on 2026-09-05 for a weekend FX
+gap), so the identity moves once more at the next restart and nothing
+retroactive is claimed.
+
+### Verdicts
+
+| Finding | Verdict | Disposition |
+|---|---|---|
+| AUD-01 take formula vs "structural target" (P1) | VALID — `take_atr_mult 1.5 / floor 3 / cap 10` with `max_target_atr 1.5` and `min_stop_atr_fraction 0.4` make a 3 % target reachable only for ATR% ∈ [2, 3.75]; the day-trade skill still says "target at a real objective" while the gate enforces the formula (override allowed only inside the band) | PLAN — WP5 exit policy per lane (the intraday exit was an operator decision 2026-08-22; a per-lane policy needs a SPEC change and shadow evidence: the simulator already carries `exit-x2.0`, `exit-ratchet`) |
+| AUD-02 target ignores time remaining (P1) | VALID — `checkTakeTarget` receives ATR, basis, target, earnings context; no clock | PLAN — WP5 research item (empirical remaining-excursion by hour/setup/regime; labels start after an executable entry) |
+| AUD-03 overnight = swing by default (P1) | VALID — the Pre-Close cron asked for GTC overnight proposals without `tradeClass`; the default is intraday and the gate refuses an intraday GTC | FIXED — the cron registers overnight setups as `tradeClass "swing"` and states the flat-by-close rule; a distinct overnight class with its own J+1 contract stays in WP5 |
+| AUD-04 skill promises keeps the triage does not make (P0) | VALID — `overnight/SKILL.md` said the 15:52 triage "keeps winners and stabilizing losers by default"; REQ-EOD-004 closes every DAY position | FIXED — skill text rewritten to the flat-by-close contract and the operator-only `keep` |
+| AUD-05 `keep` bypasses the overnight caps (P0) | PARTLY — true that overrides hold their excess in `vetOvernightBook`; but that is the ratified REQ-EOD-003 ("operator overrides hold their excess loudly"), the earnings guard still runs AFTER the override, and `keep` is a WhatsApp operator command (`KEEP_RE` in proposal-commands) with no tool — the model cannot grant it. Kept positions stay in the book the acceptance-time headroom gate sums | DECISION — the operator may re-ratify keep as "a candidacy under the caps" (then the vet trims overrides too); until then P0 is downgraded to a documented policy choice |
+| AUD-06 sizer does not compose the overnight budget (P1) | VALID — `computeQuantity` sizes by stop then position cap; the gap-stress (7.5 % of NetLiq book at 20 % stress vs 1.5 % daily loss) binds only at acceptance, so a swing sized at 15 % is refused later | PLAN — WP6 "sizer composes every budget at creation"; on live the swing class is disabled anyway, on paper it shows as accept-time refusals |
+| AUD-07 cup-and-handle is a detector, not a lane (P1) | VALID — best pattern per symbol, top 25 overall, heuristic thresholds | PLAN — WP5 lane (detector version, pivot/breakout/retest states, own cohort) |
+| AUD-08 generic score mixes hypotheses (P2) | VALID — flat 0.25 weights; RVOL bonus `min(10, 2×rvol)` on top of the volume component; the day-trade skill named a "sentiment" component the scorer does not compute | FIXED (text) — the skill names the real fourth component (trend alignment); PLAN — conditional scoring per lane (research, after WP5) |
+| AUD-09a SOUL "runners" vs `exit_style: target` | VALID — trail arms at 2.5 ATR, target at 1.5 ATR: the trail never arms first under 'target' | FIXED — SOUL states the active take policy and that the runner exit is a shadow variant |
+| AUD-09b ladder rungs 0.75/1.0 inert under the 0.5 % ceiling | VALID — `classRiskPct = min(rung, ceiling)` | FIXED — eligibility never offers a rung above the ceiling; `ladder`, the digest and `ladder up` show requested vs effective risk (REQ-LADDER-001/004 amended below) |
+| AUD-10a doctrine texts promise a hand-accept per live trade (P0) | VALID — SOUL §"Protecting the operator" and AGENTS.md predated WP4 | FIXED — both aligned with the switch + veto model (REQ-LIVE-009 completed) |
+| AUD-10b absent epoch counted as running for live auto-exec (P0) | VALID — `epochGateVerdict` treats an absent file as intake-open (the WP1 paper seam) and the live verdict reused it | FIXED — the live verdict requires a PRESENT `running` epoch (REQ-LIVE-001 amended); paper semantics unchanged |
+| AUD-11a cohort identity not verified (P0) | VALID — the epoch sample checked the constants hash, not the rows' fingerprints or model | FIXED — fingerprint absent/mismatched and >1 distinct model are anomalies that freeze the look (REQ-SEQ-001 amended) |
+| AUD-11b unknown outcomes silently dropped (P0) | VALID — `realizedPnl === null` rows were skipped before the anomaly checks | FIXED — an executed, closed row with unknown P&L is an anomaly ("cohort incomplete") |
+| AUD-12a "≈5 % familywise" unproven (P0) | VALID — measured 10.3 % (see below) | FIXED (claim) + DECISION (schedule) — the module and the SPEC state the measured rate; the operator chooses the schedule before epoch 1 |
+| AUD-12b looks not evaluated on a reproducible prefix (P0) | VALID | FIXED — prefix of the first `lookN` trades in close order (REQ-SEQ-002 amended) |
+| AUD-12c 1000 replicates thin at 1 %; 5-day minimum | VALID as a limit | DECISION — folded into the schedule choice (replicates are a constant too) |
+| AUD-13 benchmarks/simulator scope (P1) | VALID — the benchmark treats the opening gap as uncapturable; the simulator replays proposals and refusals, not never-admitted candidates | PLAN — WP7 overnight benchmark + eligible-candidate archive per lane |
+| §5 empirical figures | VERIFIED read-only on 2026-09-05: 49 intraday + 24 unclassed legacy rows = 73, net −44,986.81 USD; earnings-bet 2 (+113.46); 18 closed-filled rows with unknown P&L (17 `agent`, 2026-07-14..08-06; 1 `adopted`) | The 17 legacy rows predate every epoch and never enter a look; their reconciliation is a broker-statement task for the operator, recorded as open |
+
+### Sequential-test calibration (AUD-12; `scripts/calibrate-sequential-test.ts`)
+
+Whole procedure simulated (same `evaluateLook`, same bootstrap, prefix
+rule) under a zero-mean null with a shared daily shock (σ 0.3 R, 1–4
+trades/day, p 0.4 of +1.5 R else −1.0 R), 2,000 epochs per cell, and under
++0.25 R per trade for power. A heavier-clustering null (σ 0.5, up to 6
+trades/day, 1,000 epochs) in brackets.
+
+| Schedule (look confidences) | False ACCEPT under H0 | Power at +0.25 R | Mean stop n (H1) |
+|---|---|---|---|
+| A pre-registered 99 / 97.5 / 96 / 95 | 10.3 % [12.3 %] | 66 % [60 %] | 75 |
+| B uniform 98.75 (Bonferroni 5 %) | 5.3 % [7.7 %] | 46 % [43 %] | 80 |
+| C O'Brien-Fleming-like 99.96 / 99.33 / 97.76 / 95.87 | 7.0 % [8.7 %] | 60 % [51 %] | 85 |
+| D 99.5 / 99 / 97.5 / 95 | 8.4 % [10.0 %] | 64 % [56 %] | 80 |
+
+The REJECT rule (UCB95 < 0) fires on 15.7 % of zero-edge epochs under H0
+and on 1.4 % under H1. Reading: the pre-registered schedule buys the most
+power at roughly twice the advertised false-ACCEPT rate; B halves the false
+accepts at a 20-point power cost; C sits between. The schedule is a
+pre-registered constant: changing it before `epoch new` is free (a new
+constants hash), changing it later ends the epoch.
+
+### Requirements amended by this response (append-only)
+
+- REQ-SEQ-001 (amended, audit-2026-09-05): the epoch sample is an integrity
+  anomaly — the look is FROZEN, never decided — when a closed, entry-filled
+  row outside 'cancelled' has no realized P&L; when a sample row's strategy
+  fingerprint is absent or differs from the epoch's; when the epoch recorded
+  no fingerprint; or when more than one distinct non-null model appears
+  across the sample. A missing model stamp is reported (count) and not an
+  anomaly. `TradeProposal` now exposes `strategyFingerprint`.
+- REQ-SEQ-002 (amended, audit-2026-09-05): each look evaluates the PREFIX of
+  the first `lookN` trades in close order (close time, then id) — several
+  boundaries crossed between two runs evaluate distinct prefixes; the
+  `n` of a look is `lookN` once reached. The "familywise ≈ 5 %" wording is
+  withdrawn; the realised rate is the calibration table above.
+- REQ-LIVE-001 (amended, audit-2026-09-05): the live auto-execution verdict
+  requires a PRESENT epoch record with status `running`; an absent file is
+  intake-open for the paper accept path only (REQ-RISK-010 seam).
+- REQ-LADDER-001 (amended, audit-2026-09-05): a rung above the ratified
+  per-trade ceiling (`max_risk_per_trade_pct` of the active profile) is
+  never eligible; the effective risk is min(rung, ceiling). REQ-LADDER-004:
+  `ladder`, the digest and the `ladder up` evidence show rung, ceiling and
+  effective risk.
+- REQ-EOD-004 precision: the overnight skill and the Pre-Close cron state
+  the flat-by-close contract and the operator-only `keep`; overnight
+  setups are registered as `tradeClass "swing"`.
+- REQ-LIVE-009 completed: SOUL.md and AGENTS.md carry the switch + veto
+  doctrine; the day-trade skill names the scorer's real components.
+
+### Plan for the rest (SPEC work, each a WP with its own REQs; none started)
+
+| Lot (audit) | WP | Scope | Gate |
+|---|---|---|---|
+| R0 contract + integrity | done here | AUD-04/05(decision)/10/11/12 | this commit |
+| R1 four lanes | WP5 | `StrategyContract` (strategyId, holdingHorizon, setupId, exitPolicyId, exitDeadline) as ADDED columns; overnight class with J+1 contract and calendar rules; cup-and-handle lane with detector version and pivot/breakout/retest states; one-idea-per-symbol arbitration; legacy rows marked `legacy` | AUD-01/02/03/07; SPEC + operator decisions on horizons, budgets, exits |
+| R2 sizing + exits | WP6 | sizer composes stop, gap-stress, exposure, sector, book and liquidity at creation (whole shares, net viability); per-lane exit policy versioned; no silent post-accept resize | AUD-06/01; the live limits do not move |
+| R3 discovery | WP5/WP8 | overnight-continuation and pullback lanes; multi-pattern archive per symbol; conditional scoring per lane | AUD-07/08; point-in-time only |
+| R4 statistical proof | done (calibration) + WP5 | schedule decision; per-lane cohorts and verdicts; multi-session clustering review when swing/cup lanes trade | AUD-12/13 |
+| R5 rehearsal + promotion | WP3/WP4 machinery | unchanged: paper rehearsal, human `promote`, human `live on` | — |
+| Overnight benchmark + candidate archive | WP7 | observable-universe benchmark before the prior close; eligible candidates per lane with timestamps, levels, rejection reasons | AUD-13 |
+
+### Operator decisions this response needs
+
+1. Sequential-test schedule before `epoch new`: keep A (66 % power, ~10 %
+   false ACCEPT) or move to B/C (≈5–7 % false ACCEPT, 46–60 % power). Also
+   whether to raise replicates to 4,000 (a constant; cost trivial).
+2. `keep` semantics: keep REQ-EOD-003 as ratified (overrides hold their
+   excess, loudly) or re-ratify keep as a candidacy under the caps.
+3. Whether the four-lane program (WP5–WP8) enters the September scope
+   fence or follows the paper rehearsal.
+4. The 17 legacy rows with unknown outcomes: reconcile from broker
+   statements or mark `legacy/unreconciled` (they never enter a look).

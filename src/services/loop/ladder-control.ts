@@ -43,7 +43,7 @@ export function resetLadder(deps: LadderDeps & { carry?: boolean; epochId: strin
 
 /** REQ-LADDER-001: apply a step-up the evidence permits; the caller has
  *  already collected the operator's confirmation. */
-export function stepUp(deps: LadderDeps & { markedNetLiq: number | null; evidence: { n: number; sumR: number; stopActive: boolean } }): { ok: boolean; message: string; state?: LadderState; eligibility: LadderEligibility } {
+export function stepUp(deps: LadderDeps & { markedNetLiq: number | null; evidence: { n: number; sumR: number; stopActive: boolean; ceilingPct?: number } }): { ok: boolean; message: string; state?: LadderState; eligibility: LadderEligibility } {
     const prev = readLadderState(deps.dataDir);
     const rung = prev?.rung ?? BOTTOM_RUNG;
     const eligibility = ladderEligibility({ ...deps.evidence, rung });
@@ -88,11 +88,13 @@ export function stepDownIfDue(deps: LadderDeps & { markedNetLiq: number; alert?:
     return state;
 }
 
-export function ladderStatusLine(dataDir?: string, eligibility?: LadderEligibility | null): string {
+export function ladderStatusLine(dataDir?: string, eligibility?: LadderEligibility | null, ceilingPct?: number): string {
     const s = readLadderState(dataDir);
+    const rung = s?.rung ?? BOTTOM_RUNG;
+    const eff = ceilingPct !== undefined ? ` · effective risk ${Math.min(rung, ceilingPct)}% (ceiling ${ceilingPct}%)` : '';
     const base = s
-        ? `ladder: rung ${s.rung}%${s.since ? ` since ${s.since.slice(0, 10)}` : ''}${s.lastStepUpNetLiq ? ` · step-down mark $${s.lastStepUpNetLiq.toFixed(0)} (−5%)` : ' · no step-down mark yet'}`
-        : `ladder: rung ${BOTTOM_RUNG}% (bottom — no state file yet)`;
+        ? `ladder: rung ${s.rung}%${eff}${s.since ? ` since ${s.since.slice(0, 10)}` : ''}${s.lastStepUpNetLiq ? ` · step-down mark $${s.lastStepUpNetLiq.toFixed(0)} (−5%)` : ' · no step-down mark yet'}`
+        : `ladder: rung ${BOTTOM_RUNG}%${eff} (bottom — no state file yet)`;
     if (!eligibility) return base;
     return `${base} · ${eligibility.eligible ? `STEP-UP to ${eligibility.nextRung}% ELIGIBLE (${eligibility.reason}) — reply 'ladder up' then 'ladder up confirm'` : `next: ${eligibility.nextRung ?? '—'}% at n ≥ ${eligibility.milestone ?? '—'} (${eligibility.reason})`}`;
 }

@@ -23,6 +23,7 @@ import { describeLiveSwitch } from './live-switch.js';
 import { readLadderState, BOTTOM_RUNG } from './ladder-state.js';
 import { readEpochState } from './epoch-state.js';
 import { readEpochRecord } from './loop/epoch-control.js';
+import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
 
 export type VetoDecision = 'reject' | 'cancel-bracket' | 'refuse-filled' | 'refuse-claimed' | 'refuse-status';
 
@@ -94,11 +95,16 @@ export async function killPosition(symbol: string): Promise<{ ok: boolean; messa
 export function ladderStatusLine(dataDir?: string): string {
     const s = readLadderState(dataDir);
     const rec = readEpochRecord(dataDir);
+    // AUD-09: requested vs EFFECTIVE risk — the sizer grants min(rung, ceiling).
+    let ceiling: number | null = null;
+    try { ceiling = getRiskRules().max_risk_per_trade_pct; } catch { ceiling = null; }
+    const rung = s?.rung ?? BOTTOM_RUNG;
+    const eff = ceiling !== null ? ` · effective risk ${Math.min(rung, ceiling)}% (ceiling ${ceiling}%)` : '';
     const queued = rec?.status === 'running' && rec.stepUpEligible
         ? ` · STEP-UP to ${rec.stepUpEligible.nextRung}% ELIGIBLE (${rec.stepUpEligible.reason}) — 'ladder up' then 'ladder up confirm'`
         : '';
-    if (!s) return `ladder: rung ${BOTTOM_RUNG}% (bottom — no state file yet; 'epoch new' writes it)${queued}`;
-    return `ladder: rung ${s.rung}%${s.since ? ` since ${s.since.slice(0, 10)}` : ''}${s.lastStepUpNetLiq ? ` · automatic step-down at −5% from $${s.lastStepUpNetLiq.toFixed(0)}` : ' · no step-down mark yet'}${queued}`;
+    if (!s) return `ladder: rung ${BOTTOM_RUNG}%${eff} (bottom — no state file yet; 'epoch new' writes it)${queued}`;
+    return `ladder: rung ${s.rung}%${eff}${s.since ? ` since ${s.since.slice(0, 10)}` : ''}${s.lastStepUpNetLiq ? ` · automatic step-down at −5% from $${s.lastStepUpNetLiq.toFixed(0)}` : ' · no step-down mark yet'}${queued}`;
 }
 
 export function epochStatusLine(dataDir?: string): string {

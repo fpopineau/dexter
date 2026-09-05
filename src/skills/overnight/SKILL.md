@@ -197,10 +197,14 @@ Call `signal_scorer` for promising setups:
 **Important reminders:**
 - This skill is most valuable 30–60 minutes before market close (15:00–15:30 ET).
 - If running after hours, some data (TA on intraday bars) may reflect the regular session close, not after-hours moves.
-- Overnight gap risk is real, but the deterministic 15:52 EOD triage
-  keeps winners and stabilizing losers BY DEFAULT (operator policy) — do
-  not blanket-recommend flattening what the machine will keep 22 minutes
-  later. Your judgment adds the exits the triage won't take: name the
-  specific positions to close and why (thesis dead, macro binary night,
-  cap overshoot), and let the rest ride protected.
+- The deterministic 15:52 EOD triage CLOSES every intraday (DAY) position
+  by default — intraday is flat by close (operator policy 2026-08-23). The
+  only way an intraday position rides the night is the operator's own
+  pre-bell `keep SYMBOL`, and a keep is still subject to the earnings
+  guard, the whole-book overnight vet and the gap-stress trim. Swing and
+  earnings-bet positions are the classes that hold. So never present an
+  intraday hold as the default outcome: if you believe a DAY position
+  deserves the night, say so explicitly as a recommendation for the
+  operator to `keep`, with the reason and the gap risk, and name the
+  positions the triage will otherwise close.
 - Never hold a position through an earnings print as part of an overnight keep. Holding through a print is a separate, explicitly-labeled earnings-bet decision with its own sizing rules — close the position or propose that bet explicitly. A keep must never quietly become an earnings bet.

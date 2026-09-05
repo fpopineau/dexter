@@ -32,6 +32,7 @@ import {
     type RunningStats,
 } from '@/utils/sequential-test.js';
 import { etDayOf } from '@/utils/equity-series-math.js';
+import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
 import { readLadderState, BOTTOM_RUNG, type LadderState } from '../ladder-state.js';
 import { summarizeVariants, type VariantSummary } from '../simulator/report.js';
 import type { SimTrade } from '../simulator/store.js';
@@ -58,7 +59,11 @@ export interface LoopStatus {
     looksThisPass: LookResult[];
     band: BandLine | null;
     shadow: ShadowLine[];
-    ladder: { state: LadderState | null; rung: number; eligibility: LadderEligibility | null };
+    /** rung = the ladder's; ceilingPct = the ratified per-trade cap;
+     *  effectivePct = min(rung, ceiling), what the sizer actually grants. */
+    ladder: { state: LadderState | null; rung: number; ceilingPct: number; effectivePct: number; eligibility: LadderEligibility | null };
+    /** Judgment provenance across the sample (AUD-11). */
+    models: string[];
     drawdown: { epochNetLiq: number; minNetLiq: number; pct: number; samples: number } | null;
     anomalies: string[];
     decile: { rho: number; p: number; n: number } | null;
@@ -68,7 +73,9 @@ export interface LoopStatus {
 export interface LooksDeps {
     now: number;
     dataDir?: string;
-    loadSample: (epochStartMs: number) => Promise<EpochSample>;
+    loadSample: (epochStartMs: number, epochFingerprint: string) => Promise<EpochSample>;
+    /** The ratified per-trade ceiling (%); default: the active profile's. */
+    ceilingPct?: number;
     listSimRows: (sinceMs: number) => Promise<SimTrade[]>;
     equitySeries: () => EquitySample[];
     /** Today's EOD triage run stamped 'failed' (an unresolved broker anomaly). */
@@ -108,17 +115,19 @@ export function shadowLines(rows: SimTrade[]): ShadowLine[] {
 export async function runNightlyLooks(deps: LooksDeps): Promise<LoopStatus> {
     const rec = readEpochRecord(deps.dataDir);
     const ladderState = readLadderState(deps.dataDir);
+    const ceilingPct = deps.ceilingPct ?? getRiskRules().max_risk_per_trade_pct;
+    const rung = ladderState?.rung ?? BOTTOM_RUNG;
     const base: LoopStatus = {
         at: deps.now, epoch: rec, constantsOk: true, sample: null, shadowSample: null, openInCohort: 0, looksThisPass: [],
-        band: null, shadow: [], ladder: { state: ladderState, rung: ladderState?.rung ?? BOTTOM_RUNG, eligibility: null },
-        drawdown: null, anomalies: [], decile: null, stoppedThisPass: null,
+        band: null, shadow: [], ladder: { state: ladderState, rung, ceilingPct, effectivePct: Math.min(rung, ceilingPct), eligibility: null },
+        models: [], drawdown: null, anomalies: [], decile: null, stoppedThisPass: null,
     };
     if (!rec) {
         base.anomalies.push('no epoch started — `epoch new` opens epoch 1 (the looks evaluate nothing until then)');
         return base;
     }
 
-    const sample = await deps.loadSample(rec.startedAt);
+    const sample = await deps.loadSample(rec.startedAt, rec.fingerprint);
     const anomalies = [...sample.anomalies];
     const constantsOk = rec.constantsHash === constantsHash();
     if (!constantsOk) anomalies.push(`sequential-test constants changed since the epoch started (${rec.constantsHash} → ${constantsHash()}) — looks NOT EVALUABLE until a new epoch`);
@@ -180,8 +189,9 @@ export async function runNightlyLooks(deps: LooksDeps): Promise<LoopStatus> {
         }
     }
 
-    // Ladder eligibility (queued; the operator applies it).
-    const eligibility = ladderEligibility({ n: stats.n, sumR: stats.sumR, rung: ladderState?.rung ?? BOTTOM_RUNG, stopActive: current.status === 'stopped' });
+    // Ladder eligibility (queued; the operator applies it) — never a rung the
+    // ceiling makes inert (AUD-09).
+    const eligibility = ladderEligibility({ n: stats.n, sumR: stats.sumR, rung, stopActive: current.status === 'stopped', ceilingPct });
     recordStepUpEligibility(eligibility, deps.now, deps.dataDir);
 
     const simRows = await deps.listSimRows(rec.startedAt);
@@ -197,7 +207,8 @@ export async function runNightlyLooks(deps: LooksDeps): Promise<LoopStatus> {
         looksThisPass,
         band,
         shadow: shadowLines(simRows),
-        ladder: { state: readLadderState(deps.dataDir), rung: ladderState?.rung ?? BOTTOM_RUNG, eligibility },
+        ladder: { state: readLadderState(deps.dataDir), rung, ceilingPct, effectivePct: Math.min(rung, ceilingPct), eligibility },
+        models: sample.models,
         drawdown,
         anomalies,
         decile: spearman(decilePairs),

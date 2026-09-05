@@ -9,7 +9,7 @@ function proposal(overrides: Partial<TradeProposal> = {}): TradeProposal {
     return {
         id: 'P-0001', createdAt: T0, expiresAt: T0 + 1, updatedAt: T0, status: 'closed', symbol: 'MU', direction: 'long', entryType: 'LMT', entry: 100,
         entryLimit: null, stop: 97, target: 106, quantity: 10, tif: 'DAY', tradeClass: 'intraday', worstCaseGapPct: null, score: 66, rationale: 'x', source: 'trigger',
-        orderIds: [1, 2, 3], orderPermIds: null, plannedQuantity: null, model: null, regime: null, note: null, executedAt: T0, entryFillPrice: 100.05, entryFilledAt: T0 + 60_000,
+        orderIds: [1, 2, 3], orderPermIds: null, plannedQuantity: null, model: null, strategyFingerprint: null, regime: null, note: null, executedAt: T0, entryFillPrice: 100.05, entryFilledAt: T0 + 60_000,
         exitFillPrice: 106, exitReason: 'target', realizedPnl: 59.5, commissions: 2, closedAt: T0 + 3_600_000, keptOvernightAt: null, mfePct: null, maePct: null,
         extensionAtr: null, vwapDistPct: null, dayMovePct: null, minutesSinceOpen: null, takePct: 6, takePctSource: 'formula', postExitMfePct: null, postExitMaePct: null,
         takeCounterfactual: null, dailyAtrAtCreation: 4, triggerRank: 66, triggerBand: '60-74', autoExecuteAt: null, spreadDeferred: false, ...overrides,
@@ -26,7 +26,8 @@ const status: LoopStatus = {
         { variant: 'exit-x2.0', status: 'active', summary: { variant: 'exit-x2.0', n: 7, days: 4, sumR: 2.9, meanR: 0.41, netUsd: 87, wins: 4, losses: 3, flats: 0, open: 0, unknown: 1, unfilled: 2 }, diff: { days: 4, lcb: -0.2, median: 0.1, meanDiff: 0.11 }, candidate: false },
         { variant: 'weights-calibrated', status: 'inactive: awaiting calibrated weights (WP3)', summary: null, diff: null, candidate: false },
     ],
-    ladder: { state: { rung: 0.25 }, rung: 0.25, eligibility: { eligible: false, nextRung: 0.5, milestone: 25, reason: 'n 7 < 25' } },
+    ladder: { state: { rung: 0.25 }, rung: 0.25, ceilingPct: 0.5, effectivePct: 0.25, eligibility: { eligible: false, nextRung: 0.5, milestone: 25, reason: 'n 7 < 25' } },
+    models: ['anthropic:claude-sonnet-5'],
     drawdown: { epochNetLiq: 12_000, minNetLiq: 11_880, pct: -1, samples: 300 },
     decile: { rho: 0.12, p: 0.4, n: 7 },
 };
@@ -78,7 +79,8 @@ describe('loop digest (REQ-DIGEST-001..005)', () => {
         expect(st[1]).toContain('n 7');
         expect(st[1]).toContain('next look at n=25');
         expect(st.some((l) => l.includes('Drawdown from epoch: -1.00%'))).toBe(true);
-        expect(st.some((l) => l.includes('Ladder: rung 0.25%') && l.includes('n ≥ 25'))).toBe(true);
+        expect(st.some((l) => l.includes('Ladder: rung 0.25%') && l.includes('effective risk 0.25% (ceiling 0.5%)') && l.includes('n ≥ 25'))).toBe(true);
+        expect(st.some((l) => l.startsWith('Judgment: anthropic:claude-sonnet-5'))).toBe(true);
         expect(st.some((l) => l.includes('Spearman rho 0.12'))).toBe(true);
     });
 
