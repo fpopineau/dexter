@@ -346,6 +346,15 @@ describe('proposal store lifecycle', () => {
         // Swing class: expired long ago but patient by design, never swept.
         const swing = await create(validInput({ symbol: 'EXPC', tradeClass: 'swing', tif: 'GTC', expiresMinutes: 1 }));
         await setProposalStatus(swing.id, 'executed', { orderIds: [97, 98, 99], executedAt: now });
+        // Overnight LANE (review 2026-09-06, finding 1): rides the swing class
+        // but its entry dies with the close — swept like an intraday row.
+        const { __setCreationClockForTests } = await import('./trade-proposals.js');
+        __setCreationClockForTests(() => Date.UTC(2026, 8, 10, 19, 30, 0)); // Thu 15:30 ET
+        let overnight;
+        try {
+            overnight = await create(validInput({ symbol: 'EXPO', tradeClass: 'swing', tif: 'GTC', strategyId: 'overnight', expiresMinutes: 25 }));
+        } finally { __setCreationClockForTests(null); }
+        await setProposalStatus(overnight.id, 'executed', { orderIds: [107, 108, 109], executedAt: now });
         // Filled entry: nothing resting to cancel.
         const filled2 = await create(validInput({ symbol: 'EXPD', expiresMinutes: 1 }));
         await setProposalStatus(filled2.id, 'executed', { orderIds: [101, 102, 103], executedAt: now });
@@ -361,6 +370,8 @@ describe('proposal store lifecycle', () => {
         expect(at61).not.toContain(unexpired.id);
         expect(at61).not.toContain(swing.id);
         expect(at61).not.toContain(filled2.id);
+        // the overnight row's expiry (15:55 ET on its creation day) is long past by the query time → swept
+        expect((await listExpiredUnfilledEntries(Date.UTC(2026, 8, 11, 12, 0, 0), grace)).map((p) => p.id)).toContain(overnight.id);
 
         // 5 minutes on: EXPE's window (1 min) has passed but the 30-min
         // accept grace has not — the deliberate late accept keeps resting.
@@ -370,7 +381,7 @@ describe('proposal store lifecycle', () => {
         const at40 = (await listExpiredUnfilledEntries(now + 40 * 60_000, grace)).map((p) => p.id);
         expect(at40).toContain(lateAccept.id);
 
-        for (const id of [expired.id, unexpired.id, swing.id, filled2.id, lateAccept.id]) {
+        for (const id of [expired.id, unexpired.id, swing.id, filled2.id, lateAccept.id, overnight.id]) {
             await closeProposal(id, { exitReason: 'cancelled' });
         }
     });
@@ -664,7 +675,7 @@ describe('four-lane contract (REQ-LANE-001/002/003/007)', () => {
     });
 
     test('overnight lane: window and expiry enforced at creation; the lane cap counts open rows; the deadline is stamped at the FIRST fill from the calendar', async () => {
-        const { __setCreationClockForTests, markEntryFilled, listDeadlineDue, markDeadlineClosed } = await import('./trade-proposals.js');
+        const { __setCreationClockForTests, markEntryFilled, listDeadlineDue, markDeadlineAttempt, markDeadlineClosed, countOpenByStrategy } = await import('./trade-proposals.js');
         __setCreationClockForTests(() => et(2026, 9, 10, 14, 30)); // before the window
         try {
             await expect(createProposal(validInput({ symbol: 'OVN0', tif: 'GTC', tradeClass: 'swing', strategyId: 'overnight', expiresMinutes: 20 }), { dailyAtr: 4 })).rejects.toThrow(/window opens at 15:00 ET/);
@@ -673,9 +684,15 @@ describe('four-lane contract (REQ-LANE-001/002/003/007)', () => {
             const a = await createProposal(validInput({ symbol: 'OVNA', tif: 'GTC', tradeClass: 'swing', strategyId: 'overnight', setupId: 'EOD continuation', expiresMinutes: 25 }), { dailyAtr: 4 });
             expect(a).toMatchObject({ strategyId: 'overnight', setupId: 'eod-continuation', holdingHorizon: 'next-session', exitPolicyId: 'bracket+deadline', exitDeadline: null });
             const b = await createProposal(validInput({ symbol: 'OVNB', tif: 'GTC', tradeClass: 'swing', strategyId: 'overnight', expiresMinutes: 25 }), { dailyAtr: 4 });
+            // review 2026-09-06 (finding 2): two OPEN (unaccepted) ideas already consume the lane cap of 2 at creation
+            await expect(createProposal(validInput({ symbol: 'OVNC', tif: 'GTC', tradeClass: 'swing', strategyId: 'overnight', expiresMinutes: 25 }), { dailyAtr: 4 })).rejects.toThrow(/overnight-lane position/);
+            expect(await countOpenByStrategy('overnight', undefined, { includeOpen: true })).toBe(2);
+            expect(await countOpenByStrategy('overnight')).toBe(0); // acceptance counts real commitments only
             await setProposalStatus(a.id, 'executed');
             await setProposalStatus(b.id, 'executed');
-            // two open → the lane cap (2) refuses a third
+            expect(await countOpenByStrategy('overnight')).toBe(2);
+            expect(await countOpenByStrategy('overnight', a.id)).toBe(1); // excluding the row being accepted
+            // two executed → the lane cap (2) still refuses a third
             await expect(createProposal(validInput({ symbol: 'OVNC', tif: 'GTC', tradeClass: 'swing', strategyId: 'overnight', expiresMinutes: 25 }), { dailyAtr: 4 })).rejects.toThrow(/overnight-lane position/);
             // fill on Thursday 15:40 ET → deadline Friday 10:00 ET; a later cumulative re-fill does not move it
             await markEntryFilled(a.id, 100.1, et(2026, 9, 10, 15, 40));
@@ -683,13 +700,22 @@ describe('four-lane contract (REQ-LANE-001/002/003/007)', () => {
             expect(etOf(filled.exitDeadline!)).toContain('9/11/2026, 10:00:00');
             await markEntryFilled(a.id, 100.2, et(2026, 9, 10, 15, 45));
             expect((await getProposal(a.id))!.exitDeadline).toBe(filled.exitDeadline);
-            // due listing: not before the deadline; at it; never after the one attempt
-            expect((await listDeadlineDue(filled.exitDeadline! - 1)).map((p) => p.id)).toEqual([]);
-            expect((await listDeadlineDue(filled.exitDeadline!)).map((p) => p.id)).toEqual([a.id]);
-            await markDeadlineClosed(a.id, filled.exitDeadline!, 'lane deadline close attempted (overnight)');
-            expect((await listDeadlineDue(filled.exitDeadline! + 3_600_000)).map((p) => p.id)).toEqual([]);
-            expect((await getProposal(a.id))!.deadlineClosedAt).toBe(filled.exitDeadline);
-            expect((await getProposal(a.id))!.note).toContain('lane deadline close attempted');
+            // due listing: not before the deadline; at it; an ATTEMPT hides the row for the cooldown only,
+            // the attempt cap hands it over; a CONFIRMED close ends it (review 2026-09-06, finding 3)
+            const dl = filled.exitDeadline!;
+            expect((await listDeadlineDue(dl - 1)).map((p) => p.id)).toEqual([]);
+            expect((await listDeadlineDue(dl)).map((p) => p.id)).toEqual([a.id]);
+            await markDeadlineAttempt(a.id, dl, 'lane deadline close attempt 1/3 (overnight)');
+            expect((await getProposal(a.id))!).toMatchObject({ deadlineAttempts: 1, deadlineAttemptedAt: dl, deadlineClosedAt: null });
+            expect((await listDeadlineDue(dl + 60_000, 5 * 60_000, 3)).map((p) => p.id)).toEqual([]);      // cooling down
+            expect((await listDeadlineDue(dl + 5 * 60_000, 5 * 60_000, 3)).map((p) => p.id)).toEqual([a.id]); // retry
+            await markDeadlineAttempt(a.id, dl + 5 * 60_000, 'attempt 2/3');
+            await markDeadlineAttempt(a.id, dl + 10 * 60_000, 'attempt 3/3');
+            expect((await listDeadlineDue(dl + 3_600_000, 5 * 60_000, 3)).map((p) => p.id)).toEqual([]);   // attempts exhausted → the operator's
+            await markDeadlineClosed(a.id, dl + 3_600_000, 'lane deadline close confirmed flat');
+            expect((await listDeadlineDue(dl + 2 * 3_600_000)).map((p) => p.id)).toEqual([]);
+            expect((await getProposal(a.id))!.deadlineClosedAt).toBe(dl + 3_600_000);
+            expect((await getProposal(a.id))!.note).toContain('lane deadline close confirmed flat');
             await setProposalStatus(a.id, 'rejected');
             await setProposalStatus(b.id, 'rejected');
         } finally {

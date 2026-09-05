@@ -93,6 +93,21 @@ describe('cup-and-handle', () => {
         expect(m!.note).toContain('cup');
     });
 
+    test('review 2026-09-06 finding 14: the pivot is fixed before the last bar; a last close at/above it is breakout-confirmed, below it pivot-ready', () => {
+        const base = cupCloses(0.25); // handle [98, 97.2, 96.5, 96, 96.3, 96.8, 97] → pivot = high of the first handle bar (98 × 1.008)
+        const ready = detectCupAndHandle(mkBars(base))!;
+        expect(ready.state).toBe('pivot-ready');
+        expect(ready.pivot).toBeCloseTo(98 * 1.008, 2);
+        // the last bar closes through the pivot (99.5 > 98.78), still under the 2 % ceiling over the right rim
+        const confirmed = detectCupAndHandle(mkBars([...base.slice(0, -1), 99.5]))!;
+        expect(confirmed).not.toBeNull();
+        expect(confirmed.state).toBe('breakout-confirmed');
+        expect(confirmed.pivot).toBeCloseTo(98 * 1.008, 2); // the pivot did not move with the confirming bar
+        // a last bar that pokes above the pivot but closes below it is NOT confirmed
+        const poke = detectCupAndHandle(mkBars([...base.slice(0, -1), 98.5]))!; // high 99.29 > pivot, close 98.5 < 98.78
+        expect(poke.state).toBe('pivot-ready');
+    });
+
     test('rejects a crash too deep to be a cup', () => {
         expect(detectCupAndHandle(mkBars(cupCloses(0.5)))).toBeNull();
     });

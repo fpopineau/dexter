@@ -27,6 +27,7 @@ import {
 } from './candidate-archive.js';
 import { nextTradingDayStartMs } from './lane-contract.js';
 import { etFrameMs } from './outcome-tracker.js';
+import { classRiskPct } from './position-sizer.js';
 import type { SimBarSource } from './simulator/bars.js';
 import { commissionsFor, simulateBracket, type CommissionConfig, type SimBar, type SimSpec } from './simulator/fill-model.js';
 import { sizeAtRung } from './simulator/variants.js';
@@ -108,10 +109,13 @@ async function replayOne(row: CandidateRow, deps: OvernightBenchDeps, counts: Ov
         });
         return;
     }
-    const quantity = row.stop !== null ? sizeAtRung({ entry: row.price, stop: row.stop, rungPct: deps.rungPct, netLiq: deps.netLiq }) : 0;
+    // Size at the OVERNIGHT lane's effective budget (min(rung, overnight_risk_pct)
+    // — the budget the real row would get), for the informational USD/net R.
+    const budgetPct = classRiskPct('swing', deps.rules, deps.rungPct, 'overnight');
+    const quantity = row.stop !== null ? sizeAtRung({ entry: row.price, stop: row.stop, rungPct: budgetPct, netLiq: deps.netLiq }) : 0;
     if (r.outcome === 'unfilled' || r.fillPrice === null) {
         counts.settled++;
-        await deps.update(row.id, { ...base, replayStatus: 'settled', outcome: r.outcome, gapPct, quantity, commissions: 0, netUsd: 0, netR: null, note: 'MKT entry found no bar inside the entry window' });
+        await deps.update(row.id, { ...base, replayStatus: 'settled', outcome: r.outcome, gapPct, quantity, commissions: 0, netUsd: 0, netR: null, grossR: null, note: 'MKT entry found no bar inside the entry window' });
         return;
     }
     const sides = r.exitPrice !== null ? 2 : 1;
@@ -119,12 +123,16 @@ async function replayOne(row: CandidateRow, deps: OvernightBenchDeps, counts: Ov
     const sign = row.direction === 'long' ? 1 : -1;
     const gross = r.exitPrice !== null ? (r.exitPrice - r.fillPrice) * quantity * sign : 0;
     const netUsd = Math.round((gross - commissions) * 100) / 100;
-    const riskUsd = row.stop !== null ? Math.abs(row.price - row.stop) * quantity : 0;
+    const riskPerShare = row.stop !== null ? Math.abs(row.price - row.stop) : 0;
+    const riskUsd = riskPerShare * quantity;
+    // Review 2026-09-06 (finding 9): the size-invariant label — R before
+    // costs per unit of planned risk; netR at the budget is informational.
+    const grossR = r.exitPrice !== null && riskPerShare > 0 ? Math.round((((r.exitPrice - r.fillPrice) * sign) / riskPerShare) * 1e4) / 1e4 : null;
     counts.settled++;
     await deps.update(row.id, {
         ...base, replayStatus: 'settled', outcome: r.outcome, gapPct, fillAt: r.fillAt, fillPrice: r.fillPrice, exitAt: r.exitAt, exitPrice: r.exitPrice,
-        mfePct: r.mfePct, maePct: r.maePct, quantity, commissions, netUsd, netR: riskUsd > 0 ? Math.round((netUsd / riskUsd) * 1e4) / 1e4 : null,
-        note: quantity <= 0 ? 'unaffordable at the rung (0 shares) — R undefined' : null,
+        mfePct: r.mfePct, maePct: r.maePct, quantity, commissions, netUsd, netR: riskUsd > 0 ? Math.round((netUsd / riskUsd) * 1e4) / 1e4 : null, grossR,
+        note: quantity <= 0 ? 'unaffordable at the budget (0 shares) — net R undefined, gross R kept' : null,
     });
 }
 
@@ -217,7 +225,7 @@ export function formatOvernightReport(day: string, rows: CandidateRow[], rules: 
     const lines = [
         `🌙 Overnight benchmark — universe captured ${day} 15:35 ET: ${eligible.length} eligible / ${rows.length} seen` +
         (ineligible.length ? ` (ineligible: ${tallyLine})` : ''),
-        `• universe (mechanical MKT@close, stop ATR×, take-x, flat 10:00): n ${universe.n} meanR ${fmtR(universe.meanR)} ΣR ${fmtR(universe.sumR)} W${universe.w}/L${universe.l}/F${universe.f}` +
+        `• universe (mechanical twin: MKT@close, take-x, stop at the gate's min R:R, flat 10:00 — eligible ≠ admissible): n ${universe.n} meanR ${fmtR(universe.meanR)} ΣR ${fmtR(universe.sumR)} W${universe.w}/L${universe.l}/F${universe.f}` +
         ` · gap median ${fmtPct(median(gaps))}, adverse ≥${rules.overnight_gap_stress_pct}%: ${adverse}`,
         `• top-5 by rank: n ${top5.n} meanR ${fmtR(top5.meanR)}`,
         `• judgment proposed ${proposed.length}${proposed.length ? ` (${proposed.map((r) => `${r.dispositionRef} ${r.symbol} ${fmtR(r.netR)}R`).join(', ')})` : ''}` +

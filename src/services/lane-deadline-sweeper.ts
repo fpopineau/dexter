@@ -1,5 +1,6 @@
 /**
- * Lane deadline sweeper (REQ-LANE-003, four-lane program WP5).
+ * Lane deadline sweeper (REQ-LANE-003, four-lane program WP5; review
+ * 2026-09-06 finding 3).
  *
  * Every lane with a holding horizon beyond the session carries an exit
  * deadline stamped at entry fill (lane-contract.ts): the overnight lane's
@@ -9,12 +10,19 @@
  * SAFE close path (`closePosition` — the same primitive as `kill` and the
  * EOD triage: cancels the resting exits, market-closes, confirms flat).
  *
- * ONE attempt per row: the row is stamped `deadline_closed_at` on the first
- * attempt whatever the outcome, so a working close order is never doubled
- * by the next tick. A close that does not confirm flat is an INCIDENT
- * (alert + log); a deadline is never converted into a longer hold. A row
- * whose bracket already exited (no position) is stamped without an order —
- * the tracker owns its close.
+ * Two marks, two meanings:
+ *   deadline_attempted_at / deadline_attempts — an attempt STARTED (stamped
+ *     before the order goes out, so a crash mid-close is visible); the row
+ *     is retried after COOLDOWN_MS, at most MAX_ATTEMPTS times — a close
+ *     that failed to reach the broker is not a terminal state;
+ *   deadline_closed_at — the broker CONFIRMED flat (or the position was
+ *     already flat: the bracket exit owned the close).
+ * A double close is bounded, not assumed away: every attempt re-reads the
+ * broker positions first, and a market close still unfilled five minutes
+ * later during the regular session is itself the incident the alert names.
+ * When the attempts are exhausted the alert says so and hands the row to
+ * the operator ('kill SYMBOL'); a deadline is never converted into a longer
+ * hold.
  */
 
 import { logger } from '@/utils';
@@ -23,6 +31,10 @@ import { emitLoopAlert } from './loop/alerts.js';
 import type { TradeProposal } from './trade-proposals.js';
 
 const SWEEP_INTERVAL_MS = 60_000;
+/** Wait this long before re-attempting a close that did not confirm flat. */
+export const DEADLINE_RETRY_COOLDOWN_MS = 5 * 60_000;
+/** Attempts before the row is handed to the operator. */
+export const DEADLINE_MAX_ATTEMPTS = 3;
 
 export interface DeadlineCloseOutcome {
     ok: boolean;
@@ -33,9 +45,13 @@ export interface DeadlineCloseOutcome {
 
 export interface DeadlineSweepDeps {
     now: number;
-    listDue: (nowMs: number) => Promise<TradeProposal[]>;
+    /** Due rows: deadline passed, not confirmed closed, cooldown elapsed, attempts left. */
+    listDue: (nowMs: number, cooldownMs: number, maxAttempts: number) => Promise<TradeProposal[]>;
     positions: () => Promise<Array<{ symbol: string; quantity: number }>>;
     close: (symbol: string, reason: string) => Promise<DeadlineCloseOutcome>;
+    /** Record an attempt (before the order). */
+    markAttempt: (id: string, at: number, note: string) => Promise<void>;
+    /** Record the confirmed close. */
     markClosed: (id: string, at: number, note: string) => Promise<void>;
     alert?: (message: string) => void;
 }
@@ -44,16 +60,25 @@ export interface DeadlineSweepResult {
     due: number;
     closed: number;
     alreadyFlat: number;
+    /** Attempts that did not confirm flat (retried after the cooldown or handed over). */
     incidents: string[];
 }
 
-/** Pure: the rows whose deadline has passed and that were never attempted. */
-export function selectDueDeadlines<T extends { exitDeadline: number | null; deadlineClosedAt: number | null; status: string; entryFillPrice: number | null }>(rows: T[], nowMs: number): T[] {
-    return rows.filter((r) => r.status === 'executed' && r.entryFillPrice !== null && r.exitDeadline !== null && r.exitDeadline <= nowMs && r.deadlineClosedAt === null);
+/** Pure: the rows whose deadline has passed, not confirmed closed, outside
+ *  the retry cooldown and under the attempt cap. */
+export function selectDueDeadlines<T extends {
+    exitDeadline: number | null; deadlineClosedAt: number | null; deadlineAttemptedAt: number | null; deadlineAttempts: number;
+    status: string; entryFillPrice: number | null;
+}>(rows: T[], nowMs: number, cooldownMs = DEADLINE_RETRY_COOLDOWN_MS, maxAttempts = DEADLINE_MAX_ATTEMPTS): T[] {
+    return rows.filter((r) =>
+        r.status === 'executed' && r.entryFillPrice !== null && r.exitDeadline !== null && r.exitDeadline <= nowMs
+        && r.deadlineClosedAt === null
+        && (r.deadlineAttemptedAt === null || r.deadlineAttemptedAt <= nowMs - cooldownMs)
+        && r.deadlineAttempts < maxAttempts);
 }
 
 export async function sweepDeadlinesOnce(deps: DeadlineSweepDeps): Promise<DeadlineSweepResult> {
-    const due = await deps.listDue(deps.now);
+    const due = await deps.listDue(deps.now, DEADLINE_RETRY_COOLDOWN_MS, DEADLINE_MAX_ATTEMPTS);
     const result: DeadlineSweepResult = { due: due.length, closed: 0, alreadyFlat: 0, incidents: [] };
     if (due.length === 0) return result;
     const positions = await deps.positions();
@@ -66,8 +91,10 @@ export async function sweepDeadlinesOnce(deps: DeadlineSweepDeps): Promise<Deadl
             logger.info(`[lane-deadline] ${label}: already flat — stamped`);
             continue;
         }
-        // Stamp BEFORE the order so a crash mid-close cannot re-issue it.
-        await deps.markClosed(p.id, deps.now, `lane deadline close attempted (${p.strategyId ?? p.tradeClass})`);
+        const attempt = p.deadlineAttempts + 1;
+        // The attempt is recorded BEFORE the order so a crash mid-close is
+        // visible and the next tick waits the cooldown instead of firing again.
+        await deps.markAttempt(p.id, deps.now, `lane deadline close attempt ${attempt}/${DEADLINE_MAX_ATTEMPTS} (${p.strategyId ?? p.tradeClass})`);
         let outcome: DeadlineCloseOutcome;
         try {
             outcome = await deps.close(p.symbol, `lane deadline (${p.strategyId ?? p.tradeClass})`);
@@ -75,10 +102,14 @@ export async function sweepDeadlinesOnce(deps: DeadlineSweepDeps): Promise<Deadl
             outcome = { ok: false, message: err instanceof Error ? err.message : String(err) };
         }
         if (outcome.ok && (outcome.flat === true || outcome.state === 'filled')) {
+            await deps.markClosed(p.id, deps.now, `lane deadline close confirmed flat — ${outcome.message}`);
             result.closed++;
             logger.info(`[lane-deadline] ${label}: closed — ${outcome.message}`);
         } else {
-            const line = `⚠️ lane deadline: ${label} close NOT confirmed flat — ${outcome.message}. Act in TWS or 'kill ${p.symbol}'.`;
+            const exhausted = attempt >= DEADLINE_MAX_ATTEMPTS;
+            const line = exhausted
+                ? `🚨 lane deadline: ${label} close NOT confirmed flat after ${attempt} attempts — ${outcome.message}. Retries exhausted: act in TWS or 'kill ${p.symbol}'.`
+                : `⚠️ lane deadline: ${label} close NOT confirmed flat (attempt ${attempt}/${DEADLINE_MAX_ATTEMPTS}) — ${outcome.message}. Retry in ${DEADLINE_RETRY_COOLDOWN_MS / 60_000} min; 'kill ${p.symbol}' to act now.`;
             result.incidents.push(line);
             logger.error(`[lane-deadline] ${line}`);
             deps.alert?.(line);
@@ -97,7 +128,7 @@ export function startLaneDeadlineSweeper(): void {
         if (getMarketSession().session !== MarketSession.REGULAR) return;
         inFlight = true;
         (async () => {
-            const [{ listDeadlineDue, markDeadlineClosed }, { closePosition, fetchPositions }, { getIBApi }] = await Promise.all([
+            const [{ listDeadlineDue, markDeadlineAttempt, markDeadlineClosed }, { closePosition, fetchPositions }, { getIBApi }] = await Promise.all([
                 import('./trade-proposals.js'),
                 import('./position-actions.js'),
                 import('@/tools/ibkr/connection.js'),
@@ -107,6 +138,7 @@ export function startLaneDeadlineSweeper(): void {
                 listDue: listDeadlineDue,
                 positions: async () => (await fetchPositions(await getIBApi())).map((p) => ({ symbol: p.symbol, quantity: p.quantity })),
                 close: (symbol, reason) => closePosition(symbol, reason),
+                markAttempt: markDeadlineAttempt,
                 markClosed: markDeadlineClosed,
                 alert: emitLoopAlert,
             });

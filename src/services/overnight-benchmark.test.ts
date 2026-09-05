@@ -17,7 +17,7 @@ function row(over: Partial<CandidateRow> = {}): CandidateRow {
         id: 1, day: '2026-09-10', lane: 'overnight', symbol: 'MU', direction: 'long', capturedAt: CAPTURED, source: 'opportunity-snapshot:pre-close@1', rank: 78, rankerVersion: 'eod-continuation-v1',
         price: 100, dailyAtr: 3, dayMovePct: 4, eligible: true, reasons: [], levelsVersion: 'v1', entryType: 'MKT', entry: null, entryLimit: null, stop: 95.5, target: 104.5,
         exitDeadline: DEADLINE, detectorVersion: null, state: null, disposition: 'pending', dispositionRef: null, replayStatus: 'pending', barSource: null,
-        fillAt: null, fillPrice: null, exitAt: null, exitPrice: null, outcome: null, gapPct: null, quantity: null, commissions: null, netUsd: null, netR: null,
+        fillAt: null, fillPrice: null, exitAt: null, exitPrice: null, outcome: null, gapPct: null, quantity: null, commissions: null, netUsd: null, netR: null, grossR: null,
         mfePct: null, maePct: null, replayedAt: null, note: null, ...over,
     };
 }
@@ -72,6 +72,7 @@ describe('runOvernightBenchmarkOnce (REQ-BENCH-004/005)', () => {
         expect(mu).toMatchObject({ replayStatus: 'settled', outcome: 'eod-flat', fillPrice: 100.2, quantity: 13, commissions: 2, gapPct: 2 });
         expect(mu.netUsd).toBeCloseTo(34.4, 2);
         expect(mu.netR).toBeCloseTo(34.4 / 58.5, 3);
+        expect(mu.grossR).toBeCloseTo(2.8 / 4.5, 3); // size-invariant label: (103 − 100.2) / |100 − 95.5|
         const amd = patches.get(2)!;
         expect(amd.outcome).toBe('stop');
         expect(amd.exitPrice).toBe(94); // opened through the 95.5 stop → filled at the open

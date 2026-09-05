@@ -4,27 +4,31 @@
  * The scanner surfaces candidates all day; the judgment admits a few; the
  * rest leave no trace — so "did the overnight lane pick well among what it
  * could see?" has no data, and a gate-off variant of a refusal is not a
- * universe. This module captures the observable universe ONCE per trading
- * day, point-in-time, BEFORE the close:
+ * universe. This module captures the observable universe point-in-time,
+ * BEFORE the close, on EVERY pre-close opportunity snapshot (review
+ * 2026-09-06, finding 8 — a single 15:35 capture missed names seen at 15:10
+ * and gone by 15:35, and half-days close at 13:00):
  *
- *   overnight lane      the latest pre-close opportunity snapshot (every
- *                       scored candidate, snapshot timestamp as source)
+ *   overnight lane      each pre-close snapshot's scored candidates; a
+ *                       symbol's FIRST sighting of the day stands (price,
+ *                       rank and levels as first observed), the snapshot
+ *                       timestamp is the row's source
  *   cup-and-handle lane the latest nightly pattern scan (cup matches only,
- *                       detector version and state)
+ *                       detector version and state), once per day
  *
  * Each row carries what was OBSERVED (price, daily ATR, day move, rank), a
  * deterministic eligibility verdict with reasons, the lane's mechanical
  * levels and their version, and later the disposition (what the system did
  * with the symbol that day) and the mechanical twin's outcome (the
- * overnight benchmark fills it). The first capture of a (day, lane, symbol)
- * stands; nothing archived is ever re-priced.
+ * overnight benchmark fills it). Nothing archived is ever re-priced. Each
+ * proposal records the snapshot it was created against (`snapshot_ts`), so
+ * the judgment's universe is a captured one.
  *
  * Its own SQLite file (`candidate-archive.db`), no order ids, and no look,
  * ladder or verdict reads it (REQ-BENCH-006). Disable with
  * CANDIDATE_ARCHIVE=false.
  */
 
-import { Cron } from 'croner';
 import { mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -39,9 +43,8 @@ import { formulaTakePct } from './proposal-risk-gate.js';
 import { assertTestDataDirIsTemp } from './trade-proposals.js';
 
 const ET = 'America/New_York';
-/** 15:35 ET — five minutes into the Pre-Close Review, which reads the same snapshot. */
-const CAPTURE_CRON = '35 15 * * 1-5';
-export const CANDIDATE_LEVELS_VERSION = 'v1';
+/** v2 (review 2026-09-06, finding 7): the stop honours the gate's minimum R:R. */
+export const CANDIDATE_LEVELS_VERSION = 'v2';
 /** Rows still pending after this many days are marked unknown (bars gone). */
 export const CANDIDATE_REPLAY_HORIZON_DAYS = 5;
 
@@ -99,6 +102,10 @@ export interface CandidateRow {
     commissions: number | null;
     netUsd: number | null;
     netR: number | null;
+    /** (exit − fill) / |price − stop| signed toward the direction — the
+     *  SIZE-INVARIANT label (review 2026-09-06, finding 9); netR at the rung
+     *  is informational (min commissions and whole shares make it size-dependent). */
+    grossR: number | null;
     mfePct: number | null;
     maePct: number | null;
     replayedAt: number | null;
@@ -151,16 +158,24 @@ export interface MechanicalLevels {
     target: number;
 }
 
-/** REQ-BENCH-004 (levels v1): MKT at the next bar ("buy before the close"),
- *  stop at `stop_atr_multiplier` × daily ATR, target at take-x. Null when
- *  the geometry is impossible (stop through zero). */
+/** REQ-BENCH-004 (levels v2 — review 2026-09-06, finding 7): MKT at the next
+ *  bar ("buy before the close"), target at take-x, and the stop at the
+ *  distance the GATE would accept: min(`stop_atr_multiplier` × ATR, take
+ *  distance / `min_risk_reward`), so the twin's R:R meets the gate's
+ *  minimum instead of the 1:1 of v1 (stop 1.5 ATR, target 1.5 ATR). Null
+ *  when the geometry is impossible or the stop would sit inside the noise
+ *  filter (`min_stop_atr_fraction`) — the gate would refuse that trade, so
+ *  the benchmark must not build it. */
 export function overnightLevels(
     input: { price: number; dailyAtr: number; direction: 'long' | 'short' },
-    rules: Pick<RiskRules, 'stop_atr_multiplier' | 'take_atr_mult' | 'take_floor_pct' | 'take_cap_pct'>,
+    rules: Pick<RiskRules, 'stop_atr_multiplier' | 'take_atr_mult' | 'take_floor_pct' | 'take_cap_pct' | 'min_risk_reward' | 'min_stop_atr_fraction'>,
 ): MechanicalLevels | null {
     const sign = input.direction === 'long' ? 1 : -1;
-    const stop = r2(input.price - sign * rules.stop_atr_multiplier * input.dailyAtr);
     const takePct = formulaTakePct((input.dailyAtr / input.price) * 100, rules as RiskRules);
+    const takeDist = (input.price * takePct) / 100;
+    const stopDist = Math.min(rules.stop_atr_multiplier * input.dailyAtr, takeDist / Math.max(1e-9, rules.min_risk_reward));
+    if (stopDist < rules.min_stop_atr_fraction * input.dailyAtr) return null; // noise stop — the gate refuses it
+    const stop = r2(input.price - sign * stopDist);
     const target = r2(input.price * (1 + (sign * takePct) / 100));
     if (!(stop > 0) || !(target > 0)) return null;
     if (input.direction === 'long' ? !(stop < input.price && target > input.price) : !(stop > input.price && target < input.price)) return null;
@@ -207,7 +222,7 @@ function blankRow(base: Pick<CandidateRow, 'day' | 'lane' | 'symbol' | 'directio
         disposition: 'pending', dispositionRef: null,
         replayStatus: base.eligible ? 'pending' : 'skipped',
         barSource: null, fillAt: null, fillPrice: null, exitAt: null, exitPrice: null, outcome: null, gapPct: null,
-        quantity: null, commissions: null, netUsd: null, netR: null, mfePct: null, maePct: null, replayedAt: null, note: null,
+        quantity: null, commissions: null, netUsd: null, netR: null, grossR: null, mfePct: null, maePct: null, replayedAt: null, note: null,
     };
 }
 
@@ -386,6 +401,7 @@ async function getDb(): Promise<SqliteDatabase> {
             commissions      REAL,
             net_usd          REAL,
             net_r            REAL,
+            gross_r          REAL,
             mfe_pct          REAL,
             mae_pct          REAL,
             replayed_at      INTEGER,
@@ -398,6 +414,7 @@ async function getDb(): Promise<SqliteDatabase> {
     // WP8 column on a WP7 table: additive, idempotent (an archive created
     // before the column existed gets it; SQLite refuses a duplicate add).
     try { db.exec('ALTER TABLE candidates ADD COLUMN ranker_version TEXT'); } catch { /* already present */ }
+    try { db.exec('ALTER TABLE candidates ADD COLUMN gross_r REAL'); } catch { /* already present */ }
     return db;
 }
 
@@ -408,7 +425,7 @@ interface Row {
     detector_version: string | null; state: string | null; disposition: string; disposition_ref: string | null; replay_status: string;
     bar_source: string | null; fill_at: number | null; fill_price: number | null; exit_at: number | null; exit_price: number | null;
     outcome: string | null; gap_pct: number | null; quantity: number | null; commissions: number | null; net_usd: number | null;
-    net_r: number | null; mfe_pct: number | null; mae_pct: number | null; replayed_at: number | null; note: string | null;
+    net_r: number | null; gross_r: number | null; mfe_pct: number | null; mae_pct: number | null; replayed_at: number | null; note: string | null;
 }
 
 function fromRow(r: Row): CandidateRow {
@@ -423,7 +440,7 @@ function fromRow(r: Row): CandidateRow {
         disposition: (r.disposition as CandidateDisposition) ?? 'pending', dispositionRef: r.disposition_ref,
         replayStatus: (r.replay_status as CandidateReplayStatus) ?? 'pending', barSource: r.bar_source, fillAt: r.fill_at, fillPrice: r.fill_price,
         exitAt: r.exit_at, exitPrice: r.exit_price, outcome: r.outcome, gapPct: r.gap_pct, quantity: r.quantity, commissions: r.commissions,
-        netUsd: r.net_usd, netR: r.net_r, mfePct: r.mfe_pct, maePct: r.mae_pct, replayedAt: r.replayed_at, note: r.note,
+        netUsd: r.net_usd, netR: r.net_r, grossR: r.gross_r ?? null, mfePct: r.mfe_pct, maePct: r.mae_pct, replayedAt: r.replayed_at, note: r.note,
     };
 }
 
@@ -437,12 +454,12 @@ export async function insertCandidates(rows: CandidateRow[]): Promise<number> {
         database.query<void>(
             `INSERT OR IGNORE INTO candidates (day, lane, symbol, direction, captured_at, source, rank, ranker_version, price, daily_atr, day_move_pct, eligible, reasons,
                 levels_version, entry_type, entry, entry_limit, stop, target, exit_deadline, detector_version, state, disposition, disposition_ref,
-                replay_status, bar_source, fill_at, fill_price, exit_at, exit_price, outcome, gap_pct, quantity, commissions, net_usd, net_r, mfe_pct, mae_pct, replayed_at, note)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                replay_status, bar_source, fill_at, fill_price, exit_at, exit_price, outcome, gap_pct, quantity, commissions, net_usd, net_r, gross_r, mfe_pct, mae_pct, replayed_at, note)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
             c.day, c.lane, c.symbol, c.direction, c.capturedAt, c.source, c.rank, c.rankerVersion, c.price, c.dailyAtr, c.dayMovePct, c.eligible ? 1 : 0, JSON.stringify(c.reasons),
             c.levelsVersion, c.entryType, c.entry, c.entryLimit, c.stop, c.target, c.exitDeadline, c.detectorVersion, c.state, c.disposition, c.dispositionRef,
-            c.replayStatus, c.barSource, c.fillAt, c.fillPrice, c.exitAt, c.exitPrice, c.outcome, c.gapPct, c.quantity, c.commissions, c.netUsd, c.netR, c.mfePct, c.maePct, c.replayedAt, c.note,
+            c.replayStatus, c.barSource, c.fillAt, c.fillPrice, c.exitAt, c.exitPrice, c.outcome, c.gapPct, c.quantity, c.commissions, c.netUsd, c.netR, c.grossR, c.mfePct, c.maePct, c.replayedAt, c.note,
         );
         inserted++;
     }
@@ -475,12 +492,12 @@ export async function listEligibleCandidateSymbols(day: string, lane: CandidateL
 
 export type CandidatePatch = Partial<Pick<CandidateRow,
     'disposition' | 'dispositionRef' | 'replayStatus' | 'barSource' | 'fillAt' | 'fillPrice' | 'exitAt' | 'exitPrice' | 'outcome' | 'gapPct'
-    | 'quantity' | 'commissions' | 'netUsd' | 'netR' | 'mfePct' | 'maePct' | 'replayedAt' | 'note'>>;
+    | 'quantity' | 'commissions' | 'netUsd' | 'netR' | 'grossR' | 'mfePct' | 'maePct' | 'replayedAt' | 'note'>>;
 
 const PATCH_COLUMNS: Record<keyof CandidatePatch, string> = {
     disposition: 'disposition', dispositionRef: 'disposition_ref', replayStatus: 'replay_status', barSource: 'bar_source', fillAt: 'fill_at',
     fillPrice: 'fill_price', exitAt: 'exit_at', exitPrice: 'exit_price', outcome: 'outcome', gapPct: 'gap_pct', quantity: 'quantity',
-    commissions: 'commissions', netUsd: 'net_usd', netR: 'net_r', mfePct: 'mfe_pct', maePct: 'mae_pct', replayedAt: 'replayed_at', note: 'note',
+    commissions: 'commissions', netUsd: 'net_usd', netR: 'net_r', grossR: 'gross_r', mfePct: 'mfe_pct', maePct: 'mae_pct', replayedAt: 'replayed_at', note: 'note',
 };
 
 /** Replay outcomes and dispositions land here; captured fields are never touched. */
@@ -579,29 +596,40 @@ async function liveDeps(): Promise<CaptureDeps> {
     };
 }
 
-/** One live capture (exported for scripts and the cron). */
-export async function runCandidateCaptureOnce(): Promise<CaptureCounts | null> {
+/** One live capture (exported for scripts and the engine hook). With a
+ *  snapshot supplied, THAT snapshot is the source (the engine passes each
+ *  pre-close snapshot as it lands); without one, the engine's latest. */
+export async function runCandidateCaptureOnce(snapshot?: OpportunitySnapshot): Promise<CaptureCounts | null> {
     const today = etDayIso(Date.now());
     if (isMarketHoliday(today)) return null;
-    const counts = await captureCandidatesOnce(await liveDeps());
-    logger.info(
-        `[candidate-archive] ${counts.day}: overnight ${counts.overnight.inserted}/${counts.overnight.seen} archived (${counts.overnight.eligible} eligible)` +
-        `${counts.overnight.skipped ? ` — ${counts.overnight.skipped}` : ''}; cup ${counts.cup.inserted}/${counts.cup.seen}` +
-        `${counts.cup.skipped ? ` — ${counts.cup.skipped}` : ''}`,
-    );
+    const deps = await liveDeps();
+    const counts = await captureCandidatesOnce(snapshot ? { ...deps, latestSnapshot: () => snapshot } : deps);
+    if (counts.overnight.inserted > 0 || counts.cup.inserted > 0 || counts.overnight.skipped) {
+        logger.info(
+            `[candidate-archive] ${counts.day}: overnight +${counts.overnight.inserted}/${counts.overnight.seen} archived (${counts.overnight.eligible} eligible)` +
+            `${counts.overnight.skipped ? ` — ${counts.overnight.skipped}` : ''}; cup +${counts.cup.inserted}/${counts.cup.seen}` +
+            `${counts.cup.skipped ? ` — ${counts.cup.skipped}` : ''}`,
+        );
+    }
     return counts;
 }
 
-let job: Cron | null = null;
+let unsubscribe: (() => void) | null = null;
 
+/** REQ-BENCH-001 (amended 2026-09-06): capture on EVERY pre-close snapshot
+ *  the engine produces — first sighting per symbol per day stands. */
 export function startCandidateArchive(): void {
-    if (job || !isCandidateArchiveEnabled()) return;
-    job = new Cron(CAPTURE_CRON, { timezone: ET }, () => {
-        runCandidateCaptureOnce().catch((err) => logger.error(`[candidate-archive] capture failed: ${err}`));
+    if (unsubscribe || !isCandidateArchiveEnabled()) return;
+    void import('./opportunity-engine.js').then(({ onSnapshot }) => {
+        if (unsubscribe) return;
+        unsubscribe = onSnapshot((snap) => {
+            if (snap.phase !== 'pre-close') return;
+            runCandidateCaptureOnce(snap).catch((err) => logger.error(`[candidate-archive] capture failed: ${err}`));
+        });
+        logger.info('[candidate-archive] armed: point-in-time universe capture on every pre-close snapshot (overnight + cup-and-handle lanes)');
     });
-    logger.info('[candidate-archive] scheduled 15:35 ET: point-in-time universe capture (overnight + cup-and-handle lanes)');
 }
 
 export function stopCandidateArchive(): void {
-    if (job) { job.stop(); job = null; }
+    if (unsubscribe) { unsubscribe(); unsubscribe = null; }
 }

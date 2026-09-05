@@ -26,7 +26,7 @@ import {
     listProposals,
 } from '@/services/trade-proposals.js';
 import { rejectProposal } from '@/services/proposal-executor.js';
-import { currentAgentLane, currentAgentModel, currentTriggerRank } from '@/agent/lane-context.js';
+import { currentAgentLane, currentAgentModel, currentTriggerRank, currentTriggerSymbol } from '@/agent/lane-context.js';
 import { fetchDailyRiskContext } from '../ibkr/daily-atr.js';
 import { formatToolResult } from '../types.js';
 import { logger } from '@/utils';
@@ -87,7 +87,7 @@ const CreateSchema = z.object({
     tradeClass: z.enum(['intraday', 'swing', 'earnings-bet']).optional()
         .describe("Risk class. Usually OMIT it — the lane (strategyId) fixes it: intraday → 'intraday'; overnight, swing and cup-and-handle → 'swing' (GTC exits, gap-stress sizing, swing pool of 3); earnings-bet → 'earnings-bet' (a DELIBERATE hold through a print, one at a time, sized to the worst-case gap). Passing a class that contradicts the lane is refused. Never label a trade earnings-bet to dodge the exit-before-print rule of other classes; the class has stricter sizing, not looser."),
     strategyId: z.enum(['intraday', 'overnight', 'swing', 'cup-and-handle', 'earnings-bet']).optional()
-        .describe("The LANE (four-lane contract). 'intraday' (default): same session, flat by close, take-at-x% target, tif DAY. 'overnight': registered from 15:00 ET, GTC bracket, an unfilled entry dies with the close (expiry clamps to the bell), the position exits at 10:00 ET next session at the latest — a stated reason the move survives the night is required. 'swing': multi-session pattern trade (pullback / flat-base), GTC, closed by 15:50 ET on its 10th trading day at the latest. 'cup-and-handle': the cup lane from swing_patterns, GTC, 15 trading days max. 'earnings-bet': through-print bet (its own rules). Omitted = derived from tradeClass."),
+        .describe("The LANE (four-lane contract). 'intraday' (default): same session, flat by close, take-at-x% target, tif DAY. 'overnight': registered from 15:00 ET, GTC bracket, an unfilled entry dies with the close (expiry clamps to the bell), the position exits at 10:00 ET next session at the latest — a stated reason the move survives the night is required. 'swing': multi-session pattern trade (pullback / flat-base), GTC, closed by 15:50 ET at the latest 10 trading sessions AFTER the fill session (the 11th session counting the fill day). 'cup-and-handle': the cup lane from swing_patterns, GTC, closed 15 trading sessions after the fill session. 'earnings-bet': through-print bet (its own rules). Omitted = derived from tradeClass."),
     setupId: z.string().max(40).optional()
         .describe("The setup inside the lane, lowercase-with-dashes, e.g. 'pullback', 'flat-base', 'cup-and-handle', 'eod-continuation', 'gap-continuation', 'catalyst-reversal'. Cup-and-handle defaults to its own."),
     worstCaseGapPct: z.coerce.number().min(0).max(100).optional()
@@ -220,9 +220,11 @@ export function createTradeProposalsTool() {
                         if (lane.strategyId === 'cup-and-handle') {
                             detectorVersion = patternScan?.candidates.find((c) => c.symbol.toUpperCase() === input.symbol.toUpperCase())?.detectorVersion ?? patternScan?.detectorVersion ?? null;
                         }
-                        const provenance = laneRankFor(lane.strategyId, input.symbol, {
+                        const snapshotNow = getLatestSnapshot();
+                        const provenance = laneRankFor(lane.strategyId, input.symbol, input.direction, {
                             triggerRank: currentTriggerRank(),
-                            snapshot: getLatestSnapshot(),
+                            triggerSymbol: currentTriggerSymbol(),
+                            snapshot: snapshotNow,
                             patternScan,
                         });
 
@@ -310,11 +312,25 @@ export function createTradeProposalsTool() {
                             const capLine = sized.caps ? Object.entries(sized.caps).map(([k, v]) => `${k} ${Number.isFinite(v) ? v : '∞'}`).join(', ') : '';
                             logger.info(`[trade-proposals] auto-sized ${input.symbol}: ${quantity} shares (budget $${sized.riskBudget.toFixed(0)}, confidence ×${sized.multiplier}, bound by ${sized.binding ?? '?'}; caps: ${capLine}; cost-to-target ${costToTargetPct == null ? '—' : `${costToTargetPct}%`})`);
                         } else {
-                            // Explicit quantity: the cost ratio is still
-                            // stamped (REQ-SIZE-003 ledger), not enforced —
-                            // the operator chose the size.
-                            const { estimateRoundTrip } = await import('@/services/trade-costs.js');
-                            costToTargetPct = estimateRoundTrip({ quantity, entry: sizingBasis, target: input.target, spreadPct }, getRiskRules()).costToTargetPct;
+                            // Explicit quantity: the cost-to-target rule applies
+                            // all the same (review 2026-09-06, finding 5) — this
+                            // field is reachable by the model, so a quantity is
+                            // not evidence of a human decision. Refused and
+                            // ledgered like a sizer refusal.
+                            const { estimateRoundTrip, costViability } = await import('@/services/trade-costs.js');
+                            const est = estimateRoundTrip({ quantity, entry: sizingBasis, target: input.target, spreadPct }, getRiskRules());
+                            costToTargetPct = est.costToTargetPct;
+                            const viable = costViability(est, getRiskRules());
+                            if (!viable.ok) {
+                                logger.warn(`[trade-proposals] cost gate refused (explicit quantity ${quantity}): ${input.symbol} — ${viable.reason}`);
+                                await store.recordRefusal({
+                                    symbol: input.symbol, direction: input.direction, entryType: input.entryType,
+                                    entry: input.entry, entryLimit: input.entryLimit, stop: input.stop, target: input.target,
+                                    score: input.score, reason: `cost gate refused [costs]: ${viable.reason}`,
+                                    triggerRank: currentTriggerRank(),
+                                }).catch(() => { /* ledger is best-effort */ });
+                                return formatToolResult({ error: `cost gate refused [costs]: ${viable.reason}` });
+                            }
                         }
 
                         const p = await createProposal({
@@ -334,6 +350,9 @@ export function createTradeProposalsTool() {
                             costToTargetPct,
                             laneRank: provenance.laneRank,
                             rankerVersion: provenance.rankerVersion,
+                            // Review 2026-09-06 (finding 8): the universe the
+                            // judgment could see when it decided.
+                            snapshotTs: snapshotNow?.timestamp ?? null,
                             takePct: input.takePct,
                             worstCaseGapPct: input.worstCaseGapPct,
                             score: input.score,

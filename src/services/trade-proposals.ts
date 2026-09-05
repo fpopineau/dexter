@@ -90,6 +90,11 @@ export interface TradeProposal {
     exitDeadline: number | null;
     /** When the deadline sweeper attempted the close (one attempt). */
     deadlineClosedAt: number | null;
+    /** REQ-LANE-003: last close attempt and the attempt count (retry bookkeeping). */
+    deadlineAttemptedAt: number | null;
+    deadlineAttempts: number;
+    /** Timestamp of the opportunity snapshot in memory when the row was created (null = none). */
+    snapshotTs: number | null;
     /** Detector version that produced a pattern-lane setup. */
     detectorVersion: string | null;
     /** REQ-SIZE-003: estimated round-trip cost / gross gain at target (%), at creation. */
@@ -558,6 +563,13 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     ['exit_policy_id', 'TEXT'],
     ['exit_deadline', 'INTEGER'],
     ['deadline_closed_at', 'INTEGER'],
+    // Review 2026-09-06 (finding 3): a close ATTEMPT is not a close — the
+    // sweeper retries after a cooldown until the broker confirms flat.
+    ['deadline_attempted_at', 'INTEGER'],
+    ['deadline_attempts', 'INTEGER'],
+    // Review 2026-09-06 (finding 8): which opportunity snapshot the judgment
+    // saw when it created the row — links the choice to its universe.
+    ['snapshot_ts', 'INTEGER'],
     ['detector_version', 'TEXT'],
     // WP6 (REQ-SIZE-003): estimated round-trip cost as % of the gross gain
     // at target, at creation — the cost dimension the ledger lacked.
@@ -642,6 +654,9 @@ interface Row {
     exit_policy_id: string | null;
     exit_deadline: number | null;
     deadline_closed_at: number | null;
+    deadline_attempted_at: number | null;
+    deadline_attempts: number | null;
+    snapshot_ts: number | null;
     detector_version: string | null;
     cost_to_target_pct: number | null;
     lane_rank: number | null;
@@ -707,6 +722,9 @@ function fromRow(r: Row): TradeProposal {
         exitPolicyId: (r.exit_policy_id === 'take-x' || r.exit_policy_id === 'ratchet' || r.exit_policy_id === 'bracket+deadline' || r.exit_policy_id === 'structural+deadline' || r.exit_policy_id === 'bracket') ? r.exit_policy_id : null,
         exitDeadline: r.exit_deadline ?? null,
         deadlineClosedAt: r.deadline_closed_at ?? null,
+        deadlineAttemptedAt: r.deadline_attempted_at ?? null,
+        deadlineAttempts: r.deadline_attempts ?? 0,
+        snapshotTs: r.snapshot_ts ?? null,
         detectorVersion: r.detector_version ?? null,
         costToTargetPct: r.cost_to_target_pct ?? null,
         laneRank: r.lane_rank ?? null,
@@ -779,6 +797,8 @@ export interface CreateProposalInput {
     /** REQ-DISC-003: lane rank + ranker version, resolved server-side. */
     laneRank?: number | null;
     rankerVersion?: string | null;
+    /** The opportunity snapshot the judgment saw at creation (server-side). */
+    snapshotTs?: number | null;
     /** Take-at-x% override (WP-EXIT): the model's x within the take band;
      *  omitted = the ATR formula. Gate-validated, then stamped. */
     takePct?: number;
@@ -876,6 +896,9 @@ export async function createProposal(
         target: input.target,
         quantity: input.quantity,
         tradeClass,
+        // Review 2026-09-06 (finding 6): the lane selects its own budget
+        // (overnight_risk_pct) — the gate must read the same one as the sizer.
+        strategyId: input.strategyId ?? null,
         takePct: input.takePct ?? null,
         tif: input.tif === 'GTC' ? 'GTC' : 'DAY',
     }, {
@@ -906,7 +929,7 @@ export async function createProposal(
         throw new Error(`[lane-contract] REFUSED ${input.symbol.toUpperCase()}: ${lane.violations.join('; ')}`);
     }
     if (lane.contract.strategyId === 'overnight') {
-        const openOvernight = await countOpenByStrategy('overnight');
+        const openOvernight = await countOpenByStrategy('overnight', undefined, { includeOpen: true });
         if (openOvernight >= rules.max_overnight_lane_positions) {
             throw new Error(
                 `[lane-contract] REFUSED ${input.symbol.toUpperCase()}: ${openOvernight} overnight-lane position(s) already open/working — ` +
@@ -930,8 +953,8 @@ export async function createProposal(
           entry, entry_limit, stop, target, quantity, tif, trade_class, worst_case_gap_pct,
           score, rationale, source, order_ids, note,
           extension_atr, vwap_dist_pct, day_move_pct, minutes_since_open,
-          strategy_id, setup_id, holding_horizon, exit_policy_id, detector_version, cost_to_target_pct, lane_rank, ranker_version)
-         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          strategy_id, setup_id, holding_horizon, exit_policy_id, detector_version, cost_to_target_pct, lane_rank, ranker_version, snapshot_ts)
+         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
         id, now, expiry, now,
         input.symbol.trim().toUpperCase(), input.direction, input.entryType,
@@ -942,7 +965,7 @@ export async function createProposal(
         input.entryContext?.extensionAtr ?? null, input.entryContext?.vwapDistPct ?? null,
         input.entryContext?.dayMovePct ?? null, input.entryContext?.minutesSinceOpen ?? null,
         lane.contract.strategyId, lane.contract.setupId, lane.contract.holdingHorizon, lane.contract.exitPolicyId,
-        input.detectorVersion ?? null, input.costToTargetPct ?? null, input.laneRank ?? null, input.rankerVersion ?? null,
+        input.detectorVersion ?? null, input.costToTargetPct ?? null, input.laneRank ?? null, input.rankerVersion ?? null, input.snapshotTs ?? null,
     );
 
     // Judgment-purity stamp (review 2026-08-21): record which model
@@ -1126,18 +1149,35 @@ export async function markEntryFilled(id: string, price: number, at = Date.now()
 
 /** REQ-LANE-003: executed, filled rows whose lane deadline has passed and
  *  that the deadline sweeper has not attempted yet (one attempt each). */
-export async function listDeadlineDue(nowMs: number): Promise<TradeProposal[]> {
+/** REQ-LANE-003 (review 2026-09-06, finding 3): the rows whose deadline
+ *  has passed and that are NOT confirmed closed — a failed attempt is
+ *  retried after `cooldownMs`, at most `maxAttempts` times. `deadline_closed_at`
+ *  means "confirmed flat" (or already flat), never "attempt started". */
+export async function listDeadlineDue(nowMs: number, cooldownMs = 5 * 60_000, maxAttempts = 3): Promise<TradeProposal[]> {
     const database = await getDb();
     const rows = database.query<Row>(
         `SELECT * FROM proposals
          WHERE status = 'executed' AND entry_fill_price IS NOT NULL
            AND exit_deadline IS NOT NULL AND exit_deadline <= ? AND deadline_closed_at IS NULL
+           AND (deadline_attempted_at IS NULL OR deadline_attempted_at <= ?)
+           AND COALESCE(deadline_attempts, 0) < ?
          ORDER BY exit_deadline ASC`,
-    ).all(nowMs);
+    ).all(nowMs, nowMs - cooldownMs, maxAttempts);
     return rows.map(fromRow);
 }
 
-/** REQ-LANE-003: stamp the deadline-close attempt (once) with its note. */
+/** REQ-LANE-003: record one close ATTEMPT (before the order goes out, so a
+ *  crash mid-close is visible and the next tick waits the cooldown). */
+export async function markDeadlineAttempt(id: string, at: number, note: string): Promise<void> {
+    const database = await getDb();
+    database.query<void>(
+        `UPDATE proposals SET deadline_attempted_at = ?, deadline_attempts = COALESCE(deadline_attempts, 0) + 1,
+                note = CASE WHEN note IS NULL OR note = '' THEN ? ELSE note || ' — ' || ? END, updated_at = ?
+         WHERE id = ?`,
+    ).run(at, note, note, Date.now(), id.trim().toUpperCase());
+}
+
+/** REQ-LANE-003: stamp the deadline close as CONFIRMED (flat at the broker, or already flat). */
 export async function markDeadlineClosed(id: string, at: number, note: string): Promise<void> {
     const database = await getDb();
     database.query<void>(
@@ -1146,10 +1186,15 @@ export async function markDeadlineClosed(id: string, at: number, note: string): 
     ).run(at, note, note, Date.now(), id.trim().toUpperCase());
 }
 
-/** Real commitments of a lane (executing/executed) — the overnight lane cap. */
-export async function countOpenByStrategy(strategyId: StrategyId, excludeId?: string): Promise<number> {
+/** Commitments of a lane — the overnight lane cap. `includeOpen` counts the
+ *  OPEN (unaccepted) rows too: at creation every working idea consumes the
+ *  lane's cap (review 2026-09-06, finding 2 — three open overnight rows
+ *  accepted one after the other passed the cap of two); at acceptance the
+ *  real commitments (executing/executed) excluding the row being accepted. */
+export async function countOpenByStrategy(strategyId: StrategyId, excludeId?: string, opts: { includeOpen?: boolean } = {}): Promise<number> {
     const database = await getDb();
-    const rows = database.query<Row>(`SELECT * FROM proposals WHERE status IN ('executing', 'executed')`).all();
+    const statuses = opts.includeOpen ? `('open', 'executing', 'executed')` : `('executing', 'executed')`;
+    const rows = database.query<Row>(`SELECT * FROM proposals WHERE status IN ${statuses}`).all();
     return rows.map(fromRow).filter((t) => t.strategyId === strategyId && t.id !== excludeId).length;
 }
 
@@ -1325,19 +1370,22 @@ export async function listStaleUnfilled(maxAgeMs: number): Promise<TradeProposal
     return rows.map(fromRow);
 }
 
-/** Executed INTRADAY proposals whose entry never filled and whose validity
- *  window has passed (REQ-ENTRY-001) — the thesis expired, so the resting
- *  broker entry must not outlive it. `nowMs` is injected for determinism;
+/** Executed proposals whose entry never filled and whose validity window
+ *  has passed (REQ-ENTRY-001) — the thesis expired, so the resting broker
+ *  entry must not outlive it. `nowMs` is injected for determinism;
  *  `graceMs` protects a deliberate late accept: an operator who accepts two
  *  minutes before expiry still gets that much resting time. Swing and
- *  earnings-bet entries are patient by design (3-day sweep only); adopted
+ *  earnings-bet entries are patient by design (3-day sweep only) — EXCEPT
+ *  the OVERNIGHT lane (review 2026-09-06, finding 1): it rides the swing
+ *  class but its contract says the entry dies with the close, so its
+ *  close-clamped expiry is enforced here like an intraday row's. Adopted
  *  rows were never proposed and are excluded defensively. */
 export async function listExpiredUnfilledEntries(nowMs: number, graceMs: number): Promise<TradeProposal[]> {
     const database = await getDb();
     const rows = database.query<Row>(
         `SELECT * FROM proposals
          WHERE status = 'executed' AND entry_fill_price IS NULL
-           AND (trade_class IS NULL OR trade_class NOT IN ('swing', 'earnings-bet'))
+           AND (trade_class IS NULL OR trade_class NOT IN ('swing', 'earnings-bet') OR strategy_id = 'overnight')
            AND source != 'adopted'
            AND expires_at < ?
            AND executed_at < ?

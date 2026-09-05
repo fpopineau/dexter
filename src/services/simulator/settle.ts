@@ -155,11 +155,14 @@ async function settleOne(
     if (!spec) { counts.skipped++; return; }
     // A DAY row whose flat bar has not happened yet cannot settle tonight;
     // one created AT or AFTER its flat bar (post-cutoff, expired unfilled by
-    // policy) has no window to replay.
-    if (spec.flatAt !== null && (spec.flatAt > nowFrame || src.createdAt >= spec.flatAt)) { counts.skipped++; return; }
+    // policy) has no window to replay. A GTC row (review 2026-09-06, finding
+    // 4) carries its LANE deadline as flatAt: it replays up to tonight and
+    // stays 'open' until it exits or the deadline bar arrives.
+    if (spec.flatAt !== null && src.createdAt >= spec.flatAt) { counts.skipped++; return; }
+    if (spec.flatAt !== null && src.tif === 'DAY' && spec.flatAt > nowFrame) { counts.skipped++; return; }
     counts.evaluated++;
 
-    const horizonEnd = spec.flatAt ?? nowFrame;
+    const horizonEnd = spec.flatAt !== null ? Math.min(spec.flatAt, nowFrame) : nowFrame;
     const halfDay = deps.isHalfDay(etIsoOfFrame(src.createdAt));
     // WP7 (REQ-SIM-003 amended): regular-session bars for EVERY row — the
     // brackets never set outsideRth, so a GTC stop cannot fill after hours;
@@ -259,10 +262,15 @@ export async function runSettleOnce(depsIn: SettleDeps): Promise<SettleRunCounts
     const ctx: VariantContext = {
         rules: deps.rules,
         flatAtFor: (createdAt) => flatAtFrameFor(createdAt, deps.isHalfDay(etIsoOfFrame(createdAt))),
-        // REQ-LANE-006 precision (WP7): the overnight twin exits at the lane
-        // deadline (10:00 ET next session) like the sweeper closes the real row.
-        overnightFlatAtFor: (createdAt) => {
-            const deadline = laneExitDeadline('overnight', frameToEpochMs(createdAt), deps.rules);
+        // Review 2026-09-06 (finding 4): EVERY GTC twin exits at its lane's
+        // deadline like the sweeper closes the real row — overnight at 10:00
+        // ET next session, swing / cup after their hold days. A legacy row
+        // (no lane) takes its class's lane. The deadline is computed from
+        // creation (the fill is unknown until simulated): equal to or
+        // earlier than the real row's, never later.
+        laneFlatAtFor: (strategyId, tradeClass, createdAt) => {
+            const lane = strategyId ?? (tradeClass === 'swing' ? 'swing' : tradeClass === 'earnings-bet' ? 'earnings-bet' : 'intraday');
+            const deadline = laneExitDeadline(lane, frameToEpochMs(createdAt), deps.rules);
             return deadline === null ? null : etFrameMs(deadline);
         },
     };

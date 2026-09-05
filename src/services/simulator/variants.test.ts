@@ -3,7 +3,7 @@ import { DEFAULT_RULES } from '@/tools/ibkr/risk-rules.js';
 import { activeVariants, sizeAtRung, VARIANTS_V1, variantByName, type SimSource, type VariantContext } from './variants.js';
 
 const T0 = Date.UTC(2026, 8, 10, 14, 0, 0);
-const ctx: VariantContext = { rules: { ...DEFAULT_RULES, take_atr_mult: 1.5, take_floor_pct: 3, take_cap_pct: 10 }, flatAtFor: () => T0 + 3 * 3_600_000, overnightFlatAtFor: () => T0 + 20 * 3_600_000 };
+const ctx: VariantContext = { rules: { ...DEFAULT_RULES, take_atr_mult: 1.5, take_floor_pct: 3, take_cap_pct: 10 }, flatAtFor: () => T0 + 3 * 3_600_000, laneFlatAtFor: () => T0 + 20 * 3_600_000 };
 
 function proposal(overrides: Partial<SimSource> = {}): SimSource {
     return {
@@ -32,7 +32,7 @@ describe('variant registry v1 (REQ-SIM-004)', () => {
         const spec = v.spec(proposal(), ctx)!;
         expect(spec.entry).toBe(100); expect(spec.stop).toBe(97); expect(spec.target).toBe(106);
         expect(spec.flatAt).toBe(T0 + 3 * 3_600_000);
-        expect(v.spec(proposal({ tif: 'GTC', tradeClass: 'swing' }), ctx)!.flatAt).toBeNull();
+        expect(v.spec(proposal({ tif: 'GTC', tradeClass: 'swing' }), ctx)!.flatAt).toBe(T0 + 20 * 3_600_000); // review 2026-09-06: GTC twins flatten at the lane deadline
         // the entry may rest 30 min past the proposal's expiry (the sweeper's grace)
         expect(spec.entryDeadline).toBe(T0 + 150 * 60_000);
     });
@@ -103,7 +103,7 @@ describe('variant registry v1 (REQ-SIM-004)', () => {
         const swing = variantByName('class-swing')!;
         expect(swing.applies(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'swing' }))).toBe(true);
         expect(swing.applies(proposal())).toBe(false);
-        expect(swing.spec(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'swing' }), ctx)!.flatAt).toBeNull();
+        expect(swing.spec(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'swing' }), ctx)!.flatAt).toBe(T0 + 20 * 3_600_000);
         const bet = variantByName('class-earnings-bet')!;
         expect(bet.applies(proposal({ tradeClass: 'earnings-bet', tif: 'GTC' }))).toBe(true);
         expect(bet.applies(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'swing' }))).toBe(false);

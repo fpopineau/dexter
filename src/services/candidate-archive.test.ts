@@ -31,7 +31,7 @@ afterAll(() => {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* held by sqlite */ }
 });
 
-const rules: RiskRules = { ...DEFAULT_RULES, min_price: 5, stop_atr_multiplier: 1.5, take_atr_mult: 1.5, take_floor_pct: 3, take_cap_pct: 10, overnight_exit_minutes_et: 600 };
+const rules: RiskRules = { ...DEFAULT_RULES, min_price: 5, stop_atr_multiplier: 1.5, take_atr_mult: 1.5, take_floor_pct: 3, take_cap_pct: 10, overnight_exit_minutes_et: 600, min_risk_reward: 2, min_stop_atr_fraction: 0.4 };
 // Thursday 2026-09-10 15:35 ET = 19:35 UTC
 const CAPTURED = Date.UTC(2026, 8, 10, 19, 35, 0);
 
@@ -61,9 +61,12 @@ describe('overnight eligibility + levels v1 (REQ-BENCH-002/004)', () => {
             .toEqual(['price-missing', 'day-move-unknown']);
     });
 
-    test('levels: long stop 1.5 ATR below, target at take-x (ATR% 3 → x = 4.5%); short mirrored; impossible geometry → null', () => {
-        expect(overnightLevels({ price: 100, dailyAtr: 3, direction: 'long' }, rules)).toEqual({ entryType: 'MKT', entry: null, entryLimit: null, stop: 95.5, target: 104.5 });
-        expect(overnightLevels({ price: 100, dailyAtr: 3, direction: 'short' }, rules)).toEqual({ entryType: 'MKT', entry: null, entryLimit: null, stop: 104.5, target: 95.5 });
+    test('levels v2 (review 2026-09-06 finding 7): target at take-x (ATR% 3 → x = 4.5%), stop at take/min R:R = 2.25 (0.75 ATR, ≥ the 0.4 ATR noise floor) → R:R 2:1 as the gate requires; short mirrored; impossible geometry → null', () => {
+        expect(overnightLevels({ price: 100, dailyAtr: 3, direction: 'long' }, rules)).toEqual({ entryType: 'MKT', entry: null, entryLimit: null, stop: 97.75, target: 104.5 });
+        expect(overnightLevels({ price: 100, dailyAtr: 3, direction: 'short' }, rules)).toEqual({ entryType: 'MKT', entry: null, entryLimit: null, stop: 102.25, target: 95.5 });
+        // a wide take band relative to the ATR keeps the 1.5-ATR stop when that is the tighter of the two (ATR% 1 → take floor 3% → 3/2 = 1.5 ≥ 1.5 ATR)
+        expect(overnightLevels({ price: 100, dailyAtr: 1, direction: 'long' }, rules)).toEqual({ entryType: 'MKT', entry: null, entryLimit: null, stop: 98.5, target: 103 });
+        // a stop the noise filter would refuse (take cap 10% on a $2 stock with a $3 ATR → 0.1 stop distance < 0.4 ATR) → null
         expect(overnightLevels({ price: 2, dailyAtr: 3, direction: 'long' }, rules)).toBeNull();
         // cup: STP_LMT at the trigger with a 0.5% band, 2R target
         expect(cupLevels({ suggestedEntry: 50, suggestedStop: 47 })).toEqual({ entryType: 'STP_LMT', entry: 50, entryLimit: 50.25, stop: 47, target: 56 });
@@ -84,7 +87,8 @@ describe('candidatesFromSnapshot / candidatesFromPatternScan (REQ-BENCH-001)', (
         expect(mu.source).toMatch(/^opportunity-snapshot:pre-close@/);
         expect(mu.price).toBe(100);
         expect(mu.rankerVersion).toBe('composite-v1'); // a snapshot without lane rankings keeps the composite, labelled
-        expect(mu.stop).toBe(95.5); expect(mu.target).toBe(104.5);
+        expect(mu.levelsVersion).toBe('v2');
+        expect(mu.stop).toBe(97.75); expect(mu.target).toBe(104.5);
         expect(mu.replayStatus).toBe('pending');
         // deadline: Friday 2026-09-11 10:00 ET = 14:00 UTC
         expect(mu.exitDeadline).toBe(Date.UTC(2026, 8, 11, 14, 0, 0));

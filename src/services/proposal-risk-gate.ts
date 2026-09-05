@@ -17,6 +17,7 @@
 
 import { getRiskRules, type RiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
 import { isValidQuantity, classRiskPct, gapRiskPerShare } from '@/services/position-sizer.js';
+import type { StrategyId } from './lane-contract.js';
 import { currentRung } from '@/services/ladder-state.js';
 import { EVIDENCE_MIN_PRINTS, EVIDENCE_MIN_CONSISTENCY_PCT, type EarningsBetEvidence } from '@/services/earnings-reactions.js';
 import { logger } from '@/utils';
@@ -36,6 +37,10 @@ export interface RiskGateProposal {
     /** Trade class; omitted = 'intraday'. Selects the risk budget and the
      *  class-specific checks (swing cap, earnings-bet cap/switch/gap math). */
     tradeClass?: TradeClass;
+    /** The lane (REQ-LANE-001). Selects the lane's own budget where one
+     *  exists (overnight → overnight_risk_pct) so the gate reads the same
+     *  budget the sizer used (review 2026-09-06, finding 6). */
+    strategyId?: StrategyId | null;
     /** Take-at-x% override (REQ-EXIT-002): the model's x, validated into
      *  [take_floor_pct, take_cap_pct]. Omitted = the ATR formula. At the
      *  accept-time re-check the STORED take_pct rides here so the required
@@ -776,7 +781,7 @@ export function checkProposalRisk(
         // ceiling, ladder rung) — so an explicit quantity sized above the
         // rung, or a row whose rung stepped down between creation and
         // accept, is refused rather than waved through at the ceiling.
-        const budgetPct = classRiskPct(tradeClass, rules, ctx.rungPct ?? currentRung());
+        const budgetPct = classRiskPct(tradeClass, rules, ctx.rungPct ?? currentRung(), p.strategyId ?? undefined);
         const maxRisk = (budgetPct / 100) * ctx.netLiquidation;
         if (tradeClass === 'earnings-bet') {
             const entryPrice = entry;

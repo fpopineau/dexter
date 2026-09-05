@@ -87,28 +87,31 @@ export interface LaneRankLine {
 /** Fewer pairs than this and a rank correlation says nothing. */
 export const MIN_RANK_PAIRS = 5;
 
-/** REQ-DISC-004: Spearman(rank, R) per lane over the rows carrying a lane
- *  rank; the legacy lane (no ranker) uses the model's score, its only
- *  rank. Lanes with fewer than MIN_RANK_PAIRS pairs are omitted. */
+/** REQ-DISC-004: Spearman(rank, R) per (lane, ranker version) over the rows
+ *  carrying a lane rank — two versions of a ranker are two cohorts (review
+ *  2026-09-06, finding 12), never one line with the majority's name. The
+ *  legacy lane (no ranker) uses the model's score, its only rank. Groups
+ *  with fewer than MIN_RANK_PAIRS pairs are omitted. */
 export function rankByLane(trades: RTrade[]): LaneRankLine[] {
     const order: RTrade['strategyId'][] = ['intraday', 'overnight', 'swing', 'cup-and-handle', 'earnings-bet', 'legacy'];
     const out: LaneRankLine[] = [];
     for (const strategyId of order) {
-        const rows = trades.filter((t) => t.strategyId === strategyId);
-        const pairs: Array<[number, number]> = [];
-        const versions = new Map<string, number>();
-        for (const t of rows) {
+        const groups = new Map<string, Array<[number, number]>>();
+        for (const t of trades) {
+            if (t.strategyId !== strategyId) continue;
             const rank = strategyId === 'legacy' ? t.score ?? null : t.laneRank ?? null;
             if (rank === null || rank === undefined) continue;
-            pairs.push([rank, t.netR]);
             const v = strategyId === 'legacy' ? 'score' : t.rankerVersion ?? 'unknown';
-            versions.set(v, (versions.get(v) ?? 0) + 1);
+            const pairs = groups.get(v) ?? [];
+            pairs.push([rank, t.netR]);
+            groups.set(v, pairs);
         }
-        if (pairs.length < MIN_RANK_PAIRS) continue;
-        const s = spearman(pairs);
-        if (!s) continue;
-        const rankerVersion = [...versions.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
-        out.push({ strategyId, rankerVersion, rho: s.rho, p: s.p, n: s.n });
+        for (const [rankerVersion, pairs] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+            if (pairs.length < MIN_RANK_PAIRS) continue;
+            const s = spearman(pairs);
+            if (!s) continue;
+            out.push({ strategyId, rankerVersion, rho: s.rho, p: s.p, n: s.n });
+        }
     }
     return out;
 }

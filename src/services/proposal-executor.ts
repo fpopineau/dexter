@@ -32,6 +32,7 @@ import { replayMissedExecutions, trackExecutedProposal } from './outcome-tracker
 import { getSectorInfo } from './sector-map.js';
 import { assertAcceptContext, assertProposalRisk, checkMicrostructure, checkPriceRun, ENTRY_CONFIRM_FRACTION, formulaTakePct } from './proposal-risk-gate.js';
 import { buildBookContext } from './book-context.js';
+import { costViability, estimateRoundTrip } from './trade-costs.js';
 import { fetchDailyRiskContext } from '@/tools/ibkr/daily-atr.js';
 import type { RiskRules } from '@/tools/ibkr/risk-rules.js';
 import { fetchShortabilitySnapshot } from '@/tools/ibkr/microstructure.js';
@@ -403,6 +404,37 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         }
         spreadDeferred = micro.spreadDeferred;
 
+        // REQ-SIZE-003 at ACCEPTANCE (review 2026-09-06, finding 5): the
+        // round trip is re-priced with the live spread — a spread unknown at
+        // creation or wider now can make the trade unviable while still
+        // under the microstructure cap. A deferred pre-open spread is not a
+        // regular-session spread: commissions + slippage only, like an
+        // unknown one.
+        {
+            const rules = getRiskRules();
+            const spreadPct = !micro.spreadDeferred && quote.bid !== null && quote.ask !== null && quote.ask > quote.bid
+                ? ((quote.ask - quote.bid) / ((quote.ask + quote.bid) / 2)) * 100
+                : null;
+            const basis = p.entryFillPrice ?? Math.max(p.entry ?? 0, p.entryLimit ?? 0);
+            if (basis > 0) {
+                const viable = costViability(estimateRoundTrip({ quantity: p.quantity, entry: basis, target: p.target, spreadPct }, rules), rules);
+                if (!viable.ok) throw new Error(`[cost-gate] ${viable.reason}`);
+            }
+        }
+
+        // REQ-LANE-002 at ACCEPTANCE (review 2026-09-06, finding 2): the
+        // overnight lane's cap counts real commitments excluding this row —
+        // three open ideas accepted one after the other cannot pass a cap of
+        // two through the swing pool of three.
+        if (p.strategyId === 'overnight') {
+            const { countOpenByStrategy } = await import('./trade-proposals.js');
+            const openOvernight = await countOpenByStrategy('overnight', p.id);
+            const cap = getRiskRules().max_overnight_lane_positions;
+            if (openOvernight >= cap) {
+                throw new Error(`[lane-contract] ${openOvernight} overnight-lane position(s) already working/held — max ${cap}; this accept would exceed the lane cap`);
+            }
+        }
+
         // Risk gate with live account context. Re-runs the static checks too:
         // rules may have been tightened since the proposal was created.
         const exposure = (await listExposure()).filter((t) => t.id !== p.id);
@@ -576,6 +608,8 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 target: p.target,
                 quantity: p.quantity,
                 tradeClass: p.tradeClass,
+                // Review 2026-09-06 (finding 6): the lane's own budget at the re-check.
+                strategyId: p.strategyId,
                 // WP-EXIT: the STORED x rides the re-check as an override so
                 // the required target is stable across daily ATR drift.
                 takePct: p.takePct,

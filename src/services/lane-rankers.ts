@@ -124,7 +124,9 @@ export function buildSnapshotLanes(opps: RankableOpportunity[]): SnapshotLanes {
 export interface LaneRankSources {
     /** The firing rank of a trigger-lane run (null off the trigger lane). */
     triggerRank: number | null;
-    snapshot: { opportunities: Array<{ symbol: string; compositeRank: number }>; lanes?: SnapshotLanes } | null;
+    /** The symbol that fired the run — the rank is attributed to it ALONE. */
+    triggerSymbol: string | null;
+    snapshot: { opportunities: Array<{ symbol: string; direction: 'long' | 'short'; compositeRank: number }>; lanes?: SnapshotLanes } | null;
     patternScan: { candidates: Array<{ symbol: string; matches: Array<{ pattern: string; score: number }> }> } | null;
 }
 
@@ -135,18 +137,24 @@ export interface LaneRankProvenance {
 
 /** REQ-DISC-003: the lane rank and its provenance for a proposal, resolved
  *  server-side from the run context, the latest snapshot and the pattern
- *  scan — never from the model. A symbol the ranker never saw gets a null
- *  rank with the version that would have applied (recorded, not guessed). */
-export function laneRankFor(strategyId: StrategyId, symbol: string, sources: LaneRankSources): LaneRankProvenance {
+ *  scan — never from the model. Review 2026-09-06 (finding 10): a rank is
+ *  attributed only to the SAME symbol and, where the ranking is
+ *  directional, the SAME direction — a proposal on another name inside a
+ *  trigger run, or a short on a long-ranked symbol, gets a null rank with
+ *  the version recorded (never another row's score). */
+export function laneRankFor(strategyId: StrategyId, symbol: string, direction: 'long' | 'short', sources: LaneRankSources): LaneRankProvenance {
     const sym = symbol.toUpperCase();
     switch (strategyId) {
         case 'intraday': {
-            const fromSnapshot = sources.snapshot?.opportunities.find((o) => o.symbol.toUpperCase() === sym)?.compositeRank ?? null;
-            return { laneRank: sources.triggerRank ?? fromSnapshot, rankerVersion: RANKER_VERSIONS.intraday };
+            const trig = sources.triggerRank !== null && sources.triggerSymbol !== null && sources.triggerSymbol.toUpperCase() === sym
+                ? sources.triggerRank : null;
+            const opp = sources.snapshot?.opportunities.find((o) => o.symbol.toUpperCase() === sym);
+            const fromSnapshot = opp && opp.direction === direction ? opp.compositeRank : null;
+            return { laneRank: trig ?? fromSnapshot, rankerVersion: RANKER_VERSIONS.intraday };
         }
         case 'overnight': {
             const lane = sources.snapshot?.lanes?.overnight;
-            const row = lane?.ranked.find((r) => r.symbol.toUpperCase() === sym);
+            const row = lane?.ranked.find((r) => r.symbol.toUpperCase() === sym && r.direction === direction);
             return { laneRank: row?.score ?? null, rankerVersion: lane?.rankerVersion ?? RANKER_VERSIONS.overnight };
         }
         case 'cup-and-handle': {

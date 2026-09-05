@@ -65,9 +65,12 @@ export interface VariantContext {
     rules: RiskRules;
     /** ET-frame ms of the flat-by-close bar for the ET day containing `createdAt`. */
     flatAtFor: (createdAt: number) => number;
-    /** ET-frame ms of the overnight lane's exit deadline (10:00 ET next
-     *  session) for a row created at `createdAt`; null = no deadline. */
-    overnightFlatAtFor: (createdAt: number) => number | null;
+    /** ET-frame ms of the LANE's exit deadline for a GTC row created at
+     *  `createdAt` (overnight: 10:00 ET next session; swing / cup: 15:50 ET
+     *  after the hold days), or null for lanes without one. Review
+     *  2026-09-06 (finding 4): EVERY GTC twin — incumbent included — honours
+     *  its lane's contract, so variants compare at constant contract. */
+    laneFlatAtFor: (strategyId: SimSource['strategyId'], tradeClass: SimSource['tradeClass'], createdAt: number) => number | null;
 }
 
 export interface VariantDef {
@@ -104,7 +107,9 @@ function baseSpec(src: SimSource, ctx: VariantContext, overrides: Partial<SimSpe
         target: src.target,
         createdAt: src.createdAt,
         entryDeadline: entryDeadline(src),
-        flatAt: src.tif === 'GTC' ? null : ctx.flatAtFor(src.createdAt),
+        // A GTC row flattens at its lane deadline (the sweeper's close); a
+        // DAY row at the 15:52 triage bar.
+        flatAt: src.tif === 'GTC' ? ctx.laneFlatAtFor(src.strategyId, src.tradeClass, src.createdAt) : ctx.flatAtFor(src.createdAt),
         ...overrides,
     };
 }
@@ -211,9 +216,7 @@ export const VARIANTS_V1: readonly VariantDef[] = [
         description: 'overnight-lane proposals (REQ-LANE-002): next-session hold, entry dies with the close, exit at the lane deadline',
         status: 'active',
         applies: (s) => s.kind === 'proposal' && s.strategyId === 'overnight' && hasLevels(s),
-        // The deadline sweeper closes the real row at 10:00 ET next session;
-        // the twin flattens there too (eod-flat at that bar's close).
-        spec: (s, ctx) => baseSpec(s, ctx, { flatAt: ctx.overnightFlatAtFor(s.createdAt) }),
+        spec: (s, ctx) => baseSpec(s, ctx),
     },
     {
         name: 'lane-cup-and-handle',

@@ -25,20 +25,31 @@ interface AgentLaneContext {
      *  is measurable apart — read from the run context, never from the
      *  model. Undefined on non-trigger lanes. */
     triggerRank?: number;
+    /** The symbol that fired the run (review 2026-09-06, finding 10): the
+     *  trigger rank belongs to THIS symbol only — a proposal on another
+     *  name inside the same run must not inherit it. */
+    triggerSymbol?: string;
 }
 
 /** Extra attribution a caller may thread through the run. */
 export interface AgentLaneExtras {
     triggerRank?: number;
+    triggerSymbol?: string;
 }
 
 const storage = new AsyncLocalStorage<AgentLaneContext>();
 
-/** Run `fn` with `lane` (and optionally the model id and trigger rank)
- *  visible to everything it awaits. */
+/** Run `fn` with `lane` (and optionally the model id and trigger rank +
+ *  symbol) visible to everything it awaits. */
 export function withAgentLane<T>(lane: string, fn: () => Promise<T>, model?: string, extras?: AgentLaneExtras): Promise<T> {
     const rank = extras?.triggerRank;
-    return storage.run({ lane, model, ...(Number.isFinite(rank) ? { triggerRank: rank } : {}) }, fn);
+    const sym = extras?.triggerSymbol?.trim().toUpperCase();
+    return storage.run({ lane, model, ...(Number.isFinite(rank) ? { triggerRank: rank } : {}), ...(sym ? { triggerSymbol: sym } : {}) }, fn);
+}
+
+/** The symbol whose trigger fired the run this call sits inside, or null. */
+export function currentTriggerSymbol(): string | null {
+    return storage.getStore()?.triggerSymbol ?? null;
 }
 
 /** The lane of the run this call sits inside, or null outside any run. */

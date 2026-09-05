@@ -3650,3 +3650,91 @@ The operator ratified the plan decisions of WP6 ("OK for WP6 decisions",
 The September fence (WP5–WP8, decision 3 of 2026-09-05) is complete; the
 programme's remaining human steps are the restart, `epoch new`, and the
 paper rehearsal the WP3/WP4 machinery already governs.
+
+## Review 2026-09-06 response (WP5–WP8 consistency, commit `6bd379a`)
+
+An external review of the four-lane programme reported fourteen findings.
+Each was verified against the code; all fourteen hold. Twelve are fixed in
+this commit, two are decisions corrected in text. Where a ratified
+2026-09-06 decision is amended, the amendment is recorded here and the
+older text stands as history.
+
+| # | Finding | Verdict | Action |
+|---|---|---|---|
+| 1 | An accepted overnight entry survives the close (the expiry sweep excludes the swing class) | VALID (P1) | `listExpiredUnfilledEntries` includes `strategy_id = 'overnight'` rows; the entry dies at its close-clamped expiry + grace like an intraday row (REQ-ENTRY-001 amended) |
+| 2 | The overnight lane cap (2) is not re-checked at acceptance; open rows do not consume it at creation | VALID (P1) | creation counts open + executing + executed rows of the lane; acceptance re-checks the real commitments excluding the row (`[lane-contract]` refusal) (REQ-LANE-002 amended) |
+| 3 | A close attempt is a terminal state even when no order went out | VALID (P1) | `deadline_attempted_at` / `deadline_attempts` record the attempt before the order; `deadline_closed_at` means CONFIRMED flat; retries after 5 min, at most 3, then the operator (`kill`) (REQ-LANE-003 amended) |
+| 4 | Only the `lane-overnight` twin honoured a deadline; incumbent/class-swing/cup twins had none | VALID (P1) | `VariantContext.laneFlatAtFor`: every GTC twin flattens at its lane's deadline (legacy rows take their class's lane); the settle replays a GTC row up to tonight and keeps it open until exit or deadline (REQ-SIM-004 amended) |
+| 5 | The cost-to-target refusal was bypassed by an explicit quantity and never re-checked at acceptance | VALID (P1) | explicit quantities are refused and ledgered like sizer refusals; acceptance re-prices the round trip with the live spread (`[cost-gate]`), a deferred pre-open spread counting as unknown (REQ-SIZE-003 amended; WP6 decision on explicit quantities withdrawn) |
+| 6 | The gate read the class budget, the sizer the lane budget | VALID (P2) | `RiskGateProposal.strategyId` → `classRiskPct(…, strategyId)` at creation and acceptance (REQ-RISK-009 precision) |
+| 7 | Benchmark levels v1 built 1:1 trades the gate refuses (min R:R 2) | VALID (P1) | levels v2: target at take-x, stop at min(1.5 ATR, take / `min_risk_reward`), void inside the noise filter; "eligible ≠ admissible" stated in the report (REQ-BENCH-004 amended; WP7 decision 4 amended) |
+| 8 | The capture (15:35 cron) does not guarantee the universe the judgment saw; half-days; per-symbol uniqueness | VALID (P1) | capture on EVERY pre-close snapshot through the engine's `onSnapshot`; first sighting per symbol per day stands (the intended semantics, now stated); proposals record `snapshot_ts` (REQ-BENCH-001 amended; WP7 decision 2 amended) |
+| 9 | "R is rung-invariant" is false after minimum commissions and whole shares; the twin ignored the overnight budget | VALID (P1) | `gross_r` (exit − fill) / |price − stop| is the size-invariant label the harness uses; net R at min(rung, `overnight_risk_pct`) is informational; the decision text is corrected (REQ-BENCH-004 amended; WP7 decision 6 amended) |
+| 10 | The trigger rank was attributed to any symbol proposed in the run; overnight ranks ignored direction | VALID (P1) | the trigger context carries `triggerSymbol`; `laneRankFor` attributes a rank only to the same symbol and direction, else null with the version (REQ-DISC-003 amended) |
+| 11 | The harness had no pass criterion and a moving split | VALID (P1) | pre-registered criteria (validation n ≥ 20, rho ≥ 0.15, p ≤ 0.05, top-tercile lift ≥ 0.10 R, selection half agrees in sign); the split is a pinned date (`--split` or frozen once with `--freeze-split`); unpinned → no verdict (REQ-DISC-005 amended) |
+| 12 | Ranker versions mixed; commissions null → 0; `--since` not applied to the archive; split by close day | VALID (P1) | one cohort per (lane, version, source); a row without commissions is excluded; `--since` applies to both sources; the decision day (creation / capture) splits (REQ-DISC-004/005 amended) |
+| 13 | "10th trading day" (tool) vs "fill + 10" (code/SPEC) | VALID (P2) | the code stands (fill + N sessions); the tool, RULES.md and AUTOMATION now say "N trading sessions after the fill session (the N+1th counting the fill day)" (REQ-LANE-003 precision) |
+| 14 | `breakout-confirmed` was unreachable (the pivot included the last bar) | VALID (P2) | the pivot is the handle high BEFORE the last bar; confirmed = last close ≥ that pivot under the 2 % ceiling (REQ-LANE-005 precision) |
+
+### Amended requirements
+
+- REQ-ENTRY-001 (amended): the expiry sweep applies to intraday rows AND
+  overnight-lane rows; swing and earnings-bet entries stay patient.
+- REQ-LANE-002 (amended): `max_overnight_lane_positions` counts open,
+  executing and executed rows at creation and the executing/executed rows
+  excluding the candidate at acceptance.
+- REQ-LANE-003 (amended): the sweeper records an attempt
+  (`deadline_attempted_at`, `deadline_attempts`) before the order and
+  `deadline_closed_at` only on a confirmed flat; a failed attempt is
+  retried after 5 minutes, at most 3 times, then alerted as exhausted.
+  Deadline wording: the swing / cup deadline is 15:50 ET N trading sessions
+  after the fill session.
+- REQ-LANE-005 (precision): the cup pivot is fixed before the last bar;
+  `breakout-confirmed` = last close ≥ pivot (≤ rim × 1.02).
+- REQ-SIM-004 (amended): every GTC twin carries its lane deadline as
+  `flatAt` (overnight 10:00 ET next session; swing / cup after their hold
+  days; legacy rows by class); a GTC twin replays up to tonight and stays
+  open until exit or deadline.
+- REQ-SIZE-003 (amended): the cost-to-target rule applies to explicit
+  quantities; acceptance re-prices the round trip with the live spread
+  (deferred pre-open spread = unknown) and refuses over the cap.
+- REQ-RISK-009 (precision): the gate's budget is `classRiskPct(class,
+  rules, rung, strategyId)` — the lane's own budget where one exists.
+- REQ-BENCH-001 (amended): capture on every pre-close snapshot; a symbol's
+  first sighting of the day stands; proposals stamp `snapshot_ts`.
+- REQ-BENCH-004 (amended): levels v2 (gate-consistent R:R); `gross_r` is
+  the comparison label; net R is informational at min(rung,
+  `overnight_risk_pct`). "R is rung-invariant" is withdrawn.
+- REQ-DISC-003 (amended): a lane rank is attributed only to the same symbol
+  and direction; the trigger context carries the trigger symbol.
+- REQ-DISC-004 (amended): rank→R lines are per (lane, ranker version).
+- REQ-DISC-005 (amended): pre-registered pass criteria and a pinned split;
+  cohorts per (lane, version, source); decision-day split; incomplete rows
+  excluded.
+
+### Operator decisions amended (2026-09-06, this response)
+
+- WP6 decision on explicit quantities (implicit in REQ-SIZE-003's landing
+  note): withdrawn — the cost rule applies to every creation.
+- WP7 decision 2: "one capture per day at 15:35" → every pre-close
+  snapshot, first sighting stands.
+- WP7 decision 4: levels v1 → v2 (gate-consistent stop).
+- WP7 decision 6: "R is rung-invariant" → gross R is the label; net R at
+  the overnight budget is informational.
+
+| Finding | Test |
+|---|---|
+| 1 | `trade-proposals.test.ts` (an overnight GTC executed row is listed as expired) |
+| 2 | `trade-proposals.test.ts` (open rows consume the cap at creation; commitments excluding the row at acceptance) |
+| 3 | `lane-deadline-sweeper.test.ts` (attempt recorded, closed only on confirmed flat, cooldown, exhausted → operator); `trade-proposals.test.ts` (due listing across attempts) |
+| 4 | `simulator/variants.test.ts` (GTC twins take the lane deadline); `simulator/settle.test.ts` (an open GTC row replays up to tonight) |
+| 5 | `tools/proposals` path + executor `[cost-gate]` (type-checked; explicit-quantity refusal ledgered) |
+| 6 | `proposal-risk-gate.ts` reads `strategyId` (type-checked; sizer/gate parity test unchanged) |
+| 7 | `candidate-archive.test.ts` (levels v2: 2:1 geometry, noise-floor void) |
+| 8 | `candidate-archive.test.ts` (capture from a supplied snapshot; first capture stands) |
+| 9 | `overnight-benchmark.test.ts` (gross R = (exit − fill) / stop distance) |
+| 10 | `lane-rankers.test.ts` (another symbol in the run gets no trigger rank; a short on a long-ranked symbol gets none) |
+| 11–12 | `scripts/validate-lane-ranker.ts` smoke-run (UNPINNED without a split; criteria printed) |
+| 14 | `pattern-detectors.test.ts` (pivot fixed before the last bar; confirmed / poke-and-fail / ready) |
+
+Harness at landing: `bun test` 1112 pass (102 files), `tsc --noEmit` clean, Jest 1093 pass under Node; `scripts/validate-lane-ranker.ts` smoke-runs read-only (UNPINNED without a split).

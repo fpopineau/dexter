@@ -216,7 +216,12 @@ export function detectCupAndHandle(bars: DailyBar[]): PatternMatch | null {
     // Handle: everything after the right rim — short, shallow, upper half.
     const handle = bars.slice(iR + 1);
     if (handle.length < CH_HANDLE_MIN || handle.length > CH_HANDLE_MAX) return null;
-    const handleHigh = Math.max(...handle.map((b) => b.high));
+    // The PIVOT is the handle high fixed BEFORE the last bar (review
+    // 2026-09-06, finding 14): a close can never exceed its own bar's high,
+    // so a pivot that included the last bar made 'breakout-confirmed'
+    // unreachable. The last bar is the one that may confirm the breakout.
+    const pivotBars = handle.length > CH_HANDLE_MIN ? handle.slice(0, -1) : handle;
+    const handleHigh = Math.max(...pivotBars.map((b) => b.high));
     const handleLow = Math.min(...handle.map((b) => b.low));
     const handleDepth = (rimR - handleLow) / rimR;
     if (handleDepth > CH_HANDLE_MAX_DEPTH) return null;
@@ -262,6 +267,8 @@ export function detectCupAndHandle(bars: DailyBar[]): PatternMatch | null {
     return {
         pattern: 'cup-and-handle',
         detectorVersion: DETECTOR_VERSION,
+        // Confirmed = the last CLOSE is at/above the pivot fixed before it
+        // (and under the 2 % extension ceiling checked above).
         state: c >= handleHigh ? 'breakout-confirmed' : 'pivot-ready',
         score: Math.min(98, score),
         pivot: r2(handleHigh),

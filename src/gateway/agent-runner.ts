@@ -77,6 +77,9 @@ export type AgentRunRequest = {
   /** REQ-TRIG-002: the compositeRank that fired a trigger-lane run —
    *  stamped on the proposals/refusals the run creates. */
   triggerRank?: number;
+  /** The symbol that fired a trigger-lane run — the rank is attributed to
+   *  proposals on this symbol only (review 2026-09-06, finding 10). */
+  triggerSymbol?: string;
 };
 
 export async function runAgentForMessage(req: AgentRunRequest): Promise<string> {
@@ -92,7 +95,9 @@ export async function runAgentForMessage(req: AgentRunRequest): Promise<string> 
   assertEvaluationAllowed(lane);
 
   const run = () => withAgentLane(lane, runInner, `${req.modelProvider}:${req.model}`,
-    req.triggerRank !== undefined ? { triggerRank: req.triggerRank } : undefined);
+    req.triggerRank !== undefined || req.triggerSymbol !== undefined
+      ? { ...(req.triggerRank !== undefined ? { triggerRank: req.triggerRank } : {}), ...(req.triggerSymbol !== undefined ? { triggerSymbol: req.triggerSymbol } : {}) }
+      : undefined);
   const runInner = async () => {
     if (session) {
       session.isRunning = true;

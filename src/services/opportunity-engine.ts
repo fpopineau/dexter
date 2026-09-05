@@ -836,6 +836,10 @@ async function runCycleInner(forcePhase?: EnginePhase): Promise<OpportunitySnaps
 
         latestSnapshot = snapshot;
         await persistSnapshot(snapshot);
+        // WP7/WP8 consumers (candidate archive): every snapshot, best-effort.
+        for (const cb of [...snapshotCallbacks]) {
+            try { await cb(snapshot); } catch (err) { logger.warn(`[opportunity-engine] snapshot callback failed: ${err}`); }
+        }
         await syncStreamSubscriptions(snapshot);
 
         logger.info(
@@ -888,6 +892,17 @@ async function syncStreamSubscriptions(snapshot: OpportunitySnapshot): Promise<v
 // ---------------------------------------------------------------------------
 
 export type TriggerCallback = (opp: Opportunity, snapshot: OpportunitySnapshot) => void | Promise<void>;
+
+// --- Snapshot events (review 2026-09-06, finding 8): the candidate archive
+// captures the observable universe on EVERY pre-close snapshot.
+export type SnapshotCallback = (snapshot: OpportunitySnapshot) => void | Promise<void>;
+const snapshotCallbacks = new Set<SnapshotCallback>();
+
+/** Register a callback for every completed cycle's snapshot. */
+export function onSnapshot(cb: SnapshotCallback): () => void {
+    snapshotCallbacks.add(cb);
+    return () => snapshotCallbacks.delete(cb);
+}
 
 // --- Scanner-health events (see scan-health.ts) ---
 export type HealthCallback = (t: HealthTransition) => void | Promise<void>;

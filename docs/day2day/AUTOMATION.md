@@ -324,19 +324,24 @@ reported, never skipped. The simulator can never reach the broker (its own
 database, no order ids).
 
 ### Candidate archive + overnight benchmark — `src/services/candidate-archive.ts`, `src/services/overnight-benchmark.ts` (WP7)
-At 15:35 ET the archive captures the observable universe, point-in-time and
-per lane, into `.dexter/data/candidate-archive.db`: the overnight lane from
-the latest pre-close opportunity snapshot (every scored candidate with its
-price, daily ATR, day move, rank), the cup-and-handle lane from the nightly
-pattern scan (cup matches, detector version, state). Each row gets a
+On EVERY pre-close opportunity snapshot the archive captures the observable
+universe, point-in-time and per lane, into `.dexter/data/candidate-archive.db`:
+the overnight lane from the snapshot (every scored candidate with its price,
+daily ATR, day move, lane rank — a symbol's first sighting of the day stands),
+the cup-and-handle lane from the nightly pattern scan (cup matches, detector
+version, state). Each proposal records the snapshot it was created against
+(`snapshot_ts`). Each row gets a
 deterministic eligibility verdict with reasons (stale data, min price, ATR
 missing, day move unknown or against the direction, earnings within 2 days)
-and versioned mechanical levels — overnight v1: MKT at the next bar, stop at
-`stop_atr_multiplier` × ATR, target at take-x, flat at the 10:00 ET deadline.
-The first capture of a day stands; nothing archived is ever re-priced. After
+and versioned mechanical levels — overnight v2: MKT at the next bar, target at
+take-x, stop at min(`stop_atr_multiplier` × ATR, take distance / `min_risk_reward`)
+so the twin meets the gate's R:R (a stop inside the noise filter voids the
+row), flat at the 10:00 ET deadline. Nothing archived is ever re-priced;
+"eligible" means eligible for the benchmark, not admissible by Dexter. After
 the nightly settle, the overnight benchmark replays every due eligible row
 with the simulator's pessimistic fill model against next-session bars, records
-the gap (next open vs capture price), fill, exit and R at the rung, joins each
+the gap (next open vs capture price), fill, exit, gross R (size-invariant label)
+and net R at the overnight budget (informational), joins each
 row to what the system did with it (proposed / refused by gate / not admitted),
 and sends one 🌙 block per capture day: the whole universe, the top-5 by rank,
 the judgment's picks, the not-admitted rest, unknowns. Cup rows are archived,
@@ -353,11 +358,14 @@ Every proposal carries a lane contract (`strategyId`: intraday / overnight /
 swing / cup-and-handle / earnings-bet; `src/services/lane-contract.ts`). The
 lanes beyond the session get an exit deadline stamped at entry fill from the
 market calendar — overnight: 10:00 ET of the next trading session; swing and
-cup-and-handle: 15:50 ET on the last allowed trading day (10 / 15), pulled to
-12:50 ET on a half-day. Every 60 s during the regular session the sweeper
+cup-and-handle: 15:50 ET 10 / 15 trading sessions AFTER the fill session (the
+11th / 16th session counting the fill day), pulled to 12:50 ET on a half-day. Every 60 s during the regular session the sweeper
 closes a still-open position at or past its deadline through `closePosition`
-(cancel exits, market-close, confirm flat), stamping `deadline_closed_at`
-first so a working close is never doubled. A close that does not confirm
+(cancel exits, market-close, confirm flat). An ATTEMPT is recorded before the
+order (`deadline_attempted_at`, `deadline_attempts`); `deadline_closed_at` is
+stamped only when the broker confirms flat (or the bracket already exited); a
+close that does not confirm is retried after 5 min, at most 3 times, then
+handed to the operator (review 2026-09-06). A close that does not confirm
 flat is an incident (WhatsApp alert, `kill SYMBOL`). An overnight entry that
 never filled dies with its expiry (clamped to the close) through the
 stale-entry sweep. The lanes ride the swing risk class at the 15:52 triage:
