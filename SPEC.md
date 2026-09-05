@@ -2464,3 +2464,83 @@ task graph for the review and is deleted once the operator has read it.
 | REQ-LIVE-001 | `proposal-executor.test.ts` — `autoExecVerdict` matrix (paper identity; live: each condition named; non-D account on the paper port) |
 | REQ-LIVE-002 | `proposal-executor.test.ts` — window default 0, 5-min window stamps `auto_execute_at` and announces the veto; `veto-window.test.ts` — due sweep executes oldest first, failures isolated |
 | REQ-LIVE-003 | `loop-control.test.ts` — `vetoDecision` + `vetoProposalWith` routing; `loop-commands.test.ts` — grammar, read-only status, "not available" answers, fall-through |
+
+## Live-loop WP2 landed (2026-09-05) — in-process simulator, shadow-variant registry, fingerprint narrowing
+
+Implements REQ-SIM-001..007 and — pulled forward from WP3 — REQ-FP-001/002.
+The ephemeral `docs/day2day/WP2-PLAN.md` carries the task graph for the
+review and is deleted once read.
+
+### Sequencing decision recorded at landing
+
+The identity still hashed the whole `src` tree, so a WP2 landing without
+the narrowing would have moved the epoch-1 fingerprint on the very restart
+that opens epoch 1. The WP1 restart has not happened yet (the operator must
+set the LLM price knobs first), so the first restart carries WP1 + WP2 +
+the narrowed identity together: epoch 1 opens on an identity WP3/WP4 cannot
+move. REQ-FP-003 (protocol/manifest docs, attestation fields) stays in WP3;
+the protocol's fingerprint paragraph carries a dated amendment already.
+
+### Precisions recorded at landing (append-only; they refine the requirements above)
+
+- REQ-SIM-001 precision: `sim_trades` lives in its OWN `simulator.db` (same
+  data dir), not in `proposals.db` — the behavior store's schema stays
+  untouched, two writers never contend on one file, and REQ-SIM-007 is
+  structural (a different database, no order-id columns, no path into
+  `acceptProposal`). Same REQ-TEST-001 temp-dir guard.
+- REQ-SIM-002 precision: all simulator times use the codebase's ET-frame
+  convention (`barTimeFrameMs` / `etFrameMs`). Ratchet exits are classed
+  `target` when the exit is above the fill and `stop` otherwise (the
+  outcome set has no ratchet label), with a note. The ratchet stop for a
+  bar is the stop as it stood ENTERING the bar — the peak that lifts it
+  prints during the bar and the same bar's low may precede it.
+- REQ-SIM-003 precision: coverage = first bar within one gap tolerance of
+  the window start, last within one of the end, no internal gap over the
+  tolerance (60 s for 5-second stream bars, 5 min for 1-minute bars),
+  judged on session-filtered bars. The IBKR fallback is paced (300 ms) and
+  bars are memoized per (symbol, window, session) per run.
+- REQ-SIM-004 precision: `funnel-75` = trigger rows in the '75+' band plus
+  every non-trigger lane; `gate-off:microstructure` recognises the gate
+  from the refusal reason (the classifier files it under 'other');
+  `exit-ratchet` / `exit-x2.0` / `stop-x/3` need the row's x (stamped
+  `take_pct` or the ATR formula) and skip rows without it; entry deadline =
+  proposal expiry + the sweeper's 30-min grace (GTC: the 3-day zombie
+  horizon).
+- REQ-SIM-005 precision: the sizing base is the epoch NetLiq
+  (`performance-epoch.json`, fallback $11,700) at the current rung; R uses
+  the planned entry (the fill for MKT) and the variant's stop.
+- REQ-SIM-006 precision: settle runs at 17:10 ET with a boot catch-up when
+  today's stamp is not `completed` after the slot on a trading day; open
+  GTC rows re-settle nightly for 28 calendar days, then `unknown`
+  ("horizon expired"); a DAY row created at or after its flat bar is
+  skipped (post-cutoff, nothing to replay). The nightly report goes to
+  WhatsApp through the outcome-alerts bridge.
+- REQ-FP-001 precision: `src` + root runtime configs + SOUL.md are INCLUDED
+  by default; `BEHAVIOR_EXCLUDE` names observability (simulator, benchmark,
+  excursion sweeper, equity series, dashboard, attestation, scan health),
+  control plane (`loop-control`, `loop-commands`), alert delivery
+  (`outcome-alerts`, `mover-alerts`, `health-alerts`, `debug-log`),
+  evaluator math (`day-bootstrap`, `equity-series-math`, the future
+  `sequential-test`), TUI/CLI paths and every `*.test.ts(x)`; `scripts/`
+  left the identity. A new file is behavior unless excluded (fail-loud
+  default). The identity is per-BLOB (`git ls-tree -r`, filtered), status
+  and diff scoped to behavior paths only.
+- REQ-FP-002 finding fixed at landing: the shared git runner trimmed
+  stdout, so a porcelain entry for a modified file (` M path`) lost its
+  leading space and the path parsed one character short. The old identity
+  never noticed because any non-untracked entry counted as dirty. NUL-
+  delimited outputs are now consumed raw; the temp-repo test pins it.
+
+### Test traceability (WP2)
+
+| REQ | Test |
+|---|---|
+| REQ-SIM-001 | `simulator/store.test.ts` (own DB, upsert keyed on variant+source, filters); `simulator/settle.test.ts` (incumbent twin per proposal); `simulator/report.test.ts` (`twinCalibration`) |
+| REQ-SIM-002 | `simulator/fill-model.test.ts` — strict trade-through LMT, STP_LMT band, MKT next open, gap-aware stop, target strict, tie → stop, eod-flat, GTC open, deadline, ratchet arm/lock/trail, MFE/MAE, commissions, R |
+| REQ-SIM-003 | `simulator/bars.test.ts` — `coverageOk`, `sessionFilter` (half-day), `frameToEpochMs` round trip, loader order with fakes (loader failure = no data) |
+| REQ-SIM-004 | `simulator/variants.test.ts` — registry names, `weights-calibrated` inactive, per-variant applies/geometry |
+| REQ-SIM-005 | `simulator/variants.test.ts` (`sizeAtRung`); `simulator/settle.test.ts` (rung-sized quantity, commissions, R) |
+| REQ-SIM-006 | `simulator/settle.test.ts` — settled rows untouched, open GTC re-settled, unknown on missing bars, future flat bar waits, post-cutoff row skipped, failure isolated; the cron/stamp/catch-up wiring in `simulator/index.ts` is lifecycle glue (honest ledger) |
+| REQ-SIM-007 | structural: `simulator.db`, no order-id columns, no import from the simulator into any order path (`grep -r "simulator" src/services/proposal-executor.ts src/tools/ibkr` is empty) |
+| REQ-FP-001 | `strategy-fingerprint.test.ts` — classification pin (behavior included / excluded named), every exclusion exists |
+| REQ-FP-002 | `strategy-fingerprint.test.ts` — REAL temp repo: excluded edits (dirty and committed) leave the identity, a behavior edit moves it, an untracked behavior file dirties it, a test file does not; legacy suites re-pinned (`scripts/` no longer dirties) |

@@ -83,10 +83,19 @@ positive expectancy after costs, not improved loss control.
   and every equity sample is stamped with a 12-hex digest of the
   effective risk rules + SOUL.md + `.dexter/RULES.md` + every
   discovered skill's SKILL.md + the configured provider:model pair +
-  the runtime-path TREE identity (git tree/blob hashes of src/,
-  scripts/ and root configs — not the commit SHA, so a docs-only
-  manifest commit leaves the fingerprint unchanged)
-  (`src/services/strategy-fingerprint.ts`). The scorecard REFUSES a
+  the BEHAVIOR-path identity (git blob hashes of the behavior files under
+  src/ and the root runtime configs — not the commit SHA, so a docs-only
+  commit leaves the fingerprint unchanged)
+  (`src/services/strategy-fingerprint.ts`).
+  **Amended 2026-09-05 (live-loop WP2, SPEC REQ-FP-001/002):** the code
+  identity is narrowed to BEHAVIOR paths — scanning, ranking, gates,
+  sizing, execution, exits and the judgment surfaces. Observability
+  (simulator, benchmark, excursion sweeper, equity series, dashboard,
+  attestation), the control plane (`loop-control`, `loop-commands`),
+  alert delivery, evaluator math, TUI/CLI paths, `scripts/` and every
+  test file are explicitly excluded (`BEHAVIOR_EXCLUDE`), so a landing on
+  those paths does not end an epoch. A new file under src/ is behavior
+  unless excluded (fail-loud default). The scorecard REFUSES a
   window that mixes fingerprints or contains absent stamps — a
   mid-sample rules edit, profile flip, judgment-doc or skill rewrite,
   model switch or code deploy is detected by the sample itself, not by

@@ -73,9 +73,10 @@ describe('classifyWorkingTree (review-20/21 — RUNTIME dirty, NUL-delimited, sp
     });
 
     test('untracked RUNTIME files and any tracked change are identity-relevant', () => {
+        // REQ-FP-001: scripts/ left the identity with the WP2 narrowing.
         const t = classifyWorkingTree(z(' M src/services/foo.ts', '?? src/services/new-module.ts', '?? scripts/tool.ts', '?? .claude/x.json'));
         expect(t.hasTrackedChanges).toBe(true);
-        expect(t.untrackedRuntime).toEqual(['scripts/tool.ts', 'src/services/new-module.ts']);
+        expect(t.untrackedRuntime).toEqual(['src/services/new-module.ts']);
     });
 
     test('review-21: a path WITH SPACES is seen (the newline form quoted it into invisibility)', () => {
@@ -575,5 +576,83 @@ describe('verifyFreezeAnchor (review-30 — every fail-closed branch, executable
         const afterRetag = verifyFreezeAnchor('validation-freeze-1', moved.tagObjectSha, realDeps);
         expect(afterRetag.problems.some((p) => p.includes('FORCE-MOVED'))).toBe(true);
         expect(afterRetag.problems.some((p) => p.includes('REMOTE tag object') && p.includes('differs'))).toBe(true);
+    });
+});
+
+describe('behavior-path identity (REQ-FP-001/002 — live-loop WP2: observability may change mid-epoch)', () => {
+    test('classification: behavior paths included, observability/control-plane/evaluator/TUI/tests excluded', async () => {
+        const { isBehaviorPath } = await import('./strategy-fingerprint.js');
+        for (const p of ['src/services/proposal-risk-gate.ts', 'src/services/opportunity-engine.ts', 'src/services/position-sizer.ts',
+            'src/services/trade-proposals.ts', 'src/services/ladder-state.ts', 'src/services/epoch-state.ts', 'src/services/llm-spend.ts',
+            'src/services/spread-recheck.ts', 'src/services/veto-window.ts', 'src/services/strategy-fingerprint.ts',
+            'src/gateway/gateway.ts', 'src/gateway/trigger-alerts.ts', 'src/gateway/agent-runner.ts', 'src/gateway/proposal-commands.ts',
+            'src/agent/agent.ts', 'src/skills/day-trade/SKILL.md', 'src/tools/ibkr/bracket.ts', 'src/config/risk-rules.live.yaml',
+            'src/config/vehicle-complexes.yaml', 'src/utils/market-hours.ts', 'SOUL.md', 'package.json', 'bun.lock']) {
+            expect(isBehaviorPath(p)).toBe(true);
+        }
+        for (const p of ['src/services/simulator/settle.ts', 'src/services/simulator/fill-model.ts', 'src/services/benchmark.ts',
+            'src/services/excursion-sweeper.ts', 'src/services/equity-series.ts', 'src/services/dashboard.ts', 'src/services/dashboard-page.ts',
+            'src/services/runtime-attestation.ts', 'src/services/loop-control.ts', 'src/services/scan-health.ts',
+            'src/gateway/loop-commands.ts', 'src/gateway/outcome-alerts.ts', 'src/gateway/mover-alerts.ts', 'src/gateway/health-alerts.ts',
+            'src/utils/day-bootstrap.ts', 'src/utils/equity-series-math.ts', 'src/utils/sequential-test.ts',
+            'src/backtest/engine.ts', 'src/components/App.tsx', 'src/controllers/x.ts', 'src/commands/x.ts', 'src/cli.ts', 'src/index.tsx',
+            'src/services/proposal-risk-gate.test.ts', 'src/agent/lane-context.test.ts', 'scripts/validation-scorecard.ts', 'docs/x.md', 'test/test-env.ts']) {
+            expect(isBehaviorPath(p)).toBe(false);
+        }
+    });
+
+    test('every explicit exclusion names a path that exists (no stale entries hiding a renamed behavior file)', async () => {
+        const { BEHAVIOR_EXCLUDE } = await import('./strategy-fingerprint.js');
+        const { existsSync } = await import('node:fs');
+        for (const p of BEHAVIOR_EXCLUDE) {
+            if (p.includes('*')) continue; // glob entries
+            if (p.endsWith('sequential-test.ts')) continue; // WP3 lands it; pre-registered exclusion
+            expect(existsSync(join(process.cwd(), p))).toBe(true);
+        }
+    });
+
+    test('REAL temp repo: an edit under an excluded path leaves the identity; a behavior edit and a behavior-untracked file move it', async () => {
+        const { codeIdentity } = await import('./strategy-fingerprint.js');
+        const { execFileSync } = await import('node:child_process');
+        const dir = mkdtempSync(join(tmpdir(), 'dexter-fpnarrow-'));
+        const g = (...args: string[]) => execFileSync('git', args, { cwd: dir });
+        g('init', '-q');
+        g('config', 'user.email', 'test@dexter');
+        g('config', 'user.name', 'dexter-test');
+        g('config', 'commit.gpgsign', 'false');
+        mkdirSync(join(dir, 'src', 'services', 'simulator'), { recursive: true });
+        writeFileSync(join(dir, 'src', 'services', 'proposal-risk-gate.ts'), 'gate v1');
+        writeFileSync(join(dir, 'src', 'services', 'simulator', 'settle.ts'), 'sim v1');
+        writeFileSync(join(dir, 'src', 'services', 'benchmark.ts'), 'bench v1');
+        g('add', '.');
+        g('commit', '-qm', 'baseline');
+        const baseline = await codeIdentity(dir);
+        expect(baseline).toMatch(/^tree\.[0-9a-f]{12}$/);
+
+        // Observability edits — dirty AND committed — leave the identity alone.
+        writeFileSync(join(dir, 'src', 'services', 'simulator', 'settle.ts'), 'sim v2');
+        writeFileSync(join(dir, 'src', 'services', 'benchmark.ts'), 'bench v2');
+        writeFileSync(join(dir, 'src', 'services', 'simulator', 'new-variant.ts'), 'untracked observability');
+        expect(await codeIdentity(dir)).toBe(baseline);
+        g('add', '.');
+        g('commit', '-qm', 'observability only');
+        expect(await codeIdentity(dir)).toBe(baseline);
+
+        // A behavior edit dirties, then moves, the identity.
+        writeFileSync(join(dir, 'src', 'services', 'proposal-risk-gate.ts'), 'gate v2');
+        expect(await codeIdentity(dir)).toMatch(/\+dirty\.[0-9a-f]{12}$/);
+        g('add', '.');
+        g('commit', '-qm', 'behavior change');
+        const moved = await codeIdentity(dir);
+        expect(moved).toMatch(/^tree\.[0-9a-f]{12}$/);
+        expect(moved).not.toBe(baseline);
+
+        // An UNTRACKED behavior file dirties the identity; a test file does not.
+        writeFileSync(join(dir, 'src', 'services', 'new-gate.ts'), 'behavior');
+        expect(await codeIdentity(dir)).toMatch(/\+dirty\./);
+        g('add', '.'); g('commit', '-qm', 'gate file');
+        const afterGate = await codeIdentity(dir);
+        writeFileSync(join(dir, 'src', 'services', 'new-gate.test.ts'), 'test');
+        expect(await codeIdentity(dir)).toBe(afterGate);
     });
 });

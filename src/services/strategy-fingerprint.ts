@@ -13,13 +13,15 @@
  * ABSENT and refuses (review-19: hashing 'absent' into a valid digest
  * let a whole identity-less window pass purity):
  *   - the EFFECTIVE risk rules (post profile override);
- *   - the code identity: a digest of the runtime paths' git tree/blob
- *     hashes at HEAD plus a content digest of any runtime drift, read
- *     via the git BINARY (worktrees and submodules where `.git` is a
- *     file resolve correctly). Tree-based, NOT the commit SHA —
- *     review-22: a docs-only commit (the manifest workflow) must leave
- *     the identity unchanged. A dirty runtime checkout is a distinct
- *     (and suspect) identity, not clean;
+ *   - the code identity: a digest of the BEHAVIOR paths' git blob hashes
+ *     at HEAD plus a content digest of any behavior-path drift, read via
+ *     the git BINARY (worktrees and submodules where `.git` is a file
+ *     resolve correctly). Blob-based, NOT the commit SHA — review-22: a
+ *     docs-only commit must leave the identity unchanged; REQ-FP-001
+ *     (live-loop WP2): observability, control-plane, evaluator, TUI and
+ *     test paths are EXCLUDED (BEHAVIOR_EXCLUDE) so those landings do not
+ *     end an epoch. A dirty behavior checkout is a distinct (and suspect)
+ *     identity, not clean;
  *   - the configured provider:model pair (settings.json — the runtime's
  *     configured identity; the per-trade `model` column separately pins
  *     what actually proposed each trade).
@@ -45,10 +47,16 @@ import { getActiveWeightsInfo } from '@/tools/ibkr/signal-scorer.js';
 
 const execFileAsync = promisify(execFile);
 
-async function execGit(args: string[], cwd: string): Promise<string | null> {
+async function execGit(args: string[], cwd: string, opts: { raw?: boolean } = {}): Promise<string | null> {
     try {
         // 64MB buffer: `git diff --binary HEAD` carries file CONTENT.
         const { stdout } = await execFileAsync('git', args, { cwd, timeout: 10_000, maxBuffer: 64 * 1024 * 1024 });
+        // REQ-FP-002 (WP2): NUL-delimited outputs are consumed RAW — a
+        // porcelain status entry for a modified file begins with a SPACE
+        // (" M path"), and trimming it shifted the path parse by one
+        // character (the old identity never noticed: any non-untracked
+        // entry counted as dirty regardless of its path).
+        if (opts.raw) return stdout;
         return stdout.replace(/\r/g, '').trim();
     } catch {
         return null;
@@ -181,8 +189,69 @@ export function makeFreezeAnchorDeps(tag: string, cwd: string, pinPath: string):
  *  manifest changed HEAD and with it the fingerprint). A docs-only
  *  commit leaves every one of these objects — and so the identity —
  *  unchanged. */
-const RUNTIME_PATHS = ['src', 'scripts', 'package.json', 'bun.lock', 'bunfig.toml', 'tsconfig.json', 'SOUL.md'];
-const RUNTIME_UNTRACKED = /^(src|scripts)\/|^(package\.json|bun\.lock|bunfig\.toml|tsconfig\.json|SOUL\.md)$/;
+/** REQ-FP-001 (live-loop WP2): the code identity covers BEHAVIOR paths —
+ *  what decides which trades enter, how they are sized, placed and exited,
+ *  and what the judgment layer sees. The runtime tree `src` plus the root
+ *  runtime configs are INCLUDED by default; observability, control-plane,
+ *  evaluator, TUI and test paths are EXCLUDED explicitly below. A new file
+ *  is behavior unless excluded: a forgotten exclusion ends an epoch loudly
+ *  rather than letting a behavior file escape the identity. `scripts/`
+ *  (scorecard, ops tooling) is not runtime behavior and left the identity
+ *  with this narrowing. */
+export const BEHAVIOR_INCLUDE: readonly string[] = ['src', 'package.json', 'bun.lock', 'bunfig.toml', 'tsconfig.json', 'SOUL.md'];
+
+export const BEHAVIOR_EXCLUDE: readonly string[] = [
+    // Observability: reads the ledgers and the tape, decides nothing.
+    'src/services/simulator',
+    'src/services/benchmark.ts',
+    'src/services/excursion-sweeper.ts',
+    'src/services/equity-series.ts',
+    'src/services/dashboard.ts',
+    'src/services/dashboard-page.ts',
+    'src/services/runtime-attestation.ts',
+    'src/services/scan-health.ts',
+    // Control plane: the operator's per-trade powers and status readers.
+    'src/services/loop-control.ts',
+    'src/gateway/loop-commands.ts',
+    // Alert delivery: transport and formatting of decisions made elsewhere.
+    'src/gateway/outcome-alerts.ts',
+    'src/gateway/mover-alerts.ts',
+    'src/gateway/health-alerts.ts',
+    'src/gateway/debug-log.ts',
+    // Evaluator math: decides about the EPOCH, not about trades (its
+    // constants are hashed into the epoch record by WP3 instead).
+    'src/utils/day-bootstrap.ts',
+    'src/utils/equity-series-math.ts',
+    'src/utils/sequential-test.ts',
+    // TUI / CLI / research surfaces: never on the trading path.
+    'src/backtest',
+    'src/components',
+    'src/controllers',
+    'src/commands',
+    'src/cli.ts',
+    'src/index.tsx',
+    'src/theme.ts',
+    'src/utils/spinner.ts',
+    'src/utils/progress-channel.ts',
+    'src/utils/thinking-verbs.ts',
+    'src/utils/input-key-handlers.ts',
+    'src/utils/text-navigation.ts',
+    // Tests (glob — matched by extension below).
+    '**/*.test.ts',
+    '**/*.test.tsx',
+];
+
+/** Pure: is this repo-relative path part of the behavior identity? */
+export function isBehaviorPath(pathRaw: string): boolean {
+    const p = pathRaw.replace(/\\/g, '/').replace(/^\.\//, '');
+    if (!BEHAVIOR_INCLUDE.some((inc) => p === inc || p.startsWith(`${inc}/`))) return false;
+    if (/\.test\.tsx?$/.test(p)) return false;
+    for (const ex of BEHAVIOR_EXCLUDE) {
+        if (ex.includes('*')) continue;
+        if (p === ex || p.startsWith(`${ex}/`)) return false;
+    }
+    return true;
+}
 
 /** Review-23: behavior-affecting ENVIRONMENT settings — trigger
  *  thresholds, auto-execution selection, lifecycle switches, universe
@@ -302,22 +371,40 @@ export function judgmentConfigInput(): string {
  *  spaces — `?? "src/foo bar.ts"` silently failed the runtime filter);
  *  rename/copy entries carry the ORIGIN path as the following token.
  *  Exported for the harness — the filtering policy is the contract. */
-export function classifyWorkingTree(statusZ: string): { hasTrackedChanges: boolean; untrackedRuntime: string[] } {
+export function classifyWorkingTree(statusZ: string): { hasTrackedChanges: boolean; untrackedRuntime: string[]; changedBehavior: string[] } {
     const tokens = statusZ.split('\u0000').filter((t) => t.length > 0);
-    let hasTrackedChanges = false;
+    const changedBehavior: string[] = [];
     const untrackedRuntime: string[] = [];
     for (let i = 0; i < tokens.length; i++) {
         const entry = tokens[i];
         const xy = entry.slice(0, 2);
         const path = entry.slice(3);
         if (xy === '??') {
-            if (RUNTIME_UNTRACKED.test(path)) untrackedRuntime.push(path);
+            // REQ-FP-001: only BEHAVIOR paths dirty the identity.
+            if (isBehaviorPath(path)) untrackedRuntime.push(path);
             continue;
         }
-        hasTrackedChanges = true;
+        if (isBehaviorPath(path)) changedBehavior.push(path);
         if (/[RC]/.test(xy)) i++; // skip the origin-path token of a rename/copy
     }
-    return { hasTrackedChanges, untrackedRuntime: untrackedRuntime.sort() };
+    return { hasTrackedChanges: changedBehavior.length > 0, untrackedRuntime: untrackedRuntime.sort(), changedBehavior: changedBehavior.sort() };
+}
+
+/** Pure: `git ls-tree -r -z HEAD` output → sorted [path, blob sha] pairs
+ *  for BEHAVIOR blobs only ("<mode> <type> <sha>\t<path>" per '\u0000' entry). */
+export function behaviorBlobsFromLsTree(lsTreeZ: string): Array<[string, string]> {
+    const out: Array<[string, string]> = [];
+    for (const entry of lsTreeZ.split('\u0000')) {
+        if (!entry) continue;
+        const tab = entry.indexOf('\t');
+        if (tab < 0) continue;
+        const meta = entry.slice(0, tab).split(' ');
+        const path = entry.slice(tab + 1);
+        if (meta.length < 3 || meta[1] !== 'blob') continue;
+        if (!isBehaviorPath(path)) continue;
+        out.push([path, meta[2]]);
+    }
+    return out.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
 }
 
 /** The running code identity: `tree.<digest>` for a runtime-clean
@@ -335,27 +422,26 @@ export function classifyWorkingTree(statusZ: string): { hasTrackedChanges: boole
  *  untracked runtime DIRECTORY, is unprovable content; commit or
  *  remove it). */
 export async function codeIdentity(cwd = process.cwd()): Promise<string | null> {
-    const parts: string[] = [];
-    let anyPresent = false;
-    for (const p of RUNTIME_PATHS) {
-        const obj = await execGit(['rev-parse', `HEAD:${p}`], cwd);
-        if (obj !== null && !/^[0-9a-f]{40}$/.test(obj)) return null; // git spoke, but not an object hash
-        if (obj !== null) anyPresent = true;
-        parts.push(`${p}:${obj ?? 'absent'}`);
-    }
-    if (!anyPresent) return null; // not a repo, or nothing runtime-tracked — identity unprovable
-    const base = createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 12);
+    // REQ-FP-001: one ls-tree over the include roots, filtered to behavior
+    // blobs — a per-FILE identity, so an excluded observability file can
+    // change (dirty or committed) without moving the digest, while any
+    // behavior blob does. -z keeps paths with spaces intact.
+    const lsTree = await execGit(['ls-tree', '-r', '-z', 'HEAD', '--', ...BEHAVIOR_INCLUDE], cwd, { raw: true });
+    if (lsTree === null) return null; // not a repo / no HEAD — identity unprovable
+    const blobs = behaviorBlobsFromLsTree(lsTree);
+    if (blobs.length === 0) return null; // nothing behavior-tracked
+    const base = createHash('sha256').update(blobs.map(([p, sha]) => `${p}:${sha}`).join('|')).digest('hex').slice(0, 12);
     // -z: NUL-delimited, unquoted paths (spaces survive); untracked-files
     // =all lists files INSIDE untracked directories individually and
     // overrides any config that would suppress untracked output. Scoped
-    // to the runtime paths: docs edits do not dirty the identity.
-    const status = await execGit(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--', ...RUNTIME_PATHS], cwd);
+    // to the include roots; classifyWorkingTree keeps behavior paths only.
+    const status = await execGit(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--', ...BEHAVIOR_INCLUDE], cwd, { raw: true });
     if (status === null) return null; // a clean state we cannot PROVE is not clean
     const tree = classifyWorkingTree(status);
     if (!tree.hasTrackedChanges && tree.untrackedRuntime.length === 0) return `tree.${base}`;
     const h = createHash('sha256');
     if (tree.hasTrackedChanges) {
-        const diff = await execGit(['diff', '--binary', 'HEAD', '--', ...RUNTIME_PATHS], cwd);
+        const diff = await execGit(['diff', '--binary', 'HEAD', '--', ...tree.changedBehavior], cwd);
         if (diff === null) return null;
         h.update(diff);
     }

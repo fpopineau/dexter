@@ -9,6 +9,7 @@
 
 import { onAutoProtect, onTradeClosed } from '@/services/outcome-tracker.js';
 import { onBenchmarkReport } from '@/services/benchmark.js';
+import { onSimulatorReport } from '@/services/simulator/index.js';
 import { onEodTriage } from '@/services/eod-triage.js';
 import { onKillSwitchAlert } from '@/services/kill-switch-guardian.js';
 import { onFlatExitSweep } from '@/services/flat-exit-sweeper.js';
@@ -132,6 +133,24 @@ export function registerOutcomeAlerts(): void {
         }
         await sendMessageWhatsApp({ to: session.lastTo, body: message, accountId: session.lastAccountId });
         logger.info('[outcome-alerts] benchmark report delivered');
+    });
+
+    // Live-loop WP2 (REQ-SIM-006): the nightly simulator settle report —
+    // variants accruing, the twin calibration line, or a FAILED settle.
+    onSimulatorReport(async (message) => {
+        const session = findTargetSession();
+        if (!session?.lastTo || !session?.lastAccountId) {
+            logger.warn('[outcome-alerts] no WhatsApp delivery target, skipping simulator report');
+            return;
+        }
+        try {
+            assertOutboundAllowed({ to: session.lastTo, accountId: session.lastAccountId });
+        } catch {
+            logger.warn('[outcome-alerts] outbound blocked, skipping simulator report');
+            return;
+        }
+        await sendMessageWhatsApp({ to: session.lastTo, body: message, accountId: session.lastAccountId });
+        logger.info('[outcome-alerts] simulator report delivered');
     });
 
     // Kill-switch guardian (review 2026-08-23): latch + entry-cancel report.

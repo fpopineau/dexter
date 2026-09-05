@@ -200,6 +200,7 @@ Everything else has sensible defaults:
 | `PREMARKET_SPREAD_HARD_MULT` | 3 | pre-open DAY accept spread deferral bound (09:31 ET re-check) |
 | `LIVE_VETO_WINDOW_MIN` | 0 | veto window before an announced auto-execution places |
 | `LLM_DAILY_SPEND_CAP_USD` | 10 | daily LLM spend cap for evaluation lanes (0 = off; needs `LLM_PRICE_IN_USD_PER_MTOK` + `LLM_PRICE_OUT_USD_PER_MTOK`) |
+| `SIMULATOR` | true | nightly shadow-variant settle (17:10 ET) into `simulator.db`; `SIM_COMMISSION_PER_SHARE_USD` / `SIM_COMMISSION_MIN_USD` set the commission assumption |
 | `OPP_HEALTH_EMPTY_CYCLES` | 3 | zero-scan cycles before the scanner-health WhatsApp alert |
 | `UNIVERSE_EXTRA_SYMBOLS` | — | mega-cap watchlist for the nightly archive + swing pattern scan |
 | `OPP_MARKET_CAP_MIN` / `_MAX` | unset | restrict engine scans to a cap band (USD), e.g. 1e9–5e9 for midcaps; unset = unchanged behavior |

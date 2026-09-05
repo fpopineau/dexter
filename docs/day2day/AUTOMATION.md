@@ -281,6 +281,22 @@ reaches the ranking (REQ-SCAN-006/007); a vehicle is never traded against
 its own constituents (REQ-SCAN-008). Evaluation lanes stop for the day once
 the LLM spend cap is reached (`LLM_DAILY_SPEND_CAP_USD`, REQ-LLM-002).
 
+### Nightly simulator settle — `src/services/simulator/` (live-loop WP2)
+At 17:10 ET (after the 16:45 benchmark), every proposal created in the last
+three days and every refusal with complete levels is replayed against real
+bars for each active shadow variant — `incumbent` (the as-traded twin),
+`funnel-75`, `gate-off:<gate>`, `exit-ratchet`, `exit-x2.0`, `stop-x/3`,
+`class-swing`, `class-earnings-bet` — sized at the current ladder rung, with
+IBKR-tier commissions, into `.dexter/data/simulator.db`. Fills are
+pessimistic by construction (trade-through entries and targets, gap-aware
+stops, stop-first ties, market at the next open); bars come from the 5-second
+stream when the symbol was streamed, else the 1-minute archive, else one
+paced IBKR request; no covered source → `unknown`, never a fabricated fill.
+Open GTC rows re-settle nightly. A WhatsApp report lists each variant's n,
+summed and mean R, and the twin-vs-actual slippage line; a failed settle is
+reported, never skipped. The simulator can never reach the broker (its own
+database, no order ids).
+
 ### WhatsApp command router — `src/gateway/proposal-commands.ts`
 Inbound DMs are pre-routed **before** the agent (deterministic, no LLM):
 
@@ -444,6 +460,8 @@ manual acceptance:
 | `LIVE_VETO_WINDOW_MIN` | 0 | minutes an announced auto-execution waits for `veto P-XXXX` (REQ-LIVE-002) |
 | `LLM_DAILY_SPEND_CAP_USD` | 10 | evaluation lanes stop for the day at this spend; 0 disables; needs both price knobs (REQ-LLM-001/002) |
 | `LLM_PRICE_IN_USD_PER_MTOK` / `LLM_PRICE_OUT_USD_PER_MTOK` | — | USD per million input/output tokens; required while the cap is on |
+| `SIMULATOR` | true | nightly shadow-variant settle at 17:10 ET into `simulator.db` (REQ-SIM-006); observability only |
+| `SIM_COMMISSION_PER_SHARE_USD` / `SIM_COMMISSION_MIN_USD` | 0.005 / 1.00 | the simulator's per-side commission assumption (IBKR fixed tier) |
 | `OPP_HEALTH_EMPTY_CYCLES` | 3 | consecutive zero-scan cycles (market open) before a degraded-scanner WhatsApp alert |
 | `UNIVERSE_EXTRA_SYMBOLS` | — | watchlist archived nightly + swing-pattern-scanned regardless of the cap band |
 | `AUTO_EXECUTE_PAPER` | false | paper-only auto-execution of proposals (all sources) |

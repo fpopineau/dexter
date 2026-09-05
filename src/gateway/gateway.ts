@@ -48,6 +48,7 @@ import { startEquitySeries, stopEquitySeries } from '@/services/equity-series.js
 import { startKillSwitchGuardian, stopKillSwitchGuardian } from '@/services/kill-switch-guardian.js';
 import { startRuntimeAttestation, stopRuntimeAttestation } from '@/services/runtime-attestation.js';
 import { startSpreadRecheck, stopSpreadRecheck } from '@/services/spread-recheck.js';
+import { startSimulator, stopSimulator } from '@/services/simulator/index.js';
 import { startVetoWindowSweeper, stopVetoWindowSweeper } from '@/services/veto-window.js';
 import { assertSpendConfig } from '@/services/llm-spend.js';
 import { makeDebugLog } from './debug-log.js';
@@ -345,6 +346,9 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     // candidates, surfaced via the news_pulse tool. Read-only context.
     startNewsPulse();
     startBenchmark();
+    // Live-loop WP2 (REQ-SIM-006): nightly shadow-variant settle at 17:10 ET,
+    // after the benchmark — observability only, writes simulator.db.
+    startSimulator();
     // Swing-pattern snapshot catch-up: the nightly sweep (whose stage 4
     // produces it) is routinely killed by the nightly restart window —
     // the boot that killed it heals it. Local-only, non-blocking.
@@ -452,6 +456,7 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
       stopEodTriage();
       stopNewsPulse();
       stopBenchmark();
+      stopSimulator();
       stopDashboard();
       // Review-33/34: EVERY synchronous stop signal above fires before
       // this await — the attestation write fingerprints the whole
