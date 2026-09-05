@@ -432,13 +432,19 @@ finding; all are implemented.
   cancels the COMPLETE entry-side book is re-enumerated: ANY remaining
   order (incl. a Dexter-owned entry-side order not ending `:entry`)
   refuses the close. Empty book or no close.
-- REQ-EOD-003: the EOD earnings guard on unfilled entries routes through
+- REQ-EOD-016 (was REQ-EOD-003 in this Review-17 section; renumbered
+  2026-09-05 — the number collided with the Review-16 gap-stress vet; see
+  "Numbering errata 2026-09-05"): the EOD earnings guard on unfilled
+  entries routes through
   `cancelEntryLeg` (broker-verified parent only — the old
   cancel-every-stored-id loop could strip a newly live stop/target if
   the parent filled mid-loop). Losing the race means the position now
   EXISTS with a print ahead: the guard closes it (exactly what it does
   to a filled position of that class), reported loudly.
-- REQ-EOD-004 (broker-whole-book, three gaps): (a) broker positions are
+- REQ-EOD-017 (was REQ-EOD-004 in this Review-17 section; renumbered
+  2026-09-05 — collided with the Review-15 flat-by-close rule; see
+  "Numbering errata 2026-09-05") (broker-whole-book, three gaps): (a)
+  broker positions are
   enumerated BEFORE the no-work early return — an account holding only
   adopted/manual positions is vetted; (b) resting earnings-bet entries
   count in the stress book at their own gap severity, trimExempt (gap
@@ -455,7 +461,9 @@ finding; all are implemented.
   `BRKT-` ref — is unreconciled exposure-in-waiting. An adopted position
   with NO working `protect-` stop broker-side refuses the accept: its
   synthetic ±5% stop prices headroom but bounds nothing.
-- REQ-PROP-001: one-thesis-per-symbol is DB law — partial unique index
+- REQ-PROP-001 (strengthened, review-17 — DB law; same requirement as
+  the Review-15 definition, enforcement moved into the schema):
+  one-thesis-per-symbol is DB law — partial unique index
   `ux_one_working_thesis` on proposals(symbol) WHERE status IN
   ('executing','executed'); the claim UPDATE catches the constraint and
   loses gracefully, so simultaneous same-symbol accepts leave exactly
@@ -484,8 +492,8 @@ finding; all are implemented.
 | REQ | Test |
 |---|---|
 | REQ-CLOSE-001 | close-lifecycle suite green under the stricter refusals (not-cancellable path exercised via confirmCancel contract tests) |
-| REQ-EOD-003 | sweeper FakeIb suite covers cancelEntryLegCore honesty; triage compiles against it (behavioral paper observation pending) |
-| REQ-EOD-004 | vetOvernightBook suite (trimExempt/stressPctOverride); smoke-run |
+| REQ-EOD-016 (was EOD-003) | sweeper FakeIb suite covers cancelEntryLegCore honesty; triage compiles against it (behavioral paper observation pending) |
+| REQ-EOD-017 (was EOD-004) | vetOvernightBook suite (trimExempt/stressPctOverride); smoke-run |
 | REQ-EXPO-002 | executor gate suite green under marked/uncached exposure; orphan/adopted refusals exercised at accept |
 | REQ-PROP-001 | outcome-tracker-partial + executor ambiguity tests via `__dropOneThesisIndexForTests` (legacy-DB simulation) |
 | REQ-VAL-019 | scorecard smoke-run prints the fingerprint line and FAILS on ABSENT (verified against the pre-migration DB) |
@@ -493,7 +501,10 @@ finding; all are implemented.
 
 ## Review-18 response (2026-08-24) — postconditions verified, marks fail closed, protection proven, fingerprint widened
 
-- REQ-EOD-005: EOD actions have a VERIFIED postcondition. After every
+- REQ-EOD-018 (was REQ-EOD-005 in this Review-18 section; renumbered
+  2026-09-05 — collided with the Review-15 whole-book gap stress; see
+  "Numbering errata 2026-09-05"): EOD actions have a VERIFIED
+  postcondition. After every
   mutation loop the book is reconstructed from the fresh broker snapshot
   (positions at market-or-cost with classes re-attached; entries still
   resting after non-confirmed cancels) and `vetOvernightBook` re-runs
@@ -516,7 +527,7 @@ finding; all are implemented.
   (zero for a profit-locked stop); the synthetic ±5% level never grants
   headroom again. An adopted row with no broker position behind it also
   refuses (stale reconciliation).
-- REQ-VAL-019 widened: the fingerprint now covers every discovered
+- REQ-VAL-019 (amended, review-18 — widened): the fingerprint now covers every discovered
   skill's SKILL.md (built-in + project), the configured provider:model
   pair, and the RUNNING CODE COMMIT (git HEAD read from the checkout —
   bun executes the TS in place, so HEAD is the running code; packed and
@@ -537,7 +548,7 @@ finding; all are implemented.
 | REQ | Test |
 |---|---|
 | REQ-CLOSE-001 | position-actions-close.test.ts "entry-side neutralization": clean neutralization proceeds; 'Inactive'→not-cancellable refuses with no close placed; non-`:entry` Dexter order survives the loop and the re-probe refuses |
-| REQ-EOD-005 | vetOvernightBook purity (re-vet is a second call on a rebuilt book); the rebuild glue in runEodTriageOnce is UNTESTED (integration; flagged honestly) |
+| REQ-EOD-018 (was EOD-005) | vetOvernightBook purity (re-vet is a second call on a rebuilt book); the rebuild glue in runEodTriageOnce is UNTESTED (integration; flagged honestly) |
 | REQ-EXPO-003 | UNTESTED at the accept-path level (needs a broker fake); the max(basis, mark) floor rides unionExposure tests |
 | REQ-EXPO-004 | proposal-executor.test.ts verifyAdoptedProtection suite (pass/zero-risk/short + 8 structural defects + STP LMT/other-symbol); classifyOrphanBracketRefs suite |
 | REQ-PROP-001 | trade-proposals.test.ts "one-thesis DB law": same-symbol claims → exactly one survivor, loser stays open (index recreated first — legacy-simulation suites drop it) |
@@ -550,7 +561,7 @@ over tested cores, and all sit behind the paper-observation phase.
 
 ## Review-19 response (2026-08-24) — the pair bug fixed, direction-aware risk, broker-truth postcondition, fail-closed identity
 
-- REQ-EXPO-004 CORRECTED (my review-18 implementation had two real
+- REQ-EXPO-004 (amended, review-19 — CORRECTED; my review-18 implementation had two real
   defects the reviewer caught): (a) it rejected the NORMAL
   protectPosition output — the `protect-SYM:stop` + `protect-SYM:tp` OCA
   pair counted as "2 protect- orders, incoherent", so every correctly
@@ -566,7 +577,9 @@ over tested cores, and all sit behind the paper-observation phase.
   max() for both hid a profitable short's current-to-stop downside as
   zero risk (short from $100 marked $80 with a $90 stop = $10/share of
   real risk the old basis erased).
-- REQ-EOD-005 CORRECTED: the postcondition re-vet is rebuilt from BROKER
+- REQ-EOD-018 (amended, review-19 — CORRECTED; was written as
+  REQ-EOD-005 CORRECTED before the 2026-09-05 renumbering): the
+  postcondition re-vet is rebuilt from BROKER
   TRUTH, not the DB's unfilledGtc list — `buildRevetBook` (pure) takes
   fresh positions plus the actual working `P-XXXX:entry` parents from a
   COMPLETE open-order snapshot, so a partial fill counts BOTH ways (the
@@ -578,7 +591,7 @@ over tested cores, and all sit behind the paper-observation phase.
   unpriceable symbol, or residual trim demand each emit the 🚨
   UNRESOLVED OVERNIGHT EXCESS alert — the postcondition can no longer
   pass on missing data.
-- REQ-VAL-019 CORRECTED (fail-open → fail-closed): required identity
+- REQ-VAL-019 (amended, review-19 — CORRECTED, fail-open → fail-closed): required identity
   surfaces — effective rules, code identity, provider:model — no longer
   hash as the string 'absent' into a valid-looking digest. Any of them
   unresolvable → `strategyFingerprint()` returns NULL → the row/sample
@@ -598,7 +611,7 @@ over tested cores, and all sit behind the paper-observation phase.
 |---|---|
 | REQ-EXPO-004 | executor suite: the standard :stop+:tp OCA pair PASSES; oversized stop, STP LMT, un-joined/wrong-size/wrong-account/wrong-side targets, stray protect- refs all refuse |
 | REQ-EXPO-005 | directionalBasis suite incl. the reviewer's exact short case (riskUsd 100, was 0) |
-| REQ-EOD-005 | buildRevetBook suite: partial-fill counts both ways; broker TIF beats row TIF; orphan entries count; bets at own severity; unpriced returned — the wiring glue remains integration-untested (honest ledger) |
+| REQ-EOD-018 (was EOD-005) | buildRevetBook suite: partial-fill counts both ways; broker TIF beats row TIF; orphan entries count; bets at own severity; unpriced returned — the wiring glue remains integration-untested (honest ledger) |
 | REQ-VAL-019 | fingerprintFromSurfaces (each required null → null; optional absence changes digest, never nulls it); codeIdentity (sha or sha+dirty in a checkout, null outside); readGitHeadSha follows a `.git` FILE; fingerprintPurity strict-format (malformed → ABSENT) |
 
 ## Review-20 response (2026-08-24) — proven-working protection, race-ordered snapshots, honest run lifecycle, content-true identity
@@ -2338,3 +2351,44 @@ Operator actions (the code cannot do these)
 | REQ-FP-003 | doc change + `runtime-attestation.test.ts` new fields |
 | REQ-LIVE-004..008 | `loop-commands.test.ts` (challenge lifecycle, system-only off), `proposal-executor.test.ts` (non-paper class refusal, due-sweep order, claim race), fake-broker suites |
 | REQ-LIVE-009 | doc change, no test |
+
+## Numbering errata 2026-09-05 — duplicate REQ identifiers resolved
+
+Six identifiers were defined more than once in this append-only file
+(found by a definition grep while authoring the live-loop section; no
+code, test, script, doc or discovery file outside SPEC.md referenced any
+of them — verified 2026-09-05 with `grep -r` over `src`, `test`,
+`scripts`, `docs`, `.claude`). Operator decisions (2026-09-05): a genuine
+collision renumbers the LATER definition to the next free number in its
+domain, keeping an inline "was" note; a deliberate refinement of one
+requirement keeps its ID with a normalized prefix.
+
+Convention from here on:
+- `- REQ-X-NNN:` (colon right after the id) DEFINES a requirement — once.
+- `- REQ-X-NNN (amended, review-N — …):` or `(strengthened, …):` REFINES an
+  existing requirement under the same id; the original bullet stands as
+  history.
+- The definition grep is `^- REQ-[A-Z]+-[0-9]+:`; it must return each id
+  exactly once.
+
+Renumbered (collisions — two different requirements under one id):
+- REQ-EOD-003 (Review-17, EOD earnings guard cancels via `cancelEntryLeg`)
+  → **REQ-EOD-016**. REQ-EOD-003 stays the Review-16 gap-stress vet.
+- REQ-EOD-004 (Review-17, broker-whole-book three gaps) → **REQ-EOD-017**.
+  REQ-EOD-004 stays the Review-15 flat-by-close rule.
+- REQ-EOD-005 (Review-18, verified EOD postcondition) and its Review-19
+  CORRECTED amendment → **REQ-EOD-018**. REQ-EOD-005 stays the Review-15
+  whole-book gap stress + GTC-acceptance stress.
+- The traceability rows of the Review-17/18/19 sections were re-labelled
+  `(was EOD-00x)` to match; the Review-15/16 rows are untouched.
+
+Kept under one id (refinements, prefix normalized, text unchanged):
+- REQ-PROP-001 — Review-17 "DB law" marked `(strengthened, review-17)`.
+- REQ-EXPO-004 — Review-19 CORRECTED marked `(amended, review-19)`.
+- REQ-VAL-019 — Review-18 widened marked `(amended, review-18)`;
+  Review-19 CORRECTED marked `(amended, review-19)`.
+
+Domain counters after this errata: EOD max = 018; every other domain
+unchanged. New ids in the live-loop section above (TRIG, SIM, SEQ, LADDER,
+EPOCH, DIGEST, FP, LIVE, LLM; SCAN-004..008; RISK-008..011) were allocated
+after this check and do not collide.
