@@ -1739,3 +1739,602 @@ were seen 55x (SOXL) and 54x (SOXS). So on the day's cleanest sector
 move, the two 3x ETFs accounted for ~109 sightings and the six
 underlyings for 40, none triggering. The strongest single argument yet
 for significance-ranking over percent-ranking.
+
+## Live-loop program (2026-09-05) — WP1..WP4: the paper-rehearsed two-track loop replaces the frozen-sample gate
+
+Ratified by the operator 2026-09-05 (discovery record:
+`.claude/clarify-session.md`, section "Discovery: reaching an ONLINE system
+shortly" — 48 answered questions in 12 rounds). This section SUPERSEDES the
+go-live gate described earlier in this file and in
+`docs/handbook/VALIDATION-PROTOCOL.md`: the `validation-freeze-1` tag,
+manifest, TOFU pin and `--final` evaluation are retired (code kept dormant in
+git; earlier REQ-VAL-* rows describing them stay as history — this file is
+append-only). The invariant "auto-execution is never available for live
+trading" (Invariants, top of this file; `proposal-executor.ts` header comment)
+is superseded by REQ-LIVE-001..006 below.
+
+### Problem
+
+The frozen-sample gate never started and could not finish in useful time.
+Measured 2026-09-05 (proposals.db, refusals, benchmark ledger): since the
+2026-08-26 epoch the paper account resolved 6 trades in 8 sessions
+(~0.75/day) against ~32 refusals/day; the tag prerequisites were still open
+(manifest row 2), so the official sample was n = 0 and n = 100 projected to
+6+ months AFTER tagging. The funnel, not the broker, is the bottleneck: four
+coverage addenda (2026-08-27, 09-01, 09-03, 09-04, above) show the 4–18%
+single-name mover class scoring 55–66 against the 75 trigger bar and never
+reaching an LLM evaluation, while 3x sector ETFs crowd the percent-ranked
+scan lists. The deterministic gates are NOT the lever: their replayed
+counterfactuals since the epoch read noise-stop 37 would-stop vs 13
+would-target, entry-pricing 12/12 — relaxing them raises n and sinks
+expectancy.
+
+The operator wants real-money execution with automation, daily statistics
+and a refinement loop, with the machinery running on paper by 2026-09-30 and
+the live switch flipped on evidence, not on a date. The design: widen the
+funnel (behavior, opens paper epoch 1); simulate every proposal and a
+registry of candidate variants against real bars (observability); decide
+with a pre-registered sequential test in R-multiples plus a size ladder
+(observability + a sizing overlay); report nightly; and make live
+automation a config flip guarded by a switch only the operator can turn on.
+
+### Sequencing constraint — behavior seams land in WP1
+
+The strategy fingerprint stamps every row with the behavior-path tree
+identity and the scorecard refuses a mixed window. WP2–WP4 must therefore
+NOT touch behavior paths after WP1's restart, or paper epoch 1 ends on each
+landing. Rule: **every hook a later WP needs inside a behavior path
+(sizer rung overlay, epoch-stop latch check, live-switch/veto hooks in the
+auto-executor, the command router's delegation to the control-plane module)
+lands in WP1 as an inert, tested seam that reads a state file whose absence
+means "today's behavior".** WP2–WP4 then add only observability/control-plane
+code and state-file PRODUCERS. Acceptance is machine-checked: the scorecard's
+printed fingerprint after WP4 lands equals the one printed at the WP1
+restart (REQ-FP-001/002).
+
+### Domain deltas
+
+- Env defaults (code defaults change so `.env` stays unset; overrides still
+  honored; all already in the fingerprint's BEHAVIOR_ENV list):
+  `OPP_TRIGGER_SCORE` 75 → 60; `OPP_TRIGGER_MAX_PER_DAY` 10 → 30;
+  `AUTO_EXECUTE_MAX_PER_DAY` 5 → 6 (aligned to `max_daily_trades`).
+- New env (added to BEHAVIOR_ENV unless noted): `OPP_LARGECAP_LANE`
+  (default true), `OPP_LARGECAP_MIN_USD` (default 10e9),
+  `PREMARKET_SPREAD_HARD_MULT` (default 3), `LIVE_VETO_WINDOW_MIN`
+  (default 0), `LLM_DAILY_SPEND_CAP_USD` (default 10),
+  `LLM_PRICE_IN_USD_PER_MTOK` / `LLM_PRICE_OUT_USD_PER_MTOK` (no default —
+  required when the cap is enabled), `SIM_COMMISSION_PER_SHARE_USD`
+  (default 0.005) and `SIM_COMMISSION_MIN_USD` (default 1.00) —
+  observability, NOT fingerprinted.
+- `proposals` table gains `trigger_rank REAL`, `trigger_band TEXT`
+  ('60-74' | '75+' | NULL), `auto_execute_at INTEGER` (veto-window due
+  time; NULL = immediate/none). `refusals` gains `trigger_rank REAL`.
+  Migration via the existing `OUTCOME_COLUMNS` / `REFUSAL_COLUMNS`
+  add-column loop (`trade-proposals.ts`).
+- New table `sim_trades` in proposals.db (observability): variant, source
+  row (`proposal_id` or `refusal_id`), symbol, direction, entry_type,
+  levels, rung-sized quantity, fill/exit timestamps and prices,
+  `bar_source` ('stream-5s' | 'archive-1m' | 'ibkr-1m'), outcome
+  ('target' | 'stop' | 'eod-flat' | 'open' | 'unfilled' | 'unknown'),
+  `commissions`, `net_usd`, `net_r`, `bias_note`. Sim rows carry no
+  order ids and are never read by `acceptProposal`.
+- New config `src/config/vehicle-complexes.yaml`: named complexes
+  (semis, crypto, broad, …) each listing leveraged/sector VEHICLES and
+  CONSTITUENTS; fail-loud validated (WP0.1 pattern); fingerprinted.
+- New pure module `src/utils/sequential-test.ts` holding the
+  pre-registered constants (looks, confidences, ACCEPT/REJECT rules,
+  drawdown stop) and the look evaluation; `scripts/validation-scorecard.ts`
+  gains `--look` and calls it (the script stays the pinned evaluator).
+- New state files under `DEXTER_DATA_DIR`: `ladder-state.json`
+  ({rung, since, lastStepUpNetLiq, history[]}), `epoch-state.json`
+  ({id, startedAt, fingerprint, status 'running'|'stopped', stopReason,
+  stoppedAt}), `live-switch.json` ({enabled, changedAt, by, reason,
+  challenge?}), `llm-spend.json` (per ET day: tokens in/out, USD, by lane).
+- Fingerprint: `RUNTIME_PATHS` (whole `src`/`scripts`) is replaced by an
+  explicit `BEHAVIOR_PATHS` allowlist (REQ-FP-001).
+- Docs: VALIDATION-PROTOCOL.md gains a superseding section pointing here;
+  FREEZE-MANIFEST.md gets a RETIRED banner; TRADING-POLICY.md §"How a trade
+  starts" step 4 and §"Going live at all" are rewritten; USER-MANUAL
+  documents the new commands; VALIDATION-JOURNAL.md carries one line per
+  epoch start/stop, ladder step and promotion (control-plane appends).
+
+### Requirements
+
+#### WP1 — Funnel throughput + behavior seams (behavior; opens paper epoch 1)
+
+Trigger bar and band tagging
+
+- REQ-TRIG-001: `triggerScore()` defaults to 60 and `triggerMaxPerDay()` to
+  30 (`opportunity-engine.ts`); the eligibility windows (top-3, reactor
+  depth 10, deep margin, breadth relief, regime tilt, stale refusal) are
+  unchanged and re-pinned by test at the new defaults.
+- REQ-TRIG-002: the trigger lane's agent run carries the firing
+  `compositeRank` in the lane context (`withAgentLane` gains an optional
+  `triggerRank`; `currentTriggerRank()` accessor). `trade_proposals create`
+  stamps `trigger_rank` and `trigger_band` from the context, never from the
+  model; refusals recorded by that run stamp `trigger_rank` too. Non-trigger
+  lanes stamp NULL.
+- REQ-TRIG-003: `trigger_band` is '60-74' when 60 ≤ rank < 75 and '75+'
+  when rank ≥ 75 (the pre-change bar), so the newly admitted class is
+  measurable apart (paper-proof bar, REQ-SEQ-007) without a second column
+  per future threshold.
+- REQ-TRIG-004: the auto-executor's default daily cap is 6 and its log line
+  names both caps; `max_daily_trades` (6) and `max_open_positions` (4) in
+  `risk-rules.live.yaml` are unchanged.
+
+Significance ranking (the registered capitalization-vs-significance debate)
+
+- REQ-SCAN-004: the composite gains an ATR-NORMALISED significance term,
+  `sig = |dayMovePct| / dailyATR%`, mapped through a capped, monotone
+  function with constants in ONE config block (`opportunity-engine.ts`,
+  fingerprinted), and the raw-percent `eventMoverBoost` is REMOVED from the
+  composite (a +12% 3x-ETF day and a +4% chipmaker day carrying the same
+  underlying information rank by their ATR multiples, not their percents).
+  Secondary key inside a tie band: dollar volume (price × cumulative
+  volume). `dayMovePct` is computed for every candidate (not only
+  directionally-scanned ones) whenever `prevClose` is known.
+- REQ-SCAN-005: the boost-suppression rule (implied extension >
+  `max_extension_atr` ⇒ no boost) is kept for the significance term EXCEPT
+  for reactor-watchlist symbols (fresh reporters, `reactorWatchlist()`)
+  during the first 60 minutes of the regular session — the 2026-08-26
+  residual (QFIN, trigger 3h late): a post-print reaction is its own
+  catalyst in hour one. The creation gate's verified-earnings extension
+  waiver (`recentEarnings === true`) is unchanged.
+- REQ-SCAN-006: large-cap lane — when `OPP_LARGECAP_LANE` is on, every
+  phase plan adds its gainer/loser scans a second time with
+  `marketCapAbove = OPP_LARGECAP_MIN_USD` (source tag `LARGECAP:<code>`,
+  same SCAN_FAMILY as the base code so it corroborates nothing by itself).
+  Large-cap admissions get a reserved candidate slot like sentinels (never
+  crowded out by `maxCandidates()`), bounded by the lane's own row count.
+- REQ-SCAN-007: vehicle-vs-constituent dedupe — when a scan surfaces a
+  VEHICLE of a configured complex, the complex's constituents present in the
+  universe/watchlist are price-swept (prevClose) and admitted as candidates
+  with source `COMPLEX:<vehicle>`; ranking then runs on significance, so an
+  underlying at 2.5 ATRs outranks its 3x vehicle at the same information.
+- REQ-SCAN-008: one direction per complex — at creation AND accept, a
+  proposal on a vehicle or constituent is refused when a working row
+  (`executing`/`executed`) exists on the SAME complex in the OPPOSITE
+  direction, naming the rival (the 2026-09-04 SOXL-short-into-a-semis-rally
+  case). Same-direction pairs are allowed and already bounded by the sector
+  cap. Symbols outside every complex carry no constraint.
+
+Pre-market spread (the 2026-09-04 residual)
+
+- REQ-RISK-008: for an accept BEFORE the regular open of a DAY entry, the
+  microstructure spread check becomes two-tier: spread > `max_spread_pct ×
+  PREMARKET_SPREAD_HARD_MULT` refuses as today (liquidity red flag);
+  otherwise the accept proceeds with a `spread-deferred` note, and a
+  09:31 ET re-check (stale-entry sweeper cadence, live quote) CANCELS the
+  still-unfilled entry leg through `cancelEntryLeg` (parent-only, complete
+  book, broker-confirmed) when the regular-session spread exceeds
+  `max_spread_pct`. A filled entry is kept (protected); the refusal ledger
+  records the cancel as gate 'other' with reason `spread-deferred-cancel`.
+  Regular-session accepts are unchanged. Recorded trade-off: a fill on the
+  opening cross before 09:31 pays the true spread once — the operator
+  accepted this over refusing every dawn accept.
+
+Sizing seams and caps
+
+- REQ-RISK-009: `classRiskPct()` for the intraday class returns
+  `min(rules.max_risk_per_trade_pct, currentRung())`, where `currentRung()`
+  reads `ladder-state.json` and returns 0.25 when the file is absent or
+  malformed (fail-safe toward the SMALLER size; a warning names the cause).
+  Swing/earnings-bet budgets are unaffected in WP1. The rung is NOT a
+  fingerprint surface (REQ-FP-001 rationale: R statistics are rung-invariant
+  by design; the ladder is expected to move inside an epoch).
+- REQ-RISK-010: the accept path and the auto-executor refuse NEW ENTRIES
+  while `epoch-state.json` reads `status: 'stopped'` (message names the stop
+  reason and the `promote`/`epoch new` path); absent file = running.
+  Exits, EOD triage, guardian cancels, the flat-exit sweeper and `close`/
+  `kill` are never gated by it. Unlike the daily halt, the latch does not
+  expire with the ET day.
+- REQ-RISK-011: `risk-rules.live.yaml` REVIEW markers are replaced by
+  "Ratified 2026-09-05 — CEILING policy; per-trade risk overlaid by the
+  ladder rung (REQ-RISK-009)". `max_risk_per_trade_pct` stays 0.5 as the
+  ceiling; no numeric change. One journal line records the ratification.
+
+LLM spend cap
+
+- REQ-LLM-001: the agent's accumulated `usage_metadata` (input/output
+  tokens, `agent.ts`) is metered per ET day and per lane into
+  `llm-spend.json`, priced with `LLM_PRICE_IN_USD_PER_MTOK` /
+  `LLM_PRICE_OUT_USD_PER_MTOK`. When `LLM_DAILY_SPEND_CAP_USD` > 0 and the
+  price knobs are missing, the gateway refuses to start (WP0.1 fail-loud).
+- REQ-LLM-002: evaluation lanes (trigger, breadth, mover, `cron:*`) refuse
+  to START an agent run once the day's USD ≥ cap (one WhatsApp line per day,
+  refusal counted in the funnel digest); a run already in flight finishes.
+  Deterministic services (exits, triage, guardian, sweepers, benchmark
+  replay) do not call the LLM and are structurally outside the meter.
+
+Live/veto seams (inert in WP1; producers land in WP4)
+
+- REQ-LIVE-001 (seam): `assertPaperOnly()` is replaced by
+  `assertAutoExecAllowed()`: on a paper account it keeps today's semantics
+  (`AUTO_EXECUTE_PAPER=true`); on a live port or non-'D' account it requires
+  ALL of `IBKR_ALLOW_LIVE=true`, `live-switch.json` `enabled: true`,
+  verified managed accounts, the 'live' rule profile active, epoch running
+  and the daily halt not latched — any missing condition refuses with the
+  named reason. With no switch file the live branch refuses exactly as
+  today (structural OFF).
+- REQ-LIVE-002 (seam): `autoExecuteProposal` honors `LIVE_VETO_WINDOW_MIN`
+  on every account type: window 0 executes immediately (today's behavior);
+  window > 0 stamps `auto_execute_at = now + window`, leaves the row `open`,
+  announces "executes at HH:MM ET unless `veto P-XXXX`", and a due-sweep
+  (stale-entry sweeper cadence, ≤ 60 s late) executes it through the same
+  gates; a due time past `expires_at` or past the intraday cutoff executes
+  nothing (row expires normally).
+- REQ-LIVE-003 (seam): commands `veto P-XXXX` (open row → reject; executed
+  but unfilled → `cancelProposalBracket`; filled → refused with the
+  `kill SYMBOL` hint), `kill SYMBOL` (= `closePosition`, all its refusals
+  honored), `live on|off`, `ladder`, `epoch`, `promote` route from
+  `proposal-commands.ts` and `dashboard.ts runAction` to a NEW control-plane
+  module `src/gateway/loop-commands.ts` (outside BEHAVIOR_PATHS). In WP1 the
+  module implements `veto` and `kill` fully and answers the others with
+  "not available until WP3/WP4" — the router seam is what must land now.
+
+#### WP2 — In-process simulator + shadow-variant registry (observability)
+
+- REQ-SIM-001: every proposal row (executed or not) and every refusal with
+  complete levels gets an INCUMBENT sim twin, settled nightly from bars, in
+  `sim_trades`. Twins of executed rows are the simulator's calibration:
+  the digest prints twin-vs-actual entry/exit slippage and outcome
+  agreement (REQ-DIGEST-001 uses it).
+- REQ-SIM-002 (fill model, pessimistic by construction): LMT fills only
+  when a bar trades THROUGH the limit (long: `low < limit`, strict);
+  STP_LMT follows `replayBracket`'s band logic; MKT fills at the NEXT bar's
+  open; a stop fills at the worse of the stop price and the bar's open when
+  the bar opens through it (gap-aware); a target needs `high > target`
+  (strict); stop and target in one bar ⇒ stop; DAY/intraday sims that are
+  still open at the triage mark (15:52 ET, half-day aware) close at that
+  bar's close as 'eod-flat'; GTC-class sims carry overnight and settle on
+  later nights. Commissions: `SIM_COMMISSION_PER_SHARE_USD` per side with
+  `SIM_COMMISSION_MIN_USD` per order (IBKR fixed-tier assumption, recorded).
+- REQ-SIM-003 (bars): `stream_bars` (5 s) when the symbol was streamed
+  across the whole window; else 1-minute bars from `market-archive.db`,
+  else `fetchBars` 1-minute (the benchmark's path, IBKR-paced); the
+  `bar_source` is recorded. Missing or gapped bars over the window ⇒
+  outcome 'unknown', never a fabricated fill. Regular-session bars only for
+  DAY rows; GTC rows may fill in extended hours only where the real bracket
+  could (recorded as an assumption pending broker observation).
+- REQ-SIM-004 (registry v1, code-defined, versioned): `incumbent`;
+  `funnel-75` (twins whose `trigger_band` is '75+' or whose lane is not
+  trigger — what the old bar would have traded); `gate-off:<gate>` (the
+  refusal replayed as proposed, one variant per deterministic gate:
+  noise-stop, entry-pricing, chase, extension, risk-reward, microstructure);
+  `exit-ratchet` (lock at x−1% on a pullback from peak, per REQ-EXIT-008
+  geometry); `exit-x2.0` (target at 2.0 × dailyATR% within the take band);
+  `stop-x/3` (stop tightened to x/3, size re-derived at the rung);
+  `class-swing` and `class-earnings-bet` (the classes' proposals simulated
+  regardless of the account's class flags); `weights-calibrated` (WP3
+  supplies the weights; until then the variant reports "not calibrated").
+  Adding a variant is an observability change (no fingerprint impact).
+- REQ-SIM-005: sim quantity is re-derived at the CURRENT rung for every
+  variant (so variants compare like with like), `net_r = net_usd /
+  (|entry − stop| × quantity)` with the variant's own stop; `net_usd` is
+  informational.
+- REQ-SIM-006: the nightly pipeline order is archive (16:20 ET) → benchmark
+  (16:45) → simulator settle → looks/ladder (WP3) → digest (WP3); the
+  settle runs single-flight with a completed/failed stamp like triage, and
+  a failed settle is reported, never silently skipped.
+- REQ-SIM-007: no code path reads `sim_trades` to place, modify or cancel a
+  broker order (structural: the table has no order-id columns and lives
+  behind a read-only accessor for the digest and the scorecard).
+
+#### WP3 — Sequential test, size ladder, epochs, digest, fingerprint narrowing
+
+Pre-registered sequential test (`src/utils/sequential-test.ts`; the
+constants are the protocol's machine-readable form and print in every look)
+
+- REQ-SEQ-001: unit = R per trade, `net_r = (realized_pnl − commissions) /
+  (|entry_fill − stop_at_entry| × quantity)` over the DEPLOYABLE lane
+  (classes enabled in `risk-rules.live.yaml`, i.e. intraday) using the
+  existing sample filter (closed, entry-filled, non-adopted, provenance
+  allowlist, untrustworthy excluded); rows missing a planned-risk basis are
+  integrity anomalies (freeze the look, never a silent drop).
+- REQ-SEQ-002: looks fire when the epoch's closed-trade count first reaches
+  n = 25, 50, 75, 100; the one-sided lower confidence bound of mean R comes
+  from `dayBlockBootstrapLcb` clustered by ENTRY day (1000 replicates, seed
+  42, minDays 5) at confidence 99% / 97.5% / 96% / 95% respectively
+  (O'Brien-Fleming-style spending; the familywise false-ACCEPT rate stays
+  near 5%). Between looks the digest prints running numbers labelled
+  INFORMATIONAL — they never decide.
+- REQ-SEQ-003: ACCEPT at a look = LCB > 0 AND net R > 0 AND profit factor
+  ≥ 1.3; REJECT at a look = the 95% one-sided UPPER bound of mean R < 0;
+  neither ⇒ CONTINUE. The first ACCEPT is the pre-registered cutover
+  evidence (operator action REQ-LIVE-005); a REJECT stops the epoch
+  (REQ-EPOCH-003).
+- REQ-SEQ-004: hard stop — marked NetLiq (equity-series sampler, 5 min)
+  ≤ 0.95 × epoch NetLiq at ANY sample stops the epoch immediately (the
+  sampler evaluates it; a sampler outage is reported, never a pass).
+- REQ-SEQ-005: `validation-scorecard.ts --look` prints the look table
+  (n, net R, PF, LCB at the current confidence, UCB, drawdown from epoch,
+  decision), the epoch fingerprint and the integrity gate, using the SAME
+  module the nightly job calls; the legacy criteria (6 weeks, 2 regimes,
+  n = 100 verdict, manifest, TOFU, `--final`) remain in the script but are
+  labelled LEGACY and never decide.
+- REQ-SEQ-006: shadow-vs-incumbent — for every variant with ≥ 30 sim trades
+  over ≥ 10 trading days, the bootstrap (by day) of the DAILY difference in
+  summed R (variant − incumbent) reports LCB/median; a variant whose LCB > 0
+  is flagged "promotion candidate" in the digest. The flag is a
+  recommendation (REQ-EPOCH-004).
+- REQ-SEQ-007 (paper-proof bar for the widened funnel): the digest carries
+  the '60-74' band's own line (n, net after commissions, PF, incidents); the
+  bar the operator pre-registered is net ≥ 0 over its first ~20 closed
+  trades, zero unresolved broker anomalies, flat by close every day — the
+  first look cannot ACCEPT while this line reads negative at n ≥ 20.
+
+Size ladder
+
+- REQ-LADDER-001: rungs [0.25, 0.5, 0.75, 1.0] % per-trade risk; a step-UP
+  becomes ELIGIBLE at epoch n ≥ 25 / 50 / 100 closed trades with net R > 0
+  and no active stop; eligibility is QUEUED in the digest and applied only by
+  the operator's `ladder up` (two-step confirm), which writes
+  `ladder-state.json` with `lastStepUpNetLiq` = current marked NetLiq and a
+  journal line.
+- REQ-LADDER-002: a step-DOWN is AUTOMATIC: marked NetLiq ≤ 0.95 ×
+  `lastStepUpNetLiq` moves one rung down, journals it and alerts; the
+  sampler evaluates it with REQ-SEQ-004. Never below 0.25.
+- REQ-LADDER-003: a new epoch resets the rung to 0.25 unless the epoch
+  record carries `carryRung: true` (operator choice at `epoch new`); the
+  live cutover ALWAYS restarts at 0.25 (REQ-LIVE-006).
+- REQ-LADDER-004: `ladder` command/dashboard shows rung, since, eligibility,
+  and the next milestone.
+
+Epochs
+
+- REQ-EPOCH-001: an epoch is created by `performance reset` (existing
+  `setPerformanceBaseline`, USD NetLiq) PLUS `epoch-state.json` {id,
+  startedAt, fingerprint (the gateway's own), status 'running'}; the
+  control plane appends one VALIDATION-JOURNAL.md line
+  (`epoch <id> START <iso> fp <12hex> netliq $<n> rung <r>`).
+- REQ-EPOCH-002: epoch stop (REJECT look, −5% hard stop, or an unresolved
+  broker anomaly: triage stamped 'failed' after its retries, the UNRESOLVED
+  OVERNIGHT EXCESS alert, or a look-time integrity anomaly) writes `status:
+  'stopped'` + reason, journals it, alerts on WhatsApp, and — when the
+  account is live — turns the live switch OFF (REQ-LIVE-004). Intake pauses
+  via REQ-RISK-010; protection, triage and the guardian keep running.
+- REQ-EPOCH-003: identical semantics on paper and live (the rehearsal is
+  faithful); a stopped paper epoch is not auto-restarted — Claude's
+  diagnosis and candidate variant ride the next digest.
+- REQ-EPOCH-004: `promote <variant>` (two-step confirm) RECORDS the operator
+  decision (journal line + digest) and prints the exact config/code change
+  the variant corresponds to, plus the restart + `performance reset` steps
+  that start the next epoch; it changes no runtime behavior itself (a
+  promotion IS a behavior change and therefore a new fingerprint/epoch).
+  `epoch new` starts an epoch without a promotion (same journaling).
+
+Daily digest (WhatsApp compact + dashboard page/JSON)
+
+- REQ-DIGEST-001: fills and slippage — every entry/exit of the day with
+  planned vs actual price, commissions, net USD and R, plus the sim twin's
+  slippage line (REQ-SIM-001).
+- REQ-DIGEST-002: funnel counts per lane — scanned, triggered, evaluated,
+  proposed, gated (refusal split by gate), executed; spend-cap refusals;
+  LLM USD for the day.
+- REQ-DIGEST-003: shadow-vs-incumbent — per variant: day and cumulative
+  summed R, n, days, difference LCB (REQ-SEQ-006) and the promotion-candidate
+  flag; the '60-74' band line (REQ-SEQ-007).
+- REQ-DIGEST-004: test status — epoch id/fingerprint, n, net R, PF, LCB/UCB
+  at the current confidence, drawdown from epoch, next look, rung and
+  eligibility, stop status, score-decile Spearman line.
+- REQ-DIGEST-005: the WhatsApp digest is ≤ 12 lines per section with the
+  full tables behind `/api/loop` and a dashboard "Loop" section; it is sent
+  by the nightly pipeline's last step and re-sendable with `digest`.
+
+Fingerprint narrowing
+
+- REQ-FP-001: `codeIdentity()` hashes an explicit `BEHAVIOR_PATHS` list
+  instead of `src`/`scripts`: the scanning/ranking modules
+  (scanner-loop, opportunity-engine, breadth-detector, universe-*,
+  pattern-*, market-regime, event-*, news-pulse, earnings-*), the gates and
+  execution (proposal-risk-gate, proposal-executor, position-sizer,
+  entry-context, trade-proposals, tools/ibkr/*, exposure-snapshot,
+  broker-adopt), the exit/lifecycle services (outcome-tracker, eod-triage,
+  profit-trail, stale-entry-sweeper, flat-exit-sweeper, kill-switch-guardian,
+  daily-loss-guard, position-actions), the judgment surfaces (src/agent,
+  src/skills, src/tools, src/model, src/providers.ts, SOUL.md,
+  `.dexter/RULES.md`, cron jobs), `src/config/*.yaml`, `package.json`,
+  `bun.lock`, `bunfig.toml`, `tsconfig.json`. EXCLUDED: `src/services/
+  simulator/`, `benchmark.ts`, `excursion-sweeper.ts`, `equity-series.ts`,
+  `dashboard*.ts`, `src/gateway/loop-commands.ts`, `src/utils/
+  sequential-test.ts`, `scripts/`, tests. The list is pinned by a test that
+  fails when a file under `src/services` is neither listed nor explicitly
+  excluded (no silent third category). Untracked-file classification uses
+  the same list.
+- REQ-FP-002: a real temp-repo test proves an edit under an excluded path
+  leaves the fingerprint unchanged and an edit to `proposal-risk-gate.ts`
+  changes it; the scorecard still refuses mixed fingerprints inside an
+  epoch and prints the epoch fingerprint.
+- REQ-FP-003: VALIDATION-PROTOCOL.md gains "Superseded 2026-09-05" pointing
+  here (the freeze prerequisites list is closed; broker observations
+  already recorded stay as knowledge); FREEZE-MANIFEST.md gets a RETIRED
+  banner; the runtime attestation additionally records `liveSwitch`,
+  `vetoWindowMin`, `rung`, `epochId`.
+
+#### WP4 — Live-automation plumbing, switched OFF (behavior seams from WP1; producers here)
+
+- REQ-LIVE-004: `live on` returns a 6-character challenge; `live on <token>`
+  within 2 minutes writes `live-switch.json` `enabled: true` (by, reason,
+  changedAt) and journals; `live off` is immediate. The system itself may
+  only write `enabled: false` (REQ-EPOCH-002 triggers); nothing in the
+  system ever writes `true`. Dashboard buttons route through the same
+  control-plane function.
+- REQ-LIVE-005 (cutover evidence, operator procedure): the switch is meant
+  to be turned on after the first paper ACCEPT look (REQ-SEQ-003); the
+  control plane prints the latest look decision in the `live on` challenge
+  message so the operator sees what they are acting on. The code does not
+  block `live on` without an ACCEPT — the decision is the operator's
+  (Boundary), the evidence is displayed.
+- REQ-LIVE-006: on a non-paper account swing and earnings-bet proposals are
+  never auto-executed or accept-able (the class flags stay false; the shadow
+  forcing of REQ-SHADOW-001/002 applies to paper only — re-pinned by test);
+  their rows are marked `sim-only` and settle in the simulator. The live
+  cutover starts a new epoch at rung 0.25 (REQ-LADDER-003).
+- REQ-LIVE-007: the veto due-sweep (REQ-LIVE-002 seam) executes due rows
+  in creation order under the existing single-flight claim; a veto racing
+  the sweep resolves by the claim (a claimed row cannot be vetoed —
+  `cancel`/`kill` apply after).
+- REQ-LIVE-008: fake-broker suites cover the live branch of
+  `assertAutoExecAllowed` (every missing condition refuses, all present
+  passes), the veto lifecycle (open→due→executed; open→vetoed; due past
+  expiry/cutoff; claimed row veto refused), `live on` challenge expiry and
+  mismatch, system-side OFF on epoch stop. No test binds a live port
+  (REQ-TEST-001 isolation stands).
+- REQ-LIVE-009: docs — TRADING-POLICY.md step 4 ("A human accepts the
+  trade") and "Going live at all" rewritten for the switch + veto model;
+  USER-MANUAL command table; `proposal-executor.ts` header comment
+  rewritten (the "never available for live" doctrine is retired here).
+
+### Invariants
+
+- Risk-reducing and protective paths (exits, EOD triage, guardian cancels,
+  flat-exit sweeper, `close`/`kill`, `protect`) are never gated by the
+  spend cap, the epoch latch, the veto window, the ladder or the live
+  switch.
+- The paper/live ACCOUNT lock (`assertOrderingAllowed`, `IBKR_ALLOW_LIVE`)
+  is untouched; the live switch is an additional condition, never a
+  substitute.
+- Nothing in the system writes `live-switch.json` `enabled: true`; only the
+  operator's confirmed command does.
+- Simulated rows never reach the broker (REQ-SIM-007, structural).
+- The R metric and every look decision are rung-invariant; the rung is
+  not a fingerprint surface, the behavior paths that read it are.
+- Pre-registered constants (looks, confidences, rules, rungs, −5% stop)
+  live in one module and print in every look. The module is outside
+  BEHAVIOR_PATHS (it decides about the epoch, not which trades happen), so
+  its constants are hashed SEPARATELY into `epoch-state.json` at epoch
+  start; a look whose running constants differ from the epoch's refuses
+  (NOT EVALUABLE) instead of deciding — the protocol's "editing the
+  evaluator mid-sample ends the window" survives the narrowing.
+- Every new YAML key and env knob is fail-loud validated (WP0.1 pattern).
+- WP2–WP4 leave the fingerprint printed at the WP1 restart unchanged
+  (REQ-FP-001/002 — acceptance-checked).
+
+### Non-goals
+
+Backtest-engine recalibration on FirstRate; new data sources (Polymarket,
+FRED, options flow, social); options / fractional shares / a second broker
+or a second IB Gateway; relaxing the deterministic gates; dashboard/digest
+visual layout (PLAN); the cutover-day checklist (a separate runbook written
+before `live on`); scorer-weight calibration beyond the `weights-calibrated`
+shadow variant; automatic promotions.
+
+### Risk tags
+
+HIGH: `assertPaperOnly` replacement (live-automation safety boundary);
+veto/kill/due-sweep order paths; sizer rung overlay; pre-market spread
+deferral (order placement semantics); proposals/refusals schema migration
+and the new `sim_trades` table; fingerprint narrowing (validation
+integrity). MED: trigger defaults, significance ranking, large-cap lane,
+complex dedupe (discovery behavior); epoch latch on the accept path.
+LOW: simulator, digest, sequential-test module, docs. Approved in principle
+by the 2026-09-05 discovery; each WP is reviewed at its boundary before
+the gateway restarts on it (delivery decision R8-Q4).
+
+### Acceptance criteria
+
+WP1 (restart opens paper epoch 1)
+- [ ] `bun test` green and `tsc --noEmit` clean; Jest suite green at 4
+      workers
+- [ ] Trigger defaults 60/30 pinned; eligibility windows unchanged
+      (REQ-TRIG-001)
+- [ ] Trigger-lane proposals and refusals carry `trigger_rank`/`trigger_band`
+      from the lane context; other lanes NULL (REQ-TRIG-002/003)
+- [ ] Composite uses the ATR-normalised term; raw-percent boost gone;
+      reactor hour-one exemption pinned (REQ-SCAN-004/005)
+- [ ] Large-cap lane adds `LARGECAP:` sources with reserved slots
+      (REQ-SCAN-006); complex constituents admitted from a vehicle sighting
+      (REQ-SCAN-007); opposite-direction same-complex refused at create and
+      accept (REQ-SCAN-008)
+- [ ] Pre-open DAY accept: hard-mult refusal, deferred note, 09:31 re-check
+      cancels unfilled / keeps filled (REQ-RISK-008)
+- [ ] Sizer overlay = min(yaml, rung), 0.25 default without the file
+      (REQ-RISK-009); stopped epoch refuses entries, never exits
+      (REQ-RISK-010); yaml ratified + journal line (REQ-RISK-011)
+- [ ] Spend meter persists per day/lane; cap refuses evaluation-lane starts
+      only; missing prices fail loud (REQ-LLM-001/002)
+- [ ] `assertAutoExecAllowed` paper branch identical to today; live branch
+      refuses with no switch file (REQ-LIVE-001); window 0 immediate,
+      window > 0 due-stamped (REQ-LIVE-002); `veto`/`kill` routed and
+      working, other loop commands answer "not yet" (REQ-LIVE-003)
+- [ ] Scorecard printed fingerprint recorded in the journal at the restart
+
+WP2
+- [ ] Incumbent twins for every proposal/refusal with levels; twin-vs-actual
+      slippage line (REQ-SIM-001)
+- [ ] Fill model pinned by unit tests: strict trade-through, gap-aware
+      stops, stop-first ties, eod-flat at the triage mark, commissions
+      (REQ-SIM-002)
+- [ ] Bar-source fallback order and 'unknown' on gaps (REQ-SIM-003)
+- [ ] Registry v1 variants produce rows; rung-sized quantities; `net_r`
+      (REQ-SIM-004/005)
+- [ ] Nightly settle single-flight with completed/failed stamp
+      (REQ-SIM-006); no broker path reads `sim_trades` (REQ-SIM-007,
+      structural review)
+- [ ] Fingerprint unchanged vs the WP1 restart
+
+WP3
+- [ ] `sequential-test.ts` unit-tested: look boundaries, confidences,
+      ACCEPT/REJECT/CONTINUE, UCB rule, drawdown stop (REQ-SEQ-001..004)
+- [ ] `--look` prints the table and matches the nightly job byte-for-byte on
+      a fixture DB (REQ-SEQ-005); variant difference LCB and the '60-74'
+      line (REQ-SEQ-006/007)
+- [ ] Ladder: eligibility queued, `ladder up` two-step applies, automatic
+      step-down on −5% from last step-up, reset per epoch
+      (REQ-LADDER-001..004)
+- [ ] Epoch start/stop files + journal lines; stop pauses intake and turns
+      live off when live; `promote` records and prints the change
+      (REQ-EPOCH-001..004)
+- [ ] Digest sections 1–4 rendered on WhatsApp (compact) and `/api/loop`
+      (REQ-DIGEST-001..005)
+- [ ] BEHAVIOR_PATHS pinned; temp-repo test proves excluded/included edits;
+      protocol/manifest docs superseded; attestation fields
+      (REQ-FP-001..003)
+- [ ] Fingerprint unchanged vs the WP1 restart
+
+WP4 (switched OFF)
+- [ ] `live on` challenge/confirm/expiry; system-only OFF; dashboard parity
+      (REQ-LIVE-004); look decision shown in the challenge (REQ-LIVE-005)
+- [ ] Non-paper account: swing/bet never executed, sim-only; cutover epoch
+      at rung 0.25 (REQ-LIVE-006)
+- [ ] Veto lifecycle and claim race pinned with the fake broker
+      (REQ-LIVE-007/008)
+- [ ] Docs rewritten (REQ-LIVE-009)
+- [ ] Fingerprint unchanged vs the WP1 restart; `live-switch.json` absent
+
+Operator actions (the code cannot do these)
+- [ ] Review WP1 at its boundary; restart the gateway; send
+      `performance reset`; write the epoch-1 journal line with the printed
+      fingerprint (WP3 automates this from epoch 2)
+- [ ] Activate CallMeBot for the watchdog (pending since 2026-09-02)
+- [ ] Before `live on`: write and walk the cutover-day runbook (live IB
+      Gateway on 4001, account verification, `IBKR_ALLOW_LIVE`, rollback)
+
+### Planned harness (TDD gate — becomes the test-traceability table as tests land)
+
+| REQ | Planned test |
+|---|---|
+| REQ-TRIG-001 | `opportunity-engine.test.ts` — defaults 60/30, `triggerEligibility` matrix re-pinned |
+| REQ-TRIG-002/003 | `lane-context.test.ts` (triggerRank), `tools/proposals/index.test.ts` (stamps from context, NULL off-lane), `trade-proposals.test.ts` (migration columns) |
+| REQ-TRIG-004 | `proposal-executor.test.ts` — cap default 6 |
+| REQ-SCAN-004/005 | `opportunity-engine.test.ts` — significance term monotone/capped, boost removed, reactor hour-one exemption; snapshot replay fixture from retained `opportunities.db` days where available |
+| REQ-SCAN-006 | `opportunity-engine.test.ts` — large-cap scans requested with `marketCapAbove`, reserved slots |
+| REQ-SCAN-007/008 | `vehicle-complexes.test.ts` (yaml validation, lookup), `proposal-risk-gate.test.ts` + `proposal-executor.test.ts` (opposite-direction refusal at create/accept) |
+| REQ-RISK-008 | `proposal-executor.test.ts` (two-tier pre-open spread), `stale-entry-sweeper.test.ts` (09:31 re-check select/cancel/keep) |
+| REQ-RISK-009 | `position-sizer.test.ts` — overlay, absent/malformed file → 0.25 |
+| REQ-RISK-010 | `proposal-executor.test.ts` — stopped epoch refuses entries; `position-actions-close.test.ts` — close unaffected |
+| REQ-LLM-001/002 | `llm-spend.test.ts` (meter, pricing, day roll), `agent-runner.test.ts` (lane refusal at cap), `risk-rules-validation`-style startup check |
+| REQ-LIVE-001/002/003 | `proposal-executor.test.ts` (assertAutoExecAllowed matrix, window 0 vs >0), `loop-commands.test.ts` (veto/kill routing), `proposal-commands.test.ts` (delegation) |
+| REQ-SIM-001..005 | `simulator/fill-model.test.ts`, `simulator/registry.test.ts`, `simulator/settle.test.ts` (bar-source fallback, unknown on gaps) |
+| REQ-SIM-006 | `simulator/settle.test.ts` — single-flight + stamps |
+| REQ-SIM-007 | structural review + grep guard test (no import of the sim accessor from order paths) |
+| REQ-SEQ-001..004 | `sequential-test.test.ts` — R unit, looks, confidences, ACCEPT/REJECT/CONTINUE, UCB, −5% stop |
+| REQ-SEQ-005 | scorecard `--look` smoke-run against a fixture DB, compared to the nightly job's output |
+| REQ-SEQ-006/007 | `sequential-test.test.ts` — paired daily difference bootstrap; band line |
+| REQ-LADDER-001..004 | `ladder.test.ts` — eligibility, two-step up, auto down, epoch reset |
+| REQ-EPOCH-001..004 | `epoch.test.ts` — start/stop files, journal lines, live-off on stop, promote/epoch-new recording |
+| REQ-DIGEST-001..005 | `digest.test.ts` — section builders on fixtures; `dashboard.test.ts` `/api/loop` |
+| REQ-FP-001/002 | `strategy-fingerprint.test.ts` — allowlist completeness pin; real temp-repo included/excluded edits |
+| REQ-FP-003 | doc change + `runtime-attestation.test.ts` new fields |
+| REQ-LIVE-004..008 | `loop-commands.test.ts` (challenge lifecycle, system-only off), `proposal-executor.test.ts` (non-paper class refusal, due-sweep order, claim race), fake-broker suites |
+| REQ-LIVE-009 | doc change, no test |
