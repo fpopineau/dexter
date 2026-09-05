@@ -9,9 +9,14 @@
 # produce unusable absolute numbers on a small account. These values trade
 # fewer, larger positions with a real but bounded per-trade risk.
 #
-# >>> RE-DERIVED FOR €10K 2026-08-22 — REVIEW EVERY LINE BEFORE THE PAPER
-# >>> RESET AND AGAIN BEFORE GOING LIVE: these are risk-appetite decisions.
-# >>> (Previous revision was reviewed for €3.7K.)
+# Ratified 2026-09-05 (operator, live-loop discovery R10-Q3; REQ-RISK-011)
+# as the CEILING policy. Per-trade intraday risk is OVERLAID by the size
+# ladder rung (ladder-state.json, bottom rung 0.25%, REQ-RISK-009):
+# effective = min(max_risk_per_trade_pct below, current rung). The ladder
+# climbs 0.25 → 0.5 → 0.75 → 1.0 on pre-registered evidence (WP3); the
+# numbers here never move with it. Re-derived for €10K on 2026-08-22
+# (the previous revision was reviewed for €3.7K); the REVIEW notes below
+# are the derivation record, kept as history.
 
 # --- Position Sizing ---
 # REVIEW: was 20% × 3 slots (€3.7K era — concentration beat dust at ~€740/
@@ -45,7 +50,7 @@ max_daily_trades: 6
 # binds before the position caps do — deliberately conservative. ≈$175 on
 # $11.7K; three 0.5% stop-outs latch the day. Raise only as a deliberate
 # risk-appetite change AFTER the first live tranche proves slippage.
-# >>> REVIEW before the reset. <<<
+# Ratified 2026-09-05.
 max_daily_loss_pct: 1.5
 
 # --- Overnight ---
@@ -61,6 +66,10 @@ overnight_gap_stress_pct: 20
 # --- Per-Trade Risk Budget ---
 # FIRST-TRANCHE (review 2026-08-23): halved from the 1.0% draft — an
 # unproven agent earns size with a record, not a plan. ≈$58/stop-out.
+# CEILING (2026-09-05): the effective intraday budget is min(this, ladder
+# rung) — the paper rehearsal and the first live epoch start at 0.25%
+# (≈$29 on $11.7K) and climb on evidence; this line is the most the
+# ladder may ever grant without a new ratification.
 max_risk_per_trade_pct: 0.5
 
 # --- Confidence-weighted sizing (position-sizer) ---

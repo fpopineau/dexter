@@ -17,6 +17,7 @@
 
 import { getRiskRules, type RiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
 import { isValidQuantity, classRiskPct, gapRiskPerShare } from '@/services/position-sizer.js';
+import { currentRung } from '@/services/ladder-state.js';
 import { EVIDENCE_MIN_PRINTS, EVIDENCE_MIN_CONSISTENCY_PCT, type EarningsBetEvidence } from '@/services/earnings-reactions.js';
 import { logger } from '@/utils';
 
@@ -114,6 +115,10 @@ export interface RiskGateContext {
      *  as nulls, which REFUSE (fail-closed: the bar must not be
      *  satisfiable by breaking the data source). */
     earningsBetEvidence?: EarningsBetEvidence;
+    /** REQ-RISK-009: the size-ladder rung (% risk) overlaying the intraday
+     *  budget. Omitted = read from ladder-state.json (bottom rung when
+     *  absent). Injectable so pure tests pin the arithmetic. */
+    rungPct?: number;
 }
 
 /**
@@ -767,7 +772,11 @@ export function checkProposalRisk(
     // earnings bet pays quantity × the assumed adverse GAP (a stop cannot
     // protect through a print) against earnings_bet_risk_pct.
     if (ctx.netLiquidation !== undefined && ctx.netLiquidation > 0 && risk > 0) {
-        const budgetPct = classRiskPct(tradeClass, rules);
+        // REQ-RISK-009: the gate enforces the EFFECTIVE budget — min(yaml
+        // ceiling, ladder rung) — so an explicit quantity sized above the
+        // rung, or a row whose rung stepped down between creation and
+        // accept, is refused rather than waved through at the ceiling.
+        const budgetPct = classRiskPct(tradeClass, rules, ctx.rungPct ?? currentRung());
         const maxRisk = (budgetPct / 100) * ctx.netLiquidation;
         if (tradeClass === 'earnings-bet') {
             const entryPrice = entry;
@@ -1009,9 +1018,17 @@ export function checkMicrostructure(
         halted: boolean | null;
     },
     rules: RiskRules,
-): { violations: string[]; notes: string[] } {
+    /** REQ-RISK-008 (live-loop WP1): a pre-open accept of a DAY entry is
+     *  quoted on the pre-market book, which does not price the fill that
+     *  happens at the open. `preOpenDay` makes the spread check two-tier:
+     *  over the cap but under cap × `hardMult` DEFERS (note + flag, the
+     *  09:31 ET re-check decides); beyond the hard multiple refuses as a
+     *  liquidity red flag. Regular-session accepts are unchanged. */
+    opts: { preOpenDay?: boolean; hardMult?: number } = {},
+): { violations: string[]; notes: string[]; spreadDeferred: boolean } {
     const violations: string[] = [];
     const notes: string[] = [];
+    let spreadDeferred = false;
 
     if (input.bid === null || input.ask === null || !(input.bid > 0) || !(input.ask >= input.bid)) {
         violations.push(
@@ -1021,10 +1038,22 @@ export function checkMicrostructure(
         const mid = (input.bid + input.ask) / 2;
         const spreadPct = ((input.ask - input.bid) / mid) * 100;
         if (spreadPct > rules.max_spread_pct) {
-            violations.push(
-                `spread ${spreadPct.toFixed(2)}% of mid exceeds max_spread_pct ${rules.max_spread_pct}% — ` +
-                `the crossing cost is a tax the R/R math never priced`,
-            );
+            const hardMult = opts.hardMult ?? 3;
+            const hardCap = rules.max_spread_pct * hardMult;
+            if (opts.preOpenDay && spreadPct <= hardCap) {
+                spreadDeferred = true;
+                notes.push(
+                    `spread-deferred: pre-market spread ${spreadPct.toFixed(2)}% is over max_spread_pct ${rules.max_spread_pct}% but ` +
+                    `under the ${hardMult}x hard multiple (${hardCap.toFixed(2)}%) — the regular-session spread is re-checked at 09:31 ET; ` +
+                    `an unfilled entry is cancelled if it still exceeds the cap`,
+                );
+            } else {
+                violations.push(
+                    `spread ${spreadPct.toFixed(2)}% of mid exceeds max_spread_pct ${rules.max_spread_pct}%` +
+                    (opts.preOpenDay ? ` and the ${hardMult}x pre-market hard multiple (${hardCap.toFixed(2)}%) — a liquidity red flag, not a session artifact` : '') +
+                    ` — the crossing cost is a tax the R/R math never priced`,
+                );
+            }
         }
     }
 
@@ -1064,7 +1093,7 @@ export function checkMicrostructure(
         notes.push(`halt state unverified for ${input.symbol} (best-effort tick) — proceeding`);
     }
 
-    return { violations, notes };
+    return { violations, notes, spreadDeferred };
 }
 
 // ---------------------------------------------------------------------------

@@ -721,7 +721,7 @@ describe('daily-loss headroom gate (the kill-switch is a budget, not a tripwire)
         // value $700 stays under the 20% cap so ONLY the headroom fires.
         const r = checkProposalRisk(
             longProposal({ quantity: 7 }),
-            { netLiquidation: 3700, openPlannedRiskUsd: 80 },
+            { netLiquidation: 3700, rungPct: 1.0, openPlannedRiskUsd: 80 },
             LIVE_ISH,
         );
         expect(r.ok).toBe(false);
@@ -732,7 +732,7 @@ describe('daily-loss headroom gate (the kill-switch is a budget, not a tripwire)
     test('the same trade passes when the book leaves room', () => {
         const r = checkProposalRisk(
             longProposal({ quantity: 7 }),
-            { netLiquidation: 3700, openPlannedRiskUsd: 60 }, // 35 + 60 ≤ 111
+            { netLiquidation: 3700, rungPct: 1.0, openPlannedRiskUsd: 60 }, // 35 + 60 ≤ 111
             LIVE_ISH,
         );
         expect(r.ok).toBe(true);
@@ -741,7 +741,7 @@ describe('daily-loss headroom gate (the kill-switch is a budget, not a tripwire)
     test('realized losses today shrink the headroom', () => {
         const r = checkProposalRisk(
             longProposal({ quantity: 7 }),
-            { netLiquidation: 3700, openPlannedRiskUsd: 60, realizedLossTodayUsd: -20 },
+            { netLiquidation: 3700, rungPct: 1.0, openPlannedRiskUsd: 60, realizedLossTodayUsd: -20 },
             LIVE_ISH, // 111 − 20 − 60 = 31 < 35 → refused
         );
         expect(r.ok).toBe(false);
@@ -753,7 +753,7 @@ describe('daily-loss headroom gate (the kill-switch is a budget, not a tripwire)
         // 7 × $10 stop distance = $70 planned vs headroom 111 − 60 = 51.
         const r = checkProposalRisk(
             longProposal({ quantity: 7, stop: 90, target: 120 }),
-            { netLiquidation: 3700, openPlannedRiskUsd: 60, realizedLossTodayUsd: 250 },
+            { netLiquidation: 3700, rungPct: 1.0, openPlannedRiskUsd: 60, realizedLossTodayUsd: 250 },
             { ...LIVE_ISH, max_risk_per_trade_pct: 3 }, // +250 must NOT stretch 51 to fit 70
         );
         expect(r.ok).toBe(false);
@@ -763,7 +763,7 @@ describe('daily-loss headroom gate (the kill-switch is a budget, not a tripwire)
     test('without book context the check does not run (creation-time unchanged)', () => {
         const r = checkProposalRisk(
             longProposal({ quantity: 7 }),
-            { netLiquidation: 3700 },
+            { netLiquidation: 3700, rungPct: 1.0 },
             LIVE_ISH,
         );
         expect(r.ok).toBe(true);
@@ -774,7 +774,7 @@ describe('daily-loss headroom gate (the kill-switch is a budget, not a tripwire)
         // 5 shares × $20 gap (20% floor on $100) = $100 planned > $111 − $60.
         const r = checkProposalRisk(
             longProposal({ quantity: 5, tradeClass: 'earnings-bet' }),
-            { netLiquidation: 3700, openPlannedRiskUsd: 60, worstCaseGapPct: 12 },
+            { netLiquidation: 3700, rungPct: 1.0, openPlannedRiskUsd: 60, worstCaseGapPct: 12 },
             rules,
         );
         expect(r.ok).toBe(false);
@@ -1292,5 +1292,36 @@ describe('intraday requires DAY (flat-by-close corollary, review 2026-08-23)', (
         expect(gtc.violations.join(' ')).toContain('SWING proposal');
         expect(checkProposalRisk(longProposal({ tif: 'DAY' }), {}, RULES).ok).toBe(true);
         expect(checkProposalRisk(longProposal({ tradeClass: 'swing', tif: 'GTC' }), {}, RULES).ok).toBe(true);
+    });
+});
+
+describe('checkMicrostructure — pre-open two-tier spread (REQ-RISK-008)', () => {
+    const RULES8 = { ...DEFAULT_RULES, max_spread_pct: 0.5, max_adv_pct: 1.0, min_avg_volume: 500_000 };
+    const GOOD8 = { symbol: 'PL', direction: 'long' as const, quantity: 100, bid: 99.3, ask: 100, avgDailyVolume20d: 5_000_000, shortable: true, halted: false }; // ~0.70%
+
+    test('regular session: a 0.70% spread over the 0.5% cap refuses exactly as before', () => {
+        const r = checkMicrostructure(GOOD8, RULES8);
+        expect(r.violations.join(' ')).toContain('max_spread_pct');
+        expect(r.spreadDeferred).toBe(false);
+    });
+
+    test('pre-open DAY accept: over the cap but under cap x hard multiple = DEFERRED (note, no violation)', () => {
+        const r = checkMicrostructure(GOOD8, RULES8, { preOpenDay: true, hardMult: 3 });
+        expect(r.violations).toEqual([]);
+        expect(r.spreadDeferred).toBe(true);
+        expect(r.notes.join(' ')).toMatch(/spread-deferred/);
+        expect(r.notes.join(' ')).toMatch(/09:31/);
+    });
+
+    test('pre-open DAY accept: beyond cap x hard multiple is a liquidity red flag = refused', () => {
+        const r = checkMicrostructure({ ...GOOD8, bid: 98, ask: 100 }, RULES8, { preOpenDay: true, hardMult: 3 }); // ~2.02% > 1.5%
+        expect(r.violations.join(' ')).toContain('max_spread_pct');
+        expect(r.spreadDeferred).toBe(false);
+    });
+
+    test('pre-open DAY accept inside the cap needs no deferral', () => {
+        const r = checkMicrostructure({ ...GOOD8, bid: 99.8, ask: 100 }, RULES8, { preOpenDay: true, hardMult: 3 });
+        expect(r.violations).toEqual([]);
+        expect(r.spreadDeferred).toBe(false);
     });
 });

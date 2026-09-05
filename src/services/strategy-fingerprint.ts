@@ -205,6 +205,13 @@ const BEHAVIOR_ENV = [
     'OPP_SENTINEL', 'OPP_SENTINEL_CADENCE_MIN', 'OPP_SENTINEL_MOVE_PCT',
     'OPP_DAWN_CADENCE_MIN', 'OPP_DAWN_START_ET', 'OPP_HEALTH_EMPTY_CYCLES', 'OPP_REACTOR_RELIEF',
     'OPP_SCAN_VOLUME_FLOOR', 'OPP_SCAN_VOLUME_FLOOR_PREMARKET',
+    // Live-loop WP1 (2026-09-05): the large-cap lane, the pre-market spread
+    // hard multiple, the veto window and the spend cap all change WHICH
+    // trades enter the sample (the cap by refusing evaluations, the prices
+    // by deciding when it binds).
+    'OPP_LARGECAP_LANE', 'OPP_LARGECAP_MIN_USD', 'OPP_LARGECAP_RESERVE',
+    'PREMARKET_SPREAD_HARD_MULT', 'LIVE_VETO_WINDOW_MIN',
+    'LLM_DAILY_SPEND_CAP_USD', 'LLM_PRICE_IN_USD_PER_MTOK', 'LLM_PRICE_OUT_USD_PER_MTOK',
     'FLAT_EXIT_SWEEP',
     'OPP_BREADTH_MAX_PER_DAY', 'OPP_BREADTH_COOLDOWN_MIN', 'OPP_BREADTH_MIN_WATCHED',
     'OPP_BREADTH_THRESHOLD_RELIEF', 'OPP_BREADTH_CAP_BONUS',

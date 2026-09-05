@@ -36,3 +36,18 @@ describe('agent run context (WP0.8 — lane attribution)', () => {
         expect(deriveLane({ sessionKey: 'anything' })).toBe('agent');
     });
 });
+
+describe('trigger rank in the lane context (REQ-TRIG-002 — the firing rank rides with the run)', () => {
+    test('rank is visible inside the run, null outside and when not supplied', async () => {
+        const { currentTriggerRank } = await import('./lane-context.js');
+        expect(currentTriggerRank()).toBeNull();
+        const seen = await withAgentLane('trigger', async () => {
+            await new Promise((r) => setTimeout(r, 1));
+            return currentTriggerRank();
+        }, 'anthropic:claude-sonnet-5', { triggerRank: 66 });
+        expect(seen).toBe(66);
+        expect(currentTriggerRank()).toBeNull();
+        const none = await withAgentLane('breadth', async () => currentTriggerRank());
+        expect(none).toBeNull();
+    });
+});

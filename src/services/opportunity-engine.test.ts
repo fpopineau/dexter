@@ -125,3 +125,92 @@ describe('scanVolumeFloor (scan-coverage slice A — the volume floor is session
         }
     });
 });
+
+describe('trigger defaults (REQ-TRIG-001 — live-loop WP1: bar 60, cap 30)', () => {
+    const saved = { score: process.env.OPP_TRIGGER_SCORE, cap: process.env.OPP_TRIGGER_MAX_PER_DAY };
+    const restore = () => {
+        if (saved.score === undefined) delete process.env.OPP_TRIGGER_SCORE; else process.env.OPP_TRIGGER_SCORE = saved.score;
+        if (saved.cap === undefined) delete process.env.OPP_TRIGGER_MAX_PER_DAY; else process.env.OPP_TRIGGER_MAX_PER_DAY = saved.cap;
+    };
+
+    test('unset env → bar 60 and 30 triggers/day (the 55-66 mover class reaches evaluation)', async () => {
+        const { triggerScore, triggerMaxPerDay } = await import('./opportunity-engine.js');
+        delete process.env.OPP_TRIGGER_SCORE;
+        delete process.env.OPP_TRIGGER_MAX_PER_DAY;
+        try {
+            expect(triggerScore()).toBe(60);
+            expect(triggerMaxPerDay()).toBe(30);
+        } finally { restore(); }
+    });
+
+    test('env overrides still bind; garbage falls back to the new defaults', async () => {
+        const { triggerScore, triggerMaxPerDay } = await import('./opportunity-engine.js');
+        try {
+            process.env.OPP_TRIGGER_SCORE = '75';
+            process.env.OPP_TRIGGER_MAX_PER_DAY = '10';
+            expect(triggerScore()).toBe(75);
+            expect(triggerMaxPerDay()).toBe(10);
+            process.env.OPP_TRIGGER_SCORE = 'high';
+            process.env.OPP_TRIGGER_MAX_PER_DAY = '-3';
+            expect(triggerScore()).toBe(60);
+            expect(triggerMaxPerDay()).toBe(30);
+        } finally { restore(); }
+    });
+});
+
+describe('large-cap lane helpers (REQ-SCAN-006)', () => {
+    test('largeCapScansFor keeps only the directional gainer/loser scans of a plan', async () => {
+        const { largeCapScansFor } = await import('./opportunity-engine.js');
+        const scans = [
+            { code: 'TOP_PERC_GAIN', direction: 'long' as const },
+            { code: 'HOT_BY_VOLUME', direction: 'none' as const },
+            { code: 'TOP_PERC_LOSE', direction: 'short' as const },
+        ];
+        expect(largeCapScansFor(scans as never)).toEqual([scans[0], scans[2]] as never);
+    });
+
+    test('scanFamilyOf strips the LARGECAP: prefix so a large-cap sighting corroborates nothing by itself', async () => {
+        const { scanFamilyOf } = await import('./opportunity-engine.js');
+        expect(scanFamilyOf('TOP_PERC_GAIN')).toBe('gainer');
+        expect(scanFamilyOf('LARGECAP:TOP_PERC_GAIN')).toBe('gainer');
+        expect(scanFamilyOf('LARGECAP:TOP_PERC_LOSE')).toBe('loser');
+        expect(scanFamilyOf('WATCHLIST_SENTINEL')).toBe('WATCHLIST_SENTINEL');
+        expect(scanFamilyOf('COMPLEX:SOXL')).toBe('COMPLEX:SOXL');
+    });
+
+    test('selectReservedAdmissions: unadmitted rows carrying the tag, best scan rank first, bounded by max', async () => {
+        const { selectReservedAdmissions } = await import('./opportunity-engine.js');
+        const rows = [
+            { symbol: 'MU', sources: ['LARGECAP:TOP_PERC_GAIN'], rank: 7 },
+            { symbol: 'NVDA', sources: ['TOP_PERC_GAIN', 'LARGECAP:TOP_PERC_GAIN'], rank: 1 },
+            { symbol: 'ASML', sources: ['LARGECAP:TOP_PERC_GAIN'], rank: 3 },
+            { symbol: 'ARM', sources: ['LARGECAP:TOP_PERC_GAIN'], rank: 12 },
+            { symbol: 'XYZ', sources: ['TOP_PERC_GAIN'], rank: 2 },
+        ];
+        const picked = selectReservedAdmissions(rows, new Set(['NVDA']), 'LARGECAP:', 2).map((r) => r.symbol);
+        expect(picked).toEqual(['ASML', 'MU']);
+        expect(selectReservedAdmissions(rows, new Set(['NVDA', 'MU', 'ASML', 'ARM']), 'LARGECAP:', 5)).toEqual([]);
+    });
+
+    test('large-cap lane knobs: on by default, $10B floor, reserve 5; env overrides; garbage falls back', async () => {
+        const { largeCapLaneEnabled, largeCapMinUsd, largeCapReserve } = await import('./opportunity-engine.js');
+        const saved = { a: process.env.OPP_LARGECAP_LANE, b: process.env.OPP_LARGECAP_MIN_USD, c: process.env.OPP_LARGECAP_RESERVE };
+        try {
+            delete process.env.OPP_LARGECAP_LANE; delete process.env.OPP_LARGECAP_MIN_USD; delete process.env.OPP_LARGECAP_RESERVE;
+            expect(largeCapLaneEnabled()).toBe(true);
+            expect(largeCapMinUsd()).toBe(10e9);
+            expect(largeCapReserve()).toBe(5);
+            process.env.OPP_LARGECAP_LANE = 'false'; process.env.OPP_LARGECAP_MIN_USD = '5000000000'; process.env.OPP_LARGECAP_RESERVE = '3';
+            expect(largeCapLaneEnabled()).toBe(false);
+            expect(largeCapMinUsd()).toBe(5e9);
+            expect(largeCapReserve()).toBe(3);
+            process.env.OPP_LARGECAP_MIN_USD = 'big'; process.env.OPP_LARGECAP_RESERVE = '-1';
+            expect(largeCapMinUsd()).toBe(10e9);
+            expect(largeCapReserve()).toBe(5);
+        } finally {
+            if (saved.a === undefined) delete process.env.OPP_LARGECAP_LANE; else process.env.OPP_LARGECAP_LANE = saved.a;
+            if (saved.b === undefined) delete process.env.OPP_LARGECAP_MIN_USD; else process.env.OPP_LARGECAP_MIN_USD = saved.b;
+            if (saved.c === undefined) delete process.env.OPP_LARGECAP_RESERVE; else process.env.OPP_LARGECAP_RESERVE = saved.c;
+        }
+    });
+});

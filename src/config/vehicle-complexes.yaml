@@ -1,0 +1,32 @@
+# Vehicle complexes — REQ-SCAN-007/008 (live-loop WP1, 2026-09-05).
+#
+# A leveraged / sector VEHICLE and its CONSTITUENTS are one information
+# source. Two rules read this file:
+#   - discovery: when a scan surfaces a vehicle, the complex's constituents
+#     present in the universe/watchlist are price-swept and admitted as
+#     candidates (source COMPLEX:<vehicle>) — the underlyings the 3x ETFs
+#     crowd off the percent-ranked lists (2026-09-04: SOXL/SOXS seen 109x,
+#     MU/ASML/ARM/AMD/SMCI/INTC 40x, none triggering);
+#   - the gate: one DIRECTION per complex — a working row on a vehicle or
+#     constituent refuses an OPPOSITE-direction proposal on the same complex
+#     (the SOXL-short-into-a-semis-rally case). Same-direction pairs are
+#     allowed; the sector cap bounds them.
+#
+# Format (parsed by src/services/vehicle-complexes.ts — NOT the flat rule
+# parser): a complex name, then indented `vehicles:` and `constituents:`
+# comma-separated ticker lists. Tickers are upper-cased; a vehicle may
+# belong to ONE complex; a constituent may sit in several (NVDA is a chip
+# name and a mega-cap). This file is a strategy-fingerprint surface —
+# editing it mid-epoch starts a new epoch.
+
+semis:
+  vehicles: SOXL, SOXS, SMH, SOXX, USD
+  constituents: NVDA, AMD, MU, ASML, ARM, SMCI, INTC, TSM, QCOM, AVGO, AMAT, LRCX, KLAC, MRVL, TXN, ADI, ON, MCHP, NXPI
+
+crypto:
+  vehicles: IBIT, BITO, BITX, ETHA, FBTC
+  constituents: MSTR, COIN, HOOD, MARA, RIOT, CLSK, BMNR, CIFR, HUT, BTBT
+
+broad:
+  vehicles: QQQ, TQQQ, SQQQ, SPY, SPXL, SPXS
+  constituents: AAPL, MSFT, AMZN, GOOGL, GOOG, META, NVDA, TSLA, AVGO, NFLX

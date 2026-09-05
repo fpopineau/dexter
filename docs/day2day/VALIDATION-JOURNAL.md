@@ -35,4 +35,21 @@ window (new tag, fresh sample).
 
 ## Window log
 
-_(empty — starts at the freeze tag)_
+_(empty — the freeze-tag window never opened; superseded below)_
+
+## Live-loop program (2026-09-05 — SPEC.md § "Live-loop program", supersedes the tag protocol)
+
+Epochs replace the freeze window: one line per epoch start/stop, ladder
+step and promotion. Epoch 1 starts at the WP1 gateway restart
+(`performance reset` + the line below, filled by the operator; WP3
+automates the lines from epoch 2).
+
+- 2026-09-05 — `risk-rules.live.yaml` RATIFIED as the CEILING policy
+  (REQ-RISK-011; operator decision R10-Q3): 0.5%/trade ceiling, 1.5% daily
+  halt, 15% × 4 slots, 6 trades/day, 35% sector cap. Effective intraday
+  risk = min(ceiling, ladder rung); the rung starts at 0.25%.
+- 2026-09-05 — WP1 landed (trigger bar 60 / cap 30, significance ranking,
+  large-cap lane, vehicle complexes, pre-open spread two-tier, sizer rung
+  overlay, epoch latch, spend cap, live/veto seams). Fingerprint after the
+  restart: _pending_ (the scorecard prints it; record here).
+- epoch 1 START _pending_ — `epoch 1 START <iso> fp <12hex> netliq $<n> rung 0.25`

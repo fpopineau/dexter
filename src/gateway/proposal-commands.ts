@@ -20,6 +20,8 @@
  *                           measured from the baseline when one is set
  *   performance all [N]     same, ignoring the baseline (full history)
  *   performance reset       stamp a new baseline NOW (non-destructive)
+ *   veto P-XXXX | kill SYM | live status | ladder | epoch
+ *                           live-loop control plane (loop-commands.ts, REQ-LIVE-003)
  */
 
 import { clearTradingHalt, getDailyLossStatus, getNetLiquidation, reanchorNetLiqBaseline } from '@/services/daily-loss-guard.js';
@@ -36,6 +38,7 @@ import { cancelProposalBracket, cancelProposalForSymbol } from '@/services/propo
 import { closePosition, protectPosition } from '@/services/position-actions.js';
 import { createIbkrAccount } from '@/tools/ibkr/account.js';
 import { createIbkrOrders } from '@/tools/ibkr/orders.js';
+import { handleLoopCommand } from './loop-commands.js';
 
 const ACCEPT_RE = /^\s*(accept|ok|go)\s+(P-[A-Za-z0-9]{4})\s*$/i;
 const REJECT_RE = /^\s*(reject|no)\s+(P-[A-Za-z0-9]{4})\s*$/i;
@@ -319,5 +322,8 @@ export async function handleProposalCommand(body: string): Promise<string | null
                 : `⚠️ Baseline re-anchor FAILED — the guard may re-trip on the stale baseline; retry 'halt clear' once IBKR responds.`);
     }
 
-    return null;
+    // Live-loop control plane (REQ-LIVE-003): veto / kill / live / ladder /
+    // epoch / promote — the grammar lives in loop-commands.ts (outside the
+    // behavior paths) so WP3/WP4 extend it without touching this router.
+    return handleLoopCommand(body);
 }

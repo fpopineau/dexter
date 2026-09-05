@@ -19,14 +19,26 @@ interface AgentLaneContext {
      *  must not silently mix judgment policies — every proposal records
      *  which model proposed it. */
     model?: string;
+    /** REQ-TRIG-002 (live-loop WP1): the compositeRank that FIRED this
+     *  trigger-lane run. Stamped on the proposals/refusals the run creates
+     *  so the newly admitted 60-74 class (bar lowered from 75, REQ-TRIG-001)
+     *  is measurable apart — read from the run context, never from the
+     *  model. Undefined on non-trigger lanes. */
+    triggerRank?: number;
+}
+
+/** Extra attribution a caller may thread through the run. */
+export interface AgentLaneExtras {
+    triggerRank?: number;
 }
 
 const storage = new AsyncLocalStorage<AgentLaneContext>();
 
-/** Run `fn` with `lane` (and optionally the model id) visible to
- *  everything it awaits. */
-export function withAgentLane<T>(lane: string, fn: () => Promise<T>, model?: string): Promise<T> {
-    return storage.run({ lane, model }, fn);
+/** Run `fn` with `lane` (and optionally the model id and trigger rank)
+ *  visible to everything it awaits. */
+export function withAgentLane<T>(lane: string, fn: () => Promise<T>, model?: string, extras?: AgentLaneExtras): Promise<T> {
+    const rank = extras?.triggerRank;
+    return storage.run({ lane, model, ...(Number.isFinite(rank) ? { triggerRank: rank } : {}) }, fn);
 }
 
 /** The lane of the run this call sits inside, or null outside any run. */
@@ -37,6 +49,12 @@ export function currentAgentLane(): string | null {
 /** The model id of the run this call sits inside, or null. */
 export function currentAgentModel(): string | null {
     return storage.getStore()?.model ?? null;
+}
+
+/** The composite rank that fired the run this call sits inside, or null
+ *  (non-trigger lane, or outside any run). */
+export function currentTriggerRank(): number | null {
+    return storage.getStore()?.triggerRank ?? null;
 }
 
 /** Pure: lane from an agent-run request. Explicit lane wins; otherwise the

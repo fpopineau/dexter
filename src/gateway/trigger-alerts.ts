@@ -16,6 +16,7 @@ import { onBreadthTrigger, onOpportunityTrigger, type Opportunity } from '@/serv
 import { type BreadthEvent } from '@/services/breadth-detector.js';
 import { getSetting } from '@/utils/config.js';
 import { logger } from '@/utils';
+import { SpendCapError } from '@/services/llm-spend.js';
 import { runAgentForMessage } from './agent-runner.js';
 import { assertOutboundAllowed, sendMessageWhatsApp } from './channels/whatsapp/index.js';
 import { HEARTBEAT_OK_TOKEN } from './heartbeat/suppression.js';
@@ -23,6 +24,26 @@ import { loadSessionStore, resolveSessionStorePath, type SessionEntry } from './
 import { cleanMarkdownForWhatsApp } from './utils.js';
 
 let registered = false;
+
+/** REQ-LLM-002: one operator line per ET day when the cap starts refusing. */
+let spendCapNotifiedDate = '';
+async function notifySpendCapOnce(message: string): Promise<void> {
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+    if (spendCapNotifiedDate === today) return;
+    spendCapNotifiedDate = today;
+    const session = findTargetSession();
+    if (!session?.lastTo || !session?.lastAccountId) return;
+    try {
+        assertOutboundAllowed({ to: session.lastTo, accountId: session.lastAccountId });
+        await sendMessageWhatsApp({
+            to: session.lastTo,
+            body: `💸 LLM spend cap reached — evaluations paused for the rest of the ET day (exits, triage and the guardian unaffected).\n${message}`,
+            accountId: session.lastAccountId,
+        });
+    } catch (err) {
+        logger.warn(`[trigger-alerts] spend-cap notice not delivered: ${err}`);
+    }
+}
 
 function findTargetSession(): SessionEntry | null {
     const storePath = resolveSessionStorePath('default');
@@ -116,7 +137,7 @@ async function evaluateAndDeliver(
      *  vanishing (2026-08-18: eight declines on a −4.7% semis day, zero
      *  recorded reasons — the layer that cost the most was the only one
      *  the nightly replay could not see). */
-    declineCtx: { direction: 'long' | 'short'; price?: number | null; score?: number | null },
+    declineCtx: { direction: 'long' | 'short'; price?: number | null; score?: number | null; triggerRank?: number | null },
 ): Promise<void> {
     // Delivery availability must NOT gate analysis (WP0.7): with the old
     // order, no WhatsApp session meant no evaluation, no proposal, and —
@@ -126,15 +147,37 @@ async function evaluateAndDeliver(
     const model = getSetting('modelId', 'gpt-5.5') as string;
     const modelProvider = getSetting('provider', 'openai') as string;
 
-    const answer = await runAgentForMessage({
-        sessionKey,
-        query: prompt,
-        model,
-        modelProvider,
-        maxIterations: 10, // catalyst search + risk check + proposal + reply
-        isolatedSession: true,
-        channel: 'whatsapp',
-    });
+    let answer: string;
+    try {
+        answer = await runAgentForMessage({
+            sessionKey,
+            query: prompt,
+            model,
+            modelProvider,
+            maxIterations: 10, // catalyst search + risk check + proposal + reply
+            isolatedSession: true,
+            channel: 'whatsapp',
+            // REQ-TRIG-002: the firing rank rides the run so the proposals tool
+            // stamps it from the context (the model never self-reports it).
+            ...(declineCtx.triggerRank != null ? { triggerRank: declineCtx.triggerRank } : {}),
+        });
+    } catch (err) {
+        // REQ-LLM-002: the spend cap refused the evaluation before it
+        // started — a recorded decision (gate 'spend-cap'), never a silent
+        // skip; one WhatsApp line per day tells the operator the cap bound.
+        if (err instanceof SpendCapError) {
+            logger.warn(`[trigger-alerts] ${symbol}: ${err.message}`);
+            const { recordRefusal } = await import('@/services/trade-proposals.js');
+            await recordRefusal({
+                symbol, direction: declineCtx.direction, entryType: 'EVAL',
+                entry: declineCtx.price ?? null, score: declineCtx.score ?? null,
+                reason: err.message, triggerRank: declineCtx.triggerRank ?? null,
+            }).catch(() => { /* ledger is best-effort */ });
+            await notifySpendCapOnce(err.message);
+            return;
+        }
+        throw err;
+    }
 
     if (!answer.trim() || answer.toUpperCase().includes(HEARTBEAT_OK_TOKEN)) {
         // Ledger the decline WITH the model's reason (the prompt asks for
@@ -155,6 +198,7 @@ async function evaluateAndDeliver(
             entry: declineCtx.price ?? null,
             score: declineCtx.score ?? null,
             reason: `evaluation declined: ${reason}`,
+            triggerRank: declineCtx.triggerRank ?? null,
         }).catch(() => { /* ledger is best-effort */ });
         return;
     }
@@ -194,7 +238,7 @@ export function registerTriggerAlerts(): void {
         const { getMarketRegime } = await import('@/services/market-regime.js');
         const tape = (await getMarketRegime().catch(() => null))?.line ?? 'TAPE unknown (regime unavailable)';
         await evaluateAndDeliver(`trigger:${opp.symbol}`, opp.symbol, buildPrompt(opp, tape),
-            { direction: opp.direction, price: opp.price, score: opp.signalScore });
+            { direction: opp.direction, price: opp.price, score: opp.signalScore, triggerRank: opp.compositeRank });
     });
 
     // Sector-wide melt-ups → one evaluation of the sector vehicle, outside

@@ -39,34 +39,34 @@ describe('computeQuantity — €3.7K live account', () => {
     test('high-confidence trade sizes from the full risk budget', () => {
         // budget = 3700 × 1% = 37; stop distance 2 → 18 by risk;
         // cap = 3700 × 20% = 740 → 14 shares at $50 → cap binds.
-        const r = computeQuantity({ entry: 50, stop: 48, score: 85, netLiquidation: NETLIQ }, LIVE);
+        const r = computeQuantity({ entry: 50, stop: 48, score: 85, netLiquidation: NETLIQ }, LIVE, LIVE.max_risk_per_trade_pct);
         expect(r.quantity).toBe(14);
         expect(r.riskBudget).toBe(37);
     });
 
     test('risk budget binds when the stop is wide', () => {
         // budget 37, stop distance 5 → 7 shares; cap allows 14.
-        const r = computeQuantity({ entry: 50, stop: 45, score: 85, netLiquidation: NETLIQ }, LIVE);
+        const r = computeQuantity({ entry: 50, stop: 45, score: 85, netLiquidation: NETLIQ }, LIVE, LIVE.max_risk_per_trade_pct);
         expect(r.quantity).toBe(7);
     });
 
     test('low confidence shrinks the budget below the floor → refused', () => {
         // unscored: 37 × 0.35 = 12.95 < $15 floor.
-        const r = computeQuantity({ entry: 50, stop: 48, score: null, netLiquidation: NETLIQ }, LIVE);
+        const r = computeQuantity({ entry: 50, stop: 48, score: null, netLiquidation: NETLIQ }, LIVE, LIVE.max_risk_per_trade_pct);
         expect(r.quantity).toBeNull();
         expect(r.reason).toContain('floor');
     });
 
     test('unaffordable symbol (one share over the position cap) → refused with the cap', () => {
         // 20% cap = $740; MSFT-like $800 share.
-        const r = computeQuantity({ entry: 800, stop: 780, score: 90, netLiquidation: NETLIQ }, LIVE);
+        const r = computeQuantity({ entry: 800, stop: 780, score: 90, netLiquidation: NETLIQ }, LIVE, LIVE.max_risk_per_trade_pct);
         expect(r.quantity).toBeNull();
         expect(r.reason).toContain('cannot afford');
     });
 
     test('stop distance wider than the whole budget → refused, suggests structure', () => {
         // budget 37, stop distance 40 → 0 shares by risk.
-        const r = computeQuantity({ entry: 300, stop: 260, score: 90, netLiquidation: NETLIQ }, LIVE);
+        const r = computeQuantity({ entry: 300, stop: 260, score: 90, netLiquidation: NETLIQ }, LIVE, LIVE.max_risk_per_trade_pct);
         expect(r.quantity).toBeNull();
         expect(r.reason).toContain('stop distance');
     });
@@ -77,20 +77,20 @@ describe('computeQuantity — $1M paper account (sizer must also serve paper)', 
         // budget = 1,000,000 × 0.25% = 2500 at full confidence; stop distance 3.5
         // → 714 by risk; cap = 5% × 0.995 drift margin = 49,750 → 164
         // shares at $303 → cap binds.
-        const r = computeQuantity({ entry: 303, stop: 299.5, score: 85, netLiquidation: 1_000_000 }, PAPER);
+        const r = computeQuantity({ entry: 303, stop: 299.5, score: 85, netLiquidation: 1_000_000 }, PAPER, PAPER.max_risk_per_trade_pct);
         expect(r.quantity).toBe(164);
     });
 
     test('no budget floor on paper — small unscored trades still size', () => {
-        const r = computeQuantity({ entry: 20, stop: 19.5, score: null, netLiquidation: 1_000_000 }, PAPER);
+        const r = computeQuantity({ entry: 20, stop: 19.5, score: null, netLiquidation: 1_000_000 }, PAPER, PAPER.max_risk_per_trade_pct);
         expect(r.quantity).toBeGreaterThan(0);
     });
 });
 
 describe('computeQuantity — degenerate inputs', () => {
     test('zero stop distance or missing netliq refuse cleanly', () => {
-        expect(computeQuantity({ entry: 50, stop: 50, score: 90, netLiquidation: 3700 }, LIVE).quantity).toBeNull();
-        expect(computeQuantity({ entry: 50, stop: 48, score: 90, netLiquidation: 0 }, LIVE).quantity).toBeNull();
+        expect(computeQuantity({ entry: 50, stop: 50, score: 90, netLiquidation: 3700 }, LIVE, LIVE.max_risk_per_trade_pct).quantity).toBeNull();
+        expect(computeQuantity({ entry: 50, stop: 48, score: 90, netLiquidation: 0 }, LIVE, LIVE.max_risk_per_trade_pct).quantity).toBeNull();
     });
 });
 
@@ -98,7 +98,7 @@ describe('computeQuantity — short proposals', () => {
     test('sizes shorts identically (stop above entry)', () => {
         const LIVE_RULES = { ...DEFAULT_RULES, max_position_pct: 20, max_risk_per_trade_pct: 1.0, min_risk_budget_usd: 15 };
         // short at 50, stop 52 → distance 2, budget 37 → 18 by risk; cap 14.
-        const r = computeQuantity({ entry: 50, stop: 52, score: 85, netLiquidation: 3700 }, LIVE_RULES);
+        const r = computeQuantity({ entry: 50, stop: 52, score: 85, netLiquidation: 3700 }, LIVE_RULES, LIVE_RULES.max_risk_per_trade_pct);
         expect(r.quantity).toBe(14);
     });
 });
@@ -127,7 +127,7 @@ describe('fractional shares (small live account)', () => {
     test('a $500 mega-cap becomes tradable: cap-bound decimal quantity', () => {
         // cap = 3700 × 20% × 0.995 drift margin = 736.3 → /500 = 1.4726;
         // budget 37 / stop 10 = 3.7 → cap binds.
-        const r = computeQuantity({ entry: 500, stop: 490, score: 85, netLiquidation: 3700 }, FRAC);
+        const r = computeQuantity({ entry: 500, stop: 490, score: 85, netLiquidation: 3700 }, FRAC, FRAC.max_risk_per_trade_pct);
         expect(r.quantity).toBeCloseTo(1.4726, 10);
     });
 
@@ -151,19 +151,46 @@ describe('fractional shares (small live account)', () => {
 
     test('risk budget binds fractionally too', () => {
         // budget 37 / stop 25 = 1.48 by risk; cap 740/300 = 2.4666 → risk binds at 1.48.
-        const r = computeQuantity({ entry: 300, stop: 275, score: 85, netLiquidation: 3700 }, FRAC);
+        const r = computeQuantity({ entry: 300, stop: 275, score: 85, netLiquidation: 3700 }, FRAC, FRAC.max_risk_per_trade_pct);
         expect(r.quantity).toBeCloseTo(1.48, 10);
     });
 
     test('confidence floor still refuses sub-viable trades in fractional mode', () => {
-        const r = computeQuantity({ entry: 500, stop: 490, score: null, netLiquidation: 3700 }, FRAC);
+        const r = computeQuantity({ entry: 500, stop: 490, score: null, netLiquidation: 3700 }, FRAC, FRAC.max_risk_per_trade_pct);
         expect(r.quantity).toBeNull();
         expect(r.reason).toContain('floor');
     });
 
     test('whole-share mode is unchanged (paper regression)', () => {
         // Cap-bound at the margined cap: 49,750 / 303 = 164.
-        const r = computeQuantity({ entry: 303, stop: 299.5, score: 85, netLiquidation: 1_000_000 }, { ...DEFAULT_RULES });
+        const r = computeQuantity({ entry: 303, stop: 299.5, score: 85, netLiquidation: 1_000_000 }, { ...DEFAULT_RULES }, DEFAULT_RULES.max_risk_per_trade_pct);
         expect(r.quantity).toBe(164);
+    });
+});
+
+describe('ladder rung overlay (REQ-RISK-009 — effective intraday risk = min(yaml ceiling, rung))', () => {
+    const CEIL = { ...DEFAULT_RULES, max_risk_per_trade_pct: 0.5, swing_risk_pct: 0.75, max_position_pct: 50 };
+
+    test('classRiskPct: the rung caps intraday, the yaml stays the ceiling; swing and bets are untouched', async () => {
+        const { classRiskPct } = await import('./position-sizer.js');
+        expect(classRiskPct('intraday', CEIL, 0.25)).toBe(0.25);
+        expect(classRiskPct('intraday', CEIL, 1.0)).toBe(0.5);
+        expect(classRiskPct('swing', CEIL, 0.25)).toBe(0.75);
+        expect(classRiskPct('earnings-bet', CEIL, 0.25)).toBe(CEIL.earnings_bet_risk_pct);
+    });
+
+    test('computeQuantity sizes at the rung: 0.25% of $10,000 with a $2.5 stop = $25 budget, 10 shares; a higher rung is capped by the yaml', () => {
+        const low = computeQuantity({ entry: 100, stop: 97.5, score: 90, netLiquidation: 10_000 }, CEIL, 0.25);
+        expect(low.riskBudget).toBe(25);
+        expect(low.quantity).toBe(10);
+        const high = computeQuantity({ entry: 100, stop: 97.5, score: 90, netLiquidation: 10_000 }, CEIL, 1.0);
+        expect(high.riskBudget).toBe(50);
+        expect(high.quantity).toBe(20);
+    });
+
+    test('without a ladder file (test data dir) the default rung is the bottom rung 0.25 — fail-safe toward smaller', () => {
+        const r = computeQuantity({ entry: 100, stop: 97.5, score: 90, netLiquidation: 10_000 }, { ...CEIL, max_risk_per_trade_pct: 1.0 });
+        expect(r.riskBudget).toBe(25);
+        expect(r.quantity).toBe(10);
     });
 });

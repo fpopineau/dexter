@@ -193,9 +193,13 @@ Everything else has sensible defaults:
 | `OPPORTUNITY_ENGINE` | true | engine auto-start with the gateway |
 | `OPP_TOP_N` | 8 | candidates kept in the snapshot & streamed |
 | `OPP_MAX_CANDIDATES` | 20 | symbols scored per cycle (pacing) |
-| `OPP_TRIGGER_SCORE` | 75 | composite rank for event triggers |
+| `OPP_TRIGGER_SCORE` | 60 | composite rank for event triggers (75 until 2026-09-05; proposals carry `trigger_band` '60-74' / '75+') |
 | `OPP_TRIGGER_COOLDOWN_MIN` | 30 | per-symbol trigger debounce |
-| `OPP_TRIGGER_MAX_PER_DAY` | 10 | trigger cap per ET day |
+| `OPP_TRIGGER_MAX_PER_DAY` | 30 | trigger cap per ET day (10 until 2026-09-05) |
+| `OPP_LARGECAP_LANE` / `_MIN_USD` / `_RESERVE` | true / 1e10 / 5 | large-cap scan lane + reserved candidate slots |
+| `PREMARKET_SPREAD_HARD_MULT` | 3 | pre-open DAY accept spread deferral bound (09:31 ET re-check) |
+| `LIVE_VETO_WINDOW_MIN` | 0 | veto window before an announced auto-execution places |
+| `LLM_DAILY_SPEND_CAP_USD` | 10 | daily LLM spend cap for evaluation lanes (0 = off; needs `LLM_PRICE_IN_USD_PER_MTOK` + `LLM_PRICE_OUT_USD_PER_MTOK`) |
 | `OPP_HEALTH_EMPTY_CYCLES` | 3 | zero-scan cycles before the scanner-health WhatsApp alert |
 | `UNIVERSE_EXTRA_SYMBOLS` | — | mega-cap watchlist for the nightly archive + swing pattern scan |
 | `OPP_MARKET_CAP_MIN` / `_MAX` | unset | restrict engine scans to a cap band (USD), e.g. 1e9–5e9 for midcaps; unset = unchanged behavior |
@@ -203,7 +207,7 @@ Everything else has sensible defaults:
 | `UNIVERSE_CAP_MIN` / `_MAX` | 1e9 / 5e9 | universe cap band (USD) |
 | `UNIVERSE_MAX_REQUESTS` / `UNIVERSE_PACE_MS` | 1200 / 3000 | nightly IBKR request budget and pacing |
 | `AUTO_EXECUTE_PAPER` | false | paper-only auto-exec of proposals, all sources (§11) |
-| `AUTO_EXECUTE_MAX_PER_DAY` | 5 | auto-exec daily cap |
+| `AUTO_EXECUTE_MAX_PER_DAY` | 6 | auto-exec daily cap (aligned with `max_daily_trades`) |
 | `AUTO_EXECUTE_MIN_SCORE` | 0 | score floor — 0 since D6 (2026-08-21): the burn-in samples every band; raise only with a calibrated scorer |
 | `PROFIT_TRAIL` | true | auto-close winners: arm at `profit_trail_arm_atr_mult`×ATR, close on `profit_trail_pullback_atr_mult`×ATR pullback from peak; absolute % fallback when ATR unknown; swing/earnings-bet exempt (§9) |
 | `STALE_ENTRY_MAX_DAYS` | 3 | cancel executed-but-unfilled entries after N days (0 = off) |
@@ -344,6 +348,9 @@ tokens). Anything else goes to the agent as a normal question.
 | `performance` | `perf`, `performance 30` | Closed-trade summary (default 7 days) |
 | `halt status` | | Kill-switch state + daily P&L headroom |
 | `halt clear` | | Operator override for a FALSE halt (deposit/resize read as a loss): clears the latch and re-anchors today's baseline at current equity. Real-loss halts should stand. |
+| `veto P-XXXX` | | Live-loop (WP1): stop an announced/working auto-execution — open → rejected, executed-but-unfilled → bracket cancelled; refused once the entry has FILLED (use `kill`) |
+| `kill SYM` | | Live-loop: close the position at market through the safe close path (same refusals as `close`) |
+| `live status`, `ladder`, `epoch` | | Live-loop state: the operator's live switch, the size-ladder rung, the current epoch. `live on/off`, `ladder up`, `epoch new`, `promote <variant>` arrive with WP3/WP4 |
 
 Examples of agent (non-command) usage: "what's in the latest scan?",
 "why did you propose SOUN?", "show my positions".
@@ -527,9 +534,15 @@ Guarantees, in code, not convention:
   selective, **1** early burn-in — both predate D6; the floor is 0
   everywhere now, and FLAT sizing, not the floor, is the risk control
   across bands);
-- capped per day (`AUTO_EXECUTE_MAX_PER_DAY`, default 5) — a SEPARATE,
-  stricter budget than `max_daily_trades`: when auto-exec hits its cap,
+- capped per day (`AUTO_EXECUTE_MAX_PER_DAY`, default 6 — aligned with
+  `max_daily_trades` since 2026-09-05): when auto-exec hits its cap,
   manual accepts still work until the risk-rules cap;
+- on a LIVE account (live-loop WP1) additionally gated by
+  `IBKR_ALLOW_LIVE`, the operator's live switch (`live on`, WP4), verified
+  identity, the live profile, a running epoch and no latched halt —
+  structurally OFF until WP4 ships the switch writer; `veto P-XXXX` and
+  `kill SYMBOL` are the per-trade controls (`live status`, `ladder`,
+  `epoch` show the loop's state);
 - every standard gate still applies (kill-switch, risk gate, chase gate,
   expiry);
 - every auto-execution is announced on WhatsApp

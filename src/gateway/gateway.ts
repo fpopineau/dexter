@@ -47,6 +47,9 @@ import { startFlatExitSweeper, stopFlatExitSweeper } from '@/services/flat-exit-
 import { startEquitySeries, stopEquitySeries } from '@/services/equity-series.js';
 import { startKillSwitchGuardian, stopKillSwitchGuardian } from '@/services/kill-switch-guardian.js';
 import { startRuntimeAttestation, stopRuntimeAttestation } from '@/services/runtime-attestation.js';
+import { startSpreadRecheck, stopSpreadRecheck } from '@/services/spread-recheck.js';
+import { startVetoWindowSweeper, stopVetoWindowSweeper } from '@/services/veto-window.js';
+import { assertSpendConfig } from '@/services/llm-spend.js';
 import { makeDebugLog } from './debug-log.js';
 import { registerScanHealthAlerts } from './health-alerts.js';
 import { registerTriggerAlerts } from './trigger-alerts.js';
@@ -304,6 +307,9 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
   await manager.startAll();
 
   ensureHeartbeatCronJob(params.configPath);
+  // REQ-LLM-001 (WP0.1 fail-loud pattern): a spend cap without prices would
+  // be a silent no-op — refuse to boot rather than run an unpriced meter.
+  assertSpendConfig();
   if (process.env.IBKR_HOST || process.env.IBKR_PORT) {
     ensureTradingCronJobs();
     registerOutcomeAlerts();
@@ -314,6 +320,11 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     // Reclaim position slots from brackets whose entry never filled.
     startStaleEntrySweeper();
     startFlatExitSweeper();
+    // Live-loop WP1 seams: the 09:31 ET re-check of deferred pre-open
+    // spread checks (REQ-RISK-008) and the veto-window due sweep
+    // (REQ-LIVE-002, inert while LIVE_VETO_WINDOW_MIN=0).
+    startSpreadRecheck();
+    startVetoWindowSweeper();
     // Marked NetLiq series (REQ-VAL-006): the validation scorecard judges
     // PORTFOLIO drawdown from this series, not from closed trades.
     startEquitySeries();
@@ -366,13 +377,15 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
       // Review 2026-08-21: display the EXECUTOR'S resolution, not a
       // reimplementation — the copies disagreed the day D6 landed (real
       // floor 0, boot banner said 80).
-      const { autoExecMinScore } = await import('@/services/proposal-executor.js');
+      const { autoExecMinScore, autoExecMaxPerDay } = await import('@/services/proposal-executor.js');
       const floor = autoExecMinScore();
-      const cap = Number(process.env.AUTO_EXECUTE_MAX_PER_DAY) > 0 ? Number(process.env.AUTO_EXECUTE_MAX_PER_DAY) : 5;
+      // REQ-TRIG-004: the executor's OWN resolution of the cap, named beside
+      // the yaml's max_daily_trades so a disagreement is visible at boot.
+      const cap = autoExecMaxPerDay();
       debugLog(
-        `[gateway] auto-execute ON (paper-only): score floor ${floor}` +
+        `[gateway] auto-execute ON (paper: AUTO_EXECUTE_PAPER; live: additionally the operator's live switch): score floor ${floor}` +
         (floor <= 40 ? ' (burn-in sampling posture — every gate-passing proposal executes; the sizer de-risks low bands)' : '') +
-        `, cap ${cap}/day (separate from max_daily_trades); unscored proposals never auto-execute.`,
+        `, auto-exec cap ${cap}/day, max_daily_trades ${getRiskRules().max_daily_trades}/day; unscored proposals never auto-execute.`,
       );
     }
     // Config coherence: announce when the caps authorize a book whose
@@ -431,6 +444,8 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
       stopProfitTrail();
       stopStaleEntrySweeper();
       stopFlatExitSweeper();
+      stopSpreadRecheck();
+      stopVetoWindowSweeper();
       stopEquitySeries();
       stopKillSwitchGuardian();
       stopExcursionSweeper();

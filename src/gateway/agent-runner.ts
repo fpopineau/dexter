@@ -5,6 +5,7 @@ import { HEARTBEAT_OK_TOKEN } from './heartbeat/suppression.js';
 import type { AgentEvent } from '../agent/types.js';
 import type { GroupContext } from '../agent/prompts.js';
 import { deriveLane, withAgentLane } from '../agent/lane-context.js';
+import { assertEvaluationAllowed, recordLlmUsage } from '@/services/llm-spend.js';
 
 type SessionState = {
   history: InMemoryChatHistory;
@@ -73,14 +74,25 @@ export type AgentRunRequest = {
   /** Attribution lane for this run (WP0.8) — stamps proposal `source`.
    *  Omitted: derived from sessionKey/channel conventions. */
   lane?: string;
+  /** REQ-TRIG-002: the compositeRank that fired a trigger-lane run —
+   *  stamped on the proposals/refusals the run creates. */
+  triggerRank?: number;
 };
 
 export async function runAgentForMessage(req: AgentRunRequest): Promise<string> {
   const isolated = req.isolatedSession ?? false;
   const session = isolated ? null : getSession(req.sessionKey, req.model);
   let finalAnswer = '';
+  const lane = deriveLane(req);
 
-  const run = () => withAgentLane(deriveLane(req), runInner, `${req.modelProvider}:${req.model}`);
+  // REQ-LLM-002: evaluation lanes refuse to START once today's spend has
+  // reached the cap (throws SpendCapError; the trigger bridge ledgers it).
+  // Operator lanes are never refused. Checked BEFORE any session work so a
+  // refused run leaves no half-written history.
+  assertEvaluationAllowed(lane);
+
+  const run = () => withAgentLane(lane, runInner, `${req.modelProvider}:${req.model}`,
+    req.triggerRank !== undefined ? { triggerRank: req.triggerRank } : undefined);
   const runInner = async () => {
     if (session) {
       session.isRunning = true;
@@ -102,6 +114,10 @@ export async function runAgentForMessage(req: AgentRunRequest): Promise<string> 
       await req.onEvent?.(event);
       if (event.type === 'done') {
         finalAnswer = event.answer;
+        // REQ-LLM-001: meter the run's accumulated usage per lane (the
+        // done event carries the run total; the error-path done event
+        // carries what was spent before the failure).
+        recordLlmUsage(lane, event.tokenUsage);
       }
     }
 
@@ -126,6 +142,7 @@ export async function runAgentForMessage(req: AgentRunRequest): Promise<string> 
         await req.onEvent?.(event);
         if (event.type === 'done') {
           finalAnswer = event.answer;
+          recordLlmUsage(lane, event.tokenUsage);
         }
       }
     }

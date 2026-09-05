@@ -2392,3 +2392,75 @@ Domain counters after this errata: EOD max = 018; every other domain
 unchanged. New ids in the live-loop section above (TRIG, SIM, SEQ, LADDER,
 EPOCH, DIGEST, FP, LIVE, LLM; SCAN-004..008; RISK-008..011) were allocated
 after this check and do not collide.
+
+## Live-loop WP1 landed (2026-09-05) — funnel throughput + behavior seams
+
+Implements REQ-TRIG-001..004, REQ-SCAN-004..008, REQ-RISK-008..011,
+REQ-LLM-001..002 and the REQ-LIVE-001..003 seams from the live-loop section.
+Harness at landing: `bun test` 947/0 (80 files), `tsc --noEmit` clean, Jest
+green at 4 workers. The ephemeral `docs/day2day/WP1-PLAN.md` carries the
+task graph for the review and is deleted once the operator has read it.
+
+### Precisions recorded at landing (append-only; they refine, not change, the requirements above)
+
+- REQ-SCAN-006 precision: large-cap (and complex) admissions take at most
+  `OPP_LARGECAP_RESERVE` reserved candidate slots each (default 5, best scan
+  rank first) — "bounded by the lane's own row count" would have queued up
+  to 100 sequential scorings per cycle and starved the cadence. The knob is
+  a fingerprint surface.
+- REQ-SCAN-007 precision: constituent admission uses the ATR bar
+  `|move| ≥ max(1%, 1.0 × dailyATR%)` (`complexAdmission`), not the
+  sentinel's 5% raw bar — a +4% chipmaker on a +4% sector day is the case.
+  A constituent may belong to several complexes; a vehicle to exactly one.
+- REQ-SCAN-004 precision: the significance term is
+  `min(25, round(8 × dayMove% / dailyATR%))`, zero under one ATR, aligned
+  moves only (`SIGNIFICANCE` constants block in `event-mover.ts`); the
+  raw-percent `eventMoverBoost` is deleted. Dollar volume = price × the
+  session's cumulative bar volume (`sessionVolumeFromBars`), a new field
+  on the scorer snapshot, used only as the tie-breaker inside a rank band.
+- REQ-RISK-009 precision: the risk GATE enforces the effective budget too
+  (`classRiskPct` is shared by sizer and gate), so an explicit quantity
+  above the rung, or a row whose rung stepped down between creation and
+  accept, is refused rather than waved through at the yaml ceiling. The
+  rung is injectable (`RiskGateContext.rungPct`, sizer third argument) so
+  pure tests pin the arithmetic; production reads `ladder-state.json`.
+- REQ-LIVE-001 precision: `AUTO_EXECUTE_PAPER=true` stays the master
+  auto-exec switch on every account type (renaming it is a WP4 concern);
+  the live branch adds its conditions on top. Verdict order on a live port
+  names the static arms (IBKR_ALLOW_LIVE, live switch) before the
+  connection-dependent identity, so the boot-time refusal reason is
+  actionable without a connection.
+- REQ-LIVE-003 precision: `live status`, `ladder` and `epoch` answer
+  read-only from the state files already in WP1 (observability); `live
+  on|off`, `ladder up`, `epoch new`, `promote` are recognised and answer
+  "not available until WP3/WP4".
+- REQ-LLM-001 precision: the meter hooks the agent runner's `DoneEvent.
+  tokenUsage` (one write per run, error-path runs included); the boot check
+  refuses to start with a cap > 0 and missing prices. OPERATOR ACTION before
+  the WP1 restart: set `LLM_PRICE_IN_USD_PER_MTOK` and
+  `LLM_PRICE_OUT_USD_PER_MTOK` in `.env`, or `LLM_DAILY_SPEND_CAP_USD=0`.
+- Refusal ledger gains gates `spend-cap` and `complex`
+  (`classifyRefusalGate`).
+
+### Test traceability (WP1)
+
+| REQ | Test |
+|---|---|
+| REQ-TRIG-001 | `opportunity-engine.test.ts` — "trigger defaults" (60/30, env override, garbage) |
+| REQ-TRIG-002 | `lane-context.test.ts` — trigger rank in the lane context; `tools/proposals/index.test.ts` — stamp from context, NULL off-lane; `trade-proposals.test.ts` — refusal row carries the rank |
+| REQ-TRIG-003 | `trade-proposals.test.ts` — `triggerBand` mapping + proposal rank/band round-trip |
+| REQ-TRIG-004 | `proposal-executor.test.ts` — auto-exec cap default 6 |
+| REQ-SCAN-004 | `event-mover.test.ts` — `significanceTerm` (chipmaker vs 3x ETF, monotone, capped, aligned-only); `session-volume.test.ts` — `sessionVolumeFromBars` |
+| REQ-SCAN-005 | `event-mover.test.ts` — `significanceSuppressed` matrix incl. the reactor hour-one exemption |
+| REQ-SCAN-006 | `opportunity-engine.test.ts` — `largeCapScansFor`, `scanFamilyOf`, `selectReservedAdmissions`, lane knobs (the scan wiring in `runCycleInner` is IBKR-bound glue over these pure parts) |
+| REQ-SCAN-007 | `vehicle-complexes.test.ts` — parse/validate, lookups, `complexAdmission`, shipped config loads (the constituent sweep is IBKR-bound glue) |
+| REQ-SCAN-008 | `vehicle-complexes.test.ts` — `oppositeDirectionConflict`; the create/accept wiring reuses `listExposure` (integration glue, honest ledger) |
+| REQ-RISK-008 | `proposal-risk-gate.test.ts` — two-tier pre-open spread; `spread-recheck.test.ts` — decision matrix + one full pass with injected deps |
+| REQ-RISK-009 | `position-sizer.test.ts` — rung overlay, bottom-rung default; `ladder-state.test.ts` — parse/read/fail-safe; `proposal-risk-gate.test.ts` headroom suite pins the gate at an explicit rung |
+| REQ-RISK-010 | `epoch-state.test.ts` — parse/read/verdict (absent = running, corrupt = stopped); `proposal-executor.test.ts` — stopped epoch refuses the accept, row stays open |
+| REQ-RISK-011 | yaml + journal (doc/config, no test) |
+| REQ-LLM-001 | `llm-spend.test.ts` — pricing, price knobs, cap default, boot check, ledger roll/accumulate, persistence |
+| REQ-LLM-002 | `llm-spend.test.ts` — evaluation lanes, verdict at/under the cap, cap 0; the runner/bridge wiring is glue over the tested verdict |
+| REQ-LIVE-001 | `proposal-executor.test.ts` — `autoExecVerdict` matrix (paper identity; live: each condition named; non-D account on the paper port) |
+| REQ-LIVE-002 | `proposal-executor.test.ts` — window default 0, 5-min window stamps `auto_execute_at` and announces the veto; `veto-window.test.ts` — due sweep executes oldest first, failures isolated |
+| REQ-LIVE-003 | `loop-control.test.ts` — `vetoDecision` + `vetoProposalWith` routing; `loop-commands.test.ts` — grammar, read-only status, "not available" answers, fall-through |

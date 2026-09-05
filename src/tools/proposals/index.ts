@@ -24,7 +24,7 @@ import {
     listProposals,
 } from '@/services/trade-proposals.js';
 import { rejectProposal } from '@/services/proposal-executor.js';
-import { currentAgentLane, currentAgentModel } from '@/agent/lane-context.js';
+import { currentAgentLane, currentAgentModel, currentTriggerRank } from '@/agent/lane-context.js';
 import { fetchDailyRiskContext } from '../ibkr/daily-atr.js';
 import { formatToolResult } from '../types.js';
 import { logger } from '@/utils';
@@ -214,6 +214,7 @@ export function createTradeProposalsTool() {
                                     symbol: input.symbol, direction: input.direction, entryType: input.entryType,
                                     entry: input.entry, entryLimit: input.entryLimit, stop: input.stop, target: input.target,
                                     score: input.score, reason: `sizer refused: ${sized.reason}`,
+                                    triggerRank: currentTriggerRank(),
                                 }).catch(() => { /* ledger is best-effort */ });
                                 return formatToolResult({ error: `position sizer refused: ${sized.reason}` });
                             }
@@ -250,6 +251,9 @@ export function createTradeProposalsTool() {
                                     .then((m) => m.getMarketRegime()).catch(() => null))?.tag ?? undefined
                                 : undefined,
                             expiresMinutes: input.expiresMinutes,
+                            // REQ-TRIG-002: the firing rank, from the run
+                            // context (null off the trigger lane).
+                            triggerRank: currentTriggerRank(),
                             entryContext,
                         }, {
                             ...(dailyAtr != null ? { dailyAtr } : {}),
@@ -294,6 +298,7 @@ export function createTradeProposalsTool() {
                             symbol: input.symbol, direction: input.direction, entryType: input.entryType,
                             entry: input.entry, entryLimit: input.entryLimit, stop: input.stop, target: input.target,
                             quantity: input.quantity, score: input.score, reason: msg,
+                            triggerRank: currentTriggerRank(),
                         }).catch(() => { /* ledger is best-effort */ });
                         return formatToolResult({ error: msg });
                     }

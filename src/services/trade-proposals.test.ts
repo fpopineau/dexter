@@ -603,3 +603,40 @@ describe('performance baseline denominator (currency incident 2026-08-25)', () =
         expect(setPerformanceBaseline('zero', 0).netLiq).toBeUndefined();
     });
 });
+
+describe('trigger band stamps (REQ-TRIG-002/003 — the 60-74 class is measurable apart)', () => {
+    test('triggerBand: 60..74 → 60-74, ≥75 → 75+, below 60 or unknown → null', async () => {
+        const { triggerBand } = await import('./trade-proposals.js');
+        expect(triggerBand(60)).toBe('60-74');
+        expect(triggerBand(74.9)).toBe('60-74');
+        expect(triggerBand(75)).toBe('75+');
+        expect(triggerBand(112)).toBe('75+');
+        expect(triggerBand(59.9)).toBeNull();
+        expect(triggerBand(null)).toBeNull();
+        expect(triggerBand(undefined)).toBeNull();
+        expect(triggerBand(Number.NaN)).toBeNull();
+    });
+
+    test('a proposal created with a trigger rank carries rank + band; without, both are null', async () => {
+        const banded = await createProposal(validInput({ symbol: 'TRGA', triggerRank: 66 }), { dailyAtr: 4 });
+        expect(banded.triggerRank).toBe(66);
+        expect(banded.triggerBand).toBe('60-74');
+        const plain = await createProposal(validInput({ symbol: 'TRGB' }), { dailyAtr: 4 });
+        expect(plain.triggerRank).toBeNull();
+        expect(plain.triggerBand).toBeNull();
+        expect((await getProposal(banded.id))?.triggerBand).toBe('60-74');
+    });
+
+    test('a refusal row carries the trigger rank when supplied', async () => {
+        const { recordRefusal, listRefusalsSince } = await import('./trade-proposals.js');
+        const since = Date.now() - 1000;
+        await recordRefusal({
+            symbol: 'TRGC', direction: 'long', entryType: 'LMT', entry: 10, stop: 9, target: 12,
+            reason: 'test refusal with rank', triggerRank: 63,
+        });
+        await recordRefusal({ symbol: 'TRGD', direction: 'short', entryType: 'EVAL', reason: 'evaluation declined: test' });
+        const rows = await listRefusalsSince(since);
+        expect(rows.find((r) => r.symbol === 'TRGC')?.triggerRank).toBe(63);
+        expect(rows.find((r) => r.symbol === 'TRGD')?.triggerRank).toBeNull();
+    });
+});

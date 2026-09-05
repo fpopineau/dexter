@@ -7,10 +7,15 @@
  * trend reads a stale regime).
  *
  * Two consumers, both transparent and knob-light:
- *   - eventMoverBoost: a bounded compositeRank additive so a multi-sigma
- *     mover cannot be out-ranked by an index ETF drifting 1%. This is a
- *     STRUCTURAL fix, not a weight recalibration — the proper reweighting
- *     stays deferred until the archive holds enough labeled days.
+ *   - significanceTerm (REQ-SCAN-004, live-loop WP1 — replaces the
+ *     raw-percent eventMoverBoost): a bounded compositeRank additive in
+ *     ATR MULTIPLES. Percent-ranked lists are cap-inverse — a 3x sector
+ *     ETF moves ~3x its sector by construction and crowds every underlying
+ *     off the list (2026-09-04: SOXL/SOXS seen 109x, six chipmakers 40x,
+ *     none triggering on a +4-6% chip day). Normalising the move by the
+ *     symbol's own daily ATR% ranks a +4% MU at 2.5 ATRs above a +12% SOXL
+ *     at 1.2 ATRs: same information, honest weight. Constants live in ONE
+ *     block below and are a fingerprint surface.
  *   - moverAlertEligible: the deterministic pre-market alert filter — one
  *     WhatsApp line per symbol per day, no LLM, no gates touched.
  *
@@ -19,9 +24,49 @@
  * both carry +40. Misaligned moves are negative and never boost or alert.
  */
 
-export function eventBoostMinPct(): number {
-    const n = Number(process.env.OPP_EVENT_BOOST_MIN_PCT);
-    return Number.isFinite(n) && n > 0 ? n : 10;
+/** REQ-SCAN-004 constants — the significance term's whole configuration.
+ *  minAtr: below one daily ATR a move is noise, not information;
+ *  pointsPerAtr: 8 rank points per ATR multiple (2 ATRs ≈ the old +16 for
+ *  a 16% raw move — same scale, different denominator);
+ *  cap: 25, matching the retired boost so compositeRank keeps its range. */
+export const SIGNIFICANCE = { minAtr: 1.0, pointsPerAtr: 8, cap: 25 } as const;
+
+/**
+ * Bounded compositeRank additive for an ALIGNED day move measured in the
+ * symbol's daily ATR multiples. Zero for misaligned/unmeasured moves and
+ * for an unusable ATR (null or non-positive — the term never guesses).
+ */
+export function significanceTerm(
+    dayMovePct: number | null,
+    dailyAtrPct: number | null,
+    c: { minAtr: number; pointsPerAtr: number; cap: number } = SIGNIFICANCE,
+): number {
+    if (dayMovePct == null || !(dayMovePct > 0)) return 0;
+    if (dailyAtrPct == null || !(dailyAtrPct > 0)) return 0;
+    const sig = dayMovePct / dailyAtrPct;
+    if (sig < c.minAtr) return 0;
+    return Math.min(c.cap, Math.round(c.pointsPerAtr * sig));
+}
+
+/**
+ * REQ-SCAN-005: promoting a candidate the extension gate will refuse only
+ * burns an LLM evaluation, so the term is suppressed once the implied
+ * extension (day move over ATR%) exceeds max_extension_atr — EXCEPT for a
+ * reactor (fresh reporter) during the first 60 minutes of the regular
+ * session: a post-print reaction is its own catalyst in hour one (QFIN
+ * 2026-08-26: the trigger fired 3h late because the reaction was muted).
+ * Pre-market (negative minutes) and unknown clocks get no exemption.
+ */
+export function significanceSuppressed(input: {
+    impliedExtension: number | null;
+    maxExtensionAtr: number;
+    isReactor: boolean;
+    minutesSinceOpen: number | null;
+}): boolean {
+    if (input.impliedExtension == null || !Number.isFinite(input.impliedExtension)) return false;
+    const hourOne = input.minutesSinceOpen != null && input.minutesSinceOpen >= 0 && input.minutesSinceOpen < 60;
+    if (input.isReactor && hourOne) return false;
+    return input.impliedExtension > input.maxExtensionAtr;
 }
 
 export function moverAlertMinPct(): number {
@@ -32,16 +77,6 @@ export function moverAlertMinPct(): number {
 export function moverAlertMinRvol(): number {
     const n = Number(process.env.OPP_MOVER_ALERT_RVOL);
     return Number.isFinite(n) && n >= 0 ? n : 2;
-}
-
-/**
- * Bounded additive for compositeRank: +1 point per % of aligned day move,
- * active from `minPct`, capped at +25. Monotone, explainable in one line,
- * and impossible to confuse with the TA factors it corrects for.
- */
-export function eventMoverBoost(dayMovePct: number | null, minPct: number = eventBoostMinPct()): number {
-    if (dayMovePct == null || dayMovePct < minPct) return 0;
-    return Math.min(25, Math.round(dayMovePct));
 }
 
 /** Scan-source tag for sentinel-admitted candidates — the watchlist lane

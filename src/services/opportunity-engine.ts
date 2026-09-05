@@ -25,9 +25,11 @@ import { getMarketSession, isTradeableSession, MarketSession } from '@/utils/mar
 import { mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { addSymbol, removeSymbol } from './ibkr-stream.js';
-import { breadthFireAllowed, breadthThresholdRelief, breadthWatchlist, cryptoBreadthEvent, detectBreadth, GAINER_SCANS, LOSER_SCANS, regimeBreadthEvent, type BreadthEvent } from './breadth-detector.js';
+import { breadthFireAllowed, breadthThresholdRelief, breadthWatchlist, cryptoBreadthEvent, detectBreadth, regimeBreadthEvent, type BreadthEvent } from './breadth-detector.js';
 import { getMarketRegime, regimeThresholdAdjust } from './market-regime.js';
-import { eventMoverBoost, moverAlertEligible, SENTINEL_SOURCE, sentinelDirection } from './event-mover.js';
+import { moverAlertEligible, SENTINEL_SOURCE, sentinelDirection, significanceSuppressed, significanceTerm } from './event-mover.js';
+import { minutesSinceOpenEt } from './entry-context.js';
+import { complexAdmission, complexesOf, isVehicle, loadVehicleComplexes } from './vehicle-complexes.js';
 import { fetchDailyRiskContext } from '@/tools/ibkr/daily-atr.js';
 import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
 import { fetchLastPrice } from './proposal-executor.js';
@@ -152,6 +154,9 @@ export interface Opportunity {
     /** WP10: scorer freshness verdict — a stale bar farm (2026-08-05
      *  incident) must not fire triggers. Was computed and discarded. */
     stale: boolean;
+    /** REQ-SCAN-004: price × session cumulative volume (USD) — the
+     *  significance tie-breaker inside a rank band. Null when unmeasured. */
+    dollarVolume: number | null;
 }
 
 export interface OpportunitySnapshot {
@@ -187,6 +192,62 @@ const SCAN_FAMILY: Record<string, string> = {
     MOST_ACTIVE: 'volume', HOT_BY_VOLUME: 'volume', TOP_TRADE_RATE: 'volume',
 };
 
+/** Source tag prefix of the large-cap lane (REQ-SCAN-006). */
+export const LARGECAP_PREFIX = 'LARGECAP:';
+/** Source tag prefix of complex-constituent admissions (REQ-SCAN-007). */
+export const COMPLEX_PREFIX = 'COMPLEX:';
+
+/** Pure: the corroboration family of a source tag. A large-cap sighting
+ *  of the same code is the SAME family as the base scan — it corroborates
+ *  nothing by itself (REQ-SCAN-006); sentinel/complex tags are their own. */
+export function scanFamilyOf(source: string): string {
+    const code = source.startsWith(LARGECAP_PREFIX) ? source.slice(LARGECAP_PREFIX.length) : source;
+    return SCAN_FAMILY[code] ?? source;
+}
+
+// --- Large-cap lane (REQ-SCAN-006, live-loop WP1) -------------------------
+// Percent-ranked scan lists are cap-inverse: on a +4% chip day the 3x ETFs
+// fill them and the underlyings never appear (2026-09-04 addendum). A
+// second pass of the directional scans with a $10B market-cap floor gives
+// the deep-book names their own 50 rows. Admissions get reserved candidate
+// slots (best scan rank first, bounded by OPP_LARGECAP_RESERVE) so the
+// busy-day candidate cut cannot crowd out the lane it exists to create.
+
+export function largeCapLaneEnabled(): boolean {
+    return (process.env.OPP_LARGECAP_LANE ?? '').trim().toLowerCase() !== 'false';
+}
+
+export function largeCapMinUsd(): number {
+    const n = Number(process.env.OPP_LARGECAP_MIN_USD);
+    return Number.isFinite(n) && n > 0 ? n : 10e9;
+}
+
+export function largeCapReserve(): number {
+    const n = Number(process.env.OPP_LARGECAP_RESERVE);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 5;
+}
+
+/** Pure: the directional (gainer/loser) scans of a plan — the only ones
+ *  worth re-running with a cap floor (activity scans carry no direction). */
+export function largeCapScansFor(scans: PhasePlan['scans']): PhasePlan['scans'] {
+    return scans.filter((s) => s.direction !== 'none');
+}
+
+/** Pure: unadmitted rows carrying `tagPrefix`, best scan rank first, at
+ *  most `max` — the reserved-slot selection shared by the large-cap and
+ *  complex lanes. */
+export function selectReservedAdmissions<T extends { symbol: string; sources: string[]; rank: number }>(
+    rows: T[],
+    admitted: Set<string>,
+    tagPrefix: string,
+    max: number,
+): T[] {
+    return rows
+        .filter((r) => !admitted.has(r.symbol) && r.sources.some((s) => s.startsWith(tagPrefix)))
+        .sort((a, b) => a.rank - b.rank)
+        .slice(0, Math.max(0, max));
+}
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -210,9 +271,16 @@ const IDLE_POLL_MS = 5 * 60_000;
 const SCORE_PACING_MS = 300;
 const SNAPSHOT_RETENTION_MS = 7 * 24 * 3600_000;
 
-function triggerScore(): number {
+/** Composite-rank bar a candidate must clear to trigger an evaluation.
+ *  REQ-TRIG-001 (live-loop WP1, 2026-09-05): 75 → 60. Four coverage
+ *  addenda (08-27, 09-01, 09-03, 09-04) showed the 4-18% single-name mover
+ *  class scoring 55-66 in BOTH directions and never reaching the LLM at
+ *  all — the bar, not the scanner, excluded it. Every deterministic gate
+ *  still applies downstream; the band stamp (REQ-TRIG-003) keeps the
+ *  newly admitted 60-74 class measurable apart. Exported for the test pin. */
+export function triggerScore(): number {
     const n = Number(process.env.OPP_TRIGGER_SCORE);
-    return Number.isFinite(n) && n > 0 ? n : 75;
+    return Number.isFinite(n) && n > 0 ? n : 60;
 }
 
 function triggerCooldownMs(): number {
@@ -220,9 +288,12 @@ function triggerCooldownMs(): number {
     return (Number.isFinite(n) && n > 0 ? n : 30) * 60_000;
 }
 
-function triggerMaxPerDay(): number {
+/** Single-name triggers per ET day. REQ-TRIG-001: 10 → 30 — the lower bar
+ *  admits ~3x the candidates; each trigger is one bounded LLM evaluation,
+ *  and the daily spend cap (REQ-LLM-002) is the cost guard, not this cap. */
+export function triggerMaxPerDay(): number {
     const n = Number(process.env.OPP_TRIGGER_MAX_PER_DAY);
-    return Number.isFinite(n) && n > 0 ? n : 10;
+    return Number.isFinite(n) && n > 0 ? n : 30;
 }
 
 /** Optional market-cap band for engine scans (USD). Unset = unchanged
@@ -543,6 +614,30 @@ async function runCycleInner(forcePhase?: EnginePhase): Promise<OpportunitySnaps
             }
         }));
 
+        // REQ-SCAN-006: the large-cap lane — the same directional scans
+        // once more with the $10B floor. Same code = same family, so a
+        // name on both lists corroborates nothing extra; the lane's value
+        // is ADMISSION, not confirmation.
+        if (largeCapLaneEnabled()) {
+            const capFloor = largeCapMinUsd();
+            await Promise.all(largeCapScansFor(plan.scans).map(async ({ code, direction }) => {
+                try {
+                    const results = await runScan(code, { aboveVolume: scanVolumeFloor(plan.phase), marketCapAbove: capFloor });
+                    for (const r of results) {
+                        if (!r.symbol || r.secType !== 'STK') continue;
+                        const existing = found.get(r.symbol);
+                        const entry = existing ?? { result: r, direction: null, sources: [], longVotes: 0, shortVotes: 0 };
+                        entry.sources.push(`${LARGECAP_PREFIX}${code}`);
+                        if (direction === 'long') entry.longVotes++;
+                        else if (direction === 'short') entry.shortVotes++;
+                        if (!existing) found.set(r.symbol, entry);
+                    }
+                } catch (err) {
+                    logger.warn(`[opportunity-engine] large-cap scan ${code} failed: ${err}`);
+                }
+            }));
+        }
+
         // Resolve directions: unanimous votes win; CONFLICTS are dropped
         // (a symbol both ripping and dumping per the scans is not a
         // directional candidate); vote-less activity-scan symbols stay
@@ -565,6 +660,9 @@ async function runCycleInner(forcePhase?: EnginePhase): Promise<OpportunitySnaps
         // price-vs-prevClose sweep; aligned movers join `found` as full
         // candidates and flow through scoring/boost/triggers/alerts.
         await sweepSentinels(found);
+        // REQ-SCAN-007: a vehicle on the lists means its complex is moving —
+        // sweep the constituents the percent ranking hid.
+        await sweepComplexConstituents(found);
 
         lastSurfaced = [...found.entries()].map(([symbol, meta]) => ({ symbol, sources: [...meta.sources] }));
 
@@ -586,6 +684,18 @@ async function runCycleInner(forcePhase?: EnginePhase): Promise<OpportunitySnaps
         for (const entry of found.entries()) {
             if (entry[1].sources.includes(SENTINEL_SOURCE) && !admitted.has(entry[0])) {
                 candidates.push(entry);
+                admitted.add(entry[0]);
+            }
+        }
+        // REQ-SCAN-006/007: reserved slots for the large-cap and complex
+        // lanes — bounded (OPP_LARGECAP_RESERVE each), best scan rank first.
+        {
+            const rows = [...found.entries()].map(([symbol, meta]) => ({ symbol, sources: meta.sources, rank: meta.result.rank, meta }));
+            for (const prefix of [LARGECAP_PREFIX, COMPLEX_PREFIX]) {
+                for (const r of selectReservedAdmissions(rows, admitted, prefix, largeCapReserve())) {
+                    candidates.push([r.symbol, r.meta]);
+                    admitted.add(r.symbol);
+                }
             }
         }
 
@@ -616,41 +726,49 @@ async function runCycleInner(forcePhase?: EnginePhase): Promise<OpportunitySnaps
             }
             if (signal && direction) {
                 const rvol = signal.snapshot.rvol;
-                // Day move (direction-signed) for directionally-scanned
-                // candidates: the TA factors punish verticals (mean-
-                // reversion reads "overbought"), so the composite needs
-                // the move itself as a term — MRNA 2026-08-19 ranked
-                // below index ETFs at +110%. prevClose comes from the
-                // cached daily-risk context (completed bars only).
+                // Day move (direction-signed): the TA factors punish
+                // verticals (mean-reversion reads "overbought"), so the
+                // composite needs the move itself as a term — MRNA
+                // 2026-08-19 ranked below index ETFs at +110%. prevClose
+                // comes from the cached daily-risk context (completed bars
+                // only). REQ-SCAN-004: measured for EVERY candidate now —
+                // the significance term must not depend on which scan
+                // surfaced the name.
                 let dayMovePct: number | null = null;
-                if (meta.sources.some((s) => GAINER_SCANS.has(s) || LOSER_SCANS.has(s) || s === SENTINEL_SOURCE)) {
+                let dailyAtrPct: number | null = null;
+                {
                     const ctx = await fetchDailyRiskContext(symbol).catch(() => null);
                     const price = signal.snapshot.price;
                     if (ctx?.prevClose != null && ctx.prevClose > 0 && price != null && price > 0) {
                         const raw = ((price - ctx.prevClose) / ctx.prevClose) * 100;
                         dayMovePct = Math.round((direction === 'long' ? raw : -raw) * 10) / 10;
+                        if (ctx.dailyAtr != null && ctx.dailyAtr > 0) dailyAtrPct = (ctx.dailyAtr / price) * 100;
                     }
                 }
-                // WP10: the boost must not promote candidates the
-                // extension gate will refuse — when the implied extension
-                // (day move over ATR%) already exceeds max_extension_atr,
-                // boosting only burns a 10-iteration LLM evaluation on a
-                // guaranteed refusal.
-                let boost = eventMoverBoost(dayMovePct);
-                const atrVal = signal.snapshot.atr;
-                const priceVal = signal.snapshot.price;
-                if (boost > 0 && dayMovePct !== null && atrVal != null && atrVal > 0 && priceVal != null && priceVal > 0) {
-                    const atrPct = (atrVal / priceVal) * 100;
-                    const impliedExtension = Math.abs(dayMovePct) / atrPct;
-                    if (impliedExtension > getRiskRules().max_extension_atr) {
-                        logger.info(`[opportunity-engine] ${symbol}: boost suppressed — implied extension ${impliedExtension.toFixed(1)}x ATR exceeds the gate's ${getRiskRules().max_extension_atr}x`);
+                // REQ-SCAN-004: the ATR-normalised significance term (the
+                // raw-percent event-mover boost is retired). REQ-SCAN-005:
+                // suppressed when the implied extension already exceeds the
+                // gate's max_extension_atr — promoting a guaranteed refusal
+                // only burns an LLM evaluation — EXCEPT for a fresh reporter
+                // in hour one (a post-print reaction is its own catalyst).
+                let boost = significanceTerm(dayMovePct, dailyAtrPct);
+                if (boost > 0 && dayMovePct !== null && dailyAtrPct !== null) {
+                    const impliedExtension = Math.abs(dayMovePct) / dailyAtrPct;
+                    if (significanceSuppressed({
+                        impliedExtension,
+                        maxExtensionAtr: getRiskRules().max_extension_atr,
+                        isReactor: reactors.has(symbol.toUpperCase()),
+                        minutesSinceOpen: minutesSinceOpenEt(),
+                    })) {
+                        logger.info(`[opportunity-engine] ${symbol}: significance suppressed — implied extension ${impliedExtension.toFixed(1)}x ATR exceeds the gate's ${getRiskRules().max_extension_atr}x`);
                         boost = 0;
                     }
                 }
                 // WP10: multi-scan bonus counts distinct FAMILIES —
                 // three volume scans surfacing one volume event is one
-                // observation, not three.
-                const families = new Set(meta.sources.map((s) => SCAN_FAMILY[s] ?? s));
+                // observation, not three (a large-cap sighting of the same
+                // code is the same family — REQ-SCAN-006).
+                const families = new Set(meta.sources.map(scanFamilyOf));
                 const compositeRank = Math.round(
                     signal.compositeScore
                     + Math.min(10, (rvol ?? 0) * 2)
@@ -660,8 +778,12 @@ async function runCycleInner(forcePhase?: EnginePhase): Promise<OpportunitySnaps
                 const boostKey = `${etDateString()}:${symbol}`;
                 if (boost > 0 && !boostLoggedToday.has(boostKey)) {
                     boostLoggedToday.add(boostKey);
-                    logger.info(`[opportunity-engine] event-mover boost ${symbol} +${boost} (day ${dayMovePct}% toward ${direction})`);
+                    logger.info(`[opportunity-engine] significance ${symbol} +${boost} (day ${dayMovePct}% toward ${direction} = ${dailyAtrPct ? (Math.abs(dayMovePct ?? 0) / dailyAtrPct).toFixed(1) : '?'}x ATR)`);
                 }
+                const priceVal = signal.snapshot.price;
+                const dollarVolume = priceVal != null && priceVal > 0 && signal.snapshot.sessionVolume != null
+                    ? Math.round(priceVal * signal.snapshot.sessionVolume)
+                    : null;
                 opportunities.push({
                     symbol,
                     longName: meta.result.longName,
@@ -679,11 +801,14 @@ async function runCycleInner(forcePhase?: EnginePhase): Promise<OpportunitySnaps
                     // WP10: the freshness verdict finally lands on the
                     // Opportunity instead of being computed and discarded.
                     stale: signal.freshness?.stale ?? false,
+                    dollarVolume,
                 });
             }
             await sleep(SCORE_PACING_MS);
         }
-        opportunities.sort((a, b) => b.compositeRank - a.compositeRank);
+        // REQ-SCAN-004: rank by significance-aware composite; inside a tie
+        // the deeper book (dollar volume) ranks first.
+        opportunities.sort((a, b) => (b.compositeRank - a.compositeRank) || ((b.dollarVolume ?? 0) - (a.dollarVolume ?? 0)));
 
         const snapshot: OpportunitySnapshot = {
             timestamp: Date.now(),
@@ -909,6 +1034,65 @@ async function sweepSentinels(
     }
     if (hits.length) {
         logger.info(`[opportunity-engine] SENTINEL admitted ${hits.join(', ')} (watchlist move, absent from scans)`);
+    }
+}
+
+/**
+ * REQ-SCAN-007: for every VEHICLE the scans (or the sentinel) surfaced with
+ * a direction, price-sweep its complex's constituents that are absent from
+ * `found` and admit the ones moving at least one daily ATR (1% floor),
+ * source `COMPLEX:<vehicle>`. Shares the sentinel's cadence limiter
+ * semantics (the daily-context cache makes prevClose/ATR cheap) and its
+ * best-effort-per-name discipline: a data failure admits nothing.
+ */
+async function sweepComplexConstituents(
+    found: Map<string, { result: ScanResult; direction: 'long' | 'short' | null; sources: string[]; longVotes: number; shortVotes: number }>,
+): Promise<void> {
+    if (process.env.NODE_ENV === 'test') return;
+    let complexes;
+    try {
+        complexes = loadVehicleComplexes();
+    } catch (err) {
+        logger.error(`[opportunity-engine] vehicle complexes unavailable — constituent admission skipped: ${err}`);
+        return;
+    }
+    const wanted = new Map<string, string>(); // constituent → vehicle that admitted it
+    for (const [symbol, meta] of found.entries()) {
+        if (!isVehicle(symbol, complexes) || meta.direction === null) continue;
+        for (const c of complexesOf(symbol, complexes)) {
+            for (const k of c.constituents) {
+                if (!found.has(k) && !wanted.has(k)) wanted.set(k, symbol);
+            }
+        }
+    }
+    if (wanted.size === 0) return;
+    const hits: string[] = [];
+    const names = [...wanted.keys()];
+    for (let i = 0; i < names.length; i += 5) {
+        await Promise.all(names.slice(i, i + 5).map(async (sym) => {
+            try {
+                const [ctx, last] = await Promise.all([fetchDailyRiskContext(sym), fetchLastPrice(sym)]);
+                if (ctx?.prevClose == null || !(ctx.prevClose > 0) || last == null || !(last > 0)) return;
+                const movePct = Math.round(((last - ctx.prevClose) / ctx.prevClose) * 1000) / 10;
+                const atrPct = ctx.dailyAtr != null && ctx.dailyAtr > 0 ? (ctx.dailyAtr / last) * 100 : null;
+                const direction = complexAdmission(movePct, atrPct);
+                if (!direction) return;
+                found.set(sym, {
+                    result: {
+                        rank: 0, symbol: sym, secType: 'STK', exchange: 'SMART', currency: 'USD',
+                        longName: sym, distance: '', benchmark: '', projection: '',
+                    },
+                    direction,
+                    sources: [`${COMPLEX_PREFIX}${wanted.get(sym)}`],
+                    longVotes: direction === 'long' ? 1 : 0,
+                    shortVotes: direction === 'short' ? 1 : 0,
+                });
+                hits.push(`${sym} ${movePct > 0 ? '+' : ''}${movePct}% (via ${wanted.get(sym)})`);
+            } catch { /* best-effort per name */ }
+        }));
+    }
+    if (hits.length) {
+        logger.info(`[opportunity-engine] COMPLEX admitted ${hits.join(', ')} (constituents of a surfaced vehicle)`);
     }
 }
 

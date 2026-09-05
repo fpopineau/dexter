@@ -31,6 +31,7 @@
  */
 
 import { getRiskRules, type RiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
+import { currentRung } from './ladder-state.js';
 
 export interface SizeInput {
     entry: number;
@@ -95,12 +96,19 @@ export function confidenceMultiplier(score: number | null | undefined, rules: Ri
     return rules.sizing_low_mult;
 }
 
-/** Risk budget percentage for a trade class. */
-export function classRiskPct(tradeClass: TradeClass, rules: RiskRules): number {
+/** Risk budget percentage for a trade class.
+ *
+ *  REQ-RISK-009 (live-loop WP1): the INTRADAY budget is overlaid by the
+ *  size-ladder rung — effective = min(yaml ceiling, rung). The yaml stays
+ *  the ratified ceiling policy; the rung (ladder-state.json, bottom rung
+ *  0.25 when absent) is the evidence-earned position on the ladder. Swing
+ *  and earnings-bet budgets are untouched in WP1. `rungPct` is injectable
+ *  so pure tests pin the arithmetic without a state file. */
+export function classRiskPct(tradeClass: TradeClass, rules: RiskRules, rungPct: number = currentRung()): number {
     switch (tradeClass) {
         case 'swing': return rules.swing_risk_pct;
         case 'earnings-bet': return rules.earnings_bet_risk_pct;
-        default: return rules.max_risk_per_trade_pct;
+        default: return Math.min(rules.max_risk_per_trade_pct, rungPct);
     }
 }
 
@@ -116,7 +124,7 @@ export function gapRiskPerShare(entry: number, worstCaseGapPct: number | null | 
 }
 
 /** Compute the whole-share quantity for a proposal, or refuse with a reason. */
-export function computeQuantity(input: SizeInput, rules: RiskRules = getRiskRules()): SizeResult {
+export function computeQuantity(input: SizeInput, rules: RiskRules = getRiskRules(), rungPct: number = currentRung()): SizeResult {
     const tradeClass: TradeClass = input.tradeClass ?? 'intraday';
     const stopDistance = Math.abs(input.entry - input.stop);
     // Earnings bets size against the assumed adverse gap, never the stop —
@@ -125,7 +133,7 @@ export function computeQuantity(input: SizeInput, rules: RiskRules = getRiskRule
         ? gapRiskPerShare(input.entry, input.worstCaseGapPct, rules)
         : stopDistance;
     const multiplier = confidenceMultiplier(input.score, rules);
-    const fullBudget = (classRiskPct(tradeClass, rules) / 100) * input.netLiquidation;
+    const fullBudget = (classRiskPct(tradeClass, rules, rungPct) / 100) * input.netLiquidation;
     const riskBudget = Math.round(fullBudget * multiplier * 100) / 100;
 
     if (tradeClass === 'earnings-bet' && !rules.earnings_bet_enabled) {

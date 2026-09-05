@@ -1,21 +1,46 @@
 import { describe, expect, test } from 'bun:test';
-import { eventMoverBoost, moverAlertEligible, sentinelDirection } from './event-mover.js';
+import { moverAlertEligible, sentinelDirection, SIGNIFICANCE, significanceSuppressed, significanceTerm } from './event-mover.js';
 
-describe('eventMoverBoost (MRNA 2026-08-19: +110% ranked below index ETFs)', () => {
-    test('the MRNA case: a huge aligned move gets the full +25 — top-3 becomes unavoidable', () => {
-        expect(eventMoverBoost(93.4, 10)).toBe(25);
+describe('significanceTerm (REQ-SCAN-004 — ATR-normalised move replaces the raw-percent boost)', () => {
+    test('the chipmaker case: +4.1% on a 1.6%-ATR name is ~2.6 ATRs and outranks a +12% 3x ETF at 1.2 ATRs', () => {
+        const mu = significanceTerm(4.1, 1.6);   // sig 2.56 → 8 × 2.56 ≈ 20
+        const soxl = significanceTerm(12, 10);   // sig 1.2 → 8 × 1.2 ≈ 10
+        expect(mu).toBeGreaterThan(soxl);
+        expect(mu).toBe(20);
+        expect(soxl).toBe(10);
     });
 
-    test('boost is the move itself between the floor and the cap', () => {
-        expect(eventMoverBoost(10, 10)).toBe(10);
-        expect(eventMoverBoost(17.4, 10)).toBe(17);
-        expect(eventMoverBoost(25, 10)).toBe(25);
+    test('monotone in the ATR multiple, capped, and zero below one ATR', () => {
+        expect(significanceTerm(0.9, 1)).toBe(0);                       // under one ATR
+        expect(significanceTerm(1.0, 1)).toBe(SIGNIFICANCE.pointsPerAtr);
+        expect(significanceTerm(2.0, 1)).toBe(2 * SIGNIFICANCE.pointsPerAtr);
+        expect(significanceTerm(110, 5)).toBe(SIGNIFICANCE.cap);         // the MRNA case still saturates
+        expect(significanceTerm(3.0, 1)).toBe(24);                       // 8 × 3 — just under the cap
+        expect(significanceTerm(3.2, 1)).toBe(SIGNIFICANCE.cap);         // 25.6 → capped
     });
 
-    test('ordinary moves, misaligned moves, and unmeasured candidates get nothing', () => {
-        expect(eventMoverBoost(9.9, 10)).toBe(0);
-        expect(eventMoverBoost(-40, 10)).toBe(0); // moved AGAINST the candidate's direction
-        expect(eventMoverBoost(null, 10)).toBe(0);
+    test('misaligned moves, unmeasured moves and unusable ATRs contribute nothing', () => {
+        expect(significanceTerm(-8, 2)).toBe(0);      // moved AGAINST the candidate's direction
+        expect(significanceTerm(null, 2)).toBe(0);
+        expect(significanceTerm(8, null)).toBe(0);
+        expect(significanceTerm(8, 0)).toBe(0);
+        expect(significanceTerm(8, -1)).toBe(0);
+    });
+});
+
+describe('significanceSuppressed (REQ-SCAN-005 — do not promote what the extension gate refuses, except fresh reporters in hour one)', () => {
+    test('suppressed once the implied extension exceeds max_extension_atr; not before', () => {
+        expect(significanceSuppressed({ impliedExtension: 3.5, maxExtensionAtr: 3, isReactor: false, minutesSinceOpen: 120 })).toBe(true);
+        expect(significanceSuppressed({ impliedExtension: 2.9, maxExtensionAtr: 3, isReactor: false, minutesSinceOpen: 120 })).toBe(false);
+        expect(significanceSuppressed({ impliedExtension: null, maxExtensionAtr: 3, isReactor: false, minutesSinceOpen: 120 })).toBe(false);
+    });
+
+    test('a reactor (fresh print) is EXEMPT during the first 60 minutes of the regular session only', () => {
+        expect(significanceSuppressed({ impliedExtension: 3.5, maxExtensionAtr: 3, isReactor: true, minutesSinceOpen: 12 })).toBe(false);
+        expect(significanceSuppressed({ impliedExtension: 3.5, maxExtensionAtr: 3, isReactor: true, minutesSinceOpen: 59 })).toBe(false);
+        expect(significanceSuppressed({ impliedExtension: 3.5, maxExtensionAtr: 3, isReactor: true, minutesSinceOpen: 60 })).toBe(true);
+        expect(significanceSuppressed({ impliedExtension: 3.5, maxExtensionAtr: 3, isReactor: true, minutesSinceOpen: -30 })).toBe(true); // pre-market: no exemption
+        expect(significanceSuppressed({ impliedExtension: 3.5, maxExtensionAtr: 3, isReactor: true, minutesSinceOpen: null })).toBe(true);
     });
 });
 

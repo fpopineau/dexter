@@ -195,7 +195,7 @@ describe('auto-execution gates (paper-only by construction)', () => {
         const p = await openProposal();
         const outcome = await autoExecuteProposal(p.id);
         expect(outcome.ok).toBe(false);
-        expect(outcome.message).toContain('paper-only');
+        expect(outcome.message).toContain('IBKR_ALLOW_LIVE');
         expect((await getProposal(p.id))?.status).toBe('open');
     });
 
@@ -426,5 +426,109 @@ describe('directionalBasis (review-19 — max(cost, mark) hid short-side risk)',
             }],
         });
         expect(r).toEqual({ ok: true, riskUsd: 100 });
+    });
+});
+
+describe('auto-exec daily cap default (REQ-TRIG-004 — aligned to max_daily_trades)', () => {
+    test('default is 6; env overrides; garbage → 6', async () => {
+        const { autoExecMaxPerDay } = await import('./proposal-executor.js');
+        delete process.env.AUTO_EXECUTE_MAX_PER_DAY;
+        expect(autoExecMaxPerDay()).toBe(6);
+        process.env.AUTO_EXECUTE_MAX_PER_DAY = '9';
+        expect(autoExecMaxPerDay()).toBe(9);
+        process.env.AUTO_EXECUTE_MAX_PER_DAY = 'many';
+        expect(autoExecMaxPerDay()).toBe(6);
+        delete process.env.AUTO_EXECUTE_MAX_PER_DAY;
+    });
+});
+
+describe('epoch latch on the accept path (REQ-RISK-010 — new entries pause, the row stays OPEN)', () => {
+    test('a stopped epoch-state.json refuses with the epoch reason; removing it restores intake', async () => {
+        const { writeFileSync, rmSync } = await import('node:fs');
+        const { join } = await import('node:path');
+        const file = join(dir, 'epoch-state.json');
+        writeFileSync(file, JSON.stringify({ id: 'epoch-7', startedAt: 1, fingerprint: 'fp', status: 'stopped', stopReason: 'REJECT look at n=25' }));
+        try {
+            const p = await openProposal();
+            const outcome = await acceptProposal(p.id);
+            expect(outcome.ok).toBe(false);
+            expect(outcome.message).toContain('epoch-gate');
+            expect(outcome.message).toContain('epoch-7');
+            expect(outcome.message).toContain('remains OPEN');
+            expect((await getProposal(p.id))?.status).toBe('open');
+        } finally {
+            rmSync(file, { force: true });
+        }
+    });
+});
+
+describe('auto-exec verdict (REQ-LIVE-001 seam — paper keeps its semantics, live needs every condition)', () => {
+    const base = {
+        livePort: false, accounts: ['DU123456'], allowLiveEnv: false, liveSwitchEnabled: false,
+        profile: 'paper' as 'paper' | 'live', epochOk: true, haltLatched: false,
+    };
+
+    test('paper: verified accounts pass; no accounts refuse (identity unverified)', async () => {
+        const { autoExecVerdict } = await import('./proposal-executor.js');
+        expect(autoExecVerdict(base)).toEqual({ ok: true, account: 'paper' });
+        const r = autoExecVerdict({ ...base, accounts: [] });
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.reason).toContain('not verified');
+    });
+
+    test('live (live port OR a non-D account): each missing condition is named; all present passes as live', async () => {
+        const { autoExecVerdict } = await import('./proposal-executor.js');
+        const live = { ...base, livePort: true, accounts: ['U7654321'] };
+        const steps: Array<[Partial<typeof live>, RegExp]> = [
+            [{}, /IBKR_ALLOW_LIVE/],
+            [{ allowLiveEnv: true }, /live switch/],
+            [{ allowLiveEnv: true, liveSwitchEnabled: true }, /profile/],
+            [{ allowLiveEnv: true, liveSwitchEnabled: true, profile: 'live' as const, epochOk: false }, /epoch/],
+            [{ allowLiveEnv: true, liveSwitchEnabled: true, profile: 'live' as const, haltLatched: true }, /halt/],
+        ];
+        for (const [patch, re] of steps) {
+            const r = autoExecVerdict({ ...live, ...patch });
+            expect(r.ok).toBe(false);
+            if (!r.ok) expect(r.reason).toMatch(re);
+        }
+        expect(autoExecVerdict({ ...live, allowLiveEnv: true, liveSwitchEnabled: true, profile: 'live' })).toEqual({ ok: true, account: 'live' });
+        const r = autoExecVerdict({ ...base, accounts: ['U7654321'] }); // non-D account on the paper port is LIVE here
+        expect(r.ok).toBe(false);
+        if (!r.ok) expect(r.reason).toMatch(/IBKR_ALLOW_LIVE/);
+    });
+});
+
+describe('veto window (REQ-LIVE-002 seam — window 0 = immediate; window > 0 = due-stamped, row stays open)', () => {
+    test('LIVE_VETO_WINDOW_MIN defaults to 0; a 5-minute window stamps auto_execute_at and announces the veto command', async () => {
+        const { liveVetoWindowMin, rejectProposal: reject } = await import('./proposal-executor.js');
+        const { __setManagedAccountsForTests } = await import('@/tools/ibkr/connection.js');
+        delete process.env.LIVE_VETO_WINDOW_MIN;
+        expect(liveVetoWindowMin()).toBe(0);
+        process.env.LIVE_VETO_WINDOW_MIN = 'soon';
+        expect(liveVetoWindowMin()).toBe(0);
+        process.env.AUTO_EXECUTE_PAPER = 'true';
+        process.env.IBKR_PORT = '4002';
+        process.env.LIVE_VETO_WINDOW_MIN = '5';
+        __setManagedAccountsForTests(['DU111111']);
+        try {
+            const p = await createProposal({
+                symbol: 'VETO', direction: 'long', entryType: 'LMT',
+                entry: 100, stop: 97.5, target: 106, quantity: 10,
+                score: 70, rationale: 'veto window test', source: 'test',
+            }, ATR_CTX);
+            const before = Date.now();
+            const outcome = await autoExecuteProposal(p.id);
+            expect(outcome.ok).toBe(false);
+            expect(outcome.deferred).toBe(true);
+            expect(outcome.message).toContain(`veto ${p.id}`);
+            const row = await getProposal(p.id);
+            expect(row?.status).toBe('open');
+            expect(row?.autoExecuteAt ?? 0).toBeGreaterThanOrEqual(before + 5 * 60_000 - 1_000);
+            expect(row?.autoExecuteAt ?? 0).toBeLessThanOrEqual(Date.now() + 5 * 60_000 + 1_000);
+            await reject(p.id);
+        } finally {
+            __setManagedAccountsForTests([]);
+            delete process.env.LIVE_VETO_WINDOW_MIN;
+        }
     });
 });

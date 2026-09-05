@@ -784,6 +784,10 @@ export interface SignalResult {
         vwap: number | null;
         atr: number | null;
         rvol: number | null;
+        /** REQ-SCAN-004: cumulative volume of the newest bar's session
+         *  (shares) — with the price it gives the dollar volume the
+         *  engine uses as the significance tie-breaker. Null = no bars. */
+        sessionVolume: number | null;
     };
     /** Where the factor weights came from (file/defaults/override), with
      *  zeroed factors called out — the composite is only as honest as its
@@ -872,8 +876,27 @@ export function computeSignalScore(
             vwap: (() => { const v = lastValid(indicators.vwap.vwap); return isNaN(v) ? null : Math.round(v * 100) / 100; })(),
             atr: (() => { const v = lastValid(indicators.atr.atr); return isNaN(v) ? null : Math.round(v * 100) / 100; })(),
             rvol: (() => { const v = lastValid(indicators.volume.rvol); return isNaN(v) ? null : Math.round(v * 100) / 100; })(),
+            sessionVolume: sessionVolumeFromBars(ohlcv.time, ohlcv.volume),
         },
     };
+}
+
+/** Pure (REQ-SCAN-004): cumulative volume of the bars sharing the NEWEST
+ *  bar's calendar date. IBKR intraday bar times read "yyyyMMdd  HH:mm:ss"
+ *  (two spaces); the first eight characters are the session date. Bars
+ *  whose time does not carry a date are skipped; no bars → null. */
+export function sessionVolumeFromBars(times: string[], volumes: number[]): number | null {
+    const n = Math.min(times.length, volumes.length);
+    if (n === 0) return null;
+    const dateOf = (t: string): string | null => (/^\d{8}/.test(t) ? t.slice(0, 8) : null);
+    let newest: string | null = null;
+    for (let i = n - 1; i >= 0 && newest === null; i--) newest = dateOf(times[i] ?? '');
+    if (newest === null) return null;
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+        if (dateOf(times[i] ?? '') === newest) sum += Number.isFinite(volumes[i]) ? volumes[i] : 0;
+    }
+    return sum;
 }
 
 // ---------------------------------------------------------------------------

@@ -4,11 +4,14 @@
  *
  * Gate order on accept:
  *   1. proposal exists, is open, not expired
- *   2. paper/live safety lock (assertOrderingAllowed)
- *   3. daily-loss kill-switch (assertDailyLossOk — fail-safe on uncertainty)
- *   4. risk gate with live account context (position size vs net
- *      liquidation, max open positions, max trades per day)
- *   5. bracket placement (entry + OCA stop/target)
+ *   2. paper/live safety lock (assertOrderingAllowed), session + cutoff
+ *   3. epoch latch (REQ-RISK-010 — a stopped epoch pauses new entries)
+ *   4. daily-loss kill-switch (assertDailyLossOk — fail-safe on uncertainty)
+ *   5. one direction per vehicle complex (REQ-SCAN-008)
+ *   6. accept context + microstructure (pre-open spread two-tier, REQ-RISK-008)
+ *   7. risk gate with live account context (position size vs net
+ *      liquidation, max open positions, max trades per day), chase gate
+ *   8. bracket placement (entry + OCA stop/target)
  *
  * Callers: the WhatsApp command router (explicit human message) and the
  * approval-gated accept_proposal tool (interactive TUI confirmation).
@@ -18,8 +21,11 @@ import { placeBracketOrder } from '@/tools/ibkr/bracket.js';
 import { assertOrderingAllowed, getIBApi, getManagedAccounts, getVerifiedSingleAccount, isLivePort } from '@/tools/ibkr/connection.js';
 import { createIbkrMarketData } from '@/tools/ibkr/market-data.js';
 import { logger } from '@/utils';
-import { getMarketSession, intradayEntryCutoffReached, isMarketHalfDay, isTradeableSession } from '@/utils/market-hours.js';
-import { assertDailyLossOk } from './daily-loss-guard.js';
+import { getMarketSession, intradayEntryCutoffReached, isMarketHalfDay, isTradeableSession, MarketSession } from '@/utils/market-hours.js';
+import { assertDailyLossOk, getActiveHalt } from './daily-loss-guard.js';
+import { assertEpochRunning, epochGateVerdict, readEpochState } from './epoch-state.js';
+import { isLiveEnabled } from './live-switch.js';
+import { oppositeDirectionConflict } from './vehicle-complexes.js';
 import { replayMissedExecutions, trackExecutedProposal } from './outcome-tracker.js';
 import { getSectorInfo } from './sector-map.js';
 import { assertAcceptContext, assertProposalRisk, checkMicrostructure, checkPriceRun, ENTRY_CONFIRM_FRACTION, formulaTakePct, plannedWorstLossUsd } from './proposal-risk-gate.js';
@@ -38,14 +44,16 @@ import {
     formatProposalLine,
     getProposal,
     listTrackable,
+    markSpreadDeferred,
     recordRefusal,
     listWorkingForSymbol,
     releaseProposalClaim,
+    setAutoExecuteAt,
     setProposalStatus,
     sumRealizedPnlSince,
     type TradeProposal,
 } from './trade-proposals.js';
-import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
+import { getAccountProfile, getRiskRules } from '@/tools/ibkr/risk-rules.js';
 
 export interface ExecutionOutcome {
     ok: boolean;
@@ -54,6 +62,16 @@ export interface ExecutionOutcome {
      *  price ran past the entry (the setup may still be alive at fresh
      *  levels); 'invalidated' = it traded through the stop (dead). */
     chaseKind?: 'chasing' | 'invalidated';
+    /** REQ-LIVE-002: the auto-executor stamped a veto-window due time
+     *  instead of placing — the row stays open until the due-sweep. */
+    deferred?: boolean;
+}
+
+/** REQ-RISK-008: pre-market spread over the cap but under this multiple of
+ *  it is DEFERRED to the 09:31 ET re-check rather than refused. */
+export function premarketSpreadHardMult(): number {
+    const n = Number(process.env.PREMARKET_SPREAD_HARD_MULT);
+    return Number.isFinite(n) && n >= 1 ? n : 3;
 }
 
 /** Typed chase refusal so callers can distinguish "price ran" (worth a
@@ -278,6 +296,9 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
     // The live quote is hoisted so the refusal ledger can record what the
     // chase gate actually saw (null when the refusal fired before the fetch).
     let liveLast: number | null = null;
+    // REQ-RISK-008: set by the microstructure gate when the pre-open spread
+    // check was deferred; flagged on the row after a successful placement.
+    let spreadDeferred = false;
     try {
         assertOrderingAllowed();
         // DAY brackets need a session to live in: placed post-close they are
@@ -313,7 +334,30 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 );
             }
         }
+        // REQ-RISK-010 (live-loop WP1): a STOPPED epoch (REJECT look, -5%
+        // hard stop, unresolved broker anomaly — WP3 writes the file) pauses
+        // NEW ENTRIES only. Same gate lifecycle as the session gates: the
+        // proposal stays open, the refusal is ledgered. Absent file = running.
+        assertEpochRunning();
+
         const lossStatus = await assertDailyLossOk();
+
+        // REQ-SCAN-008: one DIRECTION per vehicle complex — accepting a
+        // constituent against a working vehicle (or vice versa) trades the
+        // same sector both ways (2026-09-04: SOXL short breadth-triggered
+        // into a semis rally while MU/ASML/ARM ran). Re-checked here because
+        // the book can change between creation and accept.
+        {
+            const working = (await listExposure()).filter((t) => t.id !== p.id);
+            const hit = oppositeDirectionConflict(p.symbol, p.direction, working, undefined, p.id);
+            if (hit) {
+                throw new Error(
+                    `[complex-gate] REFUSED ${p.symbol}: one direction per complex — ${hit.rivalId} (${hit.rivalSymbol}, ` +
+                    `${p.direction === 'long' ? 'short' : 'long'}) already works the '${hit.complex}' complex the other way; ` +
+                    `cancel or close ${hit.rivalId} first, or skip`,
+                );
+            }
+        }
 
         // WP6: refetch the market context — REQUIRED at accept, unlike
         // creation. A proposal created during a data outage used to reach
@@ -329,7 +373,13 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
         // WP7: microstructure — can the market absorb this order? Spread
         // and ADV are hard-required; borrow must be CONFIRMED for shorts;
         // a known halt refuses. All refusals transient (retry).
+        // REQ-RISK-008: a PRE-OPEN accept of a DAY entry is quoted on the
+        // pre-market book, which does not price the fill at the open —
+        // the spread check becomes two-tier (defer under the hard multiple,
+        // refuse beyond it); the 09:31 ET re-check (spread-recheck.ts)
+        // decides the deferred rows on the regular-session quote.
         const shortSnap = await fetchShortabilitySnapshot(p.symbol);
+        const preOpenDay = p.tif !== 'GTC' && getMarketSession().session === MarketSession.PRE_MARKET;
         const micro = checkMicrostructure(
             {
                 symbol: p.symbol,
@@ -342,11 +392,13 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 halted: shortSnap.halted,
             },
             getRiskRules(),
+            { preOpenDay, hardMult: premarketSpreadHardMult() },
         );
         for (const n of micro.notes) logger.info(`[proposal-executor] ${p.id}: ${n}`);
         if (micro.violations.length > 0) {
             throw new Error(`[microstructure-gate] ${micro.violations.join('; ')}`);
         }
+        spreadDeferred = micro.spreadDeferred;
 
         // Risk gate with live account context. Re-runs the static checks too:
         // rules may have been tightened since the proposal was created.
@@ -739,6 +791,13 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
             ...(unconfirmed ? { note: 'placement-unconfirmed: no broker ack within the window — verify with \'orders\'' } : {}),
         });
         logger.info(`[proposal-executor] ${p.id} executed (orders ${orderIds.join('/')}, ack ${result.ack.outcome})`);
+        if (spreadDeferred) {
+            // REQ-RISK-008: the 09:31 ET re-check reads this flag; a failed
+            // flag write must not lose the placement — it is logged loudly
+            // (the row simply keeps resting, as a regular-session accept would).
+            await markSpreadDeferred(p.id, true).catch((err) =>
+                logger.error(`[proposal-executor] ${p.id}: could not flag the deferred spread check — ${err}`));
+        }
 
         // Hand the bracket to the outcome tracker (fills, exit, realized P&L).
         const executed = await getProposal(p.id);
@@ -785,37 +844,107 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
 }
 
 // ---------------------------------------------------------------------------
-// Auto-execution (paper ONLY, behind AUTO_EXECUTE_PAPER)
+// Auto-execution (behind AUTO_EXECUTE_PAPER; live additionally behind the
+// operator's live switch — REQ-LIVE-001/002, live-loop WP1)
 //
-// Stricter than manual acceptance: refuses live ports/accounts REGARDLESS of
-// IBKR_ALLOW_LIVE, and enforces a daily cap (AUTO_EXECUTE_MAX_PER_DAY,
-// default 5). Auto-execution is never available for live trading by design —
-// going live always requires an explicit human acceptance per trade.
+// Until 2026-09-05 auto-execution refused live ports/accounts by
+// construction (assertPaperOnly) — every live trade was a hand-accept.
+// The live-loop program replaces that doctrine with an explicit, layered
+// verdict (autoExecVerdict): on a PAPER account the semantics are
+// unchanged; on a LIVE port or non-'D' account every condition must hold —
+// IBKR_ALLOW_LIVE=true (cold arm), the operator's live switch
+// (live-switch.json, warm, human-only to turn on — WP4 ships the writer,
+// so today the live branch is structurally OFF), verified account
+// identity, the 'live' rule profile active, a running epoch and no latched
+// daily halt. Any missing condition refuses with the named reason.
+//
+// The daily cap (AUTO_EXECUTE_MAX_PER_DAY, default 6 — REQ-TRIG-004) and
+// the score floor apply on every account type. LIVE_VETO_WINDOW_MIN > 0
+// stamps a due time instead of placing (REQ-LIVE-002); the default 0 is
+// today's immediate execution.
 // ---------------------------------------------------------------------------
 
 export function isAutoExecuteEnabled(): boolean {
     return (process.env.AUTO_EXECUTE_PAPER ?? '').trim().toLowerCase() === 'true';
 }
 
-function assertPaperOnly(): void {
-    if (isLivePort()) {
-        throw new Error('auto-execute is paper-only: refusing on a live port (4001/7496), regardless of IBKR_ALLOW_LIVE');
-    }
-    // An EMPTY account list is not proof of paper — it is proof of
-    // nothing. Fail closed until IBKR says who we are (audit finding 4).
-    const accounts = getManagedAccounts();
-    if (accounts.length === 0) {
-        throw new Error('auto-execute is paper-only: account identity not verified yet (no managed accounts received) — refusing');
-    }
-    const liveAccounts = accounts.filter((a) => !a.toUpperCase().startsWith('D'));
-    if (liveAccounts.length > 0) {
-        throw new Error('auto-execute is paper-only: connected account does not look like a paper account');
-    }
+/** REQ-LIVE-002: minutes the operator has to veto before a proposal
+ *  auto-executes. 0 (default) = execute unconditionally, now. */
+export function liveVetoWindowMin(): number {
+    const n = Number(process.env.LIVE_VETO_WINDOW_MIN);
+    return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-function autoExecMaxPerDay(): number {
+export interface AutoExecState {
+    livePort: boolean;
+    accounts: string[];
+    allowLiveEnv: boolean;
+    liveSwitchEnabled: boolean;
+    profile: 'paper' | 'live';
+    epochOk: boolean;
+    haltLatched: boolean;
+}
+
+export type AutoExecVerdict = { ok: true; account: 'paper' | 'live' } | { ok: false; reason: string };
+
+/**
+ * Pure (REQ-LIVE-001): may the auto-executor place on this account state?
+ * Check ORDER matters for the operator-facing reason: on a live port the
+ * static arms (env, switch) are named before the connection-dependent
+ * identity — the same order the executor evaluates them in.
+ */
+export function autoExecVerdict(s: AutoExecState): AutoExecVerdict {
+    const nonPaperAccounts = s.accounts.filter((a) => !a.toUpperCase().startsWith('D'));
+    const isLive = s.livePort || nonPaperAccounts.length > 0;
+    if (!isLive) {
+        // An EMPTY account list is not proof of paper — it is proof of
+        // nothing. Fail closed until IBKR says who we are (audit finding 4).
+        if (s.accounts.length === 0) {
+            return { ok: false, reason: 'account identity not verified yet (no managed accounts received) — refusing' };
+        }
+        return { ok: true, account: 'paper' };
+    }
+    if (!s.allowLiveEnv) {
+        return { ok: false, reason: 'live auto-execution refused — IBKR_ALLOW_LIVE is not true (the cold arm; live port or non-paper account detected)' };
+    }
+    if (!s.liveSwitchEnabled) {
+        return { ok: false, reason: 'live auto-execution refused — the operator\'s live switch is OFF (live-switch.json; only \'live on\' turns it on)' };
+    }
+    if (s.accounts.length === 0) {
+        return { ok: false, reason: 'live auto-execution refused — account identity not verified yet (no managed accounts received)' };
+    }
+    if (s.profile !== 'live') {
+        return { ok: false, reason: `live auto-execution refused — the active rule profile is '${s.profile}', not 'live'` };
+    }
+    if (!s.epochOk) {
+        return { ok: false, reason: 'live auto-execution refused — the epoch is stopped (new entries paused until the next epoch starts)' };
+    }
+    if (s.haltLatched) {
+        return { ok: false, reason: 'live auto-execution refused — the daily-loss halt is latched' };
+    }
+    return { ok: true, account: 'live' };
+}
+
+/** The verdict over the RUNNING process state. */
+function currentAutoExecVerdict(): AutoExecVerdict {
+    return autoExecVerdict({
+        livePort: isLivePort(),
+        accounts: getManagedAccounts(),
+        allowLiveEnv: (process.env.IBKR_ALLOW_LIVE ?? '').trim().toLowerCase() === 'true',
+        liveSwitchEnabled: isLiveEnabled(),
+        profile: getAccountProfile(),
+        epochOk: epochGateVerdict(readEpochState()).ok,
+        haltLatched: getActiveHalt() !== null,
+    });
+}
+
+/** Auto-executions per ET day. REQ-TRIG-004 (2026-09-05): default 5 → 6,
+ *  aligned with the live yaml's max_daily_trades so the two caps cannot
+ *  disagree about how many trades a burn-in day may take. Exported for
+ *  the boot banner (gateway) and the test pin. */
+export function autoExecMaxPerDay(): number {
     const n = Number(process.env.AUTO_EXECUTE_MAX_PER_DAY);
-    return Number.isFinite(n) && n > 0 ? n : 5;
+    return Number.isFinite(n) && n > 0 ? n : 6;
 }
 
 export function autoExecMinScore(): number {
@@ -839,10 +968,11 @@ let autoExecDate = '';
 let autoExecCount = 0;
 
 /**
- * Auto-execute a proposal on PAPER. Returns a non-ok outcome (never throws)
- * when disabled, capped, non-paper, or when the underlying acceptance fails.
+ * Auto-execute a proposal. Returns a non-ok outcome (never throws) when
+ * disabled, capped, refused by the account verdict, deferred by the veto
+ * window, or when the underlying acceptance fails.
  */
-export async function autoExecuteProposal(id: string): Promise<ExecutionOutcome> {
+export async function autoExecuteProposal(id: string, opts: { skipVetoWindow?: boolean } = {}): Promise<ExecutionOutcome> {
     if (!isAutoExecuteEnabled()) {
         return { ok: false, message: 'auto-execute is disabled (AUTO_EXECUTE_PAPER != true)' };
     }
@@ -857,13 +987,16 @@ export async function autoExecuteProposal(id: string): Promise<ExecutionOutcome>
     }
 
     // Static live-port refusal first — it must dominate every other message.
+    // The verdict names the first missing live condition (REQ-LIVE-001);
+    // with no live switch writer yet (WP4) this branch is structurally OFF.
     if (isLivePort()) {
-        return { ok: false, message: 'auto-execute refused — auto-execute is paper-only: refusing on a live port (4001/7496), regardless of IBKR_ALLOW_LIVE' };
+        const v = currentAutoExecVerdict();
+        if (!v.ok) return { ok: false, message: `auto-execute refused — ${v.reason}` };
     }
 
     // Confidence gate next: a pure filter that places nothing — refusals
-    // here must not depend on connection state. The paper-identity assertion
-    // runs just before anything could actually execute.
+    // here must not depend on connection state. The account verdict runs
+    // just before anything could actually execute.
     const p = await getProposal(id);
     if (!p) {
         return { ok: false, message: `auto-execute: proposal ${id.toUpperCase()} not found` };
@@ -877,12 +1010,27 @@ export async function autoExecuteProposal(id: string): Promise<ExecutionOutcome>
         };
     }
 
-    try {
-        assertPaperOnly();
-    } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error(`[proposal-executor] auto-execute refused: ${msg}`);
-        return { ok: false, message: `auto-execute refused — ${msg}` };
+    const verdict = currentAutoExecVerdict();
+    if (!verdict.ok) {
+        logger.error(`[proposal-executor] auto-execute refused: ${verdict.reason}`);
+        return { ok: false, message: `auto-execute refused — ${verdict.reason}` };
+    }
+
+    // REQ-LIVE-002: veto window — stamp the due time and announce instead
+    // of placing; the due-sweep (veto-window.ts) executes through this same
+    // function with skipVetoWindow once the window elapses. Window 0
+    // (default) is today's immediate execution.
+    const windowMin = liveVetoWindowMin();
+    if (windowMin > 0 && !opts.skipVetoWindow) {
+        const dueMs = Date.now() + windowMin * 60_000;
+        await setAutoExecuteAt(p.id, dueMs);
+        const dueEt = new Date(dueMs).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: '2-digit', minute: '2-digit', hour12: false });
+        logger.info(`[proposal-executor] ${p.id}: auto-execution deferred to ${dueEt} ET (veto window ${windowMin} min)`);
+        return {
+            ok: false,
+            deferred: true,
+            message: `⏳ ${p.id} ${p.direction.toUpperCase()} ${p.symbol} executes at ${dueEt} ET (${windowMin}-min veto window) unless you reply 'veto ${p.id}'.`,
+        };
     }
 
     const outcome = await acceptProposal(id);
@@ -902,14 +1050,14 @@ export async function autoExecuteProposal(id: string): Promise<ExecutionOutcome>
             return {
                 ok: outcome.ok,
                 chaseKind: outcome.chaseKind,
-                message: `🤖 AUTO-EXECUTE (paper, score ${p.score}, ${autoExecCount}/${max} today) — ${outcome.message}\n${cont.message}`,
+                message: `🤖 AUTO-EXECUTE (${verdict.account}, score ${p.score}, ${autoExecCount}/${max} today) — ${outcome.message}\n${cont.message}`,
             };
         }
     }
     return {
         ok: outcome.ok,
         ...(outcome.chaseKind ? { chaseKind: outcome.chaseKind } : {}),
-        message: `🤖 AUTO-EXECUTE (paper, score ${p.score}, ${autoExecCount}/${max} today) — ${outcome.message}`,
+        message: `🤖 AUTO-EXECUTE (${verdict.account}, score ${p.score}, ${autoExecCount}/${max} today) — ${outcome.message}`,
     };
 }
 

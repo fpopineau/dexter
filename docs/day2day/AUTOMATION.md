@@ -267,11 +267,19 @@ seeded jobs; schedules stay user-tunable):
 
 ### Event triggers — engine + `src/gateway/trigger-alerts.ts`
 When a candidate enters the **top 3** with `compositeRank ≥ OPP_TRIGGER_SCORE`
-(default 75) during loop cycles: debounce per symbol
-(`OPP_TRIGGER_COOLDOWN_MIN`, default 30) and daily cap
-(`OPP_TRIGGER_MAX_PER_DAY`, default 10). A focused, isolated agent run checks
-the news catalyst and risk; if actionable it registers a proposal and the
-alert lands on WhatsApp. Non-actionable evaluations are suppressed.
+(default **60** since the live-loop WP1, 2026-09-05 — was 75) during loop
+cycles: debounce per symbol (`OPP_TRIGGER_COOLDOWN_MIN`, default 30) and
+daily cap (`OPP_TRIGGER_MAX_PER_DAY`, default **30** — was 10). A focused,
+isolated agent run checks the news catalyst and risk; if actionable it
+registers a proposal and the alert lands on WhatsApp. Non-actionable
+evaluations are suppressed (and ledgered). The firing rank rides the run
+and is stamped on the proposal (`trigger_rank`, `trigger_band` '60-74' or
+'75+') so the class the lower bar admitted stays measurable apart. The
+composite's move term is ATR-normalised (significance, REQ-SCAN-004); a
+large-cap scan lane and vehicle-complex constituent admission widen what
+reaches the ranking (REQ-SCAN-006/007); a vehicle is never traded against
+its own constituents (REQ-SCAN-008). Evaluation lanes stop for the day once
+the LLM spend cap is reached (`LLM_DAILY_SPEND_CAP_USD`, REQ-LLM-002).
 
 ### WhatsApp command router — `src/gateway/proposal-commands.ts`
 Inbound DMs are pre-routed **before** the agent (deterministic, no LLM):
@@ -407,9 +415,19 @@ manual acceptance:
   execute unattended — lower scores stay open for manual accept. Default
   **0** since D6 (2026-08-21): the validation burn-in samples every score
   band with FLAT sizing; unscored proposals still never auto-execute.
-- Daily cap: `AUTO_EXECUTE_MAX_PER_DAY` (default 5).
-- All standard gates still apply (kill-switch included).
-- Every auto-execution is reported on WhatsApp (`🤖 AUTO-EXECUTE (paper, score S, n/cap)`).
+- Daily cap: `AUTO_EXECUTE_MAX_PER_DAY` (default 6, aligned with
+  `max_daily_trades` since 2026-09-05).
+- All standard gates still apply (kill-switch included), plus the epoch
+  latch (a stopped epoch pauses new entries) and the per-complex direction
+  gate.
+- Live accounts (live-loop WP1, REQ-LIVE-001): auto-execution additionally
+  requires `IBKR_ALLOW_LIVE=true`, the operator's live switch
+  (`live-switch.json`, written only by the confirmed `live on` command —
+  WP4), verified account identity, the live rule profile, a running epoch
+  and no latched halt. Until WP4 ships the writer, live auto-execution is
+  structurally OFF. `LIVE_VETO_WINDOW_MIN` > 0 announces and defers each
+  auto-execution so `veto P-XXXX` can stop it (default 0 = immediate).
+- Every auto-execution is reported on WhatsApp (`🤖 AUTO-EXECUTE (paper|live, score S, n/cap)`).
 
 ## 6. Configuration reference (env)
 
@@ -418,13 +436,18 @@ manual acceptance:
 | `OPPORTUNITY_ENGINE` | true | gateway auto-start of the engine |
 | `OPP_TOP_N` | 8 | ranked candidates kept/streamed |
 | `OPP_MAX_CANDIDATES` | 20 | symbols scored per cycle (pacing) |
-| `OPP_TRIGGER_SCORE` | 75 | composite threshold for event triggers |
+| `OPP_TRIGGER_SCORE` | 60 | composite threshold for event triggers (75 before 2026-09-05) |
 | `OPP_TRIGGER_COOLDOWN_MIN` | 30 | per-symbol trigger debounce |
-| `OPP_TRIGGER_MAX_PER_DAY` | 10 | trigger cap per ET day |
+| `OPP_TRIGGER_MAX_PER_DAY` | 30 | trigger cap per ET day (10 before 2026-09-05) |
+| `OPP_LARGECAP_LANE` / `_MIN_USD` / `_RESERVE` | true / 1e10 / 5 | large-cap scan lane and its reserved candidate slots (REQ-SCAN-006) |
+| `PREMARKET_SPREAD_HARD_MULT` | 3 | pre-open DAY accepts: spread over the cap but under cap × this is deferred to the 09:31 ET re-check (REQ-RISK-008) |
+| `LIVE_VETO_WINDOW_MIN` | 0 | minutes an announced auto-execution waits for `veto P-XXXX` (REQ-LIVE-002) |
+| `LLM_DAILY_SPEND_CAP_USD` | 10 | evaluation lanes stop for the day at this spend; 0 disables; needs both price knobs (REQ-LLM-001/002) |
+| `LLM_PRICE_IN_USD_PER_MTOK` / `LLM_PRICE_OUT_USD_PER_MTOK` | — | USD per million input/output tokens; required while the cap is on |
 | `OPP_HEALTH_EMPTY_CYCLES` | 3 | consecutive zero-scan cycles (market open) before a degraded-scanner WhatsApp alert |
 | `UNIVERSE_EXTRA_SYMBOLS` | — | watchlist archived nightly + swing-pattern-scanned regardless of the cap band |
 | `AUTO_EXECUTE_PAPER` | false | paper-only auto-execution of proposals (all sources) |
-| `AUTO_EXECUTE_MAX_PER_DAY` | 5 | auto-execution cap per ET day |
+| `AUTO_EXECUTE_MAX_PER_DAY` | 6 | auto-execution cap per ET day (aligned with `max_daily_trades`) |
 | `AUTO_EXECUTE_MIN_SCORE` | 0 (D6) | auto-exec confidence floor (score); unscored never auto-executes |
 | `AUTO_PROTECT` | true | GTC exits auto-reattached when DAY exits die on an open position |
 | `EOD_TRIAGE` | true | 15:52 ET losing-and-fading DAY positions closed; rest kept overnight |

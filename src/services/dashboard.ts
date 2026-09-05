@@ -18,6 +18,7 @@ import { randomBytes } from 'node:crypto';
 import { BarSizeSetting } from '@stoqey/ib';
 import { acceptProposal, cancelProposalBracket, rejectProposal } from './proposal-executor.js';
 import { closePosition, protectPosition } from './position-actions.js';
+import { killPosition, vetoProposal } from './loop-control.js';
 import { getDailyBars, getIntradayBars } from './data-archive.js';
 import { getDailyLossStatus } from './daily-loss-guard.js';
 import { getLatestPatternScan } from './pattern-scanner.js';
@@ -170,6 +171,16 @@ async function runAction(p: ActionPayload): Promise<{ ok: boolean; message: stri
         case 'close': {
             if (!p.symbol || !SYMBOL_RE.test(p.symbol)) return { ok: false, message: 'bad symbol' };
             return closePosition(p.symbol);
+        }
+        // REQ-LIVE-003: the loop control plane's per-trade powers, same
+        // deterministic core as the WhatsApp grammar.
+        case 'veto': {
+            if (!p.id || !PROPOSAL_ID_RE.test(p.id)) return { ok: false, message: 'bad proposal id' };
+            return vetoProposal(p.id.toUpperCase());
+        }
+        case 'kill': {
+            if (!p.symbol || !SYMBOL_RE.test(p.symbol)) return { ok: false, message: 'bad symbol' };
+            return killPosition(p.symbol);
         }
         case 'protect': {
             if (!p.symbol || !SYMBOL_RE.test(p.symbol)) return { ok: false, message: 'bad symbol' };

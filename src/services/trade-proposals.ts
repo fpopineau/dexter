@@ -23,6 +23,7 @@ import { mkdir } from 'node:fs/promises';
 import { dirname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { assertProposalRisk, type RiskGateContext } from './proposal-risk-gate.js';
+import { oppositeDirectionConflict } from './vehicle-complexes.js';
 import type { TradeClass } from '@/tools/ibkr/risk-rules.js';
 
 export type ProposalStatus = 'open' | 'executing' | 'executed' | 'closed' | 'rejected' | 'expired' | 'failed';
@@ -132,6 +133,35 @@ export interface TradeProposal {
     /** Daily ATR (USD) at creation — the take formula's and the
      *  counterfactual's yardstick. Null on pre-policy rows. */
     dailyAtrAtCreation: number | null;
+    // --- Live-loop WP1 (2026-09-05) ---
+    /** REQ-TRIG-002: the compositeRank that fired the trigger-lane run
+     *  which created this row (from the lane context, never the model).
+     *  Null on non-trigger lanes. */
+    triggerRank: number | null;
+    /** REQ-TRIG-003: '60-74' (admitted by the lowered bar) | '75+' (would
+     *  have triggered under the old bar) | null. */
+    triggerBand: TriggerBand | null;
+    /** REQ-LIVE-002 seam: when the veto window is non-zero, the time the
+     *  due-sweep may auto-execute this still-open row. Null = none. */
+    autoExecuteAt: number | null;
+    /** REQ-RISK-008: a pre-open accept passed the spread check DEFERRED
+     *  (pre-market spread over the cap but under the hard multiple); the
+     *  09:31 ET re-check clears it — cancelling the unfilled entry when the
+     *  regular-session spread still exceeds the cap. */
+    spreadDeferred: boolean;
+}
+
+export type TriggerBand = '60-74' | '75+';
+
+/** Pure (REQ-TRIG-003): the band a firing rank falls in. Below 60 (reactor
+ *  or breadth relief) and unknown ranks carry no band — `triggerRank`
+ *  still records the number. The 75 boundary is the PRE-change bar, so
+ *  the '75+' band is what the old funnel would have traded. */
+export function triggerBand(rank: number | null | undefined): TriggerBand | null {
+    if (rank == null || !Number.isFinite(rank)) return null;
+    if (rank >= 75) return '75+';
+    if (rank >= 60) return '60-74';
+    return null;
 }
 
 const DEFAULT_EXPIRY_MIN = 120;
@@ -286,6 +316,9 @@ export interface RefusalRecord {
      *  into a ledger column. Null on creation-time refusals. */
     proposalAgeSec: number | null;
     livePrice: number | null;
+    /** REQ-TRIG-002: the firing rank of the trigger-lane run that produced
+     *  this refusal (creation-time and judgment declines). Null off-lane. */
+    triggerRank: number | null;
 }
 
 /** Keyword classification of a refusal reason into the gate that fired. */
@@ -295,6 +328,12 @@ export function classifyRefusalGate(reason: string): string {
     // legitimately mention any other gate's keywords ("stop would sit inside
     // intraday noise") — the prefix, not the content, decides the bucket.
     if (r.startsWith('evaluation declined')) return 'judgment';
+    // Live-loop WP1: the spend cap refuses an evaluation before it STARTS
+    // (REQ-LLM-002) and the complex gate refuses a vehicle traded against
+    // its own constituents (REQ-SCAN-008) — both named before the generic
+    // keywords so neither lands in 'other'.
+    if (r.startsWith('spend cap')) return 'spend-cap';
+    if (r.includes('one direction per complex')) return 'complex';
     if (r.includes('duplicate setup')) return 'duplicate';
     if (r.includes('intraday noise')) return 'noise-stop';
     if (r.includes('chasing an extended move')) return 'extension';
@@ -334,16 +373,20 @@ export async function recordRefusal(input: {
      *  gate check, and the live price the gate compared against. */
     proposalAgeSec?: number | null;
     livePrice?: number | null;
+    /** REQ-TRIG-002: the firing rank of the trigger-lane run (from the lane
+     *  context); omitted/null off-lane. */
+    triggerRank?: number | null;
 }): Promise<void> {
     const database = await getDb();
+    const rank = input.triggerRank != null && Number.isFinite(input.triggerRank) ? input.triggerRank : null;
     database.query<void>(
-        `INSERT INTO refusals (created_at, symbol, direction, entry_type, entry, entry_limit, stop, target, quantity, score, reason, gate, proposal_age_sec, live_price)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO refusals (created_at, symbol, direction, entry_type, entry, entry_limit, stop, target, quantity, score, reason, gate, proposal_age_sec, live_price, trigger_rank)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
         Date.now(), input.symbol.trim().toUpperCase(), input.direction, input.entryType,
         input.entry ?? null, input.entryLimit ?? null, input.stop ?? null, input.target ?? null,
         input.quantity ?? null, input.score ?? null, input.reason.slice(0, 600), classifyRefusalGate(input.reason),
-        input.proposalAgeSec ?? null, input.livePrice ?? null,
+        input.proposalAgeSec ?? null, input.livePrice ?? null, rank,
     );
 }
 
@@ -354,6 +397,7 @@ interface RefusalRow {
     outcome: string | null; outcome_note: string | null;
     mfe_pct: number | null; mae_pct: number | null;
     proposal_age_sec: number | null; live_price: number | null;
+    trigger_rank: number | null;
 }
 
 export async function listRefusalsSince(sinceMs: number): Promise<RefusalRecord[]> {
@@ -368,6 +412,7 @@ export async function listRefusalsSince(sinceMs: number): Promise<RefusalRecord[
         outcome: r.outcome, outcomeNote: r.outcome_note,
         mfePct: r.mfe_pct ?? null, maePct: r.mae_pct ?? null,
         proposalAgeSec: r.proposal_age_sec ?? null, livePrice: r.live_price ?? null,
+        triggerRank: r.trigger_rank ?? null,
     }));
 }
 
@@ -469,6 +514,15 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     // rules + judgment documents at creation (strategy-fingerprint.ts).
     // The scorecard refuses a mixed-fingerprint sample.
     ['strategy_fingerprint', 'TEXT'],
+    // Live-loop WP1 (2026-09-05). REQ-TRIG-002/003: the firing rank and its
+    // band, so the class the lowered bar admitted is measurable apart.
+    ['trigger_rank', 'REAL'],
+    ['trigger_band', 'TEXT'],
+    // REQ-LIVE-002 seam: veto-window due time for a still-open row.
+    ['auto_execute_at', 'INTEGER'],
+    // REQ-RISK-008: pre-open accept with the spread check DEFERRED to the
+    // 09:31 ET re-check (0/1).
+    ['spread_deferred', 'INTEGER'],
 ];
 
 /** Replay/instrumentation columns added after the refusals-table release. */
@@ -477,6 +531,8 @@ const REFUSAL_COLUMNS: Array<[string, string]> = [
     ['mae_pct', 'REAL'],
     ['proposal_age_sec', 'REAL'],
     ['live_price', 'REAL'],
+    // REQ-TRIG-002: the firing rank of the trigger-lane run.
+    ['trigger_rank', 'REAL'],
 ];
 
 function migrate(database: SqliteDatabase): void {
@@ -562,6 +618,10 @@ interface Row {
     post_exit_mae_pct: number | null;
     take_counterfactual: string | null;
     daily_atr: number | null;
+    trigger_rank: number | null;
+    trigger_band: string | null;
+    auto_execute_at: number | null;
+    spread_deferred: number | null;
 }
 
 function fromRow(r: Row): TradeProposal {
@@ -613,6 +673,10 @@ function fromRow(r: Row): TradeProposal {
         takeCounterfactual: (r.take_counterfactual === 'target-first' || r.take_counterfactual === 'stop-first' || r.take_counterfactual === 'neither')
             ? r.take_counterfactual : null,
         dailyAtrAtCreation: r.daily_atr ?? null,
+        triggerRank: r.trigger_rank ?? null,
+        triggerBand: r.trigger_band === '60-74' || r.trigger_band === '75+' ? r.trigger_band : null,
+        autoExecuteAt: r.auto_execute_at ?? null,
+        spreadDeferred: r.spread_deferred === 1,
     };
 }
 
@@ -647,6 +711,9 @@ export interface CreateProposalInput {
     rationale: string;
     source: string;
     expiresMinutes?: number;
+    /** REQ-TRIG-002: the compositeRank that fired the creating run (lane
+     *  context, never the model). Omitted/null off the trigger lane. */
+    triggerRank?: number | null;
     /** Market state at creation (entry-context.ts), computed server-side
      *  by the caller when the data is in hand. Instrumentation only —
      *  never gates; missing fields stay null. */
@@ -693,6 +760,19 @@ export async function createProposal(
                 `[risk-gate] REFUSED ${input.symbol.toUpperCase()}: one active thesis per symbol — ${existing.id} ` +
                 `(${existing.tradeClass}${existing.entryFillPrice !== null ? ', filled' : ', working'}) already owns it. ` +
                 `Cancel or close ${existing.id} first, or skip`,
+            );
+        }
+        // REQ-SCAN-008 (live-loop WP1): one DIRECTION per vehicle complex —
+        // a 3x sector ETF and its constituents are one information source,
+        // and working them both ways is a hedge nobody decided (2026-09-04:
+        // SOXL short into a semis rally). Same-direction pairs are allowed;
+        // the sector cap bounds them. Re-checked at accept (book may change).
+        const hit = oppositeDirectionConflict(input.symbol, input.direction, await listExposure());
+        if (hit) {
+            throw new Error(
+                `[risk-gate] REFUSED ${input.symbol.toUpperCase()}: one direction per complex — ${hit.rivalId} (${hit.rivalSymbol}, ` +
+                `${input.direction === 'long' ? 'short' : 'long'}) already works the '${hit.complex}' complex the other way. ` +
+                `Cancel or close ${hit.rivalId} first, or skip`,
             );
         }
     }
@@ -777,6 +857,13 @@ export async function createProposal(
     }
     if (input.regime) {
         database.query<void>(`UPDATE proposals SET regime = ? WHERE id = ?`).run(input.regime, id);
+    }
+    // REQ-TRIG-002/003: the firing rank and its band — what the lowered
+    // trigger bar admitted must stay measurable apart from what the old
+    // bar would have traded.
+    if (input.triggerRank != null && Number.isFinite(input.triggerRank)) {
+        database.query<void>(`UPDATE proposals SET trigger_rank = ?, trigger_band = ? WHERE id = ?`)
+            .run(input.triggerRank, triggerBand(input.triggerRank), id);
     }
     // WP-EXIT: persist the enforced take level — the accept-time re-check
     // reuses the STORED x (as an override) so the required target survives
@@ -1098,6 +1185,51 @@ export async function listExpiredUnfilledEntries(nowMs: number, graceMs: number)
            AND executed_at < ?
          ORDER BY executed_at ASC`,
     ).all(nowMs, nowMs - graceMs);
+    return rows.map(fromRow);
+}
+
+// ---------------------------------------------------------------------------
+// Live-loop WP1 seams: veto-window due time and deferred spread re-check
+// ---------------------------------------------------------------------------
+
+/** REQ-LIVE-002: stamp (or clear with null) the time the due-sweep may
+ *  auto-execute a still-open row. */
+export async function setAutoExecuteAt(id: string, atMs: number | null): Promise<void> {
+    const database = await getDb();
+    database.query<void>(`UPDATE proposals SET auto_execute_at = ?, updated_at = ? WHERE id = ?`)
+        .run(atMs, Date.now(), id.trim().toUpperCase());
+}
+
+/** REQ-LIVE-002: open rows whose veto window has elapsed and whose validity
+ *  has not — in creation order, so the sweep executes oldest first. A due
+ *  time past `expires_at` executes nothing (the expiry sweep owns it). */
+export async function listDueAutoExecutions(nowMs: number): Promise<TradeProposal[]> {
+    const database = await getDb();
+    const rows = database.query<Row>(
+        `SELECT * FROM proposals
+         WHERE status = 'open' AND auto_execute_at IS NOT NULL
+           AND auto_execute_at <= ? AND expires_at > ?
+         ORDER BY created_at ASC`,
+    ).all(nowMs, nowMs);
+    return rows.map(fromRow);
+}
+
+/** REQ-RISK-008: flag / clear the deferred pre-open spread check. */
+export async function markSpreadDeferred(id: string, deferred: boolean): Promise<void> {
+    const database = await getDb();
+    database.query<void>(`UPDATE proposals SET spread_deferred = ?, updated_at = ? WHERE id = ?`)
+        .run(deferred ? 1 : 0, Date.now(), id.trim().toUpperCase());
+}
+
+/** REQ-RISK-008: executed rows still carrying the deferred flag — the
+ *  09:31 ET re-check decides each one (cancel the unfilled entry when the
+ *  regular-session spread exceeds the cap; a filled entry is kept and the
+ *  flag simply clears). */
+export async function listSpreadDeferred(): Promise<TradeProposal[]> {
+    const database = await getDb();
+    const rows = database.query<Row>(
+        `SELECT * FROM proposals WHERE status = 'executed' AND spread_deferred = 1 ORDER BY executed_at ASC`,
+    ).all();
     return rows.map(fromRow);
 }
 

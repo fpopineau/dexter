@@ -81,3 +81,29 @@ describe('trade_proposals tool — argument coercion', () => {
         expect(parsed.data.days).toBe(7);
     });
 });
+
+describe('trigger rank stamp (REQ-TRIG-002 — from the run context, never the model)', () => {
+    test('a create inside a trigger-lane run carries the firing rank and band; outside a run both are null', async () => {
+        const { withAgentLane } = await import('@/agent/lane-context.js');
+        const tool = createTradeProposalsTool();
+        const args = {
+            action: 'create', symbol: 'TRGT', direction: 'long', entryType: 'LMT',
+            entry: '20.80', stop: '20.30', target: '22.05', quantity: '48', score: '66',
+            rationale: 'trigger-lane stamp test',
+        } as never;
+        const inLane = JSON.parse(String(await withAgentLane('trigger', () => tool.invoke(args), 'anthropic:claude-sonnet-5', { triggerRank: 66 }))) as
+            { data: { created?: { id: string; triggerRank: number | null; triggerBand: string | null; source: string }; error?: string } };
+        expect(inLane.data.error).toBeUndefined();
+        expect(inLane.data.created?.source).toBe('trigger');
+        expect(inLane.data.created?.triggerRank).toBe(66);
+        expect(inLane.data.created?.triggerBand).toBe('60-74');
+
+        const { closeProposal } = await import('@/services/trade-proposals.js');
+        // One thesis per symbol: retire the first row before the second create.
+        await closeProposal(inLane.data.created!.id, { exitReason: 'cancelled' });
+        const outside = JSON.parse(String(await tool.invoke({ ...(args as object), symbol: 'TRGU' } as never))) as
+            { data: { created?: { triggerRank: number | null; triggerBand: string | null } } };
+        expect(outside.data.created?.triggerRank).toBeNull();
+        expect(outside.data.created?.triggerBand).toBeNull();
+    });
+});
