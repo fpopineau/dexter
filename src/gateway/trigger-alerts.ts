@@ -159,7 +159,7 @@ async function evaluateAndDeliver(
             channel: 'whatsapp',
             // REQ-TRIG-002: the firing rank rides the run so the proposals tool
             // stamps it from the context (the model never self-reports it).
-            ...(declineCtx.triggerRank != null ? { triggerRank: declineCtx.triggerRank, triggerSymbol: symbol } : {}),
+            ...(declineCtx.triggerRank != null ? { triggerRank: declineCtx.triggerRank, triggerSymbol: symbol, triggerDirection: declineCtx.direction } : {}),
         });
     } catch (err) {
         // REQ-LLM-002: the spend cap refused the evaluation before it

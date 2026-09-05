@@ -8,7 +8,7 @@ const ctx: VariantContext = { rules: { ...DEFAULT_RULES, take_atr_mult: 1.5, tak
 function proposal(overrides: Partial<SimSource> = {}): SimSource {
     return {
         kind: 'proposal', id: 'P-0001', symbol: 'MU', direction: 'long', entryType: 'LMT', entry: 100, entryLimit: null,
-        stop: 97, target: 106, quantity: 10, tif: 'DAY', tradeClass: 'intraday', strategyId: 'intraday', createdAt: T0, expiresAt: T0 + 120 * 60_000,
+        stop: 97, target: 106, quantity: 10, tif: 'DAY', tradeClass: 'intraday', strategyId: 'intraday', createdAt: T0, expiresAt: T0 + 120 * 60_000, executedAt: null,
         takePct: 6, dailyAtr: 4, triggerBand: '60-74', lane: 'trigger', gate: null, score: 66,
         ...overrides,
     };
@@ -34,7 +34,10 @@ describe('variant registry v1 (REQ-SIM-004)', () => {
         expect(spec.flatAt).toBe(T0 + 3 * 3_600_000);
         expect(v.spec(proposal({ tif: 'GTC', tradeClass: 'swing' }), ctx)!.flatAt).toBe(T0 + 20 * 3_600_000); // review 2026-09-06: GTC twins flatten at the lane deadline
         // the entry may rest 30 min past the proposal's expiry (the sweeper's grace)
-        expect(spec.entryDeadline).toBe(T0 + 150 * 60_000);
+        // review 2026-09-06 second pass (finding 5): the entry dies at max(expiry, accepted + 30 min grace) — never accepted → expiry
+        expect(spec.entryDeadline).toBe(T0 + 120 * 60_000);
+        expect(v.spec(proposal({ executedAt: T0 + 110 * 60_000 }), ctx)!.entryDeadline).toBe(T0 + 140 * 60_000); // a late accept keeps its 30 min
+        expect(v.spec(proposal({ executedAt: T0 + 10 * 60_000 }), ctx)!.entryDeadline).toBe(T0 + 120 * 60_000); // an early accept dies at expiry
     });
 
     test('WP5 lanes: exit-fixed-3 targets +3% from entry; lane-overnight/lane-cup by strategy; class-swing keeps swing + legacy swing rows; an overnight GTC entry dies with its expiry', () => {
@@ -49,7 +52,8 @@ describe('variant registry v1 (REQ-SIM-004)', () => {
         expect(variantByName('class-swing')!.applies(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: null }))).toBe(true);
         expect(variantByName('lane-cup-and-handle')!.applies(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'cup-and-handle' }))).toBe(true);
         // entry deadline: an ordinary GTC swing may rest 3 days; the overnight lane dies at expiry + grace
-        expect(variantByName('lane-overnight')!.spec(ovn, ctx)!.entryDeadline).toBe(T0 + 55 * 60_000);
+        expect(variantByName('lane-overnight')!.spec(ovn, ctx)!.entryDeadline).toBe(T0 + 30 * 60_000); // max(expiry 25 min, creation + 30 min grace)
+        expect(variantByName('lane-overnight')!.spec({ ...ovn, executedAt: T0 + 20 * 60_000 }, ctx)!.entryDeadline).toBe(T0 + 50 * 60_000); // accepted at 20 → 50
         expect(variantByName('class-swing')!.spec(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'swing' }), ctx)!.entryDeadline).toBe(T0 + 3 * 86_400_000);
     });
 

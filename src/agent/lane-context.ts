@@ -29,27 +29,42 @@ interface AgentLaneContext {
      *  trigger rank belongs to THIS symbol only — a proposal on another
      *  name inside the same run must not inherit it. */
     triggerSymbol?: string;
+    /** The direction the trigger ranked (second pass, finding 6): a short
+     *  proposal on a long-ranked symbol inherits no rank. */
+    triggerDirection?: 'long' | 'short';
 }
 
 /** Extra attribution a caller may thread through the run. */
 export interface AgentLaneExtras {
     triggerRank?: number;
     triggerSymbol?: string;
+    triggerDirection?: 'long' | 'short';
 }
 
 const storage = new AsyncLocalStorage<AgentLaneContext>();
 
 /** Run `fn` with `lane` (and optionally the model id and trigger rank +
- *  symbol) visible to everything it awaits. */
+ *  symbol + direction) visible to everything it awaits. */
 export function withAgentLane<T>(lane: string, fn: () => Promise<T>, model?: string, extras?: AgentLaneExtras): Promise<T> {
     const rank = extras?.triggerRank;
     const sym = extras?.triggerSymbol?.trim().toUpperCase();
-    return storage.run({ lane, model, ...(Number.isFinite(rank) ? { triggerRank: rank } : {}), ...(sym ? { triggerSymbol: sym } : {}) }, fn);
+    const dir = extras?.triggerDirection;
+    return storage.run({
+        lane, model,
+        ...(Number.isFinite(rank) ? { triggerRank: rank } : {}),
+        ...(sym ? { triggerSymbol: sym } : {}),
+        ...(dir === 'long' || dir === 'short' ? { triggerDirection: dir } : {}),
+    }, fn);
 }
 
 /** The symbol whose trigger fired the run this call sits inside, or null. */
 export function currentTriggerSymbol(): string | null {
     return storage.getStore()?.triggerSymbol ?? null;
+}
+
+/** The direction the firing trigger ranked, or null. */
+export function currentTriggerDirection(): 'long' | 'short' | null {
+    return storage.getStore()?.triggerDirection ?? null;
 }
 
 /** The lane of the run this call sits inside, or null outside any run. */

@@ -184,16 +184,19 @@ export async function runOvernightBenchmarkOnce(deps: OvernightBenchDeps): Promi
 // Report (pure)
 // ---------------------------------------------------------------------------
 
-function stats(rows: CandidateRow[]): { n: number; meanR: number | null; sumR: number; w: number; l: number; f: number } {
-    const scored = rows.filter((r) => r.replayStatus === 'settled' && r.netR !== null);
-    const sumR = scored.reduce((s, r) => s + (r.netR ?? 0), 0);
+/** The comparison measure is GROSS R — size-invariant (second pass, finding 7);
+ *  net USD at the budget is informational. */
+function stats(rows: CandidateRow[]): { n: number; meanR: number | null; sumR: number; w: number; l: number; f: number; netUsd: number } {
+    const scored = rows.filter((r) => r.replayStatus === 'settled' && r.grossR !== null);
+    const sumR = scored.reduce((s, r) => s + (r.grossR ?? 0), 0);
     return {
         n: scored.length,
         meanR: scored.length ? sumR / scored.length : null,
         sumR,
-        w: scored.filter((r) => (r.netR ?? 0) > 0).length,
-        l: scored.filter((r) => (r.netR ?? 0) < 0).length,
-        f: scored.filter((r) => r.netR === 0).length,
+        w: scored.filter((r) => (r.grossR ?? 0) > 0).length,
+        l: scored.filter((r) => (r.grossR ?? 0) < 0).length,
+        f: scored.filter((r) => r.grossR === 0).length,
+        netUsd: scored.reduce((s, r) => s + (r.netUsd ?? 0), 0),
     };
 }
 
@@ -223,12 +226,12 @@ export function formatOvernightReport(day: string, rows: CandidateRow[], rules: 
     const notAdmitted = stats(eligible.filter((r) => r.disposition === 'not-admitted'));
     const unknown = eligible.filter((r) => r.replayStatus === 'unknown').length;
     const lines = [
-        `🌙 Overnight benchmark — universe captured ${day} 15:35 ET: ${eligible.length} eligible / ${rows.length} seen` +
+        `🌙 Overnight benchmark — universe of ${day} (pre-close snapshots, first sightings): ${eligible.length} eligible / ${rows.length} seen` +
         (ineligible.length ? ` (ineligible: ${tallyLine})` : ''),
-        `• universe (mechanical twin: MKT@close, take-x, stop at the gate's min R:R, flat 10:00 — eligible ≠ admissible): n ${universe.n} meanR ${fmtR(universe.meanR)} ΣR ${fmtR(universe.sumR)} W${universe.w}/L${universe.l}/F${universe.f}` +
+        `• universe (mechanical twin: MKT@close, take-x, stop at the gate's min R:R, flat 10:00 — eligible ≠ admissible; R = gross, per unit risk): n ${universe.n} meanR ${fmtR(universe.meanR)} ΣR ${fmtR(universe.sumR)} W${universe.w}/L${universe.l}/F${universe.f} · net $${universe.netUsd.toFixed(0)} at the budget` +
         ` · gap median ${fmtPct(median(gaps))}, adverse ≥${rules.overnight_gap_stress_pct}%: ${adverse}`,
         `• top-5 by rank: n ${top5.n} meanR ${fmtR(top5.meanR)}`,
-        `• judgment proposed ${proposed.length}${proposed.length ? ` (${proposed.map((r) => `${r.dispositionRef} ${r.symbol} ${fmtR(r.netR)}R`).join(', ')})` : ''}` +
+        `• judgment proposed ${proposed.length}${proposed.length ? ` (${proposed.map((r) => `${r.dispositionRef} ${r.symbol} ${fmtR(r.grossR)}R`).join(', ')})` : ''}` +
         ` · refused ${refused.length}${refused.length ? ` (${refused.map((r) => `${r.symbol}:${r.dispositionRef}`).join(', ')})` : ''}` +
         ` · not admitted n ${notAdmitted.n} meanR ${fmtR(notAdmitted.meanR)}`,
     ];

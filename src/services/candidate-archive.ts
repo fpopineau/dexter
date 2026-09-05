@@ -300,25 +300,40 @@ export function candidatesFromPatternScan(scan: PatternScanSnapshot, ctx: Captur
 }
 
 export interface DispositionLedger {
-    proposals: Array<{ id: string; symbol: string; strategyId: string | null; createdAt: number }>;
-    refusals: Array<{ symbol: string; createdAt: number; gate: string }>;
+    proposals: Array<{ id: string; symbol: string; direction: 'long' | 'short'; strategyId: string | null; createdAt: number; snapshotTs?: number | null }>;
+    refusals: Array<{ symbol: string; direction: 'long' | 'short'; createdAt: number; gate: string }>;
 }
 
-/** REQ-BENCH-003: what the system did with the symbol on the selection day.
- *  Overnight: a same-day overnight-lane proposal → proposed; a same-day
- *  refusal in the pre-close window (≥ 15:00 ET) → refused:<gate>; else
- *  not-admitted. Cup: a cup-lane proposal on the day or the next (the
- *  Pre-Market Brief proposes the morning after the scan). */
+/** The snapshot timestamp a row was first captured from (`…@<ts>` in `source`). */
+export function sourceSnapshotTs(row: Pick<CandidateRow, 'source' | 'capturedAt'>): number {
+    const m = /@(\d+)$/.exec(row.source);
+    return m ? Number(m[1]) : row.capturedAt;
+}
+
+/** REQ-BENCH-003 (amended 2026-09-06, second pass, finding 4): what the
+ *  system did with THIS candidate — same symbol, same lane, same DIRECTION,
+ *  and a decision taken against a universe that already contained the row
+ *  (the proposal's `snapshotTs`, else its creation, is not earlier than the
+ *  snapshot the row was first captured from). Overnight: such a proposal →
+ *  proposed; a same-day refusal in the pre-close window (≥ 15:00 ET) after
+ *  the capture → refused:<gate>; else not-admitted. Cup: a cup-lane
+ *  proposal on the day or the next (the Pre-Market Brief proposes the
+ *  morning after the scan). A late short is never attributed to the
+ *  morning's long candidate, and a proposal made before the row existed is
+ *  not a pick from this universe. */
 export function disposeCandidates(rows: CandidateRow[], ledger: DispositionLedger): CandidateRow[] {
     return rows.map((row) => {
         const sym = row.symbol.toUpperCase();
         const dayOf = (ms: number) => etDayIso(ms);
+        const rowTs = sourceSnapshotTs(row);
         const nextDayOk = (ms: number) => row.lane === 'cup-and-handle' && ms > row.capturedAt && ms - row.capturedAt < 2 * 86_400_000;
         const proposal = ledger.proposals.find((p) =>
-            p.symbol.toUpperCase() === sym && p.strategyId === row.lane && (dayOf(p.createdAt) === row.day || nextDayOk(p.createdAt)));
+            p.symbol.toUpperCase() === sym && p.strategyId === row.lane && p.direction === row.direction
+            && (dayOf(p.createdAt) === row.day || nextDayOk(p.createdAt))
+            && (p.snapshotTs ?? p.createdAt) >= rowTs);
         if (proposal) return { ...row, disposition: 'proposed', dispositionRef: proposal.id };
         const refusal = ledger.refusals.find((r) => {
-            if (r.symbol.toUpperCase() !== sym || dayOf(r.createdAt) !== row.day) return false;
+            if (r.symbol.toUpperCase() !== sym || r.direction !== row.direction || dayOf(r.createdAt) !== row.day || r.createdAt < rowTs) return false;
             if (row.lane !== 'overnight') return true;
             const et = new Date(new Date(r.createdAt).toLocaleString('en-US', { timeZone: ET }));
             return et.getHours() >= 15;

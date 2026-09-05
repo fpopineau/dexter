@@ -135,16 +135,31 @@ describe('disposeCandidates (REQ-BENCH-003)', () => {
     test('proposed by the lane that day / refused in the pre-close window / not admitted', () => {
         const out = disposeCandidates([row('MU'), row('AMD'), row('NVDA'), row('SOXL')], {
             proposals: [
-                { id: 'P-0101', symbol: 'MU', strategyId: 'overnight', createdAt: CAPTURED + 5 * 60_000 },
-                { id: 'P-0102', symbol: 'SOXL', strategyId: 'intraday', createdAt: CAPTURED - 3 * 3_600_000 }, // another lane: does not count
+                { id: 'P-0101', symbol: 'MU', direction: 'long', strategyId: 'overnight', createdAt: CAPTURED + 5 * 60_000 },
+                { id: 'P-0102', symbol: 'SOXL', direction: 'long', strategyId: 'intraday', createdAt: CAPTURED - 3 * 3_600_000 }, // another lane: does not count
             ],
             refusals: [
-                { symbol: 'AMD', createdAt: CAPTURED + 2 * 60_000, gate: 'noise-stop' },
-                { symbol: 'NVDA', createdAt: Date.UTC(2026, 8, 10, 14, 0, 0), gate: 'chase' }, // 10:00 ET — morning refusal, not the pre-close window
+                { symbol: 'AMD', direction: 'long', createdAt: CAPTURED + 2 * 60_000, gate: 'noise-stop' },
+                { symbol: 'NVDA', direction: 'long', createdAt: Date.UTC(2026, 8, 10, 14, 0, 0), gate: 'chase' }, // 10:00 ET — morning refusal, not the pre-close window
             ],
         });
         expect(out.map((r) => [r.symbol, r.disposition, r.dispositionRef])).toEqual([
             ['MU', 'proposed', 'P-0101'], ['AMD', 'refused', 'noise-stop'], ['NVDA', 'not-admitted', null], ['SOXL', 'not-admitted', null],
+        ]);
+    });
+
+    test('review 2026-09-06 second pass, finding 4: a late SHORT is not attributed to the long candidate; a proposal decided against an EARLIER snapshot than the row\'s first sighting is not a pick from this universe', () => {
+        const snapTs = CAPTURED - 5 * 60_000; // the row's source snapshot (see snapshot(): timestamp = CAPTURED − 5 min)
+        const out = disposeCandidates([row('MU'), row('AMD'), row('NVDA')], {
+            proposals: [
+                { id: 'P-S', symbol: 'MU', direction: 'short', strategyId: 'overnight', createdAt: CAPTURED + 10 * 60_000, snapshotTs: snapTs },          // wrong direction
+                { id: 'P-E', symbol: 'AMD', direction: 'long', strategyId: 'overnight', createdAt: CAPTURED + 60_000, snapshotTs: snapTs - 10 * 60_000 }, // earlier universe
+                { id: 'P-OK', symbol: 'NVDA', direction: 'long', strategyId: 'overnight', createdAt: CAPTURED + 60_000, snapshotTs: snapTs },           // same snapshot: attributable
+            ],
+            refusals: [{ symbol: 'MU', direction: 'short', createdAt: CAPTURED + 2 * 60_000, gate: 'noise-stop' }], // wrong direction too
+        });
+        expect(out.map((r) => [r.symbol, r.disposition, r.dispositionRef])).toEqual([
+            ['MU', 'not-admitted', null], ['AMD', 'not-admitted', null], ['NVDA', 'proposed', 'P-OK'],
         ]);
     });
 });

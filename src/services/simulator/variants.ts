@@ -51,6 +51,9 @@ export interface SimSource {
     createdAt: number;
     /** ET-frame ms; null for refusals (they use the default validity). */
     expiresAt: number | null;
+    /** ET-frame ms of the acceptance (the real sweep's grace runs from it);
+     *  null for refusals and never-accepted rows. */
+    executedAt: number | null;
     takePct: number | null;
     dailyAtr: number | null;
     triggerBand: '60-74' | '75+' | null;
@@ -65,12 +68,13 @@ export interface VariantContext {
     rules: RiskRules;
     /** ET-frame ms of the flat-by-close bar for the ET day containing `createdAt`. */
     flatAtFor: (createdAt: number) => number;
-    /** ET-frame ms of the LANE's exit deadline for a GTC row created at
-     *  `createdAt` (overnight: 10:00 ET next session; swing / cup: 15:50 ET
-     *  after the hold days), or null for lanes without one. Review
-     *  2026-09-06 (finding 4): EVERY GTC twin — incumbent included — honours
-     *  its lane's contract, so variants compare at constant contract. */
-    laneFlatAtFor: (strategyId: SimSource['strategyId'], tradeClass: SimSource['tradeClass'], createdAt: number) => number | null;
+    /** ET-frame ms of the LANE's exit deadline for a GTC row anchored at
+     *  `anchorFrame` — the creation in the variant spec (a lower bound), the
+     *  simulated FILL when the settle re-anchors it (overnight: 10:00 ET next
+     *  session; swing / cup: 15:50 ET after the hold days); null for lanes
+     *  without one. Review 2026-09-06 (finding 4): EVERY GTC twin —
+     *  incumbent included — honours its lane's contract. */
+    laneFlatAtFor: (strategyId: SimSource['strategyId'], tradeClass: SimSource['tradeClass'], anchorFrame: number) => number | null;
 }
 
 export interface VariantDef {
@@ -94,7 +98,11 @@ function entryDeadline(src: SimSource): number {
     // REQ-LANE-003: an overnight-lane entry dies with its (close-clamped)
     // expiry even though its bracket is GTC — the sweeper cancels it.
     if (src.tif === 'GTC' && src.strategyId !== 'overnight') return src.createdAt + GTC_ENTRY_HORIZON_MS;
-    return (src.expiresAt ?? src.createdAt + DEFAULT_VALIDITY_MS) + ENTRY_GRACE_MS;
+    // The real sweep (REQ-ENTRY-001) cancels once BOTH the expiry has passed
+    // and the acceptance grace has run: deadline = max(expiry, accepted +
+    // grace) — not expiry + grace (review 2026-09-06, second pass, finding 5).
+    const expiry = src.expiresAt ?? src.createdAt + DEFAULT_VALIDITY_MS;
+    return Math.max(expiry, (src.executedAt ?? src.createdAt) + ENTRY_GRACE_MS);
 }
 
 function baseSpec(src: SimSource, ctx: VariantContext, overrides: Partial<SimSpec> = {}): SimSpec {

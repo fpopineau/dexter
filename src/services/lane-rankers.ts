@@ -126,6 +126,8 @@ export interface LaneRankSources {
     triggerRank: number | null;
     /** The symbol that fired the run — the rank is attributed to it ALONE. */
     triggerSymbol: string | null;
+    /** The direction the trigger ranked — a proposal the other way inherits nothing. */
+    triggerDirection: 'long' | 'short' | null;
     snapshot: { opportunities: Array<{ symbol: string; direction: 'long' | 'short'; compositeRank: number }>; lanes?: SnapshotLanes } | null;
     patternScan: { candidates: Array<{ symbol: string; matches: Array<{ pattern: string; score: number }> }> } | null;
 }
@@ -147,6 +149,7 @@ export function laneRankFor(strategyId: StrategyId, symbol: string, direction: '
     switch (strategyId) {
         case 'intraday': {
             const trig = sources.triggerRank !== null && sources.triggerSymbol !== null && sources.triggerSymbol.toUpperCase() === sym
+                && sources.triggerDirection === direction
                 ? sources.triggerRank : null;
             const opp = sources.snapshot?.opportunities.find((o) => o.symbol.toUpperCase() === sym);
             const fromSnapshot = opp && opp.direction === direction ? opp.compositeRank : null;

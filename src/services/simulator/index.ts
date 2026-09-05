@@ -160,8 +160,8 @@ async function runOvernightBenchmarkSafely(today: string): Promise<void> {
             isHalfDay: isMarketHalfDay,
             ledgerSince: async (sinceMs) => ({
                 proposals: (await listAll(undefined, 1000)).filter((p) => p.createdAt >= sinceMs)
-                    .map((p) => ({ id: p.id, symbol: p.symbol, strategyId: p.strategyId, createdAt: p.createdAt })),
-                refusals: (await refusalsSince(sinceMs)).map((r) => ({ symbol: r.symbol, createdAt: r.createdAt, gate: r.gate })),
+                    .map((p) => ({ id: p.id, symbol: p.symbol, direction: p.direction, strategyId: p.strategyId, createdAt: p.createdAt, snapshotTs: p.snapshotTs })),
+                refusals: (await refusalsSince(sinceMs)).map((r) => ({ symbol: r.symbol, direction: r.direction, createdAt: r.createdAt, gate: r.gate })),
             }),
         });
         logger.info(`[overnight-benchmark] ${today}: ${JSON.stringify(counts)}`);

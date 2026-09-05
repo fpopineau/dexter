@@ -89,7 +89,7 @@ describe('runOvernightBenchmarkOnce (REQ-BENCH-004/005)', () => {
     test('a row pending past the horizon expires as unknown; dispositions are joined and reported', async () => {
         const rows = [row(), row({ id: 5, symbol: 'OLD', capturedAt: NOW - 6 * 86_400_000, day: '2026-09-05' })];
         const { d, patches } = deps(rows, { MU: bars(101, 102) }, async () => ({
-            proposals: [{ id: 'P-0200', symbol: 'MU', strategyId: 'overnight', createdAt: CAPTURED + 60_000 }],
+            proposals: [{ id: 'P-0200', symbol: 'MU', direction: 'long', strategyId: 'overnight', createdAt: CAPTURED + 60_000 }],
             refusals: [],
         }));
         const { counts, reports } = await runOvernightBenchmarkOnce(d);
@@ -110,16 +110,18 @@ describe('runOvernightBenchmarkOnce (REQ-BENCH-004/005)', () => {
 
 describe('formatOvernightReport (REQ-BENCH-005 — the common perimeter)', () => {
     test('tallies ineligibility, universe / top-5 / judgment / not-admitted, gap median and adverse gaps', () => {
+        // R in the report = GROSS R (size-invariant); net USD is shown for information
         const rows: CandidateRow[] = [
-            row({ id: 1, symbol: 'A', rank: 90, replayStatus: 'settled', netR: 1.0, gapPct: 1.5, disposition: 'proposed', dispositionRef: 'P-1' }),
-            row({ id: 2, symbol: 'B', rank: 80, replayStatus: 'settled', netR: -1.0, gapPct: -22, disposition: 'refused', dispositionRef: 'noise-stop' }),
-            row({ id: 3, symbol: 'C', rank: 70, replayStatus: 'settled', netR: 0.5, gapPct: 0.5, disposition: 'not-admitted' }),
+            row({ id: 1, symbol: 'A', rank: 90, replayStatus: 'settled', grossR: 1.0, netR: 0.9, netUsd: 50, gapPct: 1.5, disposition: 'proposed', dispositionRef: 'P-1' }),
+            row({ id: 2, symbol: 'B', rank: 80, replayStatus: 'settled', grossR: -1.0, netR: -1.1, netUsd: -60, gapPct: -22, disposition: 'refused', dispositionRef: 'noise-stop' }),
+            row({ id: 3, symbol: 'C', rank: 70, replayStatus: 'settled', grossR: 0.5, netR: 0.4, netUsd: 20, gapPct: 0.5, disposition: 'not-admitted' }),
             row({ id: 4, symbol: 'D', rank: 60, eligible: false, reasons: ['counter-move'], replayStatus: 'skipped' }),
             row({ id: 5, symbol: 'E', rank: 55, eligible: false, reasons: ['counter-move', 'earnings-within-2d'], replayStatus: 'skipped' }),
         ];
         const s = formatOvernightReport('2026-09-10', rows, rules);
         expect(s).toContain('3 eligible / 5 seen (ineligible: counter-move 2, earnings-within-2d 1)');
-        expect(s).toContain('n 3 meanR +0.17 ΣR +0.50 W2/L1/F0');
+        expect(s).toContain('n 3 meanR +0.17 ΣR +0.50 W2/L1/F0 · net $10 at the budget');
+        expect(s).toContain('(pre-close snapshots, first sightings)');
         expect(s).toContain('gap median +0.5%, adverse ≥20%: 1');
         expect(s).toContain('top-5 by rank: n 3 meanR +0.17');
         expect(s).toContain('judgment proposed 1 (P-1 A +1.00R) · refused 1 (B:noise-stop) · not admitted n 1 meanR +0.50');

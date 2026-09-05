@@ -214,3 +214,13 @@ describe('large-cap lane helpers (REQ-SCAN-006)', () => {
         }
     });
 });
+
+describe('planForNow — the pre-close phase is the last hour before the CLOSE (review 2026-09-06, second pass)', () => {
+    test('full day: 12:30 ET is midday, 15:05 ET is pre-close; half-day 2026-11-27: 12:30 ET is already pre-close', async () => {
+        const { planForNow } = await import('./opportunity-engine.js');
+        expect(planForNow(new Date(Date.UTC(2026, 8, 10, 16, 30, 0))).phase).toBe('midday');     // Thu 12:30 ET (EDT)
+        expect(planForNow(new Date(Date.UTC(2026, 8, 10, 19, 5, 0))).phase).toBe('pre-close');   // Thu 15:05 ET
+        expect(planForNow(new Date(Date.UTC(2026, 10, 27, 17, 30, 0))).phase).toBe('pre-close'); // Fri 12:30 ET (EST), close 13:00
+        expect(planForNow(new Date(Date.UTC(2026, 10, 27, 16, 30, 0))).phase).toBe('midday');    // Fri 11:30 ET
+    });
+});

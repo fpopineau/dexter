@@ -64,6 +64,7 @@ export function sourceFromProposal(p: TradeProposal): SimSource | null {
         strategyId: p.strategyId,
         createdAt: etFrameMs(p.createdAt),
         expiresAt: etFrameMs(p.expiresAt),
+        executedAt: p.executedAt === null ? null : etFrameMs(p.executedAt),
         takePct: p.takePct,
         dailyAtr: p.dailyAtrAtCreation,
         triggerBand: p.triggerBand,
@@ -100,6 +101,7 @@ export function sourceFromRefusal(r: RefusalRecord): SimSource | null {
         strategyId: null,
         createdAt: etFrameMs(r.createdAt),
         expiresAt: null,
+        executedAt: null,
         takePct: null,
         dailyAtr: null,
         triggerBand: triggerBand(r.triggerRank),
@@ -162,7 +164,10 @@ async function settleOne(
     if (spec.flatAt !== null && src.tif === 'DAY' && spec.flatAt > nowFrame) { counts.skipped++; return; }
     counts.evaluated++;
 
-    const horizonEnd = spec.flatAt !== null ? Math.min(spec.flatAt, nowFrame) : nowFrame;
+    // DAY rows replay to their flat bar; GTC rows to tonight — their real
+    // deadline is anchored on the FILL (unknown until simulated), so the
+    // creation-anchored flatAt is only a lower bound (second pass, finding 5).
+    const horizonEnd = src.tif === 'DAY' && spec.flatAt !== null ? Math.min(spec.flatAt, nowFrame) : nowFrame;
     const halfDay = deps.isHalfDay(etIsoOfFrame(src.createdAt));
     // WP7 (REQ-SIM-003 amended): regular-session bars for EVERY row — the
     // brackets never set outsideRth, so a GTC stop cannot fill after hours;
@@ -200,7 +205,19 @@ async function settleOne(
         await deps.store.upsert({ ...base, note: 'no covered bar source (stream/archive/IBKR) for the window' });
         return;
     }
-    const r = simulateBracket(loaded.bars, spec);
+    // Fill-anchored lane deadline for GTC rows (second pass, finding 5): a
+    // probe pass finds the fill, the lane deadline is recomputed from it (the
+    // real row stamps its deadline at first fill), then the row is replayed
+    // with that flatAt. Unfilled → the probe result stands.
+    let finalSpec = spec;
+    if (src.tif === 'GTC' && spec.flatAt !== null) {
+        const probe = simulateBracket(loaded.bars, { ...spec, flatAt: null });
+        if (probe.fillAt !== null) {
+            const anchored = ctx.laneFlatAtFor(src.strategyId, src.tradeClass, probe.fillAt);
+            if (anchored !== null) finalSpec = { ...spec, flatAt: anchored };
+        }
+    }
+    const r = simulateBracket(loaded.bars, finalSpec);
     const row: SimTrade = { ...base, fillAt: r.fillAt, fillPrice: r.fillPrice, exitAt: r.exitAt, exitPrice: r.exitPrice, outcome: r.outcome, note: r.note ?? null };
     if (r.outcome === 'open') {
         if (base.horizonDays * 1 >= GTC_HORIZON_DAYS || src.createdAt < nowFrame - GTC_HORIZON_DAYS * DAY_MS) {
@@ -265,12 +282,12 @@ export async function runSettleOnce(depsIn: SettleDeps): Promise<SettleRunCounts
         // Review 2026-09-06 (finding 4): EVERY GTC twin exits at its lane's
         // deadline like the sweeper closes the real row — overnight at 10:00
         // ET next session, swing / cup after their hold days. A legacy row
-        // (no lane) takes its class's lane. The deadline is computed from
-        // creation (the fill is unknown until simulated): equal to or
-        // earlier than the real row's, never later.
-        laneFlatAtFor: (strategyId, tradeClass, createdAt) => {
+        // (no lane) takes its class's lane. The variant anchors it on the
+        // creation (a lower bound); settleOne re-anchors it on the simulated
+        // FILL like the real row (second pass, finding 5).
+        laneFlatAtFor: (strategyId, tradeClass, anchorFrame) => {
             const lane = strategyId ?? (tradeClass === 'swing' ? 'swing' : tradeClass === 'earnings-bet' ? 'earnings-bet' : 'intraday');
-            const deadline = laneExitDeadline(lane, frameToEpochMs(createdAt), deps.rules);
+            const deadline = laneExitDeadline(lane, frameToEpochMs(anchorFrame), deps.rules);
             return deadline === null ? null : etFrameMs(deadline);
         },
     };
@@ -300,7 +317,7 @@ export async function runSettleOnce(depsIn: SettleDeps): Promise<SettleRunCounts
         sources.push({
             kind: o.sourceKind, id: o.sourceId, symbol: o.symbol, direction: o.direction, entryType: o.entryType, entry: o.entry,
             entryLimit: o.entryLimit, stop: o.stop, target: o.target ?? o.stop, quantity: o.quantity, tif: o.tif, tradeClass: o.tradeClass, strategyId,
-            createdAt: etFrameMs(o.createdAt), expiresAt: null, takePct: null, dailyAtr: null, triggerBand: null, lane: 'reopened', gate: null, score: null,
+            createdAt: etFrameMs(o.createdAt), expiresAt: null, executedAt: null, takePct: null, dailyAtr: null, triggerBand: null, lane: 'reopened', gate: null, score: null,
         });
     }
     counts.sources = sources.length;

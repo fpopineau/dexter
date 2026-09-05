@@ -45,8 +45,8 @@ Session-aware loop (US Eastern, holidays/half-days handled by
 |---|---|---|---|
 | pre-open | 08:00–09:30 | 5 min | HIGH_OPEN_GAP, TOP_OPEN_PERC_GAIN, TOP_OPEN_PERC_LOSE (short), MOST_ACTIVE |
 | open-drive | 09:30–10:30 | 2 min | TOP_PERC_GAIN, HOT_BY_VOLUME, TOP_PERC_LOSE (short), TOP_TRADE_RATE |
-| midday | 10:30–15:00 | 10 min | TOP_PERC_GAIN, MOST_ACTIVE, TOP_PERC_LOSE (short) |
-| pre-close | 15:00–16:00 | 5 min | TOP_PERC_GAIN, MOST_ACTIVE, HOT_BY_VOLUME |
+| midday | 10:30 → close − 60 min | 10 min | TOP_PERC_GAIN, MOST_ACTIVE, TOP_PERC_LOSE (short) |
+| pre-close | last hour before the close (15:00–16:00; 12:00–13:00 on a half-day) | 5 min | TOP_PERC_GAIN, MOST_ACTIVE, HOT_BY_VOLUME |
 | idle | otherwise | sleeps | — |
 
 Each cycle: parallel scans (per-code 5-min cache) → dedupe (multi-scanner

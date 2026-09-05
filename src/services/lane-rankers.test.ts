@@ -50,21 +50,25 @@ describe('rankOvernight + buildSnapshotLanes (REQ-DISC-002)', () => {
 describe('laneRankFor (REQ-DISC-003 — server-side provenance, same symbol and direction only)', () => {
     const snapshot = { opportunities: [{ symbol: 'MU', direction: 'long' as const, compositeRank: 78 }], lanes: buildSnapshotLanes([opp()]) };
     const patternScan = { candidates: [{ symbol: 'CUP1', matches: [{ pattern: 'flat-base', score: 80 }, { pattern: 'cup-and-handle', score: 72 }] }] };
-    const none = { triggerRank: null, triggerSymbol: null };
+    const none = { triggerRank: null, triggerSymbol: null, triggerDirection: null };
     test('intraday: the trigger rank for the trigger symbol, else the composite; overnight: the lane score; cup: the detector score; swing/bet: none', () => {
-        expect(laneRankFor('intraday', 'MU', 'long', { triggerRank: 66, triggerSymbol: 'MU', snapshot, patternScan })).toEqual({ laneRank: 66, rankerVersion: 'composite-v1' });
+        expect(laneRankFor('intraday', 'MU', 'long', { triggerRank: 66, triggerSymbol: 'MU', triggerDirection: 'long', snapshot, patternScan })).toEqual({ laneRank: 66, rankerVersion: 'composite-v1' });
         expect(laneRankFor('intraday', 'mu', 'long', { ...none, snapshot, patternScan })).toEqual({ laneRank: 78, rankerVersion: 'composite-v1' });
         expect(laneRankFor('overnight', 'MU', 'long', { ...none, snapshot, patternScan })).toEqual({ laneRank: 70, rankerVersion: 'eod-continuation-v1' });
         expect(laneRankFor('cup-and-handle', 'CUP1', 'long', { ...none, snapshot, patternScan })).toEqual({ laneRank: 72, rankerVersion: 'detector-v1' });
-        expect(laneRankFor('swing', 'MU', 'long', { triggerRank: 66, triggerSymbol: 'MU', snapshot, patternScan })).toEqual({ laneRank: null, rankerVersion: null });
+        expect(laneRankFor('swing', 'MU', 'long', { triggerRank: 66, triggerSymbol: 'MU', triggerDirection: 'long', snapshot, patternScan })).toEqual({ laneRank: null, rankerVersion: null });
         expect(laneRankFor('earnings-bet', 'MU', 'long', { ...none, snapshot, patternScan })).toEqual({ laneRank: null, rankerVersion: null });
     });
 
     test('review 2026-09-06 finding 10: another symbol in the trigger run does NOT inherit the trigger rank; a short on a long-ranked symbol gets no rank', () => {
         // MSFT proposed inside the MU trigger run (rank 95): MSFT takes its own composite (absent → null), never 95
-        expect(laneRankFor('intraday', 'MSFT', 'long', { triggerRank: 95, triggerSymbol: 'MU', snapshot, patternScan })).toEqual({ laneRank: null, rankerVersion: 'composite-v1' });
+        expect(laneRankFor('intraday', 'MSFT', 'long', { triggerRank: 95, triggerSymbol: 'MU', triggerDirection: 'long', snapshot, patternScan })).toEqual({ laneRank: null, rankerVersion: 'composite-v1' });
         // a trigger rank without a symbol cannot be attributed
-        expect(laneRankFor('intraday', 'MU', 'long', { triggerRank: 95, triggerSymbol: null, snapshot, patternScan })).toEqual({ laneRank: 78, rankerVersion: 'composite-v1' });
+        expect(laneRankFor('intraday', 'MU', 'long', { triggerRank: 95, triggerSymbol: null, triggerDirection: 'long', snapshot, patternScan })).toEqual({ laneRank: 78, rankerVersion: 'composite-v1' });
+        // second pass, finding 6: a SHORT proposal on the symbol whose LONG trigger fired (rank 95) inherits nothing — not the trigger rank, not the long composite
+        expect(laneRankFor('intraday', 'MU', 'short', { triggerRank: 95, triggerSymbol: 'MU', triggerDirection: 'long', snapshot, patternScan })).toEqual({ laneRank: null, rankerVersion: 'composite-v1' });
+        // a trigger without a recorded direction cannot be attributed either
+        expect(laneRankFor('intraday', 'MU', 'long', { triggerRank: 95, triggerSymbol: 'MU', triggerDirection: null, snapshot, patternScan })).toEqual({ laneRank: 78, rankerVersion: 'composite-v1' });
         // direction: the snapshot ranked MU long; a short proposal takes no rank from it
         expect(laneRankFor('intraday', 'MU', 'short', { ...none, snapshot, patternScan })).toEqual({ laneRank: null, rankerVersion: 'composite-v1' });
         expect(laneRankFor('overnight', 'MU', 'short', { ...none, snapshot, patternScan })).toEqual({ laneRank: null, rankerVersion: 'eod-continuation-v1' });

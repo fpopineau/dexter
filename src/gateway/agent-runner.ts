@@ -80,6 +80,8 @@ export type AgentRunRequest = {
   /** The symbol that fired a trigger-lane run — the rank is attributed to
    *  proposals on this symbol only (review 2026-09-06, finding 10). */
   triggerSymbol?: string;
+  /** The direction the trigger ranked (the rank is attributed to that direction only). */
+  triggerDirection?: 'long' | 'short';
 };
 
 export async function runAgentForMessage(req: AgentRunRequest): Promise<string> {
@@ -96,7 +98,11 @@ export async function runAgentForMessage(req: AgentRunRequest): Promise<string> 
 
   const run = () => withAgentLane(lane, runInner, `${req.modelProvider}:${req.model}`,
     req.triggerRank !== undefined || req.triggerSymbol !== undefined
-      ? { ...(req.triggerRank !== undefined ? { triggerRank: req.triggerRank } : {}), ...(req.triggerSymbol !== undefined ? { triggerSymbol: req.triggerSymbol } : {}) }
+      ? {
+          ...(req.triggerRank !== undefined ? { triggerRank: req.triggerRank } : {}),
+          ...(req.triggerSymbol !== undefined ? { triggerSymbol: req.triggerSymbol } : {}),
+          ...(req.triggerDirection !== undefined ? { triggerDirection: req.triggerDirection } : {}),
+        }
       : undefined);
   const runInner = async () => {
     if (session) {

@@ -3738,3 +3738,49 @@ older text stands as history.
 | 14 | `pattern-detectors.test.ts` (pivot fixed before the last bar; confirmed / poke-and-fail / ready) |
 
 Harness at landing: `bun test` 1112 pass (102 files), `tsc --noEmit` clean, Jest 1093 pass under Node; `scripts/validate-lane-ranker.ts` smoke-runs read-only (UNPINNED without a split).
+
+## Review 2026-09-06, second pass (commit `ba4d8dd`) — response
+
+Seven further findings; each verified against the code and each holds. All
+seven are fixed here.
+
+| # | Finding | Verdict | Action |
+|---|---|---|---|
+| 1 | A close reported `filled` with `flat: false` (or unknown) was stamped closed | VALID (P1) | only `flat === true` confirms a close; `filled` without a verified flat is an incident (retry / operator) |
+| 2 | A partial positions book read an absent symbol as flat | VALID (P1) | the sweeper uses `requestPositions` and its `complete` flag; with a partial book an absent symbol is `unverifiable` — no stamp, no order, retried next tick; a symbol present in the partial book is still closed |
+| 3 | The engine's pre-close phase started at a fixed 15:00, so half-days (13:00 close) had no pre-close snapshots and no capture | VALID (P1) | `planForNow`: pre-close = the last hour before the session close (12:00–13:00 on a half-day); midday ends an hour before the close |
+| 4 | The disposition join ignored direction and snapshot order | VALID (P1) | attribution requires the same symbol, lane AND direction, and a decision taken against a universe that already contained the row (proposal `snapshotTs`, else creation, ≥ the row's source snapshot); refusals likewise (REQ-BENCH-003 amended) |
+| 5 | Twin deadlines anchored on creation, not the fill; the simulated entry expiry added 30 min to `expiresAt` while the real sweep runs the grace from acceptance | VALID (P2) | the settle probes the fill and re-anchors the lane deadline on it (GTC rows replay to tonight); `SimSource.executedAt` and entry deadline = max(expiry, accepted + grace) (REQ-SIM-004 amended) |
+| 6 | The trigger rank was attributable to the opposite direction | VALID (P2) | the trigger context carries `triggerDirection`; the rank is attributed only when symbol AND direction match (REQ-DISC-003 amended) |
+| 7 | The overnight report compared net R and printed a fixed 15:35 capture | VALID (P2) | the report's R is gross R (size-invariant) with net USD at the budget as information; the header names the pre-close snapshots / first sightings (REQ-BENCH-005 amended) |
+
+### Amended requirements
+
+- REQ-LANE-003 (amended): a deadline close is confirmed only by
+  `closePosition`'s `flat === true`; a symbol absent from an INCOMPLETE
+  positions snapshot is neither flat nor held and the row stays due.
+- REQ-SCAN (engine phases, precision): the pre-close phase is the last 60
+  minutes before the session close, half-day aware; the overnight capture
+  and the lane window therefore exist on half-days. (The Pre-Close Review
+  cron itself is fixed at 15:30 ET and does not run on a half-day — the
+  operator's schedule, unchanged here.)
+- REQ-BENCH-003 (amended): attribution = same symbol + lane + direction +
+  a decision universe not earlier than the row's source snapshot.
+- REQ-BENCH-005 (amended): the report's R is gross R; net USD at
+  min(rung, `overnight_risk_pct`) is informational.
+- REQ-SIM-004 (amended): GTC twins re-anchor the lane deadline on the
+  simulated fill; the entry deadline is max(expiry, accepted + grace).
+- REQ-DISC-003 (amended): the trigger rank requires the trigger's symbol
+  AND direction.
+
+| Finding | Test |
+|---|---|
+| 1 | `lane-deadline-sweeper.test.ts` (filled + not flat / flat unknown → incident, no close mark) |
+| 2 | `lane-deadline-sweeper.test.ts` (partial book: absent symbol unverifiable, present symbol closed) |
+| 3 | `opportunity-engine.test.ts` (`planForNow`: 12:30 ET midday on a full day, pre-close on 2026-11-27) |
+| 4 | `candidate-archive.test.ts` (late short not attributed; earlier-universe proposal not attributed; same snapshot attributed) |
+| 5 | `simulator/variants.test.ts` (entry deadline = max(expiry, accepted + grace), early/late accepts); `settle.test.ts` (GTC replay unchanged) |
+| 6 | `lane-rankers.test.ts` (short on the long trigger's symbol → no rank; unrecorded direction → composite fallback) |
+| 7 | `overnight-benchmark.test.ts` (report on gross R with net USD; header) |
+
+Harness at landing: `bun test` 1116 pass (102 files), `tsc --noEmit` clean, Jest 1097 pass under Node.

@@ -20,6 +20,9 @@
  * A double close is bounded, not assumed away: every attempt re-reads the
  * broker positions first, and a market close still unfilled five minutes
  * later during the regular session is itself the incident the alert names.
+ * Only a VERIFIED flat (closePosition's `flat === true`) confirms a close;
+ * a symbol absent from a PARTIAL positions book is neither flat nor held
+ * and the row simply waits for the next tick.
  * When the attempts are exhausted the alert says so and hands the row to
  * the operator ('kill SYMBOL'); a deadline is never converted into a longer
  * hold.
@@ -43,11 +46,19 @@ export interface DeadlineCloseOutcome {
     flat?: boolean | null;
 }
 
+export interface PositionsView {
+    positions: Array<{ symbol: string; quantity: number }>;
+    /** false = the broker's positionEnd never arrived — a PARTIAL book. A
+     *  symbol absent from a partial book is NOT known flat (review
+     *  2026-09-06 second pass, finding 2). */
+    complete: boolean;
+}
+
 export interface DeadlineSweepDeps {
     now: number;
     /** Due rows: deadline passed, not confirmed closed, cooldown elapsed, attempts left. */
     listDue: (nowMs: number, cooldownMs: number, maxAttempts: number) => Promise<TradeProposal[]>;
-    positions: () => Promise<Array<{ symbol: string; quantity: number }>>;
+    positions: () => Promise<PositionsView>;
     close: (symbol: string, reason: string) => Promise<DeadlineCloseOutcome>;
     /** Record an attempt (before the order). */
     markAttempt: (id: string, at: number, note: string) => Promise<void>;
@@ -60,6 +71,9 @@ export interface DeadlineSweepResult {
     due: number;
     closed: number;
     alreadyFlat: number;
+    /** Rows left untouched this tick because the broker book was partial and
+     *  the symbol was not in it — neither flat nor held is known. */
+    unverifiable: number;
     /** Attempts that did not confirm flat (retried after the cooldown or handed over). */
     incidents: string[];
 }
@@ -79,13 +93,20 @@ export function selectDueDeadlines<T extends {
 
 export async function sweepDeadlinesOnce(deps: DeadlineSweepDeps): Promise<DeadlineSweepResult> {
     const due = await deps.listDue(deps.now, DEADLINE_RETRY_COOLDOWN_MS, DEADLINE_MAX_ATTEMPTS);
-    const result: DeadlineSweepResult = { due: due.length, closed: 0, alreadyFlat: 0, incidents: [] };
+    const result: DeadlineSweepResult = { due: due.length, closed: 0, alreadyFlat: 0, unverifiable: 0, incidents: [] };
     if (due.length === 0) return result;
-    const positions = await deps.positions();
+    const book = await deps.positions();
     for (const p of due) {
         const label = `${p.id} ${p.symbol} (${p.strategyId ?? p.tradeClass}, deadline ${new Date(p.exitDeadline ?? 0).toISOString()})`;
-        const pos = positions.find((x) => x.symbol.toUpperCase() === p.symbol.toUpperCase() && x.quantity !== 0);
+        const pos = book.positions.find((x) => x.symbol.toUpperCase() === p.symbol.toUpperCase() && x.quantity !== 0);
         if (!pos) {
+            if (!book.complete) {
+                // A partial book proves nothing about an absent symbol: leave
+                // the row due for the next tick (no stamp, no order).
+                result.unverifiable++;
+                logger.warn(`[lane-deadline] ${label}: positions snapshot incomplete and the symbol is absent — not marked, retried next tick`);
+                continue;
+            }
             await deps.markClosed(p.id, deps.now, 'lane deadline reached with no open position — the bracket exit owns the close');
             result.alreadyFlat++;
             logger.info(`[lane-deadline] ${label}: already flat — stamped`);
@@ -101,7 +122,11 @@ export async function sweepDeadlinesOnce(deps: DeadlineSweepDeps): Promise<Deadl
         } catch (err) {
             outcome = { ok: false, message: err instanceof Error ? err.message : String(err) };
         }
-        if (outcome.ok && (outcome.flat === true || outcome.state === 'filled')) {
+        // Only a VERIFIED flat position closes the row (review 2026-09-06
+        // second pass, finding 1): closePosition reports the order state and
+        // the residual position separately — 'filled' with flat false/null is
+        // an incident, not a close.
+        if (outcome.ok && outcome.flat === true) {
             await deps.markClosed(p.id, deps.now, `lane deadline close confirmed flat — ${outcome.message}`);
             result.closed++;
             logger.info(`[lane-deadline] ${label}: closed — ${outcome.message}`);
@@ -128,15 +153,20 @@ export function startLaneDeadlineSweeper(): void {
         if (getMarketSession().session !== MarketSession.REGULAR) return;
         inFlight = true;
         (async () => {
-            const [{ listDeadlineDue, markDeadlineAttempt, markDeadlineClosed }, { closePosition, fetchPositions }, { getIBApi }] = await Promise.all([
+            const [{ listDeadlineDue, markDeadlineAttempt, markDeadlineClosed }, { closePosition }, { requestPositions }, { getIBApi }] = await Promise.all([
                 import('./trade-proposals.js'),
                 import('./position-actions.js'),
+                import('@/tools/ibkr/positions.js'),
                 import('@/tools/ibkr/connection.js'),
             ]);
             const r = await sweepDeadlinesOnce({
                 now: Date.now(),
                 listDue: listDeadlineDue,
-                positions: async () => (await fetchPositions(await getIBApi())).map((p) => ({ symbol: p.symbol, quantity: p.quantity })),
+                // The COMPLETE flag matters: a partial book must not read as flat.
+                positions: async () => {
+                    const snap = await requestPositions(await getIBApi());
+                    return { positions: snap.positions.map((p) => ({ symbol: p.symbol, quantity: p.quantity })), complete: snap.complete };
+                },
                 close: (symbol, reason) => closePosition(symbol, reason),
                 markAttempt: markDeadlineAttempt,
                 markClosed: markDeadlineClosed,

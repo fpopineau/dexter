@@ -378,6 +378,11 @@ export function planForNow(date?: Date): PhasePlan {
     }
 
     if (info.session === MarketSession.REGULAR) {
+        // Review 2026-09-06 (second pass, finding 3): the pre-close phase is
+        // the LAST HOUR before the session close — 12:00 on a half-day, not a
+        // fixed 15:00 — so the overnight window and the candidate capture
+        // exist on half-days too.
+        const closeMin = info.isHalfDay ? 13 * 60 : 16 * 60;
         if (mins < 10 * 60 + 30) {
             return {
                 phase: 'open-drive',
@@ -390,7 +395,7 @@ export function planForNow(date?: Date): PhasePlan {
                 ],
             };
         }
-        if (mins < 15 * 60) {
+        if (mins < closeMin - 60) {
             return {
                 phase: 'midday',
                 cadenceMs: 10 * 60_000,

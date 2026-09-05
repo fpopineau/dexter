@@ -26,7 +26,7 @@ import {
     listProposals,
 } from '@/services/trade-proposals.js';
 import { rejectProposal } from '@/services/proposal-executor.js';
-import { currentAgentLane, currentAgentModel, currentTriggerRank, currentTriggerSymbol } from '@/agent/lane-context.js';
+import { currentAgentLane, currentAgentModel, currentTriggerDirection, currentTriggerRank, currentTriggerSymbol } from '@/agent/lane-context.js';
 import { fetchDailyRiskContext } from '../ibkr/daily-atr.js';
 import { formatToolResult } from '../types.js';
 import { logger } from '@/utils';
@@ -224,6 +224,7 @@ export function createTradeProposalsTool() {
                         const provenance = laneRankFor(lane.strategyId, input.symbol, input.direction, {
                             triggerRank: currentTriggerRank(),
                             triggerSymbol: currentTriggerSymbol(),
+                            triggerDirection: currentTriggerDirection(),
                             snapshot: snapshotNow,
                             patternScan,
                         });

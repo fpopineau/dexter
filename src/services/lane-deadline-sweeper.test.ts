@@ -44,12 +44,12 @@ describe('sweepDeadlinesOnce (REQ-LANE-003 — attempt before the order, closed 
         const r = await sweepDeadlinesOnce({
             now: T0,
             listDue: async () => [row(), row({ id: 'P-FLAT', symbol: 'AMD' })],
-            positions: async () => [{ symbol: 'MU', quantity: 4 }],
+            positions: async () => ({ positions: [{ symbol: 'MU', quantity: 4 }], complete: true }),
             close: async (symbol, reason) => { closes.push(`${symbol}|${reason}`); return { ok: true, message: 'Closed.', state: 'filled', flat: true }; },
             markAttempt: async (id, _at, note) => { attempts.push(`${id}:${note}`); },
             markClosed: async (id, _at, note) => { closedMarks.push(`${id}:${note.split(' ').slice(0, 4).join(' ')}`); },
         });
-        expect(r).toMatchObject({ due: 2, closed: 1, alreadyFlat: 1, incidents: [] });
+        expect(r).toMatchObject({ due: 2, closed: 1, alreadyFlat: 1, unverifiable: 0, incidents: [] });
         expect(closes).toEqual(['MU|lane deadline (overnight)']);
         expect(attempts).toEqual(['P-OVN1:lane deadline close attempt 1/3 (overnight)']);
         expect(closedMarks).toEqual(['P-OVN1:lane deadline close confirmed', 'P-FLAT:lane deadline reached with']);
@@ -62,7 +62,7 @@ describe('sweepDeadlinesOnce (REQ-LANE-003 — attempt before the order, closed 
         const r = await sweepDeadlinesOnce({
             now: T0,
             listDue: async () => [row(), row({ id: 'P-THRW', symbol: 'NVDA', deadlineAttempts: DEADLINE_MAX_ATTEMPTS - 1, deadlineAttemptedAt: T0 - 3_600_000 })],
-            positions: async () => [{ symbol: 'MU', quantity: 4 }, { symbol: 'NVDA', quantity: 2 }],
+            positions: async () => ({ positions: [{ symbol: 'MU', quantity: 4 }, { symbol: 'NVDA', quantity: 2 }], complete: true }),
             close: async (symbol) => { if (symbol === 'NVDA') throw new Error('IBKR timeout'); return { ok: false, message: 'close order working, not filled' }; },
             markAttempt: async (id) => { attempts.push(id); },
             markClosed: async (id) => { closedMarks.push(id); },
@@ -79,11 +79,47 @@ describe('sweepDeadlinesOnce (REQ-LANE-003 — attempt before the order, closed 
         expect(alerts[1]).toContain('IBKR timeout');
     });
 
+    test('review 2026-09-06 second pass, finding 1: an order reported filled with the position NOT flat is an incident, never a confirmed close', async () => {
+        const closedMarks: string[] = [];
+        const alerts: string[] = [];
+        const r = await sweepDeadlinesOnce({
+            now: T0,
+            listDue: async () => [row(), row({ id: 'P-UNKN', symbol: 'AMD' })],
+            positions: async () => ({ positions: [{ symbol: 'MU', quantity: 4 }, { symbol: 'AMD', quantity: 3 }], complete: true }),
+            close: async (symbol) => symbol === 'MU'
+                ? { ok: true, message: 'close filled; 2 remain', state: 'filled', flat: false }
+                : { ok: true, message: 'close filled; residual unknown', state: 'filled', flat: null },
+            markAttempt: async () => {},
+            markClosed: async (id) => { closedMarks.push(id); },
+            alert: (m) => { alerts.push(m); },
+        });
+        expect(r.closed).toBe(0);
+        expect(closedMarks).toEqual([]);
+        expect(r.incidents).toHaveLength(2);
+        expect(alerts[0]).toContain('NOT confirmed flat');
+    });
+
+    test('review 2026-09-06 second pass, finding 2: a PARTIAL positions book never reads an absent symbol as flat — the row waits; a symbol present in it is still closed', async () => {
+        const closedMarks: string[] = [];
+        const closes: string[] = [];
+        const r = await sweepDeadlinesOnce({
+            now: T0,
+            listDue: async () => [row(), row({ id: 'P-AMD', symbol: 'AMD' })],
+            positions: async () => ({ positions: [{ symbol: 'AMD', quantity: 3 }], complete: false }), // MU omitted by a partial snapshot
+            close: async (symbol) => { closes.push(symbol); return { ok: true, message: 'Closed.', state: 'filled', flat: true }; },
+            markAttempt: async () => {},
+            markClosed: async (id) => { closedMarks.push(id); },
+        });
+        expect(r).toMatchObject({ due: 2, closed: 1, alreadyFlat: 0, unverifiable: 1, incidents: [] });
+        expect(closes).toEqual(['AMD']);
+        expect(closedMarks).toEqual(['P-AMD']); // MU is neither stamped nor ordered
+    });
+
     test('nothing due → no position fetch, no orders', async () => {
         const r = await sweepDeadlinesOnce({
             now: T0, listDue: async () => [], positions: async () => { throw new Error('must not run'); },
             close: async () => { throw new Error('must not run'); }, markAttempt: async () => {}, markClosed: async () => {},
         });
-        expect(r).toEqual({ due: 0, closed: 0, alreadyFlat: 0, incidents: [] });
+        expect(r).toEqual({ due: 0, closed: 0, alreadyFlat: 0, unverifiable: 0, incidents: [] });
     });
 });
