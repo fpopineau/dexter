@@ -11,10 +11,12 @@
  *   epoch new [carry] [confirm]  start the next epoch (two-step while one runs)
  *   promote <variant> [confirm]  record a ratified promotion (two-step)
  *   digest                       today's loop digest on demand
- *   live on|off                  WP4 (the switch writer) — named, not silent
+ *   live on                      the 6-character challenge + evidence (WP4)
+ *   live on <token>              confirm within 2 min → switch ON + journal
+ *   live off                     immediate OFF + journal
  */
 
-import { epochStatusLine, killPosition, ladderStatusLine, liveStatusLine, vetoProposal } from '@/services/loop-control.js';
+import { epochStatusLine, killPosition, ladderStatusLine, vetoProposal } from '@/services/loop-control.js';
 
 export interface LoopCommandCore {
     veto: (id: string) => Promise<{ ok: boolean; message: string }>;
@@ -26,23 +28,36 @@ export interface LoopCommandCore {
     epochNew: (carry: boolean, confirm: boolean) => Promise<string>;
     promote: (variant: string, confirm: boolean) => Promise<string>;
     digest: () => Promise<string>;
+    /** REQ-LIVE-004: null token = request the challenge; a token = confirm. */
+    liveOn: (token: string | null) => Promise<string>;
+    liveOff: () => Promise<string>;
 }
 
 const defaultCore: LoopCommandCore = {
     veto: vetoProposal,
     kill: killPosition,
-    liveStatus: async () => liveStatusLine(),
+    liveStatus: async () => (await liveSwitch()).status(),
     ladderStatus: async () => ladderStatusLine(),
     epochStatus: async () => epochStatusLine(),
     ladderUp: async (confirm) => (await operator()).ladderUp(confirm),
     epochNew: async (carry, confirm) => (await operator()).epochNew(carry, confirm),
     promote: async (variant, confirm) => (await operator()).promote(variant, confirm),
     digest: async () => (await operator()).digest(),
+    liveOn: async (token) => {
+        const c = await liveSwitch();
+        return (token === null ? c.requestOn() : c.confirmOn(token)).message;
+    },
+    liveOff: async () => (await liveSwitch()).off().message,
 };
 
 async function operator() {
     const { liveLoopOperator } = await import('@/services/loop/operator.js');
     return liveLoopOperator();
+}
+
+async function liveSwitch() {
+    const { liveLiveSwitchControl } = await import('@/services/loop/live-switch-control.js');
+    return liveLiveSwitchControl();
 }
 
 const VETO_RE = /^\s*veto\s+(P-[A-Za-z0-9]{4})\s*$/i;
@@ -52,8 +67,6 @@ const LADDER_RE = /^\s*ladder(?:\s+(up)(?:\s+(confirm))?)?\s*$/i;
 const EPOCH_RE = /^\s*epoch(?:\s+(new)(?:\s+(carry))?(?:\s+(confirm))?)?\s*$/i;
 const PROMOTE_RE = /^\s*promote\s+([^\s]+)(?:\s+(confirm))?\s*$/i;
 const DIGEST_RE = /^\s*digest\s*$/i;
-
-const NOT_YET_WP4 = (what: string) => `ℹ️ '${what}' is not available until WP4 (live-automation producers). The switch is structurally OFF today.`;
 
 /**
  * Try to handle `body` as a loop command. Returns the reply, or null when
@@ -70,7 +83,8 @@ export async function handleLoopCommand(body: string, core: LoopCommandCore = de
     if (live) {
         const verb = live[1].toLowerCase();
         if (verb === 'status') return core.liveStatus();
-        return NOT_YET_WP4(`live ${verb}`);
+        if (verb === 'off') return core.liveOff();
+        return core.liveOn(live[2] ?? null);
     }
 
     const ladder = LADDER_RE.exec(body);

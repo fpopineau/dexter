@@ -23,6 +23,8 @@ import {
     getPerformanceSummary,
     getProposal,
     setPerformanceBaseline,
+    listDueAutoExecutions,
+    setAutoExecuteAt,
     listProposals,
     listTrackable,
     markEntryFilled,
@@ -638,5 +640,27 @@ describe('trigger band stamps (REQ-TRIG-002/003 — the 60-74 class is measurabl
         const rows = await listRefusalsSince(since);
         expect(rows.find((r) => r.symbol === 'TRGC')?.triggerRank).toBe(63);
         expect(rows.find((r) => r.symbol === 'TRGD')?.triggerRank).toBeNull();
+    });
+});
+
+describe('veto-window due listing (REQ-LIVE-002/007 — due rows in creation order; not-yet-due, non-open and expired rows never listed)', () => {
+    test('listDueAutoExecutions', async () => {
+        const now = Date.now();
+        const a = await createProposal(validInput({ symbol: 'DUEA' }), { dailyAtr: 4 });
+        await new Promise((r) => setTimeout(r, 5));
+        const b = await createProposal(validInput({ symbol: 'DUEB' }), { dailyAtr: 4 });
+        const c = await createProposal(validInput({ symbol: 'DUEC' }), { dailyAtr: 4 });
+        const d = await createProposal(validInput({ symbol: 'DUED' }), { dailyAtr: 4 });
+        await setAutoExecuteAt(b.id, now - 1_000); // due, created after a
+        await setAutoExecuteAt(a.id, now - 2_000); // due, created first
+        await setAutoExecuteAt(c.id, now + 60_000); // not yet due
+        await setAutoExecuteAt(d.id, now - 1_000);
+        await setProposalStatus(d.id, 'rejected'); // vetoed meanwhile
+        const due = await listDueAutoExecutions(now);
+        expect(due.map((p) => p.id)).toEqual([a.id, b.id]);
+        // a due time past expiry executes nothing: the listing is bounded by expires_at
+        expect((await listDueAutoExecutions(a.expiresAt + 1)).map((p) => p.id)).not.toContain(a.id);
+        await setAutoExecuteAt(a.id, null);
+        expect((await listDueAutoExecutions(now)).map((p) => p.id)).toEqual([b.id]);
     });
 });

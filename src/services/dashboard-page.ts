@@ -61,6 +61,9 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
   <span id="netliq" class="dim"></span>
   <span id="dpnl"></span>
   <span id="halt"></span>
+  <span id="live" class="dim"></span>
+  <button id="liveon" class="act" title="request the live-switch challenge (REQ-LIVE-004)">live on</button>
+  <button id="liveoff" class="act warn" title="turn live auto-execution off now">live off</button>
   <span id="asof" class="dim" style="margin-left:auto"></span>
 </header>
 <div class="wrap">
@@ -214,6 +217,11 @@ function renderOverview(o){
     el('dpnl').innerHTML = o.loss.dailyPnL!=null ? 'Day '+pnlSpan(o.loss.dailyPnL) : '';
     el('halt').innerHTML = o.loss.halted ? '<span class="halt-on">⛔ HALTED</span>' : '<span class="halt-off">● trading allowed</span>';
   }
+  if(o.live){
+    var on = o.live.switch && o.live.switch.enabled;
+    el('live').innerHTML = on ? '<span class="halt-on">LIVE SWITCH ON</span>' : '<span class="dim">live switch off</span>';
+    el('live').title = o.live.line || '';
+  }
   if(o.perf){
     var s = o.perf;
     var base = s.baseline ? 'since '+new Date(s.baseline.epochMs).toISOString().slice(0,10) : 'last 90d';
@@ -365,6 +373,25 @@ document.addEventListener('click', function(ev){
     act(p, null);
   }
 });
+
+// REQ-LIVE-004: the live switch — same two-step as WhatsApp. The first
+// click shows the challenge + evidence; the token is then typed back.
+el('liveon').addEventListener('click', function(){
+  toast('⏳ requesting the live-switch challenge…');
+  fetch('/api/action', { method:'POST',
+    headers:{ 'content-type':'application/json', 'x-dexter-token': window.DEXTER_TOKEN },
+    body: JSON.stringify({action:'live-on'}) })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      toast(d.message || 'no challenge', d.ok === false ? 'fail' : '');
+      if(d.ok === false) return;
+      var tok = window.prompt('Type the 6-character token from the challenge to turn LIVE auto-execution ON (cancel = stay off):');
+      if(tok===null || tok==='') return;
+      act({action:'live-on', token: tok}, null);
+    })
+    .catch(function(e){ toast('live on failed: ' + e, 'fail'); });
+});
+el('liveoff').addEventListener('click', function(){ act({action:'live-off'}, 'Turn the live switch OFF now?'); });
 
 // A refusal banner stays until the operator dismisses it (or a new action
 // replaces it) — click to clear.

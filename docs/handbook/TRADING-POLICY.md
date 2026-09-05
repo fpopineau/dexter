@@ -31,10 +31,19 @@ until proven").
    position caps, daily limits, duplicate checks, market hours, and a
    late-day cutoff (no new intraday entries in the last minutes before
    close).
-4. **A human accepts the trade.** On the paper account an auto-execute
-   mode exists; on a real account it is structurally disabled — every
-   single trade requires an explicit accept (WhatsApp or dashboard),
-   and the code refuses live auto-execution by construction.
+4. **A human holds the switch and the veto.** On the paper account an
+   auto-execute mode exists. On a real account auto-execution fires only
+   while the operator's **live switch** is on — a state file written
+   solely by the operator's challenge-confirmed `live on` (a 6-character
+   token, 2-minute window; `live off` is immediate; the system itself can
+   only ever turn it *off*, which it does on any epoch stop). Even then,
+   every other condition must hold: `IBKR_ALLOW_LIVE`, a verified live
+   account, the live rule profile, a running epoch, no daily halt. The
+   per-trade controls are the **veto window** (an announced execution
+   waits `LIVE_VETO_WINDOW_MIN` minutes for `veto P-XXXX`; a row the
+   executor has already claimed cannot be vetoed — `cancel` / `kill`
+   apply after placement) and `kill SYMBOL`. A hand `accept` remains
+   available at all times.
 5. Acceptance places a **bracket**: the entry order plus its stop-loss
    and take-profit, linked so that one exit filling cancels the other.
    A position is never in the market without its protection.
@@ -112,14 +121,26 @@ validation journal.
 
 ## Going live at all
 
-The whole system must first pass a frozen validation sample on the paper
-account, run under the exact live rules and live account scale
-(shadow-live): at least 100 trades with positive expectancy, profit
-factor ≥ 1.3, bounded drawdown, and breadth across symbols — evaluated
-by a pinned scorecard against a tamper-evident frozen configuration.
-Nothing goes live on any other basis. The full contract is in
-[VALIDATION-PROTOCOL.md](VALIDATION-PROTOCOL.md).
+The system rehearses on the paper account under the exact live rules and
+live account scale, and is judged by a **pre-registered sequential test**
+(SPEC.md § "Live-loop program"): the paper epoch is evaluated when its
+closed-trade count first reaches 25, 50, 75 and 100, with confidences
+chosen in advance (99 / 97.5 / 96 / 95 %). A look ACCEPTS when the
+lower bound of expectancy in R is positive, net R is positive and the
+profit factor is ≥ 1.3; it REJECTS when the upper bound is negative
+(the epoch stops, new entries pause); a −5 % drawdown of marked equity
+stops the epoch at any time. The first paper ACCEPT is the cutover
+evidence. The evidence is displayed in the `live on` challenge; the
+decision is the operator's, and the code neither flips the switch nor
+withholds it.
 
-Even after that, going live is a deliberate manual switch
-(`IBKR_ALLOW_LIVE` stays false until flipped), and on live every trade
-is hand-accepted.
+Going live is then a deliberate, layered act: `IBKR_ALLOW_LIVE` (an env
+flag, restart required), the live switch (`live on` + token), a fresh
+epoch on the live account at the bottom size rung (0.25 % risk per
+trade; the ladder steps up only on the operator's confirmation at 25 /
+50 / 100 trades with a positive record, and steps down automatically on
+a −5 % drawdown). Classes not enabled in the live rules (swing,
+earnings-bet) never trade on the live account — their rows are marked
+sim-only and settle in the simulator. `live off`, `veto`, `kill` and a
+stopped epoch each end automated entries at once; protective exits are
+never gated.

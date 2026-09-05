@@ -19,6 +19,7 @@ import { BarSizeSetting } from '@stoqey/ib';
 import { acceptProposal, cancelProposalBracket, rejectProposal } from './proposal-executor.js';
 import { closePosition, protectPosition } from './position-actions.js';
 import { killPosition, vetoProposal } from './loop-control.js';
+import { describeLiveSwitch, readLiveSwitch } from './live-switch.js';
 import { getDailyBars, getIntradayBars } from './data-archive.js';
 import { getDailyLossStatus } from './daily-loss-guard.js';
 import { getLatestPatternScan } from './pattern-scanner.js';
@@ -82,6 +83,8 @@ async function buildOverview(): Promise<string> {
         loss: lossStatus,
         patterns: getLatestPatternScan()?.candidates?.slice(0, 10) ?? [],
         perf,
+        // REQ-LIVE-004: the operator's live switch as the process reads it.
+        live: { switch: readLiveSwitch(), line: describeLiveSwitch() },
     });
     overviewCache = { at: Date.now(), body };
     return body;
@@ -153,6 +156,8 @@ interface ActionPayload {
     symbol?: string;
     stop?: number;
     target?: number;
+    /** REQ-LIVE-004: the challenge token for `live-on` (absent = request one). */
+    token?: string;
 }
 
 /** Route a dashboard action through the SAME deterministic paths as the
@@ -181,6 +186,18 @@ async function runAction(p: ActionPayload): Promise<{ ok: boolean; message: stri
         case 'kill': {
             if (!p.symbol || !SYMBOL_RE.test(p.symbol)) return { ok: false, message: 'bad symbol' };
             return killPosition(p.symbol);
+        }
+        // REQ-LIVE-004: the live switch buttons route through the SAME
+        // control-plane function as the WhatsApp grammar (challenge, confirm, off).
+        case 'live-on': {
+            const { liveLiveSwitchControl } = await import('./loop/live-switch-control.js');
+            const c = await liveLiveSwitchControl();
+            const token = typeof p.token === 'string' ? p.token.trim() : '';
+            return token ? c.confirmOn(token) : c.requestOn();
+        }
+        case 'live-off': {
+            const { liveLiveSwitchControl } = await import('./loop/live-switch-control.js');
+            return (await liveLiveSwitchControl()).off('dashboard');
         }
         case 'protect': {
             if (!p.symbol || !SYMBOL_RE.test(p.symbol)) return { ok: false, message: 'bad symbol' };

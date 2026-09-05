@@ -334,6 +334,7 @@ Inbound DMs are pre-routed **before** the agent (deterministic, no LLM):
 | `performance` (or `perf`, `performance 30`) | closed-trade P&L summary (default 7 days) |
 | `veto P-XXXX` / `kill SYM` | live-loop per-trade controls (cancel an unfilled auto-execution / close at market) |
 | `live status` / `ladder` / `epoch` / `digest` | live-loop state and the day's digest (read-only) |
+| `live on` → `live on <token>` / `live off` | the live switch: challenge + evidence, confirm within 2 min (ON, journaled); OFF is immediate (WP4) |
 | `ladder up` → `ladder up confirm` | apply a queued size-ladder step-up (two-step; the step-down mark is set at the current NetLiq) |
 | `epoch new [carry]` (→ `… confirm` while one runs) | start the next epoch: USD NetLiq frozen, record + journal, rung reset to 0.25 % unless `carry` |
 | `promote <variant>` → `promote <variant> confirm` | record a ratified promotion and print the exact change + restart + `epoch new` steps |
@@ -461,13 +462,18 @@ manual acceptance:
 - All standard gates still apply (kill-switch included), plus the epoch
   latch (a stopped epoch pauses new entries) and the per-complex direction
   gate.
-- Live accounts (live-loop WP1, REQ-LIVE-001): auto-execution additionally
-  requires `IBKR_ALLOW_LIVE=true`, the operator's live switch
-  (`live-switch.json`, written only by the confirmed `live on` command —
-  WP4), verified account identity, the live rule profile, a running epoch
-  and no latched halt. Until WP4 ships the writer, live auto-execution is
-  structurally OFF. `LIVE_VETO_WINDOW_MIN` > 0 announces and defers each
-  auto-execution so `veto P-XXXX` can stop it (default 0 = immediate).
+- Live accounts (live-loop WP1/WP4, REQ-LIVE-001/004/006/007):
+  auto-execution additionally requires `IBKR_ALLOW_LIVE=true`, the
+  operator's live switch (`live-switch.json` — written ON only by the
+  challenge-confirmed `live on <token>`; `live off` and every epoch stop
+  write OFF; nothing in the system writes ON), verified account identity,
+  the live rule profile, a running epoch and no latched halt. Swing and
+  earnings-bet rows are never auto-executed on a live account: they are
+  marked sim-only (rejected + refusal row) and settle in the simulator.
+  `LIVE_VETO_WINDOW_MIN` > 0 announces and defers each auto-execution so
+  `veto P-XXXX` can stop it (default 0 = immediate); the due-sweep executes
+  oldest first through every gate, and a row the executor has claimed
+  cannot be vetoed (`cancel`/`kill` apply after placement).
 - Every auto-execution is reported on WhatsApp (`🤖 AUTO-EXECUTE (paper|live, score S, n/cap)`).
 
 ## 6. Configuration reference (env)

@@ -21,7 +21,7 @@ describe('vetoDecision (REQ-LIVE-003 — veto = cancel the UNFILLED entry, never
         expect(vetoDecision(p({ status: 'open' }))).toBe('reject');
         expect(vetoDecision(p({ status: 'executed', orderIds: [1, 2, 3] }))).toBe('cancel-bracket');
         expect(vetoDecision(p({ status: 'executed', orderIds: [1, 2, 3], entryFillPrice: 20.02 }))).toBe('refuse-filled');
-        expect(vetoDecision(p({ status: 'executing' }))).toBe('refuse-status');
+        expect(vetoDecision(p({ status: 'executing' }))).toBe('refuse-claimed'); // REQ-LIVE-007
         expect(vetoDecision(p({ status: 'closed' }))).toBe('refuse-status');
         expect(vetoDecision(p({ status: 'rejected' }))).toBe('refuse-status');
     });
@@ -34,6 +34,7 @@ describe('vetoProposalWith (deps injected — routes to the existing reject / ca
             getProposal: async (id: string) => id === 'P-OPEN' ? p({ id, status: 'open' })
                 : id === 'P-EXEC' ? p({ id, status: 'executed', orderIds: [1, 2, 3] })
                 : id === 'P-FILL' ? p({ id, status: 'executed', orderIds: [1, 2, 3], entryFillPrice: 20.02, symbol: 'FILL' })
+                : id === 'P-CLMD' ? p({ id, status: 'executing', symbol: 'CLMD' })
                 : null,
             rejectProposal: async (id: string) => { calls.push(`reject:${id}`); return { ok: true, message: 'rejected' }; },
             cancelProposalBracket: async (id: string) => { calls.push(`cancel:${id}`); return { ok: true, message: 'cancel requested' }; },
@@ -45,6 +46,12 @@ describe('vetoProposalWith (deps injected — routes to the existing reject / ca
         expect(filled.message).toContain('kill FILL');
         const missing = await vetoProposalWith('P-NONE', deps);
         expect(missing.ok).toBe(false);
+        // REQ-LIVE-007: a claimed row is refused by the claim, naming what applies after placement.
+        const claimed = await vetoProposalWith('P-CLMD', deps);
+        expect(claimed.ok).toBe(false);
+        expect(claimed.message).toContain('CLAIMED');
+        expect(claimed.message).toContain('cancel P-CLMD');
+        expect(claimed.message).toContain('kill CLMD');
         expect(calls).toEqual(['reject:P-OPEN', 'cancel:P-EXEC']);
     });
 });

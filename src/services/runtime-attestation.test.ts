@@ -95,7 +95,7 @@ describe('writeRuntimeAttestation (the gateway-side writer)', () => {
         expect(typeof onDisk.vetoWindowMin).toBe('number');
         expect(typeof onDisk.rung).toBe('number');
         expect(onDisk.epochId === null || typeof onDisk.epochId === 'string').toBe(true);
-        expect([null, 'running', 'stopped']).toContain(onDisk.epochStatus);
+        expect([null, 'running', 'stopped']).toContain(onDisk.epochStatus as string | null);
     }, 30_000);
 
     test('review-33: stop AWAITS the stopped record, and racing running writes can never bury it', async () => {

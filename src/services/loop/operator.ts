@@ -34,6 +34,9 @@ export interface OperatorDeps {
     setBaseline: (note: string, netLiqUsd: number | null) => void;
     journal: (line: string) => void;
     digest: () => Promise<string>;
+    /** REQ-LADDER-003 / REQ-LIVE-006: on a live account the cutover epoch
+     *  always restarts at the bottom rung — `carry` is refused. */
+    liveAccount: () => boolean;
 }
 
 export interface LoopOperator {
@@ -80,6 +83,9 @@ export function createOperator(deps: OperatorDeps): LoopOperator {
         },
 
         async epochNew(carry, confirm) {
+            if (carry && deps.liveAccount()) {
+                return "⛔ 'epoch new carry' refused on a LIVE account — the live cutover always restarts at rung 0.25% (REQ-LADDER-003). Send 'epoch new'.";
+            }
             const current = readEpochRecord(deps.dataDir);
             const key = `epoch new${carry ? ' carry' : ''}`;
             if (current?.status === 'running' && !confirm) {
@@ -143,15 +149,17 @@ let liveOperator: LoopOperator | null = null;
  *  pull the broker layer, which unit tests never touch). */
 export async function liveLoopOperator(): Promise<LoopOperator> {
     if (liveOperator) return liveOperator;
-    const [{ getNetLiquidation }, { strategyFingerprint }, { setPerformanceBaseline }, { appendJournalLine }, nightly] = await Promise.all([
+    const [{ getNetLiquidation }, { strategyFingerprint }, { setPerformanceBaseline }, { appendJournalLine }, nightly, { getManagedAccounts, isLivePort }] = await Promise.all([
         import('../daily-loss-guard.js'),
         import('../strategy-fingerprint.js'),
         import('../trade-proposals.js'),
         import('./journal.js'),
         import('./nightly.js'),
+        import('@/tools/ibkr/connection.js'),
     ]);
     liveOperator = createOperator({
         now: Date.now,
+        liveAccount: () => isLivePort() || getManagedAccounts().some((a) => !a.toUpperCase().startsWith('D')),
         netLiqUsd: () => getNetLiquidation().catch(() => null),
         fingerprint: () => strategyFingerprint().catch(() => null),
         looks: () => nightly.runLooksLive(),

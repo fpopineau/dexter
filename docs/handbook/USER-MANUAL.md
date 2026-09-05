@@ -351,7 +351,9 @@ tokens). Anything else goes to the agent as a normal question.
 | `halt clear` | | Operator override for a FALSE halt (deposit/resize read as a loss): clears the latch and re-anchors today's baseline at current equity. Real-loss halts should stand. |
 | `veto P-XXXX` | | Live-loop (WP1): stop an announced/working auto-execution — open → rejected, executed-but-unfilled → bracket cancelled; refused once the entry has FILLED (use `kill`) |
 | `kill SYM` | | Live-loop: close the position at market through the safe close path (same refusals as `close`) |
-| `live status`, `ladder`, `epoch`, `digest` | | Live-loop state: the operator's live switch, the size-ladder rung (with any queued step-up), the current epoch (looks, ACCEPT, pending promotion), today's four-section digest. `live on/off` arrives with WP4 |
+| `live status`, `ladder`, `epoch`, `digest` | | Live-loop state: the operator's live switch and the live-verdict conditions, the size-ladder rung (with any queued step-up), the current epoch (looks, ACCEPT, pending promotion), today's four-section digest |
+| `live on` → `live on <token>` | | Live-loop (WP4): the first message shows the evidence (epoch, last look, ACCEPT state, rung, account kind, `IBKR_ALLOW_LIVE`, profile, veto window) and a 6-character token; typing it back within 2 minutes turns live auto-execution ON (journaled). Only this command ever writes ON. Then `epoch new` (no carry) opens the live epoch at 0.25 % |
+| `live off` | | Immediate OFF (journaled). The system also turns the switch off by itself on any epoch stop (REJECT look, −5 % hard stop, unresolved broker anomaly) |
 | `ladder up` → `ladder up confirm` | | Live-loop (WP3): apply a queued step-up (0.25 → 0.5 → 0.75 → 1.0 % at n ≥ 25/50/100 with net R > 0); shows the evidence first, confirm within 10 min. The automatic step-down (−5 % of marked NetLiq from the step-up mark) needs no command |
 | `epoch new [carry]` | `epoch new confirm`, `epoch new carry confirm` | Live-loop (WP3): start the next epoch — the performance baseline resets with the USD NetLiq frozen (hard stop at −5 %), the record and journal line are written, the rung resets to 0.25 % unless `carry`. Two-step while an epoch is running; refused when IBKR cannot report NetLiq or the identity is unresolved |
 | `promote <variant>` → `promote <variant> confirm` | | Live-loop (WP3): shows the variant's shadow evidence (n, days, ΔR LCB vs the incumbent, candidate flag) and the exact config change; confirm records the ratification (journal + epoch record). Then apply the change, restart, `epoch new` |
@@ -541,13 +543,14 @@ Guarantees, in code, not convention:
 - capped per day (`AUTO_EXECUTE_MAX_PER_DAY`, default 6 — aligned with
   `max_daily_trades` since 2026-09-05): when auto-exec hits its cap,
   manual accepts still work until the risk-rules cap;
-- on a LIVE account (live-loop WP1) additionally gated by
-  `IBKR_ALLOW_LIVE`, the operator's live switch (`live on`, WP4), verified
-  identity, the live profile, a running epoch and no latched halt —
-  structurally OFF until WP4 ships the switch writer; `veto P-XXXX` and
-  `kill SYMBOL` are the per-trade controls (`live status`, `ladder`,
-  `epoch`, `digest` show the loop's state; `ladder up`, `epoch new`,
-  `promote` are the operator's two-step acts — WP3);
+- on a LIVE account (live-loop WP1/WP4) additionally gated by
+  `IBKR_ALLOW_LIVE`, the operator's live switch (`live on` + token; `live
+  off`; the system writes only OFF), verified identity, the live profile,
+  a running epoch and no latched halt; swing and earnings-bet rows are
+  never auto-executed on live (marked sim-only, settled in the simulator);
+  `veto P-XXXX` and `kill SYMBOL` are the per-trade controls (`live
+  status`, `ladder`, `epoch`, `digest` show the loop's state; `ladder up`,
+  `epoch new`, `promote` are the operator's two-step acts — WP3);
 - judged by the pre-registered sequential test (WP3): every evening the
   loop rebuilds the epoch sample, evaluates a look when n first reaches
   25/50/75/100 (ACCEPT = LCB > 0, net R > 0, PF ≥ 1.3; REJECT = UCB95 < 0

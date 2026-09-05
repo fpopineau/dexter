@@ -12,6 +12,8 @@ function fakeCore(log: string[]): LoopCommandCore {
         epochNew: async (carry, confirm) => { log.push(`epochNew:${carry}:${confirm}`); return `epoch new carry=${carry} confirm=${confirm}`; },
         promote: async (variant, confirm) => { log.push(`promote:${variant}:${confirm}`); return `promote ${variant} ${confirm ? 'recorded' : 'asked'}`; },
         digest: async () => { log.push('digest'); return 'DIGEST'; },
+        liveOn: async (token) => { log.push(`liveOn:${token}`); return token === null ? 'challenge ABC234' : `confirmed ${token}`; },
+        liveOff: async () => { log.push('liveOff'); return 'switch off'; },
     };
 }
 
@@ -45,12 +47,13 @@ describe('loop commands (REQ-LIVE-003 — control-plane grammar, routed outside 
         expect(log).toEqual(['ladderUp:false', 'ladderUp:true', 'epochNew:false:false', 'epochNew:true:false', 'epochNew:true:true', 'epochNew:false:true', 'promote:exit-x2.0:false', 'promote:gate-off:noise-stop:true']);
     });
 
-    test('live on/off stay named-but-unavailable until WP4', async () => {
+    test('REQ-LIVE-004 grammar: live on → challenge, live on <token> → confirm, live off → immediate', async () => {
         const log: string[] = [];
-        for (const body of ['live on', 'live off', 'live on ABC123']) {
-            expect(await handleLoopCommand(body, fakeCore(log))).toMatch(/not available until WP4/);
-        }
-        expect(log).toEqual([]);
+        expect(await handleLoopCommand('live on', fakeCore(log))).toBe('challenge ABC234');
+        expect(await handleLoopCommand('Live ON abc234', fakeCore(log))).toBe('confirmed abc234');
+        expect(await handleLoopCommand('live off', fakeCore(log))).toBe('switch off');
+        expect(await handleLoopCommand('live status', fakeCore(log))).toContain('live switch');
+        expect(log).toEqual(['liveOn:null', 'liveOn:abc234', 'liveOff']);
     });
 
     test('unrelated messages fall through (null) so the agent handles them', async () => {

@@ -33,6 +33,22 @@ describe('veto-window due sweep (REQ-LIVE-002 seam — executes due rows oldest 
         expect(result.failed).toBe(1);
     });
 
+    test('REQ-LIVE-007: a refused row (claimed or vetoed meanwhile) is counted failed and the next row still runs', async () => {
+        const executed: string[] = [];
+        const result = await sweepDueOnce({
+            now: 1_000_000,
+            listDue: async () => [due('P-AAAA', 900_000), due('P-BBBB', 950_000), due('P-CCCC', 990_000)],
+            execute: async (id) => {
+                executed.push(id);
+                if (id === 'P-AAAA') return { ok: false, message: 'proposal is executing (claimed)' };
+                if (id === 'P-BBBB') return { ok: false, message: 'proposal is rejected' };
+                return { ok: true, message: 'placed' };
+            },
+        });
+        expect(executed).toEqual(['P-AAAA', 'P-BBBB', 'P-CCCC']);
+        expect(result).toEqual({ attempted: 3, executed: 1, failed: 2 });
+    });
+
     test('nothing due → nothing executed', async () => {
         const result = await sweepDueOnce({ now: 1, listDue: async () => [], execute: async () => { throw new Error('must not run'); } });
         expect(result).toEqual({ attempted: 0, executed: 0, failed: 0 });

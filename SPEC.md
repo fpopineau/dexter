@@ -2677,3 +2677,89 @@ identity untouched.
 | REQ-DIGEST-001..004 | `loop/digest.test.ts` (fills with bps/twin, funnel counts and gates, shadow + band line, status lines) |
 | REQ-DIGEST-005 | `loop/digest.test.ts` (`truncateSection`, WhatsApp format); `loop-commands.test.ts` (`digest`); `/api/loop` and the Loop panel verified by the digest smoke-run over the live ledgers |
 | REQ-FP-003 | `strategy-fingerprint.test.ts` (loop paths excluded; every exclusion exists); `runtime-attestation.test.ts` (new fields present); doc changes |
+
+## Live-loop WP4 landed (2026-09-05) — live-automation plumbing, switched OFF
+
+Implements REQ-LIVE-004..009. The ephemeral `docs/day2day/WP4-PLAN.md`
+carries the task graph for the review and is deleted once read.
+
+### Sequencing recorded at landing
+
+The first gateway restart had still not happened (the operator killed the
+pre-WP1 gateway on 2026-09-05 after setting `SIMULATOR` and the LLM cap),
+so WP4 lands BEFORE epoch 1 opens: the restart carries WP1..WP4 together
+and the identity WP4 establishes is the one epoch 1 records. The two
+behavior-path edits (`proposal-executor.ts`: the REQ-LIVE-006 sim-only
+branch and the REQ-LIVE-009 header doctrine) are therefore deliberate and
+pre-epoch; the acceptance item "fingerprint unchanged vs the WP1 restart"
+is moot and replaced by "epoch 1 opens on the WP1..WP4 identity".
+Everything else lives on excluded paths (`src/services/loop/
+live-switch-control.ts`, `loop-control.ts`, `loop-commands.ts`,
+`dashboard*.ts`, docs, tests). `live-switch.json` is absent in the data
+dir (verified at landing: the switch reads OFF).
+
+### Precisions recorded at landing (append-only; they refine the requirements above)
+
+- REQ-LIVE-004 precision: the challenge token is 6 characters from an
+  unambiguous alphabet (no 0/O/1/I), compared case-insensitively, valid
+  2 minutes, consumed on success. A mismatch refuses and KEEPS the pending
+  challenge until it expires (a typo should not force a new evidence
+  read); expiry and `live off` clear it; a consumed challenge cannot be
+  replayed. The ON record is `{enabled:true, changedAt, by:'operator',
+  reason:'live on (challenge confirmed)'}`; `live off` writes
+  `by:'operator'`, the epoch stop writes `by:'system'` (the only system
+  writer, `false` only). The dashboard `live on` / `live off` buttons post
+  `live-on` (token absent = challenge, present = confirm) and `live-off`
+  through the same control object as the WhatsApp grammar.
+- REQ-LIVE-005 precision: the challenge shows the epoch id/status, the
+  last look (n, decision, LCB, UCB95, net R, PF), whether an ACCEPT is
+  recorded, the rung, the account kind as the process sees it, the
+  `IBKR_ALLOW_LIVE` state, the profile and the veto window; on a non-live
+  account it says the switch has no effect until the gateway connects to
+  one. `live status` prints the switch line plus the last two evidence
+  lines. `live on` never starts an epoch: the confirmation instructs
+  `epoch new` (no carry).
+- REQ-LIVE-006 precision: on the live profile the class gate already
+  refuses a disabled-class proposal at CREATION (pinned:
+  `risk-rules-profile.test.ts` — a live account never gets the shadow
+  forcing; `proposal-executor.test.ts` — creation throws). The sim-only
+  marking covers rows that exist from before the account verified as live
+  (the boot window under the default paper profile, or the paper era
+  before a cutover restart): the live auto-exec branch marks such a row
+  `rejected` with a `sim-only:` note and a refusal-ledger row before the
+  veto window or the accept path. The simulator replays every proposal
+  and every refusal with levels, so both paths settle in the class
+  variants. `epoch new carry` is refused on a live account (REQ-LADDER-003
+  letter); plain `epoch new` opens the live epoch at 0.25%.
+- REQ-LIVE-007 precision: `listDueAutoExecutions` orders by `created_at`
+  and lists only `open` rows whose due time has passed and whose expiry
+  has not; a row rejected (vetoed) or claimed between listing and
+  execution is refused by the executor's claim and counted `failed` by the
+  sweep, which continues with the next row. A veto of a row in `executing`
+  returns `refuse-claimed`, naming `cancel P-XXXX` / `kill SYMBOL` as the
+  controls that apply after placement.
+- REQ-LIVE-008 precision: no placement-path fake broker exists for the
+  executor, so "open → due → executed" is pinned as far as the gates: the
+  due path (`skipVetoWindow`) is proven not to re-defer and to reach the
+  accept gates (a deterministic kill-switch refusal without IBKR); the
+  live verdict matrix, the challenge lifecycle and the system-side OFF
+  are unit-pinned. No test binds a live port (the live-port tests set the
+  env and never connect).
+- REQ-LIVE-009 precision: TRADING-POLICY step 4 is "A human holds the
+  switch and the veto"; "Going live at all" describes the sequential test,
+  the layered live act and the class doctrine; the executor header
+  retires the "never available for live" doctrine in place.
+- Harness note: the WP3 commit carried a `tsc` error in
+  `runtime-attestation.test.ts` (an `unknown` passed to `toContain`),
+  introduced after WP3's type-check ran; fixed here.
+
+### Test traceability (WP4)
+
+| REQ | Test |
+|---|---|
+| REQ-LIVE-004 | `loop/live-switch-control.test.ts` — challenge → confirm writes ON by operator + journal; expiry, mismatch (challenge kept), no pending, replay all refused; `live off` immediate; token alphabet. `loop-commands.test.ts` — `live on` / `live on <token>` / `live off` routing |
+| REQ-LIVE-005 | `loop/live-switch-control.test.ts` — no-epoch message; epoch + last look + ACCEPT + rung + cold arm + veto window shown |
+| REQ-LIVE-006 | `risk-rules-profile.test.ts` — live account: no shadow forcing, both classes disabled; `proposal-executor.test.ts` — creation refused on live, pre-existing swing row marked sim-only (rejected + note + refusal row), paper control unmarked; `loop/operator.test.ts` — `epoch new carry` refused on live |
+| REQ-LIVE-007 | `trade-proposals.test.ts` — due listing in creation order, not-yet-due / rejected / expired excluded, cleared stamp; `veto-window.test.ts` — refused rows counted, sweep continues; `loop-control.test.ts` — claimed row → `refuse-claimed` naming cancel/kill |
+| REQ-LIVE-008 | `proposal-executor.test.ts` — live verdict matrix (WP1), due path does not re-defer and reaches the gates; `loop/live-switch-control.test.ts` — system-side OFF after `live on` on an epoch stop |
+| REQ-LIVE-009 | doc change, no test; smoke: `live status` and the challenge rendered from the real data dir (no switch file → OFF; no epoch → says so) |

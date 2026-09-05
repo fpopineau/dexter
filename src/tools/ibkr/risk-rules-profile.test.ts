@@ -83,6 +83,24 @@ describe('shadow-live override (WP-SHADOW, REQ-SHADOW-001/002)', () => {
         }
     });
 
+    test('REQ-LIVE-006: a LIVE account never gets the shadow forcing — the raw live yaml governs the class switches', async () => {
+        const prev = process.env.DEXTER_RISK_PROFILE;
+        process.env.DEXTER_RISK_PROFILE = 'live';
+        try {
+            setAccountProfile('live'); // account truth: live → no shadow, whatever the env says
+            const { isShadowLive, liveDisabledClasses } = await import('./risk-rules.js');
+            expect(isShadowLive()).toBe(false);
+            const r = getRiskRules();
+            expect(r.swing_enabled).toBe(false);
+            expect(r.earnings_bet_enabled).toBe(false);
+            expect(liveDisabledClasses()).toEqual(['swing', 'earnings-bet']);
+        } finally {
+            if (prev === undefined) delete process.env.DEXTER_RISK_PROFILE;
+            else process.env.DEXTER_RISK_PROFILE = prev;
+            setAccountProfile('paper');
+        }
+    });
+
     test('without the env the paper account keeps paper rules and bets stay yaml-governed', async () => {
         setAccountProfile('paper');
         const { isShadowLive } = await import('./risk-rules.js');

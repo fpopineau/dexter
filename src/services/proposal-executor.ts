@@ -13,8 +13,10 @@
  *      liquidation, max open positions, max trades per day), chase gate
  *   8. bracket placement (entry + OCA stop/target)
  *
- * Callers: the WhatsApp command router (explicit human message) and the
- * approval-gated accept_proposal tool (interactive TUI confirmation).
+ * Callers: the WhatsApp command router (explicit human message), the
+ * approval-gated accept_proposal tool (interactive TUI confirmation), the
+ * dashboard action route, and the auto-executor below (paper, or live
+ * behind the operator's switch + veto model — REQ-LIVE-001/004).
  */
 
 import { placeBracketOrder } from '@/tools/ibkr/bracket.js';
@@ -53,7 +55,7 @@ import {
     sumRealizedPnlSince,
     type TradeProposal,
 } from './trade-proposals.js';
-import { getAccountProfile, getRiskRules } from '@/tools/ibkr/risk-rules.js';
+import { getAccountProfile, getRiskRules, liveDisabledClasses } from '@/tools/ibkr/risk-rules.js';
 
 export interface ExecutionOutcome {
     ok: boolean;
@@ -845,23 +847,34 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
 
 // ---------------------------------------------------------------------------
 // Auto-execution (behind AUTO_EXECUTE_PAPER; live additionally behind the
-// operator's live switch — REQ-LIVE-001/002, live-loop WP1)
+// operator's live switch — REQ-LIVE-001/002/004/006, live-loop WP1/WP4)
 //
-// Until 2026-09-05 auto-execution refused live ports/accounts by
-// construction (assertPaperOnly) — every live trade was a hand-accept.
-// The live-loop program replaces that doctrine with an explicit, layered
-// verdict (autoExecVerdict): on a PAPER account the semantics are
-// unchanged; on a LIVE port or non-'D' account every condition must hold —
-// IBKR_ALLOW_LIVE=true (cold arm), the operator's live switch
-// (live-switch.json, warm, human-only to turn on — WP4 ships the writer,
-// so today the live branch is structurally OFF), verified account
-// identity, the 'live' rule profile active, a running epoch and no latched
-// daily halt. Any missing condition refuses with the named reason.
+// The switch + veto model (live-loop program, 2026-09-05). The old
+// doctrine — "auto-execution is never available for live; every live
+// trade is a hand-accept" (assertPaperOnly) — is retired. Live
+// auto-execution is a layered verdict (autoExecVerdict): on a PAPER
+// account the semantics are unchanged; on a LIVE port or non-'D' account
+// every condition must hold — IBKR_ALLOW_LIVE=true (the cold arm, an env
+// var that needs a restart), the operator's live switch (live-switch.json,
+// warm: written `true` ONLY by the operator's challenge-confirmed 'live
+// on'; the system writes only `false`, on an epoch stop), verified
+// account identity, the 'live' rule profile active, a running epoch and
+// no latched daily halt. Any missing condition refuses with the named
+// reason. The operator's per-trade controls are the veto window
+// (LIVE_VETO_WINDOW_MIN > 0 stamps a due time and announces instead of
+// placing — REQ-LIVE-002; the due-sweep executes oldest first through
+// every gate again; a row the executor has CLAIMED cannot be vetoed —
+// `cancel`/`kill` apply after placement, REQ-LIVE-007) and `kill`.
+//
+// REQ-LIVE-006: on a live account the classes disabled in the raw live
+// yaml (swing, earnings-bet — the shadow forcing is paper-only) are never
+// auto-executed: the row is marked `sim-only` (rejected + note + refusal
+// ledger) and settles in the simulator; a hand `accept` is refused by the
+// class gate.
 //
 // The daily cap (AUTO_EXECUTE_MAX_PER_DAY, default 6 — REQ-TRIG-004) and
-// the score floor apply on every account type. LIVE_VETO_WINDOW_MIN > 0
-// stamps a due time instead of placing (REQ-LIVE-002); the default 0 is
-// today's immediate execution.
+// the score floor apply on every account type. The default window 0 is
+// immediate execution.
 // ---------------------------------------------------------------------------
 
 export function isAutoExecuteEnabled(): boolean {
@@ -1014,6 +1027,24 @@ export async function autoExecuteProposal(id: string, opts: { skipVetoWindow?: b
     if (!verdict.ok) {
         logger.error(`[proposal-executor] auto-execute refused: ${verdict.reason}`);
         return { ok: false, message: `auto-execute refused — ${verdict.reason}` };
+    }
+
+    // REQ-LIVE-006: a live account trades only the classes the raw live
+    // yaml enables. A disabled-class row is marked sim-only — it never
+    // reaches the veto window or the accept path, and the simulator's
+    // class variants replay it (that is where its record accrues).
+    if (verdict.account === 'live' && liveDisabledClasses().includes(p.tradeClass)) {
+        const msg = `sim-only: the ${p.tradeClass} class is disabled in risk-rules.live.yaml — the row settles in the simulator only (REQ-LIVE-006)`;
+        await setProposalStatus(p.id, 'rejected', { note: msg });
+        await recordRefusal({
+            symbol: p.symbol, direction: p.direction, entryType: p.entryType,
+            entry: p.entry, entryLimit: p.entryLimit, stop: p.stop, target: p.target,
+            quantity: p.quantity, score: p.score, reason: msg,
+            proposalAgeSec: Math.round((Date.now() - p.createdAt) / 1000),
+            triggerRank: p.triggerRank,
+        }).catch(() => { /* ledger is best-effort */ });
+        logger.info(`[proposal-executor] ${p.id} ${p.symbol}: ${msg}`);
+        return { ok: false, message: `🧪 ${p.id} ${p.symbol} ${msg}` };
     }
 
     // REQ-LIVE-002: veto window — stamp the due time and announce instead

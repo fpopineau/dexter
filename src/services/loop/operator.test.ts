@@ -19,7 +19,7 @@ function statusWith(over: Partial<LoopStatus> = {}, dir?: string): LoopStatus {
     };
 }
 
-function harness(opts: { netLiq?: number | null; fp?: string | null; status?: (dir: string) => LoopStatus } = {}) {
+function harness(opts: { netLiq?: number | null; fp?: string | null; status?: (dir: string) => LoopStatus; liveAccount?: boolean } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'dexter-operator-'));
     let now = T0;
     const journal: string[] = [];
@@ -33,6 +33,7 @@ function harness(opts: { netLiq?: number | null; fp?: string | null; status?: (d
         setBaseline: (note) => { baselines.push(note); },
         journal: (l) => { journal.push(l); },
         digest: async () => 'DIGEST',
+        liveAccount: () => opts.liveAccount ?? false,
     };
     return { dir, deps, journal, baselines, op: createOperator(deps), advance: (ms: number) => { now += ms; } };
 }
@@ -72,6 +73,14 @@ describe('epoch new (REQ-EPOCH-001)', () => {
         h.advance(CONFIRM_TTL_MS + 1);
         expect(await h.op.epochNew(false, true)).toContain('lapsed');
         expect(readEpochRecord(h.dir)?.id).toBe('epoch-2');
+    });
+
+    test('REQ-LADDER-003 / REQ-LIVE-006: on a live account `epoch new carry` is refused; plain `epoch new` starts at 0.25', async () => {
+        const h = harness({ liveAccount: true });
+        expect(await h.op.epochNew(true, false)).toContain('refused on a LIVE account');
+        expect(readEpochRecord(h.dir)).toBeNull();
+        expect(await h.op.epochNew(false, false)).toContain('epoch-1 STARTED');
+        expect(readLadderState(h.dir)?.rung).toBe(0.25);
     });
 });
 

@@ -531,4 +531,91 @@ describe('veto window (REQ-LIVE-002 seam — window 0 = immediate; window > 0 = 
             delete process.env.LIVE_VETO_WINDOW_MIN;
         }
     });
+
+    test('REQ-LIVE-007: the due-sweep path (skipVetoWindow) never re-defers — it reaches the accept gates', async () => {
+        const { writeFileSync } = await import('node:fs');
+        const { join } = await import('node:path');
+        const { __setManagedAccountsForTests } = await import('@/tools/ibkr/connection.js');
+        const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+        const today = `${et.getFullYear()}-${String(et.getMonth() + 1).padStart(2, '0')}-${String(et.getDate()).padStart(2, '0')}`;
+        process.env.AUTO_EXECUTE_PAPER = 'true';
+        process.env.IBKR_PORT = '4002';
+        process.env.LIVE_VETO_WINDOW_MIN = '5';
+        __setManagedAccountsForTests(['DU111111']);
+        // A latched halt makes the accept path refuse deterministically (no IBKR).
+        writeFileSync(join(dir, 'trading-halt.json'), JSON.stringify({ date: today, reason: 'test halt', dailyPnL: -9999, netLiquidation: 100_000, trippedAt: 'now' }));
+        try {
+            const p = await createProposal({ symbol: 'DUEX', direction: 'long', entryType: 'LMT', entry: 100, stop: 97.5, target: 106, quantity: 10, score: 70, rationale: 'due path', source: 'test' }, ATR_CTX);
+            const deferred = await autoExecuteProposal(p.id);
+            expect(deferred.deferred).toBe(true);
+            const due = await autoExecuteProposal(p.id, { skipVetoWindow: true });
+            expect(due.deferred).toBeUndefined();
+            expect(due.ok).toBe(false);
+            expect(due.message).toContain('KILL-SWITCH'); // the gates ran — the window did not
+            expect((await getProposal(p.id))?.status).toBe('open');
+        } finally {
+            writeFileSync(join(dir, 'trading-halt.json'), JSON.stringify({ date: '1970-01-01' }));
+            __setManagedAccountsForTests([]);
+            delete process.env.LIVE_VETO_WINDOW_MIN;
+        }
+    });
+});
+
+describe('REQ-LIVE-006: on a live account the disabled classes are sim-only (never auto-executed)', () => {
+    test('live verdict + swing row → rejected with the sim-only note and a refusal row; creation on live is refused by the class gate; the same class on paper is not marked', async () => {
+        const { writeFileSync, rmSync } = await import('node:fs');
+        const { join } = await import('node:path');
+        const { __setManagedAccountsForTests } = await import('@/tools/ibkr/connection.js');
+        const { setAccountProfile } = await import('@/tools/ibkr/risk-rules.js');
+        const { listRefusalsSince } = await import('./trade-proposals.js');
+        const prevAllow = process.env.IBKR_ALLOW_LIVE;
+        const prevProfile = process.env.DEXTER_RISK_PROFILE;
+        process.env.AUTO_EXECUTE_PAPER = 'true';
+        delete process.env.DEXTER_RISK_PROFILE;
+        // The row exists from BEFORE the account verified as live (boot
+        // window under the default paper profile, or the paper era before a
+        // cutover restart) — the creation-time class gate could not see it.
+        setAccountProfile('paper');
+        const since = Date.now();
+        const swing = await createProposal({ symbol: 'SWNG', direction: 'long', entryType: 'LMT', entry: 100, stop: 97.5, target: 106, quantity: 10, score: 70, rationale: 'live swing', source: 'test', tradeClass: 'swing' }, ATR_CTX);
+        process.env.IBKR_PORT = '4001';
+        process.env.IBKR_ALLOW_LIVE = 'true';
+        __setManagedAccountsForTests(['U7654321']);
+        setAccountProfile('live');
+        writeFileSync(join(dir, 'live-switch.json'), JSON.stringify({ enabled: true, by: 'operator' }));
+        try {
+            // On the live profile the class gate refuses a NEW swing row outright.
+            await expect(createProposal({ symbol: 'SWNH', direction: 'long', entryType: 'LMT', entry: 100, stop: 97.5, target: 106, quantity: 10, score: 70, rationale: 'live swing 2', source: 'test', tradeClass: 'swing' }, ATR_CTX))
+                .rejects.toThrow(/swing class is disabled/);
+            const out = await autoExecuteProposal(swing.id);
+            expect(out.ok).toBe(false);
+            expect(out.message).toContain('sim-only');
+            const row = await getProposal(swing.id);
+            expect(row?.status).toBe('rejected');
+            expect(row?.note).toContain('sim-only');
+            expect((await listRefusalsSince(since)).some((r) => r.symbol === 'SWNG' && r.reason.includes('sim-only'))).toBe(true);
+        } finally {
+            rmSync(join(dir, 'live-switch.json'), { force: true });
+            __setManagedAccountsForTests([]);
+            setAccountProfile('paper');
+            if (prevAllow === undefined) delete process.env.IBKR_ALLOW_LIVE; else process.env.IBKR_ALLOW_LIVE = prevAllow;
+            if (prevProfile === undefined) delete process.env.DEXTER_RISK_PROFILE; else process.env.DEXTER_RISK_PROFILE = prevProfile;
+        }
+        // Paper control: the shadow forcing keeps swing tradeable — no sim-only marking.
+        const { writeFileSync: wf } = await import('node:fs');
+        const et = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+        const today = `${et.getFullYear()}-${String(et.getMonth() + 1).padStart(2, '0')}-${String(et.getDate()).padStart(2, '0')}`;
+        process.env.IBKR_PORT = '4002';
+        __setManagedAccountsForTests(['DU111111']);
+        wf(join(dir, 'trading-halt.json'), JSON.stringify({ date: today, reason: 'test halt', dailyPnL: -9999, netLiquidation: 100_000, trippedAt: 'now' }));
+        try {
+            const paperSwing = await createProposal({ symbol: 'PSWG', direction: 'long', entryType: 'LMT', entry: 100, stop: 97.5, target: 106, quantity: 10, score: 70, rationale: 'paper swing', source: 'test', tradeClass: 'swing' }, ATR_CTX);
+            const out = await autoExecuteProposal(paperSwing.id);
+            expect(out.message).not.toContain('sim-only');
+            expect((await getProposal(paperSwing.id))?.status).toBe('open');
+        } finally {
+            wf(join(dir, 'trading-halt.json'), JSON.stringify({ date: '1970-01-01' }));
+            __setManagedAccountsForTests([]);
+        }
+    });
 });

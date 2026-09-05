@@ -24,15 +24,18 @@ import { readLadderState, BOTTOM_RUNG } from './ladder-state.js';
 import { readEpochState } from './epoch-state.js';
 import { readEpochRecord } from './loop/epoch-control.js';
 
-export type VetoDecision = 'reject' | 'cancel-bracket' | 'refuse-filled' | 'refuse-status';
+export type VetoDecision = 'reject' | 'cancel-bracket' | 'refuse-filled' | 'refuse-claimed' | 'refuse-status';
 
-/** Pure: what a veto may do to this row. */
+/** Pure: what a veto may do to this row. REQ-LIVE-007: a row the executor
+ *  has CLAIMED (`executing`) is past the point a veto can reach — the
+ *  claim resolves the race; `cancel`/`kill` apply once it is placed. */
 export function vetoDecision(p: TradeProposal): VetoDecision {
     if (p.status === 'open') return 'reject';
     if (p.status === 'executed') {
         if (p.entryFillPrice != null) return 'refuse-filled';
         return 'cancel-bracket';
     }
+    if (p.status === 'executing') return 'refuse-claimed';
     return 'refuse-status';
 }
 
@@ -62,6 +65,12 @@ export async function vetoProposalWith(idRaw: string, deps: VetoDeps = defaultVe
                 ok: false,
                 message: `⛔ veto ${id} refused: the ${p.symbol} entry has FILLED — a veto never strips a position's protection. ` +
                     `Use 'kill ${p.symbol}' to close it at market, or leave the bracket working.`,
+            };
+        case 'refuse-claimed':
+            return {
+                ok: false,
+                message: `⛔ veto ${id} refused: the executor has CLAIMED it (placement in progress) — a claimed row cannot be vetoed. ` +
+                    `Once placed, 'cancel ${id}' cancels an unfilled bracket and 'kill ${p.symbol}' closes a filled position.`,
             };
         case 'refuse-status':
             return { ok: false, message: `⛔ veto ${id} refused: the proposal is ${p.status} — nothing to veto.` };
