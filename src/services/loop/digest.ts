@@ -111,7 +111,7 @@ export function buildStatusSection(inp: DigestInputs): string[] {
     const e = st.epoch;
     lines.push(`${e.id} ${e.status.toUpperCase()}${e.stopReason ? ` — ${e.stopReason}` : ''} · fp ${e.fingerprint || '?'} · constants ${st.constantsOk ? 'ok' : 'CHANGED'}${e.firstAcceptAt ? ` · ACCEPT recorded ${new Date(e.firstAcceptAt).toISOString().slice(0, 10)}` : ''}`);
     if (st.sample) {
-        lines.push(`Deployable: n ${st.sample.n} (${st.sample.days}d), ΣR ${num(st.sample.sumR)}, meanR ${num(st.sample.meanR)}, PF ${num(st.sample.profitFactor)}, net ${usd(st.sample.netUsd)}, open in cohort ${st.openInCohort}${st.sample.nextLook ? ` · next look at n=${st.sample.nextLook} (INFORMATIONAL until then)` : ' · all looks done'}`);
+        lines.push(`Deployable: n ${st.sample.n} (${st.sample.days}d), ΣR ${num(st.sample.sumR)}, meanR ${num(st.sample.meanR)}, PF ${num(st.sample.profitFactor)}, net ${usd(st.sample.netUsd)}${st.sample.netUsdCostsDoubled !== null ? ` (costs ×2: ${usd(st.sample.netUsdCostsDoubled)})` : ''}, open in cohort ${st.openInCohort}${st.sample.nextLook ? ` · next look at n=${st.sample.nextLook} (INFORMATIONAL until then)` : ' · all looks done'}`);
     }
     for (const l of st.looksThisPass) {
         lines.push(`LOOK n=${l.lookN}: ${l.decision} — LCB ${num(l.lcb, 3)} @${l.lookConfidence * 100}%, UCB95 ${num(l.ucb95, 3)}; ${l.reasons.join('; ')}`);

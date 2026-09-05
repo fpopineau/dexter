@@ -19,7 +19,7 @@ function proposal(overrides: Partial<TradeProposal> = {}): TradeProposal {
 const status: LoopStatus = {
     at: T0, constantsOk: true, openInCohort: 1, looksThisPass: [], anomalies: [], stoppedThisPass: null, shadowSample: null,
     epoch: { id: 'epoch-1', startedAt: T0 - 86_400_000, fingerprint: 'abcdef123456', status: 'running', constantsHash: 'c', netLiq: 12_000, looksDone: [], looks: [], stepUpEligible: null, promotionPending: null },
-    sample: { n: 7, days: 4, sumR: 2.1, meanR: 0.3, profitFactor: 1.6, netUsd: 63, nextLook: 25, informational: true },
+    sample: { n: 7, days: 4, sumR: 2.1, meanR: 0.3, profitFactor: 1.6, netUsd: 63, netUsdCostsDoubled: null, nextLook: 25, informational: true },
     band: { band: '60-74', n: 4, netUsd: 12, sumR: 0.4, profitFactor: 1.2, barMet: null },
     shadow: [
         { variant: 'incumbent', status: 'active', summary: { variant: 'incumbent', n: 7, days: 4, sumR: 2.1, meanR: 0.3, netUsd: 63, wins: 4, losses: 3, flats: 0, open: 0, unknown: 1, unfilled: 2 }, diff: null, candidate: false },
@@ -29,8 +29,8 @@ const status: LoopStatus = {
     ladder: { state: { rung: 0.25 }, rung: 0.25, ceilingPct: 0.5, effectivePct: 0.25, eligibility: { eligible: false, nextRung: 0.5, milestone: 25, reason: 'n 7 < 25' } },
     models: ['anthropic:claude-sonnet-5'],
     lanes: [
-        { strategyId: 'intraday', stats: { n: 7, days: 4, sumR: 2.1, meanR: 0.3, profitFactor: 1.6, netUsd: 63, nextLook: 25, informational: true } },
-        { strategyId: 'overnight', stats: { n: 2, days: 2, sumR: -0.4, meanR: -0.2, profitFactor: 0.5, netUsd: -12, nextLook: 25, informational: true } },
+        { strategyId: 'intraday', stats: { n: 7, days: 4, sumR: 2.1, meanR: 0.3, profitFactor: 1.6, netUsd: 63, netUsdCostsDoubled: null, nextLook: 25, informational: true } },
+        { strategyId: 'overnight', stats: { n: 2, days: 2, sumR: -0.4, meanR: -0.2, profitFactor: 0.5, netUsd: -12, netUsdCostsDoubled: null, nextLook: 25, informational: true } },
     ],
     drawdown: { epochNetLiq: 12_000, minNetLiq: 11_880, pct: -1, samples: 300 },
     decile: { rho: 0.12, p: 0.4, n: 7 },

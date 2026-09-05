@@ -86,6 +86,7 @@ export function buildEpochSample(proposals: TradeProposal[], epoch: EpochIdentit
             closedAt: p.closedAt ?? p.updatedAt,
             netR,
             netUsd: p.realizedPnl - (p.commissions ?? 0),
+            commissionsUsd: p.commissions,
             band: p.triggerBand,
             tradeClass: p.tradeClass,
             // REQ-LANE-006/007: the lane, or 'legacy' for a pre-contract row.

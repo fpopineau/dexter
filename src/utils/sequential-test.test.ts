@@ -40,6 +40,7 @@ describe('SEQ_CONSTANTS are the pre-registered numbers and hash stably', () => {
         expect(SEQ_CONSTANTS.ladder.rungs).toEqual([0.25, 0.5, 0.75, 1.0]);
         expect(SEQ_CONSTANTS.ladder.stepUpAt).toEqual([25, 50, 100]);
         expect(SEQ_CONSTANTS.ladder.stepDownDrawdown).toBe(0.05);
+        expect(SEQ_CONSTANTS.bootstrap).toEqual({ replicates: 10_000, seed: 42, minDays: 5, blockDays: 1 });
         expect(SEQ_CONSTANTS.promotion).toEqual({ minTrades: 30, minDays: 10 });
         expect(SEQ_CONSTANTS.band).toEqual({ name: '60-74', minTrades: 20 });
         expect(constantsHash()).toMatch(/^[0-9a-f]{12}$/);
@@ -134,6 +135,10 @@ describe('runningStats (informational between looks)', () => {
         expect(s.profitFactor).toBeCloseTo(3.5 / 1.5, 6);
         expect(s.nextLook).toBe(25);
         expect(s.informational).toBe(true);
+        expect(s.netUsdCostsDoubled).toBeNull(); // fixtures carry no commissions
+        const withCosts = runningStats(trades([1, -0.5, 2]).map((t) => ({ ...t, commissionsUsd: 2 })));
+        expect(withCosts.netUsd).toBeCloseTo(75, 6);
+        expect(withCosts.netUsdCostsDoubled).toBeCloseTo(69, 6); // −$2 more per trade
         expect(runningStats(trades(Array.from({ length: 60 }, () => 1))).nextLook).toBe(75);
         expect(runningStats(trades(Array.from({ length: 100 }, () => 1))).nextLook).toBeNull();
     });

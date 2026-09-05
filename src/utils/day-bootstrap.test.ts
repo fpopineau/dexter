@@ -28,6 +28,28 @@ describe('day-block bootstrap (REQ-VAL-003)', () => {
         expect(dayBlockBootstrapLcb(fragile)!.lcb).toBeLessThan(0);  // …the bound is not fooled
     });
 
+    test('moving session blocks (blockDays): L = 1 is byte-identical to the default; L = 5 on an autocorrelated day series yields a WIDER (lower) bound', () => {
+        // 30 days: a regime streak — ten good days, ten bad, ten good.
+        const days = new Map<string, number[]>();
+        for (let i = 0; i < 30; i++) {
+            const d = `2026-09-${String(1 + i).padStart(2, '0')}`;
+            const good = i < 10 || i >= 20;
+            days.set(d, [good ? 1.2 : -0.9, good ? 0.8 : -1.1]);
+        }
+        const plain = dayBlockBootstrapLcb(days, { replicates: 2000, seed: 42 })!;
+        const l1 = dayBlockBootstrapLcb(days, { replicates: 2000, seed: 42, blockDays: 1 })!;
+        expect(l1.lcb).toBe(plain.lcb);
+        expect(l1.blockDays).toBe(1);
+        const l5 = dayBlockBootstrapLcb(days, { replicates: 2000, seed: 42, blockDays: 5 })!;
+        expect(l5.blockDays).toBe(5);
+        expect(l5.days).toBe(30);
+        // Blocks preserve the streaks, so replicate means spread more: the
+        // 5th percentile sits lower than under independent-day resampling.
+        expect(l5.lcb).toBeLessThan(l1.lcb);
+        // Same seed, same bound (still deterministic).
+        expect(dayBlockBootstrapLcb(days, { replicates: 2000, seed: 42, blockDays: 5 })!.lcb).toBe(l5.lcb);
+    });
+
     test('fewer than minDays distinct days is not evaluable', () => {
         const two = new Map([['d1', [5]], ['d2', [3]]]);
         expect(dayBlockBootstrapLcb(two)).toBeNull();

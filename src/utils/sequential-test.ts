@@ -28,9 +28,13 @@
  *               when the LCB of its daily R difference vs the incumbent > 0
  *   band        the '60-74' class must read net ≥ 0 once it has 20 trades
  *
- * Bootstrap: day-block by ENTRY day, 1000 replicates, seed 42, ≥ 5 days
- * (`dayBlockBootstrapLcb`); the upper bound is the same bootstrap on the
- * negated values (UCB(x) = −LCB(−x)).
+ * Bootstrap: day-block by ENTRY day, 10,000 replicates (the 1 % tail rests
+ * on 100 draws, not 10 — AUD-12c), seed 42, ≥ 5 days, moving session
+ * blocks of `blockDays` consecutive days (`dayBlockBootstrapLcb`); the
+ * upper bound is the same bootstrap on the negated values
+ * (UCB(x) = −LCB(−x)). Informational alongside every look: the net USD
+ * with variable costs (commissions) doubled — a result that survives
+ * doubled costs is the one worth believing.
  *
  * Error rate (audit 2026-09-05, AUD-12): the four look alphas sum to 12.5 %
  * — the Bonferroni BOUND on the familywise false-ACCEPT rate, not the
@@ -52,7 +56,7 @@ export const SEQ_CONSTANTS = {
     rejectConfidence: 0.95,
     minProfitFactor: 1.3,
     hardStopDrawdown: 0.05,
-    bootstrap: { replicates: 1000, seed: 42, minDays: 5 },
+    bootstrap: { replicates: 10_000, seed: 42, minDays: 5, blockDays: 1 },
     ladder: { rungs: [0.25, 0.5, 0.75, 1.0], stepUpAt: [25, 50, 100], stepDownDrawdown: 0.05 },
     promotion: { minTrades: 30, minDays: 10 },
     band: { name: '60-74', minTrades: 20 },
@@ -66,7 +70,7 @@ export interface LookConstants {
     lookConfidences: readonly number[];
     rejectConfidence: number;
     minProfitFactor: number;
-    bootstrap: { replicates: number; seed: number; minDays: number };
+    bootstrap: { replicates: number; seed: number; minDays: number; blockDays: number };
 }
 
 function stableJson(v: unknown): string {
@@ -91,6 +95,8 @@ export interface RTrade {
     closedAt: number;
     netR: number;
     netUsd: number;
+    /** Commissions paid (USD) — the "variable costs doubled" check. */
+    commissionsUsd?: number | null;
     band: '60-74' | '75+' | null;
     tradeClass: 'intraday' | 'swing' | 'earnings-bet';
     /** Four-lane contract (REQ-LANE-006): the lane; 'legacy' for rows
@@ -177,9 +183,9 @@ export function evaluateLook(trades: readonly RTrade[], lookN: number, consts: L
     const pf = profitFactor(prefix);
     const days = byDay(prefix);
     const b = consts.bootstrap;
-    const low = dayBlockBootstrapLcb(days, { replicates: b.replicates, seed: b.seed, minDays: b.minDays, alpha: 1 - lookConfidence });
+    const low = dayBlockBootstrapLcb(days, { replicates: b.replicates, seed: b.seed, minDays: b.minDays, blockDays: b.blockDays, alpha: 1 - lookConfidence });
     const negated = new Map([...days.entries()].map(([d, rs]) => [d, rs.map((r) => -r)]));
-    const upNeg = dayBlockBootstrapLcb(negated, { replicates: b.replicates, seed: b.seed, minDays: b.minDays, alpha: 1 - consts.rejectConfidence });
+    const upNeg = dayBlockBootstrapLcb(negated, { replicates: b.replicates, seed: b.seed, minDays: b.minDays, blockDays: b.blockDays, alpha: 1 - consts.rejectConfidence });
     const reasons: string[] = [];
     if (!low || !upNeg) {
         return {
@@ -213,6 +219,9 @@ export interface RunningStats {
     meanR: number | null;
     profitFactor: number;
     netUsd: number;
+    /** Net USD if every trade's commissions were doubled (spread/slippage
+     *  proxy); null when a trade lacks its commissions. Informational. */
+    netUsdCostsDoubled: number | null;
     nextLook: number | null;
     informational: true;
 }
@@ -221,13 +230,16 @@ export interface RunningStats {
 export function runningStats(trades: readonly RTrade[]): RunningStats {
     const n = trades.length;
     const sumR = trades.reduce((s, t) => s + t.netR, 0);
+    const commissionsKnown = trades.every((t) => typeof t.commissionsUsd === 'number' && Number.isFinite(t.commissionsUsd));
+    const netUsd = trades.reduce((s, t) => s + t.netUsd, 0);
     return {
         n,
         days: byDay(trades).size,
         sumR,
         meanR: n > 0 ? sumR / n : null,
         profitFactor: profitFactor(trades),
-        netUsd: trades.reduce((s, t) => s + t.netUsd, 0),
+        netUsd,
+        netUsdCostsDoubled: n > 0 && commissionsKnown ? netUsd - trades.reduce((s, t) => s + (t.commissionsUsd ?? 0), 0) : null,
         nextLook: SEQ_CONSTANTS.looks.find((l) => l > n) ?? null,
         informational: true,
     };
@@ -249,7 +261,7 @@ export function dailyDifferenceBounds(variantDailyR: Map<string, number>, incumb
     const diffs = new Map<string, number[]>();
     for (const [day, inc] of incumbentDailyR) diffs.set(day, [(variantDailyR.get(day) ?? 0) - inc]);
     const b = SEQ_CONSTANTS.bootstrap;
-    const r = dayBlockBootstrapLcb(diffs, { replicates: b.replicates, seed: b.seed, minDays: b.minDays, alpha: 0.05 });
+    const r = dayBlockBootstrapLcb(diffs, { replicates: b.replicates, seed: b.seed, minDays: b.minDays, blockDays: b.blockDays, alpha: 0.05 });
     if (!r) return null;
     const all = [...diffs.values()].map((d) => d[0]);
     return { days: diffs.size, lcb: r.lcb, median: r.median, meanDiff: all.reduce((s, x) => s + x, 0) / all.length };

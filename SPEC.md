@@ -3095,3 +3095,26 @@ Precisions recorded at landing (append-only):
 | REQ-LANE-007 | `loop/sample.test.ts` (NULL lane → legacy) |
 | REQ-LANE-008 | doc/cron/skill/rule changes; `risk-rules-validation.test.ts` (the six keys load) |
 | REQ-LANE-009 | `scripts/remaining-excursion.ts` smoke-run read-only |
+
+### Bootstrap upgrade (2026-09-05, operator: "add bootstrap if it helps") — REQ-SEQ-002 amended
+
+- Replicates 1,000 → **10,000** (`SEQ_CONSTANTS.bootstrap.replicates`): the
+  99 % look's 1 % tail now rests on 100 draws instead of 10 (AUD-12c). The
+  constants hash changes; epoch 1 has not opened, so no epoch is affected.
+- `dayBlockBootstrapLcb` gains `blockDays` (moving session blocks over
+  chronologically ordered days; L = 1 is byte-identical to the previous
+  behaviour). **Kept at 1** for the pre-registered test: the calibration
+  (`--block 5 --reps 10000 --sims 1000`, iid daily shocks) shows 5-session
+  blocks RAISE the false-ACCEPT rate of schedule A from 11.0 % to 19.1 %
+  (9.6 points at the n = 25 look alone) and of schedule B from 5.5 % to
+  15.2 %: a 10-day sample yields two blocks and the bootstrap degenerates.
+  Blocks are the right tool for long cohorts (the swing and cup lanes at
+  100+ sessions), not for the early looks; the option stays available and
+  is re-evaluated when those lanes reach their looks.
+- Informational alongside every look and lane line: **net USD with variable
+  costs doubled** (`RunningStats.netUsdCostsDoubled`, commissions counted
+  twice) — never a criterion, always printed in the digest.
+- Not adopted: daily marked returns including flat days as the test unit
+  (the pre-registered unit stays R per trade, paired by entry day —
+  discovery decision), Bonferroni 98.75 % (schedule A kept by operator
+  decision), and the exploratory-then-confirmation redesign.

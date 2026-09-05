@@ -12,7 +12,7 @@ const T0 = Date.UTC(2026, 8, 10, 14, 0, 0);
 function statusWith(over: Partial<LoopStatus> = {}, dir?: string): LoopStatus {
     return {
         at: T0, epoch: dir ? readEpochRecord(dir) : null, constantsOk: true, openInCohort: 0, looksThisPass: [], anomalies: [], stoppedThisPass: null, shadowSample: null,
-        sample: { n: 30, days: 12, sumR: 9.5, meanR: 0.32, profitFactor: 1.8, netUsd: 285, nextLook: 50, informational: true },
+        sample: { n: 30, days: 12, sumR: 9.5, meanR: 0.32, profitFactor: 1.8, netUsd: 285, netUsdCostsDoubled: null, nextLook: 50, informational: true },
         band: null, shadow: [], drawdown: null, decile: null,
         ladder: { state: readLadderState(dir), rung: readLadderState(dir)?.rung ?? 0.25, ceilingPct: 1.0, effectivePct: readLadderState(dir)?.rung ?? 0.25, eligibility: { eligible: true, nextRung: 0.5, milestone: 25, reason: 'n 30 ≥ 25, net R 9.50 > 0' } },
         models: [],
