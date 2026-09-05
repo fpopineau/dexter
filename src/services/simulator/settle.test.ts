@@ -16,7 +16,7 @@ function proposal(overrides: Partial<TradeProposal> = {}): TradeProposal {
         id: 'P-0001', createdAt: CREATED, expiresAt: CREATED + 120 * M, updatedAt: CREATED, status: 'closed', symbol: 'MU', direction: 'long',
         entryType: 'LMT', entry: 100, entryLimit: null, stop: 97, target: 106, quantity: 7, tif: 'DAY', tradeClass: 'intraday',
         worstCaseGapPct: null, score: 66, rationale: 'x', source: 'trigger', orderIds: [1, 2, 3], orderPermIds: null,
-        plannedQuantity: null, model: null, strategyFingerprint: null, strategyId: null, setupId: null, holdingHorizon: null, exitPolicyId: null, exitDeadline: null, deadlineClosedAt: null, detectorVersion: null, regime: null, note: null, executedAt: CREATED, entryFillPrice: 100.05, entryFilledAt: CREATED + M,
+        plannedQuantity: null, model: null, strategyFingerprint: null, strategyId: null, setupId: null, holdingHorizon: null, exitPolicyId: null, exitDeadline: null, deadlineClosedAt: null, detectorVersion: null, costToTargetPct: null, regime: null, note: null, executedAt: CREATED, entryFillPrice: 100.05, entryFilledAt: CREATED + M,
         exitFillPrice: 106, exitReason: 'target', realizedPnl: 41.65, commissions: 2, closedAt: CREATED + 60 * M, keptOvernightAt: null,
         mfePct: null, maePct: null, extensionAtr: null, vwapDistPct: null, dayMovePct: null, minutesSinceOpen: null,
         takePct: 6, takePctSource: 'formula', postExitMfePct: null, postExitMaePct: null, takeCounterfactual: null,

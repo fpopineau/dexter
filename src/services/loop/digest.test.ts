@@ -9,7 +9,7 @@ function proposal(overrides: Partial<TradeProposal> = {}): TradeProposal {
     return {
         id: 'P-0001', createdAt: T0, expiresAt: T0 + 1, updatedAt: T0, status: 'closed', symbol: 'MU', direction: 'long', entryType: 'LMT', entry: 100,
         entryLimit: null, stop: 97, target: 106, quantity: 10, tif: 'DAY', tradeClass: 'intraday', worstCaseGapPct: null, score: 66, rationale: 'x', source: 'trigger',
-        orderIds: [1, 2, 3], orderPermIds: null, plannedQuantity: null, model: null, strategyFingerprint: null, strategyId: null, setupId: null, holdingHorizon: null, exitPolicyId: null, exitDeadline: null, deadlineClosedAt: null, detectorVersion: null, regime: null, note: null, executedAt: T0, entryFillPrice: 100.05, entryFilledAt: T0 + 60_000,
+        orderIds: [1, 2, 3], orderPermIds: null, plannedQuantity: null, model: null, strategyFingerprint: null, strategyId: null, setupId: null, holdingHorizon: null, exitPolicyId: null, exitDeadline: null, deadlineClosedAt: null, detectorVersion: null, costToTargetPct: null, regime: null, note: null, executedAt: T0, entryFillPrice: 100.05, entryFilledAt: T0 + 60_000,
         exitFillPrice: 106, exitReason: 'target', realizedPnl: 59.5, commissions: 2, closedAt: T0 + 3_600_000, keptOvernightAt: null, mfePct: null, maePct: null,
         extensionAtr: null, vwapDistPct: null, dayMovePct: null, minutesSinceOpen: null, takePct: 6, takePctSource: 'formula', postExitMfePct: null, postExitMaePct: null,
         takeCounterfactual: null, dailyAtrAtCreation: 4, triggerRank: 66, triggerBand: '60-74', autoExecuteAt: null, spreadDeferred: false, ...overrides,

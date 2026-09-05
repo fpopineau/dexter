@@ -132,6 +132,17 @@ way it scores the deterministic gates.
 
 Deterministic enforcement of `risk-rules.yaml` (the `risk_manager` tool is
 advisory; this gate is mandatory):
+- at **creation**, the sizer first composes EVERY budget from the proposals
+  store (WP6, 2026-09-05): risk budget, position cap, per-symbol aggregate
+  room, daily-loss headroom (planned stop-outs of the open book plus today's
+  realized losses), the overnight position/book caps and the class-aware
+  gap-stress room (swing class), the sector room, the ADV cap — the smallest
+  binds and is named in the result — then the **cost-to-target** check
+  refuses a trade whose estimated round trip (two commissions, one spread
+  crossing, slippage) exceeds `max_cost_to_target_pct` of the gross gain at
+  the target. The same context is handed to the creation gate, so a sized
+  proposal passes it by construction; acceptance re-checks with fresh
+  broker marks and refuses on drift, never resizing;
 - at **creation** (`createProposal`): coherent stop/target, min price,
   min risk/reward, integer quantity, and the **noise-stop filter** (stop
   distance must be ≥ `min_stop_atr_fraction` × the daily ATR(14), fetched

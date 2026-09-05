@@ -33,6 +33,31 @@
 import { getRiskRules, type RiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
 import { currentRung } from './ladder-state.js';
 import { stressNotionalCapUsd, type StrategyId } from './lane-contract.js';
+import { costViability, estimateRoundTrip } from './trade-costs.js';
+
+/** REQ-SIZE-001: the book the sizer composes against (creation-time, from
+ *  the proposals store; every field optional — a missing field skips its
+ *  cap, never fakes a zero). */
+export interface SizerBook {
+    /** Planned stop-out risk of the open book (USD); undefined = an
+     *  unpriceable row made it unknown → the headroom cap is skipped. */
+    openPlannedRiskUsd?: number;
+    /** Today's realized P&L (USD); losses shrink the headroom, wins never expand it. */
+    realizedLossTodayUsd?: number;
+    /** Notional already committed to THIS symbol by other working/filled rows. */
+    existingSymbolExposureUsd?: number;
+    /** Notional of rows that survive the close; class-aware stressed loss of that book. */
+    overnightExposureUsd?: number;
+    overnightStressedLossUsd?: number;
+    /** Same-sector notional; undefined/null = sector unknown → skipped. */
+    sameSectorExposureUsd?: number | null;
+    /** 20-day average daily volume (shares); enables the ADV cap. */
+    avgDailyVolume20d?: number | null;
+    /** Live bid-ask spread (% of mid) for the cost estimate; null = unknown. */
+    spreadPct?: number | null;
+}
+
+export type SizeBinding = 'risk' | 'position-cap' | 'symbol-aggregate' | 'headroom' | 'overnight' | 'sector' | 'adv' | 'costs';
 
 export interface SizeInput {
     entry: number;
@@ -48,12 +73,18 @@ export interface SizeInput {
     strategyId?: StrategyId | null;
     /** Notional (USD) of the overnight-capable book already working or
      *  held (swing class + kept overnight), supplied server-side — the
-     *  gap-stress budget this new position must fit beside. */
+     *  gap-stress budget this new position must fit beside. Superseded by
+     *  `book.overnightStressedLossUsd` when that is supplied (WP6). */
     overnightBookNotionalUsd?: number | null;
     /** Earnings bets only: the symbol's worst historical adverse post-print
      *  move (%). The sizer floors it at earnings_bet_gap_floor_pct; omitted
      *  → the floor alone is assumed. Ignored for other classes. */
     worstCaseGapPct?: number | null;
+    /** REQ-SIZE-002: the rest of the book — every cap the acceptance gate
+     *  enforces, composed here so a sized proposal passes it. */
+    book?: SizerBook;
+    /** Target price — enables the cost-to-target viability check (REQ-SIZE-003). */
+    target?: number;
 }
 
 export interface SizeResult {
@@ -65,6 +96,12 @@ export interface SizeResult {
     riskBudget: number;
     /** Why quantity is null — actionable, shown to the proposing model. */
     reason?: string;
+    /** REQ-SIZE-002: the constraint that bound the quantity (or refused). */
+    binding?: SizeBinding;
+    /** The share count each evaluated constraint allowed. */
+    caps?: Partial<Record<SizeBinding, number>>;
+    /** REQ-SIZE-003: estimated round-trip cost as % of the gross gain at target. */
+    costToTargetPct?: number | null;
 }
 
 /** IBKR fractional resolution: 4 decimal places, minimum 0.0001 share. */
@@ -180,38 +217,90 @@ export function computeQuantity(input: SizeInput, rules: RiskRules = getRiskRule
     const byCap = floorToPlaceable((maxPositionValue * CAP_DRIFT_MARGIN) / input.entry, fractional);
     const minQty = fractional ? FRACTIONAL_STEP : 1;
 
+    const book = input.book ?? {};
+    const caps: Partial<Record<SizeBinding, number>> = { risk: byRisk, 'position-cap': byCap };
+    const reasons: Partial<Record<SizeBinding, string>> = {};
+
     // REQ-LANE-004 (AUD-06 partial): an overnight-capable position (the
     // swing risk class — overnight, swing and cup lanes) is ALSO bounded at
-    // creation by the per-position overnight cap and by the gap-stress
-    // budget the whole overnight book must fit — the 15:52 vet used to be
-    // the first place a swing sized at 15% met the 7.5% stress reality.
-    let overnightCapValue: number | null = null;
+    // creation by the per-position overnight cap, the overnight book cap and
+    // the gap-stress budget the whole overnight book must fit — the 15:52
+    // vet used to be the first place a swing sized at 15% met the 7.5%
+    // stress reality. REQ-SIZE-002: with the book supplied the stress room
+    // is class-aware (each existing row at its own gap) and the notional
+    // book cap composes too.
     if (tradeClass === 'swing') {
         const posCap = (rules.max_overnight_position_pct / 100) * input.netLiquidation;
-        const stressCap = stressNotionalCapUsd(rules, input.netLiquidation, input.overnightBookNotionalUsd ?? 0);
-        overnightCapValue = stressCap === null ? posCap : Math.min(posCap, stressCap);
+        const bookStressUsd = book.overnightStressedLossUsd
+            ?? ((book.overnightExposureUsd ?? input.overnightBookNotionalUsd ?? 0) * (rules.overnight_gap_stress_pct / 100));
+        const stressBudget = (rules.max_daily_loss_pct / 100) * input.netLiquidation;
+        const stressRoom = rules.overnight_gap_stress_pct > 0
+            ? Math.max(0, stressBudget - bookStressUsd) / (rules.overnight_gap_stress_pct / 100)
+            : Number.POSITIVE_INFINITY;
+        const bookRoom = book.overnightExposureUsd !== undefined
+            ? Math.max(0, (rules.max_overnight_exposure_pct / 100) * input.netLiquidation - book.overnightExposureUsd)
+            : Number.POSITIVE_INFINITY;
+        const overnightCapValue = Math.min(posCap, stressRoom, bookRoom);
+        caps.overnight = floorToPlaceable((overnightCapValue * CAP_DRIFT_MARGIN) / input.entry, fractional);
+        reasons.overnight =
+            `the overnight budget allows at most $${overnightCapValue.toFixed(0)} of notional for this position ` +
+            `(per-position overnight cap ${rules.max_overnight_position_pct}%, the ${rules.max_overnight_exposure_pct}% book cap, and the ` +
+            `${rules.overnight_gap_stress_pct}% gap-stress vs the ${rules.max_daily_loss_pct}% daily-loss budget minus the $${bookStressUsd.toFixed(0)} ` +
+            `of stress the overnight book already carries) — one share at $${input.entry} exceeds it; pick a cheaper name, wait for the book to clear, or skip`;
     }
-    const byOvernight = overnightCapValue === null
-        ? Number.POSITIVE_INFINITY
-        : floorToPlaceable((overnightCapValue * CAP_DRIFT_MARGIN) / input.entry, fractional);
-    if (byOvernight < minQty && overnightCapValue !== null) {
-        return {
-            quantity: null, multiplier, riskBudget,
-            reason:
-                `the overnight budget allows at most $${overnightCapValue.toFixed(0)} of notional for this position ` +
-                `(per-position overnight cap ${rules.max_overnight_position_pct}% and the ${rules.overnight_gap_stress_pct}% gap-stress ` +
-                `vs the ${rules.max_daily_loss_pct}% daily-loss budget, minus the $${Math.max(0, input.overnightBookNotionalUsd ?? 0).toFixed(0)} ` +
-                `already riding overnight) — one share at $${input.entry} exceeds it; pick a cheaper name, wait for the book to clear, or skip`,
-        };
+    // Per-symbol aggregate (REQ-EXPO-001 mirror): the cap counts what is
+    // already committed to the name.
+    if (book.existingSymbolExposureUsd !== undefined && book.existingSymbolExposureUsd > 0) {
+        const room = Math.max(0, maxPositionValue - book.existingSymbolExposureUsd);
+        caps['symbol-aggregate'] = floorToPlaceable((room * CAP_DRIFT_MARGIN) / input.entry, fractional);
+        reasons['symbol-aggregate'] =
+            `$${book.existingSymbolExposureUsd.toFixed(0)} is already committed to this symbol — the ${rules.max_position_pct}% single-symbol cap ` +
+            `($${maxPositionValue.toFixed(0)}) leaves $${room.toFixed(0)}, less than one share at $${input.entry}`;
     }
-    const quantity = Math.min(byRisk, byCap, byOvernight);
+    // Daily-loss headroom (acceptance-gate mirror): planned stop-outs of the
+    // open book plus today's realized losses must leave room for this one.
+    if (book.openPlannedRiskUsd !== undefined && rules.max_daily_loss_pct > 0) {
+        const limit = (rules.max_daily_loss_pct / 100) * input.netLiquidation;
+        const realized = Math.min(0, book.realizedLossTodayUsd ?? 0);
+        const headroom = Math.max(0, limit + realized - book.openPlannedRiskUsd);
+        caps.headroom = floorToPlaceable(headroom / riskPerShare, fractional);
+        reasons.headroom =
+            `the remaining daily-loss headroom is $${headroom.toFixed(0)} (kill-switch ${rules.max_daily_loss_pct}% = $${limit.toFixed(0)}` +
+            `${realized < 0 ? `, $${Math.abs(realized).toFixed(0)} realized in losses today` : ''}, $${book.openPlannedRiskUsd.toFixed(0)} committed to the open book's planned stops) — ` +
+            `less than one share's $${riskPerShare.toFixed(2)} stop distance; close or trim something first, or skip`;
+    }
+    // Sector concentration (acceptance-gate mirror), only when the sector is known.
+    if (book.sameSectorExposureUsd !== undefined && book.sameSectorExposureUsd !== null) {
+        const room = Math.max(0, (rules.max_sector_exposure_pct / 100) * input.netLiquidation - book.sameSectorExposureUsd);
+        caps.sector = floorToPlaceable((room * CAP_DRIFT_MARGIN) / input.entry, fractional);
+        reasons.sector =
+            `$${book.sameSectorExposureUsd.toFixed(0)} is already committed to this sector — the ${rules.max_sector_exposure_pct}% sector cap leaves $${room.toFixed(0)}, ` +
+            `less than one share at $${input.entry}; on a sector-wide move prefer the breadth vehicle`;
+    }
+    // Liquidity (microstructure mirror): the order must stay under max_adv_pct of the 20-day ADV.
+    if (book.avgDailyVolume20d !== undefined && book.avgDailyVolume20d !== null && book.avgDailyVolume20d > 0) {
+        caps.adv = floorToPlaceable((rules.max_adv_pct / 100) * book.avgDailyVolume20d, fractional);
+        reasons.adv = `even one share exceeds ${rules.max_adv_pct}% of the 20-day ADV (${Math.round(book.avgDailyVolume20d).toLocaleString()} shares) — too thin`;
+    }
+
+    // The binding constraint is the smallest cap (priority order on ties).
+    const order: SizeBinding[] = ['risk', 'position-cap', 'symbol-aggregate', 'headroom', 'overnight', 'sector', 'adv'];
+    let quantity = Number.POSITIVE_INFINITY;
+    let binding: SizeBinding = 'risk';
+    for (const k of order) {
+        const v = caps[k];
+        if (v !== undefined && v < quantity) { quantity = v; binding = k; }
+    }
+    if (quantity < minQty && binding !== 'risk' && binding !== 'position-cap') {
+        return { quantity: null, multiplier, riskBudget, binding, caps, reason: reasons[binding] };
+    }
 
     if (quantity < minQty) {
         const maxAffordableEntry = Math.floor(maxPositionValue * 100) / 100;
         const unit = fractional ? `${FRACTIONAL_STEP} share` : 'one share';
         const riskLabel = tradeClass === 'earnings-bet' ? 'assumed worst-case gap' : 'stop distance';
         return {
-            quantity: null, multiplier, riskBudget,
+            quantity: null, multiplier, riskBudget, binding: byCap < minQty ? 'position-cap' : 'risk', caps,
             reason: byCap < minQty
                 ? `${unit} at $${input.entry} exceeds the ${rules.max_position_pct}% position cap ` +
                   `($${maxAffordableEntry.toFixed(0)}) — the account cannot afford this symbol; pick one under that price`
@@ -224,5 +313,18 @@ export function computeQuantity(input: SizeInput, rules: RiskRules = getRiskRule
     }
 
     // toFixed(4) clears float dust from the resolution math (e.g. 1.4799999…).
-    return { quantity: fractional ? Number(quantity.toFixed(4)) : quantity, multiplier, riskBudget };
+    const placeable = fractional ? Number(quantity.toFixed(4)) : quantity;
+
+    // REQ-SIZE-003: net viability — the round trip must be worth paying.
+    let costToTargetPct: number | null | undefined;
+    if (input.target !== undefined && input.target > 0) {
+        const est = estimateRoundTrip({ quantity: placeable, entry: input.entry, target: input.target, spreadPct: book.spreadPct ?? null }, rules);
+        costToTargetPct = est.costToTargetPct;
+        const viable = costViability(est, rules);
+        if (!viable.ok) {
+            return { quantity: null, multiplier, riskBudget, binding: 'costs', caps, costToTargetPct, reason: viable.reason };
+        }
+    }
+
+    return { quantity: placeable, multiplier, riskBudget, binding, caps, costToTargetPct };
 }

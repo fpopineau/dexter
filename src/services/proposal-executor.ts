@@ -30,7 +30,8 @@ import { isLiveEnabled } from './live-switch.js';
 import { oppositeDirectionConflict } from './vehicle-complexes.js';
 import { replayMissedExecutions, trackExecutedProposal } from './outcome-tracker.js';
 import { getSectorInfo } from './sector-map.js';
-import { assertAcceptContext, assertProposalRisk, checkMicrostructure, checkPriceRun, ENTRY_CONFIRM_FRACTION, formulaTakePct, plannedWorstLossUsd } from './proposal-risk-gate.js';
+import { assertAcceptContext, assertProposalRisk, checkMicrostructure, checkPriceRun, ENTRY_CONFIRM_FRACTION, formulaTakePct } from './proposal-risk-gate.js';
+import { buildBookContext } from './book-context.js';
 import { fetchDailyRiskContext } from '@/tools/ibkr/daily-atr.js';
 import type { RiskRules } from '@/tools/ibkr/risk-rules.js';
 import { fetchShortabilitySnapshot } from '@/tools/ibkr/microstructure.js';
@@ -541,9 +542,28 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
             }
         };
         const sector = await resolveSector(p.symbol);
-        let sameSectorExposureUsd = 0;
-        for (const t of exposure) {
-            if ((await resolveSector(t.symbol)) === sector) sameSectorExposureUsd += exposureValue(t);
+        const sectorOf = new Map<string, string>();
+        for (const t of exposure) sectorOf.set(t.symbol.toUpperCase(), await resolveSector(t.symbol));
+        // WP6 (REQ-SIZE-006): the four book sums — planned risk, symbol
+        // aggregate, overnight notional + class-aware stress, same-sector —
+        // come from the SAME builder the creation-time sizer used, priced
+        // here at max(basis, mark). Unpriceable rows are listed, never
+        // zeroed: plannedWorstLossUsd's null means NOT countable (WP0.3),
+        // and an adopted row prices only at its VERIFIED broker stop
+        // (review-18) — either refuses the accept until the row prices,
+        // fills, or dies.
+        const book = buildBookContext({
+            rows: exposure, symbol: p.symbol, rules: getRiskRules(), valueOf: exposureValue, sector, sectorOf, adoptedRiskUsd,
+        });
+        for (const u of book.unpriceableRows) {
+            if (u.kind === 'adopted-unverified') {
+                throw new Error(`[risk-gate] adopted row ${u.id} (${u.symbol}) missed protection verification — refuse`);
+            }
+            throw new Error(
+                `[risk-gate] open proposal ${u.id} (${u.symbol}) has no usable price basis — ` +
+                `its worst-case risk is unknown, so the daily-loss headroom cannot be computed. ` +
+                `Retry when its entry fills or it is cleaned up.`,
+            );
         }
         assertProposalRisk(
             {
@@ -581,63 +601,21 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
                 // proposals — the aggregate cap stops same-name stacking.
                 // WP4: MAX of the DB view and the broker's actual holding,
                 // so a manual TWS position in the same name binds the cap.
-                existingSymbolExposure: Math.max(
-                    exposure
-                        .filter((t) => t.symbol === p.symbol)
-                        .reduce((sum, t) => sum + exposureValue(t), 0),
-                    union.notionalBySymbol.get(p.symbol) ?? 0,
-                ),
+                existingSymbolExposure: Math.max(book.existingSymbolExposureUsd, union.notionalBySymbol.get(p.symbol) ?? 0),
                 // Daily-loss headroom: the open book's planned stop-outs
                 // (gap cost for bets) plus today's realized losses — the
                 // gate refuses a book that could stop out through the halt.
-                // plannedWorstLossUsd's contract says null = NOT countable,
-                // never zero risk — an unpriceable in-flight row therefore
-                // refuses the accept instead of granting free headroom
-                // (WP0.3; the refusal clears once the row prices or dies).
-                openPlannedRiskUsd: exposure.reduce((sum, t) => {
-                    // Review-18: adopted rows price at their VERIFIED
-                    // broker stop (built above; a row that failed the
-                    // verification never reaches this sum) — the
-                    // synthetic ±5% level is bookkeeping, not risk.
-                    if (t.source === 'adopted') {
-                        const real = adoptedRiskUsd.get(t.symbol.toUpperCase());
-                        if (real === undefined) {
-                            throw new Error(`[risk-gate] adopted row ${t.id} (${t.symbol}) missed protection verification — refuse`);
-                        }
-                        return sum + real;
-                    }
-                    const usd = plannedWorstLossUsd(t);
-                    if (usd === null) {
-                        throw new Error(
-                            `[risk-gate] open proposal ${t.id} (${t.symbol}) has no usable price basis — ` +
-                            `its worst-case risk is unknown, so the daily-loss headroom cannot be computed. ` +
-                            `Retry when its entry fills or it is cleaned up.`,
-                        );
-                    }
-                    return sum + usd;
-                }, 0),
+                // Every row priced (the unpriceable list above is empty).
+                openPlannedRiskUsd: book.openPlannedRiskUsd,
                 realizedLossTodayUsd: Math.min(0, await sumRealizedPnlSince(etDayStartMs())),
                 // Overnight book: GTC rows survive the close (incl. 🌙
-                // kept-overnight holds — converted to GTC at the bell).
-                overnightExposureUsd: exposure
-                    .filter((t) => t.tif === 'GTC')
-                    .reduce((sum, t) => sum + exposureValue(t), 0),
-                // CLASS-AWARE stressed loss of the existing overnight book
-                // (review 2026-08-23, omission 6): an earnings bet in the
-                // book gaps at ITS assumed severity, not the base shock —
-                // stressing it at 20% when its own record says 35% understates
-                // the tail the accept is adding to.
-                overnightStressedLossUsd: exposure
-                    .filter((t) => t.tif === 'GTC')
-                    .reduce((sum, t) => {
-                        const rules = getRiskRules();
-                        const pct = t.tradeClass === 'earnings-bet'
-                            ? Math.max(rules.overnight_gap_stress_pct, Math.max(t.worstCaseGapPct ?? 0, rules.earnings_bet_gap_floor_pct))
-                            : rules.overnight_gap_stress_pct;
-                        return sum + exposureValue(t) * (pct / 100);
-                    }, 0),
+                // kept-overnight holds — converted to GTC at the bell);
+                // CLASS-AWARE stressed loss (review 2026-08-23, omission 6):
+                // a bet in the book gaps at ITS assumed severity.
+                overnightExposureUsd: book.overnightExposureUsd,
+                overnightStressedLossUsd: book.overnightStressedLossUsd,
                 sector,
-                sameSectorExposureUsd,
+                sameSectorExposureUsd: book.sameSectorExposureUsd ?? 0,
                 // WP6: the context the creation-time checks used, now
                 // guaranteed present (assertAcceptContext above) — the
                 // noise-stop, target-reachability and extension checks run

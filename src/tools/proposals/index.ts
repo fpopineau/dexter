@@ -172,16 +172,19 @@ export function createTradeProposalsTool() {
                         // Server-side daily ATR + EMA10 for the noise-stop
                         // and extension checks — never taken from the model.
                         // Fail-open (nulls skip the checks).
-                        const { dailyAtr, ema10, recentEarnings, prevClose } = await fetchDailyRiskContext(input.symbol);
+                        const riskCtx = await fetchDailyRiskContext(input.symbol);
+                        const { dailyAtr, ema10, recentEarnings, prevClose } = riskCtx;
 
-                        // Live last price (never delayed) for the buy-now
-                        // entry-pricing check, plus session VWAP — both
-                        // server-side, both fail-open. Skipped in tests
-                        // (IBKR-dependent, same as the daily context).
-                        const lastPrice = process.env.NODE_ENV === 'test'
+                        // Live quote (never delayed) for the buy-now
+                        // entry-pricing check and the spread the cost model
+                        // prices (WP6), plus session VWAP — all server-side,
+                        // all fail-open. Skipped in tests (IBKR-dependent,
+                        // same as the daily context).
+                        const quote = process.env.NODE_ENV === 'test'
                             ? null
                             : await import('@/services/proposal-executor.js')
-                                .then((m) => m.fetchLastPrice(input.symbol)).catch(() => null);
+                                .then((m) => m.fetchLiveQuote(input.symbol)).catch(() => null);
+                        const lastPrice = quote?.last ?? null;
                         const { buildEntryContext, fetchSessionVwap, minutesSinceOpenEt } =
                             await import('@/services/entry-context.js');
                         const vwap = await fetchSessionVwap(input.symbol).catch(() => null);
@@ -205,62 +208,103 @@ export function createTradeProposalsTool() {
                                 .fetchEarningsBetEvidence(input.symbol, input.direction)
                             : undefined;
 
-                        // REQ-LANE-004: the overnight-capable book already
-                        // working or held (swing class / kept overnight) —
-                        // the gap-stress budget this position must fit beside.
                         // REQ-LANE-005: the detector version of a pattern lane.
-                        let overnightBookNotionalUsd: number | null = null;
                         let detectorVersion: string | null = null;
-                        if (lane.tradeClass === 'swing') {
-                            const { listExposure } = await import('@/services/trade-proposals.js');
-                            const book = await listExposure().catch(() => []);
-                            overnightBookNotionalUsd = book
-                                .filter((t) => t.tradeClass !== 'intraday' || t.keptOvernightAt !== null)
-                                .reduce((s, t) => s + Math.abs(t.quantity) * (t.entryFillPrice ?? t.entry ?? 0), 0);
-                            if (lane.strategyId === 'cup-and-handle') {
-                                const { getLatestPatternScan } = await import('@/services/pattern-scanner.js');
-                                const snap = getLatestPatternScan();
-                                detectorVersion = snap?.candidates.find((c) => c.symbol.toUpperCase() === input.symbol.toUpperCase())?.detectorVersion ?? snap?.detectorVersion ?? null;
-                            }
+                        if (lane.strategyId === 'cup-and-handle') {
+                            const { getLatestPatternScan } = await import('@/services/pattern-scanner.js');
+                            const snap = getLatestPatternScan();
+                            detectorVersion = snap?.candidates.find((c) => c.symbol.toUpperCase() === input.symbol.toUpperCase())?.detectorVersion ?? snap?.detectorVersion ?? null;
                         }
+
+                        // WP6 (REQ-SIZE-001): the book context — the SAME
+                        // sums the acceptance gate reads, built from the
+                        // proposals store (no broker call at creation: rows
+                        // price at their worst entry basis). Sectors are
+                        // live-only (Nasdaq metadata; 'UNKNOWN' bucket for
+                        // misses, as at accept); in tests they stay unknown
+                        // and the sector cap skips. An unpriceable row makes
+                        // the planned risk UNKNOWN (never zero): the sizer
+                        // then skips the headroom cap and the accept-time
+                        // gate refuses until the row prices — fail-closed
+                        // where the orders are placed, informative here.
+                        const store = await import('@/services/trade-proposals.js');
+                        const { buildBookContext } = await import('@/services/book-context.js');
+                        const { getRiskRules } = await import('@/tools/ibkr/risk-rules.js');
+                        const { worstEntryNotional } = await import('@/services/proposal-executor.js');
+                        const rows = await store.listExposure().catch(() => []);
+                        const sectorsLive = process.env.NODE_ENV !== 'test';
+                        const resolveSector = async (sym: string): Promise<string> => {
+                            try {
+                                const { getSectorInfo } = await import('@/services/sector-map.js');
+                                return (await getSectorInfo(sym))?.sector ?? 'UNKNOWN';
+                            } catch { return 'UNKNOWN'; }
+                        };
+                        const sector = sectorsLive ? await resolveSector(input.symbol) : null;
+                        const sectorOf = sectorsLive ? new Map<string, string>() : null;
+                        if (sectorOf) for (const t of rows) sectorOf.set(t.symbol.toUpperCase(), await resolveSector(t.symbol));
+                        const book = buildBookContext({ rows, symbol: input.symbol, rules: getRiskRules(), valueOf: worstEntryNotional, sector, sectorOf });
+                        const realizedLossTodayUsd = Math.min(0, await store.sumRealizedPnlSince(store.etDayStartMs()).catch(() => 0));
+                        const executedToday = await store.countExecutedSince(store.etDayStartMs()).catch(() => 0);
+                        const spreadPct = quote?.bid != null && quote.ask != null && quote.ask > quote.bid
+                            ? ((quote.ask - quote.bid) / ((quote.ask + quote.bid) / 2)) * 100
+                            : null;
+                        const { avgDailyVolume20d } = riskCtx;
+                        // Live NetLiq (both paths): the sizer needs it; the
+                        // account caps of the creation gate read it too.
+                        const netLiq = process.env.NODE_ENV === 'test'
+                            ? null
+                            : (await import('@/services/daily-loss-guard.js').then((m) => m.getDailyLossStatus()).catch(() => null))?.netLiquidation ?? null;
 
                         // Auto-sizing: quantity omitted → the deterministic
                         // sizer computes shares from live NetLiq, the score
-                        // and the stop distance. Sizing failures return the
-                        // reason — the model adjusts or skips, never guesses.
+                        // and the stop distance, COMPOSED with every cap the
+                        // acceptance gate enforces (REQ-SIZE-002) and the
+                        // cost-to-target viability check (REQ-SIZE-003).
+                        // Sizing failures return the reason and the binding
+                        // constraint — the model adjusts or skips, never guesses.
                         let quantity = input.quantity;
+                        let costToTargetPct: number | null = null;
+                        const sizingBasis = input.entryType === 'STP_LMT' && input.entryLimit != null && input.entryLimit > 0
+                            ? input.entryLimit // Review 2026-08-21: STP_LMT sizes at the LIMIT cap (the worst permitted fill)
+                            : input.entry;
                         if (quantity == null) {
-                            const { getDailyLossStatus } = await import('@/services/daily-loss-guard.js');
                             const { computeQuantity } = await import('@/services/position-sizer.js');
-                            const netLiq = (await getDailyLossStatus().catch(() => null))?.netLiquidation;
                             if (netLiq == null || !(netLiq > 0)) {
                                 return formatToolResult({ error: 'auto-sizing needs the live account net liquidation and it is unavailable — retry shortly or pass an explicit quantity' });
                             }
-                            // Review 2026-08-21: STP_LMT sizes at the LIMIT
-                            // cap (the worst permitted fill) — sizing at the
-                            // trigger under-counts risk when the fill lands
-                            // at the cap.
-                            const sizingBasis = input.entryType === 'STP_LMT' && input.entryLimit != null && input.entryLimit > 0
-                                ? input.entryLimit
-                                : input.entry;
                             const sized = computeQuantity({
-                                entry: sizingBasis, stop: input.stop, score: input.score, netLiquidation: netLiq,
-                                tradeClass: lane.tradeClass, worstCaseGapPct: input.worstCaseGapPct,
-                                strategyId: lane.strategyId, overnightBookNotionalUsd,
+                                entry: sizingBasis, stop: input.stop, target: input.target, score: input.score, netLiquidation: netLiq,
+                                tradeClass: lane.tradeClass, worstCaseGapPct: input.worstCaseGapPct, strategyId: lane.strategyId,
+                                book: {
+                                    ...(book.unpriceableRows.length === 0 ? { openPlannedRiskUsd: book.openPlannedRiskUsd } : {}),
+                                    realizedLossTodayUsd,
+                                    existingSymbolExposureUsd: book.existingSymbolExposureUsd,
+                                    overnightExposureUsd: book.overnightExposureUsd,
+                                    overnightStressedLossUsd: book.overnightStressedLossUsd,
+                                    sameSectorExposureUsd: book.sameSectorExposureUsd,
+                                    avgDailyVolume20d, spreadPct,
+                                },
                             });
                             if (sized.quantity == null) {
-                                logger.warn(`[trade-proposals] auto-size refused: ${input.symbol} ${input.direction} @${input.entry} stop ${input.stop} score ${input.score ?? '—'} — ${sized.reason}`);
-                                const { recordRefusal } = await import('@/services/trade-proposals.js');
-                                await recordRefusal({
+                                logger.warn(`[trade-proposals] auto-size refused (${sized.binding ?? '?'}): ${input.symbol} ${input.direction} @${input.entry} stop ${input.stop} score ${input.score ?? '—'} — ${sized.reason}`);
+                                await store.recordRefusal({
                                     symbol: input.symbol, direction: input.direction, entryType: input.entryType,
                                     entry: input.entry, entryLimit: input.entryLimit, stop: input.stop, target: input.target,
-                                    score: input.score, reason: `sizer refused: ${sized.reason}`,
+                                    score: input.score, reason: `sizer refused [${sized.binding ?? 'unknown'}]: ${sized.reason}`,
                                     triggerRank: currentTriggerRank(),
                                 }).catch(() => { /* ledger is best-effort */ });
-                                return formatToolResult({ error: `position sizer refused: ${sized.reason}` });
+                                return formatToolResult({ error: `position sizer refused [${sized.binding ?? 'unknown'}]: ${sized.reason}` });
                             }
                             quantity = sized.quantity;
-                            logger.info(`[trade-proposals] auto-sized ${input.symbol}: ${quantity} shares (budget $${sized.riskBudget.toFixed(0)}, confidence ×${sized.multiplier})`);
+                            costToTargetPct = sized.costToTargetPct ?? null;
+                            const capLine = sized.caps ? Object.entries(sized.caps).map(([k, v]) => `${k} ${Number.isFinite(v) ? v : '∞'}`).join(', ') : '';
+                            logger.info(`[trade-proposals] auto-sized ${input.symbol}: ${quantity} shares (budget $${sized.riskBudget.toFixed(0)}, confidence ×${sized.multiplier}, bound by ${sized.binding ?? '?'}; caps: ${capLine}; cost-to-target ${costToTargetPct == null ? '—' : `${costToTargetPct}%`})`);
+                        } else {
+                            // Explicit quantity: the cost ratio is still
+                            // stamped (REQ-SIZE-003 ledger), not enforced —
+                            // the operator chose the size.
+                            const { estimateRoundTrip } = await import('@/services/trade-costs.js');
+                            costToTargetPct = estimateRoundTrip({ quantity, entry: sizingBasis, target: input.target, spreadPct }, getRiskRules()).costToTargetPct;
                         }
 
                         const p = await createProposal({
@@ -277,6 +321,7 @@ export function createTradeProposalsTool() {
                             strategyId: lane.strategyId,
                             setupId: input.setupId,
                             detectorVersion,
+                            costToTargetPct,
                             takePct: input.takePct,
                             worstCaseGapPct: input.worstCaseGapPct,
                             score: input.score,
@@ -312,6 +357,25 @@ export function createTradeProposalsTool() {
                             ...(recentEarnings === true ? { recentEarnings: true } : {}),
                             // worstCaseGapPct reaches the gate via createProposal's own input threading.
                             ...(betEvidence ? { earningsBetEvidence: betEvidence } : {}),
+                            // WP6 (REQ-SIZE-004): the SAME book context the
+                            // sizer composed against — the creation gate now
+                            // runs the account, headroom, overnight, sector and
+                            // slot caps too, so a sized proposal passes by
+                            // construction and an explicit quantity that
+                            // breaks a cap is refused HERE, not at accept.
+                            // Fields that are unknown are omitted (their checks
+                            // skip honestly, and refuse later at accept).
+                            ...(netLiq != null && netLiq > 0 ? { netLiquidation: netLiq } : {}),
+                            openPositions: book.openPositions,
+                            executedToday,
+                            openSwingPositions: book.openSwing,
+                            openEarningsBets: book.openEarningsBets,
+                            existingSymbolExposure: book.existingSymbolExposureUsd,
+                            ...(book.unpriceableRows.length === 0 ? { openPlannedRiskUsd: book.openPlannedRiskUsd } : {}),
+                            realizedLossTodayUsd,
+                            overnightExposureUsd: book.overnightExposureUsd,
+                            overnightStressedLossUsd: book.overnightStressedLossUsd,
+                            ...(sector != null ? { sector, sameSectorExposureUsd: book.sameSectorExposureUsd ?? 0 } : {}),
                         });
 
                         // Paper-only auto-execution (AUTO_EXECUTE_PAPER=true):

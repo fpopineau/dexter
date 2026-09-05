@@ -102,6 +102,73 @@ describe('computeQuantity — four-lane contract (REQ-LANE-004: overnight-capabl
     });
 });
 
+describe('computeQuantity — WP6: the book composes every acceptance cap at creation (REQ-SIZE-002/003)', () => {
+    const LIVE_BOOK: RiskRules = {
+        ...DEFAULT_RULES, max_position_pct: 15, max_daily_loss_pct: 1.5, max_sector_exposure_pct: 35, max_overnight_position_pct: 15,
+        max_overnight_exposure_pct: 30, overnight_gap_stress_pct: 20, swing_risk_pct: 0.75, overnight_risk_pct: 0.75, max_risk_per_trade_pct: 0.5,
+        max_adv_pct: 1.0, commission_per_share_usd: 0.005, commission_min_usd: 1, slippage_bps: 5, max_cost_to_target_pct: 20,
+    };
+    const NETLIQ = 11_700;
+    // intraday, $100 entry, $2 stop, rung 0.5%: risk 58.5/2 = 29 shares; cap 1,755×0.995/100 = 17 → 'position-cap' binds by default
+    const base = { entry: 100, stop: 98, score: 85, netLiquidation: NETLIQ, tradeClass: 'intraday' as const, strategyId: 'intraday' as const };
+
+    test('with no book the result names the binding cap (position-cap here) and lists every cap it evaluated', () => {
+        const r = computeQuantity(base, LIVE_BOOK, 0.5);
+        expect(r.quantity).toBe(17);
+        expect(r.binding).toBe('position-cap');
+        expect(r.caps).toEqual({ risk: 29, 'position-cap': 17 });
+    });
+
+    test('headroom: planned stop-outs of the open book plus realized losses cap the shares; nothing left → refused naming headroom', () => {
+        // limit $175.5; open planned risk $150; realized −$10 → headroom $15.5 → 7 shares at $2
+        const r = computeQuantity({ ...base, book: { openPlannedRiskUsd: 150, realizedLossTodayUsd: -10 } }, LIVE_BOOK, 0.5);
+        expect(r.quantity).toBe(7);
+        expect(r.binding).toBe('headroom');
+        const none = computeQuantity({ ...base, book: { openPlannedRiskUsd: 175 } }, LIVE_BOOK, 0.5);
+        expect(none.quantity).toBeNull();
+        expect(none.binding).toBe('headroom');
+        expect(none.reason).toContain('daily-loss headroom');
+        // wins never expand the headroom
+        expect(computeQuantity({ ...base, book: { openPlannedRiskUsd: 150, realizedLossTodayUsd: +500 } }, LIVE_BOOK, 0.5).quantity).toBe(12);
+    });
+
+    test('symbol aggregate, sector and ADV rooms bind and name themselves', () => {
+        // symbol: cap $1,755 − $1,500 committed = $255 → 2 shares
+        expect(computeQuantity({ ...base, book: { existingSymbolExposureUsd: 1500 } }, LIVE_BOOK, 0.5)).toMatchObject({ quantity: 2, binding: 'symbol-aggregate' });
+        // sector: 35% = $4,095 − $3,800 = $295 → 2 shares
+        expect(computeQuantity({ ...base, book: { sameSectorExposureUsd: 3800 } }, LIVE_BOOK, 0.5)).toMatchObject({ quantity: 2, binding: 'sector' });
+        // unknown sector → skipped
+        expect(computeQuantity({ ...base, book: { sameSectorExposureUsd: null } }, LIVE_BOOK, 0.5).caps?.sector).toBeUndefined();
+        // ADV: 1% of 1,000 shares = 10
+        expect(computeQuantity({ ...base, book: { avgDailyVolume20d: 1000 } }, LIVE_BOOK, 0.5)).toMatchObject({ quantity: 10, binding: 'adv' });
+        const thin = computeQuantity({ ...base, book: { avgDailyVolume20d: 50 } }, LIVE_BOOK, 0.5);
+        expect(thin.quantity).toBeNull();
+        expect(thin.reason).toContain('ADV');
+    });
+
+    test('swing class: class-aware book stress and the overnight book cap compose with the per-position overnight cap', () => {
+        const swing = { ...base, tradeClass: 'swing' as const, strategyId: 'swing' as const, stop: 97 };
+        // stress budget $175.5; book already stressed $100 → room $75.5/0.2 = $377.5 → 3 shares
+        expect(computeQuantity({ ...swing, book: { overnightExposureUsd: 500, overnightStressedLossUsd: 100 } }, LIVE_BOOK, 0.5)).toMatchObject({ quantity: 3, binding: 'overnight' });
+        // book cap: 30% = $3,510 − $3,400 = $110 → 1 share (stress room would allow more with an empty stressed book)
+        expect(computeQuantity({ ...swing, book: { overnightExposureUsd: 3400, overnightStressedLossUsd: 0 } }, LIVE_BOOK, 0.5)).toMatchObject({ quantity: 1, binding: 'overnight' });
+    });
+
+    test('REQ-SIZE-003 viability: a 2-share trade at +3% cannot pay two $1 commissions inside 20%; a viable size passes and reports the ratio', () => {
+        // cheap name, wide stop → risk allows few shares: $117 entry, $110 stop, rung 0.25% → 29.25/7 = 4 shares; target +3% → gross $14.04, costs ≈ $2.6 → 18.5%
+        const ok = computeQuantity({ entry: 117, stop: 110, target: 120.51, score: 85, netLiquidation: NETLIQ, tradeClass: 'intraday', strategyId: 'intraday', book: { spreadPct: 0.05 } }, LIVE_BOOK, 0.25);
+        expect(ok.quantity).toBe(4);
+        expect(ok.costToTargetPct).toBeLessThanOrEqual(20);
+        const tiny = computeQuantity({ entry: 117, stop: 100, target: 120.51, score: 85, netLiquidation: NETLIQ, tradeClass: 'intraday', strategyId: 'intraday' }, LIVE_BOOK, 0.25);
+        // 29.25/17 = 1 share → gross $3.51, costs $2 + slippage → over 20%
+        expect(tiny.quantity).toBeNull();
+        expect(tiny.binding).toBe('costs');
+        expect(tiny.reason).toContain('cost-to-target cap');
+        // without a target the viability check does not run
+        expect(computeQuantity({ entry: 117, stop: 100, score: 85, netLiquidation: NETLIQ, tradeClass: 'intraday', strategyId: 'intraday' }, LIVE_BOOK, 0.25).quantity).toBe(1);
+    });
+});
+
 describe('computeQuantity — $1M paper account (sizer must also serve paper)', () => {
     test('produces the familiar risk-budget sizing', () => {
         // budget = 1,000,000 × 0.25% = 2500 at full confidence; stop distance 3.5

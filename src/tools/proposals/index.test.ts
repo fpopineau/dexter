@@ -14,12 +14,17 @@ process.env.AUTO_EXECUTE_PAPER = 'false';
 
 import { createTradeProposalsTool } from './index.js';
 import { __setDailyRiskContextForTests } from '@/tools/ibkr/daily-atr.js';
+import { __rebindStoreForTests } from '@/services/trade-proposals.js';
 
 // Take policy (WP-EXIT): intraday creation fails closed without an ATR —
 // supply the 4%-ATR fixture (entry 20.80 → x = 6% → target 22.05).
 __setDailyRiskContextForTests({
     dailyAtr: 0.832, ema10: null, recentEarnings: null, prevClose: null, avgDailyVolume20d: null,
 });
+// The store caches one handle per process: rebind it to THIS file's temp
+// dir, or the creation-time book (WP6 slot/daily counts) sees rows that
+// earlier test files executed.
+await __rebindStoreForTests();
 
 afterAll(() => {
     __setDailyRiskContextForTests(null);

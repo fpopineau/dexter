@@ -3118,3 +3118,152 @@ Precisions recorded at landing (append-only):
   (the pre-registered unit stays R per trade, paired by entry day —
   discovery decision), Bonferroni 98.75 % (schedule A kept by operator
   decision), and the exploratory-then-confirmation redesign.
+
+## Sizer composition (2026-09-05) — WP6: every budget composed at creation
+
+Completes AUD-06 and adds the cost dimension of AUD-01. WP5 taught the sizer
+the overnight budget; the remaining caps the acceptance gate enforces were
+still unknown to the sizer, so a correctly-budgeted proposal could be
+refused later for a constraint knowable at creation, and nothing priced the
+round trip against the target.
+
+### Domain deltas
+
+- `src/services/book-context.ts`: `buildBookContext` — the pure book sums
+  both paths use (open positions, class counts, per-symbol notional,
+  planned stop-out risk with unpriceable rows LISTED, overnight notional and
+  class-aware stressed loss, same-sector notional).
+- `src/services/trade-costs.ts`: the cost model (commissions per side,
+  spread crossing, slippage) and `costToTargetPct`.
+- `SizeInput.book` + `SizeInput.target`; `SizeResult.binding`
+  ('risk' | 'position-cap' | 'symbol-aggregate' | 'headroom' | 'overnight' |
+  'sector' | 'adv' | 'costs') and `caps` (the share count each constraint
+  allowed).
+- Proposal column `cost_to_target_pct` (REAL): the estimate at creation.
+- Rules keys: `commission_per_share_usd` (0.005), `commission_min_usd`
+  (1.0), `slippage_bps` (5), `max_cost_to_target_pct` (20).
+
+### Requirements
+
+- REQ-SIZE-001: at creation the tool assembles the book context from the
+  proposals store (working + filled rows priced at the worst entry basis),
+  today's realized losses, the symbol's sector (live resolution; UNKNOWN
+  bucket on a miss; skipped in tests), the 20-day ADV and the live spread
+  when a quote exists. No broker call at creation.
+- REQ-SIZE-002: the sizer's quantity is the minimum over risk budget,
+  position cap, per-symbol aggregate room, daily-loss headroom (planned
+  stop-outs of the open book plus today's realized losses), overnight
+  position cap, overnight book cap and class-aware stress room (swing class),
+  sector room and ADV (`max_adv_pct`), floored to whole shares; below one
+  share it refuses naming the binding constraint; the result names the
+  binding constraint and every cap's share count.
+- REQ-SIZE-003 (net viability): the estimated round-trip cost (two
+  commissions at the IBKR fixed model, one spread crossing, slippage both
+  sides) must not exceed `max_cost_to_target_pct` of the gross gain at the
+  target, else the proposal is refused with the numbers; the estimate is
+  stamped on the proposal (`cost_to_target_pct`).
+- REQ-SIZE-004 (parity): the creation-time gate receives the same context
+  the sizer used, so a sized proposal passes `checkProposalRisk` by
+  construction; the acceptance gate re-checks with fresh marks and the
+  broker union (REQ-EXPO-*), and a drift refuses.
+- REQ-SIZE-005 (no silent resize): acceptance never changes `quantity`; the
+  only quantity change after acceptance is the partial-fill downgrade with
+  `planned_quantity` preserved (existing). Pinned by test.
+- REQ-SIZE-006: the accept path computes its four pure book sums through
+  `buildBookContext` (adopted-row verification and the broker union stay in
+  the executor), so the two paths cannot drift in formula.
+
+### Invariants
+
+- Sizing never loosens a cap: every constraint the accept gate enforces is
+  either composed at creation or re-checked at acceptance, and the stricter
+  binds.
+- An unpriceable open row never counts as zero risk: creation skips the
+  headroom cap WITH a note; acceptance refuses.
+
+### Non-goals (WP6)
+
+Broker-marked exposure at creation (accept-time only); realized-slippage
+calibration of the cost model (the observed twin slippage feeds it later);
+liquidity-adjusted ADV per session.
+
+### Acceptance criteria
+
+- [x] each cap binds and names itself; refusal reasons carry the binding constraint (REQ-SIZE-002)
+- [x] costs above the ratio refuse; the ratio is stamped (REQ-SIZE-003)
+- [x] a sized proposal passes the creation gate with the same context (REQ-SIZE-004)
+- [x] the accept path's sums equal the builder's on the same rows (REQ-SIZE-006)
+- [x] yaml keys load; docs name the composition (REQ-SIZE-001)
+
+### Landed (2026-09-05) — WP6 precisions and traceability
+
+- REQ-SIZE-001 precision: the tool prices the creation-time book with
+  `worstEntryNotional` (fill, else max(entry, limit)); realized losses come
+  from `sumRealizedPnlSince(etDayStartMs())`, the daily count from
+  `countExecutedSince`; NetLiq from the daily-loss guard (live only) feeds
+  both the sizer and the creation gate's account caps. Sector resolution is
+  live-only (`getSectorInfo`, 'UNKNOWN' bucket); in tests sectors are
+  unknown and the sector cap skips.
+- REQ-SIZE-002 precision: the binding constraint is the smallest cap, ties
+  broken in the order risk, position-cap, symbol-aggregate, headroom,
+  overnight, sector, adv. Headroom uses the raw stop distance (no drift
+  margin: risk, not notional); the notional rooms apply the 0.5 % cap-drift
+  margin like the position cap. A missing book field skips its cap (never a
+  fake zero): the planned-risk field is omitted when the builder lists an
+  unpriceable row. The overnight composition supersedes WP5's
+  `overnightBookNotionalUsd` when `book.overnightStressedLossUsd` is
+  supplied (the old input remains as a fallback).
+- REQ-SIZE-003 precision: `estimateRoundTrip` rounds each component to
+  cents and the ratio to 0.1 %; an unknown spread counts commissions and
+  slippage only and is flagged `spreadKnown: false` in the refusal text.
+  `max_cost_to_target_pct: 0` disables the check. With an EXPLICIT quantity
+  the ratio is stamped but not enforced (the operator chose the size).
+  Refusals are recorded in the refusal ledger as `sizer refused [<binding>]`.
+- REQ-SIZE-004 precision: the creation gate now receives `netLiquidation`
+  (when known), `openPositions`, `executedToday`, `openSwingPositions`,
+  `openEarningsBets`, `existingSymbolExposure`, `openPlannedRiskUsd` (when
+  priceable), `realizedLossTodayUsd`, `overnightExposureUsd`,
+  `overnightStressedLossUsd`, `sector` + `sameSectorExposureUsd` (when
+  resolved) — so the slot, daily-trade, headroom, overnight and sector caps
+  refuse at CREATION for an explicit quantity too, where before they first
+  bit at accept.
+- REQ-SIZE-006 precision: the accept path keeps the broker union maxes
+  (symbol notional, distinct-symbol count), the fresh marks and the adopted
+  protection verification; it passes `adoptedRiskUsd` into the builder and
+  turns the builder's `unpriceableRows` into the two pre-existing refusals
+  ("missed protection verification", "no usable price basis"). The
+  `sameSectorExposureUsd` it reads is the builder's (0 when null).
+- Test infrastructure: `__rebindStoreForTests()` — Bun runs every test file
+  in one process and the proposals store caches its handle, so a file that
+  isolates its own `DEXTER_DATA_DIR` inherited the first file's DB. The
+  tool test now rebinds; without it the WP6 creation-time daily-trade cap
+  sees other files' executed rows (46 > 20) and refuses.
+- Rules keys land in `risk-rules.yaml` (the live profile layers on top and
+  inherits them; identical values on both profiles).
+
+| REQ | Test |
+|---|---|
+| REQ-SIZE-001 | `book-context.test.ts` (counts, aggregate, planned risk, overnight + class-aware stress, sector; unpriceable rows listed, adopted override); `tools/proposals/index.test.ts` (creation still passes with the book wired, isolated store) |
+| REQ-SIZE-002 | `position-sizer.test.ts` "WP6" block (binding named, caps listed; headroom incl. realized losses and no expansion on wins; symbol/sector/ADV rooms; swing class stress + book cap) |
+| REQ-SIZE-003 | `trade-costs.test.ts` (per-side commission floor, round trip, ratio, unknown spread, viability, cap 0); `position-sizer.test.ts` (2-share refusal at +3 %, viable size reports the ratio, no target → no check) |
+| REQ-SIZE-004 | `sizer-gate-parity.test.ts` (intraday crowded book: sized quantity passes `checkProposalRisk`, one more share refuses; swing GTC stress-composed quantity passes the overnight checks) |
+| REQ-SIZE-005 | `outcome-tracker-partial.test.ts` (partial-fill downgrade keeps `plannedQuantity`; the only `quantity = ?` UPDATE in `trade-proposals.ts` is that downgrade) |
+| REQ-SIZE-006 | executor refactor covered by `book-context.test.ts` formulas + the existing executor suites (`proposal-executor*.test.ts`) — same refusal texts |
+| rules | `risk-rules-validation.test.ts` (both profiles load with the four keys; schema bounds) |
+
+Acceptance criteria above: all checked at landing (`bun test` 1083 pass,
+`tsc --noEmit` clean, Jest 1064 pass under Node).
+
+Plan decisions 1–5 (`docs/day2day/WP6-PLAN.md`) are implemented as written
+and await ratification at the review.
+
+### Block-bootstrap sensitivity under regime streaks (2026-09-05, note to REQ-SEQ-002)
+
+Second calibration run, daily shocks autocorrelated at ρ = 0.5 (`--rho 0.5
+--block 5 --reps 10000 --sims 1000`): schedule A false-ACCEPT 11.0 % → 14.1 %
+(blocks of 5: 20.9 %), schedule B 5.5 % → 8.8 % (blocks of 5: 17.6 %); power
+at +0.25 R unchanged (A 65.5 %, B 47.6 %). Streaky tapes inflate every
+schedule's false-ACCEPT by roughly three points; 5-session blocks still hurt
+at the early looks for the same degeneracy reason. Decision unchanged:
+`blockDays` stays 1, schedule A stays. Where the realised false-ACCEPT rate is
+quoted (VALIDATION-JOURNAL), 11–14 % is the honest range, not 11 % alone.

@@ -407,6 +407,19 @@ composed at creation with the gap-stress budget: at live scale the WHOLE
 overnight book is capped near 7.5% of NetLiq (1.5% daily loss / 20% stress),
 so expect small sizes — that is the ratified risk, not a bug.
 
+**Sizing composes the whole book (2026-09-05):** when a proposal omits its
+quantity, the sizer takes the smallest of the risk budget, the position cap,
+the room left on the same symbol, the remaining daily-loss headroom (the
+open book's planned stop-outs plus today's realized losses), the overnight
+caps and gap-stress room for swing-class lanes, the sector room and 1% of
+the 20-day ADV — and names the constraint that bound. It then refuses a
+trade whose estimated round-trip costs (two commissions at the IBKR fixed
+tier, one spread crossing, slippage) exceed 20% of the gross gain at the
+target; the ratio is stamped on the proposal. A sized proposal passes the
+creation gate by construction; the acceptance gate re-checks with fresh
+broker marks and refuses on drift. Nothing ever resizes a proposal after
+acceptance.
+
 Swings and earnings bets require GTC brackets and a `company-snapshot`
 card; earnings bets additionally require the `earnings_bet_intel`
 evidence bar (≥8 prints, ≥75% consistency, ≥1 external signal) and are

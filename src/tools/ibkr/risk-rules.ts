@@ -57,6 +57,16 @@ export interface RiskRules {
     /** Max order size as % of the 20-day average daily volume (WP7) —
      *  bounds market impact. */
     max_adv_pct: number;
+    // --- Trade-cost model (WP6, REQ-SIZE-003; IBKR fixed tier) ---
+    /** Commission per share per side (USD). */
+    commission_per_share_usd: number;
+    /** Commission minimum per order (USD). */
+    commission_min_usd: number;
+    /** Assumed slippage per side, basis points of notional. */
+    slippage_bps: number;
+    /** Refuse a proposal whose estimated round-trip costs exceed this % of
+     *  the gross gain at the target. 0 disables. */
+    max_cost_to_target_pct: number;
     stop_atr_multiplier: number;
     max_risk_per_trade_pct: number;
     min_stop_atr_fraction: number;
@@ -201,6 +211,10 @@ export const DEFAULT_RULES: RiskRules = {
     min_avg_volume: 500_000,
     max_spread_pct: 0.5,
     max_adv_pct: 1.0,
+    commission_per_share_usd: 0.005,
+    commission_min_usd: 1.0,
+    slippage_bps: 5,
+    max_cost_to_target_pct: 20,
     stop_atr_multiplier: 1.5,
     max_risk_per_trade_pct: 0.25,
     min_stop_atr_fraction: 0.4,
@@ -286,6 +300,10 @@ const RULE_SCHEMA: Record<keyof RiskRules, RuleSpec> = {
     min_avg_volume: num(0, 1e12),
     max_spread_pct: num(0, 10, { minExclusive: true }),
     max_adv_pct: num(0, 100, { minExclusive: true }),
+    commission_per_share_usd: num(0, 1),
+    commission_min_usd: num(0, 50),
+    slippage_bps: num(0, 500),
+    max_cost_to_target_pct: num(0, 100),
     stop_atr_multiplier: num(0, 20, { minExclusive: true }),
     max_risk_per_trade_pct: num(0, 10, { minExclusive: true }),
     min_stop_atr_fraction: num(0, 10),
