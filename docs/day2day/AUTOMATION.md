@@ -297,6 +297,26 @@ summed and mean R, and the twin-vs-actual slippage line; a failed settle is
 reported, never skipped. The simulator can never reach the broker (its own
 database, no order ids).
 
+### Nightly looks + digest — `src/services/loop/` (live-loop WP3)
+The tail of the nightly pipeline (settle → LOOKS → DIGEST) runs right after
+the simulator settle, whether or not the settle succeeded. The looks rebuild
+the epoch sample (closed, entry-filled, production lanes, deployable classes,
+proposed inside the epoch), check integrity (pre-registered constants hash,
+planned-risk anomalies, an EOD triage stamped `failed` today) and evaluate
+every look boundary n has newly reached — once each, recorded in
+`epoch-state.json`: ACCEPT (LCB > 0, net R > 0, PF ≥ 1.3 at 99 / 97.5 / 96 /
+95 % for n = 25 / 50 / 75 / 100) is the pre-registered cutover evidence
+(alert + journal); REJECT (UCB95 < 0) STOPS the epoch (status `stopped`,
+journal, alert, live switch OFF); an ACCEPT is withheld while the '60-74'
+band reads negative at n ≥ 20. Between boundaries the numbers are
+INFORMATIONAL. Ladder step-up eligibility (n ≥ 25 / 50 / 100, net R > 0, no
+stop) is QUEUED for the operator; the equity sampler applies the automatic
+step-down (−5 % from the step-up mark) and the −5 % hard stop on every
+5-minute mark. The digest (four sections, ≤ 12 lines each on WhatsApp; full
+tables at `/api/loop` and the dashboard's Loop panel) then goes out through
+the outcome-alerts bridge; `digest` re-sends it. `bun run
+scripts/validation-scorecard.ts --look` runs the same module on demand.
+
 ### WhatsApp command router — `src/gateway/proposal-commands.ts`
 Inbound DMs are pre-routed **before** the agent (deterministic, no LLM):
 
@@ -312,6 +332,11 @@ Inbound DMs are pre-routed **before** the agent (deterministic, no LLM):
 | `cancel P-XXXX` / `cancel SYM` | cancel an executed-but-unfilled bracket (symbol resolves to its proposal; ambiguity → cancel by id) |
 | `halt status` | kill-switch state and daily P&L headroom |
 | `performance` (or `perf`, `performance 30`) | closed-trade P&L summary (default 7 days) |
+| `veto P-XXXX` / `kill SYM` | live-loop per-trade controls (cancel an unfilled auto-execution / close at market) |
+| `live status` / `ladder` / `epoch` / `digest` | live-loop state and the day's digest (read-only) |
+| `ladder up` → `ladder up confirm` | apply a queued size-ladder step-up (two-step; the step-down mark is set at the current NetLiq) |
+| `epoch new [carry]` (→ `… confirm` while one runs) | start the next epoch: USD NetLiq frozen, record + journal, rung reset to 0.25 % unless `carry` |
+| `promote <variant>` → `promote <variant> confirm` | record a ratified promotion and print the exact change + restart + `epoch new` steps |
 
 The explicit human message IS the approval — execution still passes every
 safety gate below.
@@ -462,6 +487,7 @@ manual acceptance:
 | `LLM_PRICE_IN_USD_PER_MTOK` / `LLM_PRICE_OUT_USD_PER_MTOK` | — | USD per million input/output tokens; required while the cap is on |
 | `SIMULATOR` | true | nightly shadow-variant settle at 17:10 ET into `simulator.db` (REQ-SIM-006); observability only |
 | `SIM_COMMISSION_PER_SHARE_USD` / `SIM_COMMISSION_MIN_USD` | 0.005 / 1.00 | the simulator's per-side commission assumption (IBKR fixed tier) |
+| `DEXTER_JOURNAL_PATH` | `docs/day2day/VALIDATION-JOURNAL.md` | where the loop appends its epoch/ladder/promotion lines (WP3) |
 | `OPP_HEALTH_EMPTY_CYCLES` | 3 | consecutive zero-scan cycles (market open) before a degraded-scanner WhatsApp alert |
 | `UNIVERSE_EXTRA_SYMBOLS` | — | watchlist archived nightly + swing-pattern-scanned regardless of the cap band |
 | `AUTO_EXECUTE_PAPER` | false | paper-only auto-execution of proposals (all sources) |

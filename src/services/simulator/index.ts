@@ -21,6 +21,7 @@ import { getRiskRules } from '@/tools/ibkr/risk-rules.js';
 import { logger } from '@/utils';
 import { isMarketHalfDay, isMarketHoliday } from '@/utils/market-hours.js';
 import { currentRung } from '../ladder-state.js';
+import { runLoopNightly } from '../loop/nightly.js';
 import { getPerformanceBaseline, listProposals, listRefusalsSince, type TradeProposal } from '../trade-proposals.js';
 import { DEFAULT_MAX_GAP_MS, loadSimBars } from './bars.js';
 import { formatSettleReport, summarizeVariants, twinCalibration, type SettleRunCounts } from './report.js';
@@ -116,20 +117,25 @@ export async function runSimulatorSettleOnce(): Promise<SettleRunCounts | null> 
     inFlight = true;
     const today = etToday();
     writeStamp({ date: today, status: 'running', at: Date.now() });
+    let counts: SettleRunCounts | null = null;
     try {
-        const counts = await runSettleOnce(liveDeps());
+        counts = await runSettleOnce(liveDeps());
         writeStamp({ date: today, status: counts.failed > 0 ? 'failed' : 'completed', at: Date.now(), counts });
         await report(today, counts);
-        return counts;
     } catch (err) {
         writeStamp({ date: today, status: 'failed', at: Date.now() });
         const msg = `🧪 Simulator settle ${today} FAILED — ${err instanceof Error ? err.message : err}`;
         logger.error(`[simulator] ${msg}`);
         for (const cb of [...callbacks]) { try { await cb(msg); } catch { /* delivery is best-effort */ } }
-        return null;
     } finally {
         inFlight = false;
     }
+    // Live-loop WP3: the nightly pipeline is settle → LOOKS → DIGEST. The
+    // looks run whether or not the settle succeeded (a failed settle leaves
+    // the shadow section stale, the deployable verdict does not depend on
+    // it); runLoopNightly never throws.
+    await runLoopNightly();
+    return counts;
 }
 
 async function report(today: string, counts: SettleRunCounts): Promise<void> {

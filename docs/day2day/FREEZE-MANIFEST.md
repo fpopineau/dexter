@@ -1,5 +1,12 @@
 # Freeze manifest — validation-freeze-1
 
+> **RETIRED 2026-09-05** (REQ-FP-003). The freeze-tag ceremony this manifest
+> served is superseded by the live-loop program's epochs (SPEC.md § "Live-loop
+> program"; `epoch-state.json` + `epochs.jsonl` + the VALIDATION-JOURNAL
+> epoch lines are the identity record now). The template stays for the
+> record; nothing below is to be filled, and `validation-freeze-1` is never
+> tagged.
+
 TEMPLATE (2026-08-24, review-17 model) — the operator fills and commits
 this AT TAG TIME. It is the immutable record the final evaluation is
 checked against (VALIDATION-PROTOCOL.md). A field left `_pending_` means

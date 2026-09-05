@@ -1,5 +1,29 @@
 # Validation protocol — the frozen paper sample (Phase 4)
 
+> **Superseded 2026-09-05** — the n = 100 frozen-sample gate below is
+> RETIRED. The go-live evidence is now the pre-registered SEQUENTIAL TEST
+> of the live-loop program (SPEC.md § "Live-loop program (2026-09-05) —
+> WP1..WP4", REQ-SEQ-001..007): epochs replace the freeze tag, looks at
+> n = 25 / 50 / 75 / 100 with O'Brien-Fleming-style confidences (99 / 97.5 /
+> 96 / 95 %) decide ACCEPT (LCB > 0, net R > 0, PF ≥ 1.3) / REJECT (UCB95 <
+> 0) / CONTINUE; a −5 % marked-NetLiq hard stop ends an epoch; the size
+> ladder 0.25 → 0.5 → 0.75 → 1.0 % steps up on the operator's confirmation
+> at n ≥ 25 / 50 / 100. The constants live in
+> `src/utils/sequential-test.ts` and are hashed into every epoch record —
+> editing them mid-epoch makes the looks NOT EVALUABLE. The evaluator is
+> `bun run scripts/validation-scorecard.ts --look` (the same module the
+> nightly job runs; the digest reports it every evening). The tagging
+> prerequisites list below is CLOSED: the broker observations recorded
+> there stay as knowledge, the tag ceremony is not performed. The legacy
+> scorecard output is labelled LEGACY and never decides.
+>
+> Fingerprint (REQ-FP-001/003): the strategy identity covers BEHAVIOR paths
+> only (`BEHAVIOR_INCLUDE` / `BEHAVIOR_EXCLUDE` in
+> `src/services/strategy-fingerprint.ts`); observability, control plane
+> (`src/services/loop/`), alert delivery, evaluator math, TUI and tests may
+> change inside an epoch. The runtime attestation additionally records
+> `liveSwitch`, `vetoWindowMin`, `rung`, `epochId`, `epochStatus`.
+
 Pre-registered BEFORE the first frozen trade, per
 [REMEDIATION-2026-08-20.md](REMEDIATION-2026-08-20.md) Phase 4. This
 document is the acceptance contract for going live: the numbers below

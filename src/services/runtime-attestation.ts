@@ -37,6 +37,14 @@ export interface RuntimeAttestation {
     swingEnabled: boolean;
     earningsBetEnabled: boolean;
     strategyFingerprint: string | null;
+    /** Live-loop WP3 (REQ-FP-003): the loop's state as the process sees it
+     *  — the operator's live switch (null = no state file), the veto window
+     *  in minutes, the ladder rung, and the current epoch id (null = none). */
+    liveSwitch: boolean | null;
+    vetoWindowMin: number;
+    rung: number;
+    epochId: string | null;
+    epochStatus: 'running' | 'stopped' | null;
     /** Review-32: set by the ORDERLY shutdown write — a stopped gateway
      *  must never read as "confirmed running". */
     stopped?: boolean;
@@ -73,6 +81,10 @@ export function writeRuntimeAttestation(opts?: { stopped?: boolean }): Promise<R
                 account = getVerifiedSingleAccount();
             } catch { /* boot write before the account verifies — the 90s re-write fills it */ }
             const { strategyFingerprint } = await import('./strategy-fingerprint.js');
+            const [{ readLiveSwitch }, { currentRung }, { readEpochState }, { liveVetoWindowMin }] = await Promise.all([
+                import('./live-switch.js'), import('./ladder-state.js'), import('./epoch-state.js'), import('./proposal-executor.js'),
+            ]);
+            const epoch = readEpochState();
             const record: RuntimeAttestation = {
                 at: Date.now(),
                 pid: process.pid,
@@ -84,6 +96,11 @@ export function writeRuntimeAttestation(opts?: { stopped?: boolean }): Promise<R
                 swingEnabled: rules.swing_enabled,
                 earningsBetEnabled: rules.earnings_bet_enabled,
                 strategyFingerprint: await strategyFingerprint(),
+                liveSwitch: readLiveSwitch()?.enabled ?? null,
+                vetoWindowMin: liveVetoWindowMin(),
+                rung: currentRung(),
+                epochId: epoch.kind === 'present' ? epoch.state.id : null,
+                epochStatus: epoch.kind === 'present' ? epoch.state.status : epoch.kind === 'corrupt' ? 'stopped' : null,
                 ...(opts?.stopped ? { stopped: true } : {}),
             };
             writeFileSync(attestationPath(), JSON.stringify(record, null, 2));

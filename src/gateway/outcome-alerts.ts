@@ -10,6 +10,7 @@
 import { onAutoProtect, onTradeClosed } from '@/services/outcome-tracker.js';
 import { onBenchmarkReport } from '@/services/benchmark.js';
 import { onSimulatorReport } from '@/services/simulator/index.js';
+import { onLoopAlert, onLoopDigest } from '@/services/loop/alerts.js';
 import { onEodTriage } from '@/services/eod-triage.js';
 import { onKillSwitchAlert } from '@/services/kill-switch-guardian.js';
 import { onFlatExitSweep } from '@/services/flat-exit-sweeper.js';
@@ -152,6 +153,26 @@ export function registerOutcomeAlerts(): void {
         await sendMessageWhatsApp({ to: session.lastTo, body: message, accountId: session.lastAccountId });
         logger.info('[outcome-alerts] simulator report delivered');
     });
+
+    // Live-loop WP3 (REQ-DIGEST-001, REQ-EPOCH-002): the nightly digest and
+    // the loop's alerts (epoch stop, ACCEPT look, ladder step-down).
+    const deliverLoop = (kind: string) => async (message: string) => {
+        const session = findTargetSession();
+        if (!session?.lastTo || !session?.lastAccountId) {
+            logger.warn(`[outcome-alerts] no WhatsApp delivery target, skipping loop ${kind}`);
+            return;
+        }
+        try {
+            assertOutboundAllowed({ to: session.lastTo, accountId: session.lastAccountId });
+        } catch {
+            logger.warn(`[outcome-alerts] outbound blocked, skipping loop ${kind}`);
+            return;
+        }
+        await sendMessageWhatsApp({ to: session.lastTo, body: message, accountId: session.lastAccountId });
+        logger.info(`[outcome-alerts] loop ${kind} delivered`);
+    };
+    onLoopDigest(deliverLoop('digest'));
+    onLoopAlert(deliverLoop('alert'));
 
     // Kill-switch guardian (review 2026-08-23): latch + entry-cancel report.
     // Orphaned-exit sweeps (incident 2026-08-26: exits resting on a flat

@@ -40,9 +40,10 @@ _(empty — the freeze-tag window never opened; superseded below)_
 ## Live-loop program (2026-09-05 — SPEC.md § "Live-loop program", supersedes the tag protocol)
 
 Epochs replace the freeze window: one line per epoch start/stop, ladder
-step and promotion. Epoch 1 starts at the WP1 gateway restart
-(`performance reset` + the line below, filled by the operator; WP3
-automates the lines from epoch 2).
+step, look and promotion. Epoch 1 starts with the operator's `epoch new`
+after the WP1..WP3 gateway restart; from there the control plane
+(`src/services/loop/`) appends the lines itself (`- <date> — epoch-N START
+… / LOOK n=… / STOP … / ladder STEP-UP|STEP-DOWN … / PROMOTE …`).
 
 - 2026-09-05 — `risk-rules.live.yaml` RATIFIED as the CEILING policy
   (REQ-RISK-011; operator decision R10-Q3): 0.5%/trade ceiling, 1.5% daily

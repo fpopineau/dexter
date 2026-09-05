@@ -5,9 +5,16 @@
  * and once at completion; the definitions HERE are the protocol's
  * machine-readable form — changing them mid-sample ends the window.
  *
- *   bun run scripts/validation-scorecard.ts               # since baseline
+ *   bun run scripts/validation-scorecard.ts --look        # LIVE-LOOP look table (decides; WP3)
+ *   bun run scripts/validation-scorecard.ts               # LEGACY scorecard since baseline
  *   npx tsx scripts/validation-scorecard.ts               # same, node runtime
  *   ... scripts/validation-scorecard.ts 2026-08-25        # since a date (freeze tag day)
+ *
+ * LEGACY since 2026-09-05 (SPEC.md § "Live-loop program", REQ-SEQ-005): the
+ * n = 100 frozen-sample verdict, the 6-week/2-regime breadth, the manifest,
+ * TOFU and `--final` machinery below are kept for the record and labelled
+ * LEGACY in the output — they never decide. The pre-registered sequential
+ * test (`--look`) is the evaluator.
  *
  * Definitions (pinned):
  *   - Sample row: status='closed', entry filled, realized_pnl NOT NULL,
@@ -73,6 +80,43 @@ import { DEFAULT_RULES, parseFlatYaml, type RiskRules } from '../src/tools/ibkr/
 
 const UNTRUSTWORTHY = '%NOT trustworthy%';
 const dataDir = process.env.DEXTER_DATA_DIR ?? join(process.cwd(), '.dexter', 'data');
+
+// Live-loop WP3 (REQ-SEQ-005): `--look` prints the epoch's look table with
+// the SAME module the nightly job runs (a boundary reached now is recorded
+// now — the nightly finds it done). Everything below this branch is the
+// LEGACY frozen-sample evaluator: kept for the record, it never decides.
+//   bun run scripts/validation-scorecard.ts --look
+if (process.argv.includes('--look')) {
+    const { runLooksLive } = await import('../src/services/loop/nightly.js');
+    const { SEQ_CONSTANTS, constantsHash } = await import('../src/utils/sequential-test.js');
+    const st = await runLooksLive();
+    const f = (n: number | null | undefined, d = 3) => (n === null || n === undefined || !Number.isFinite(n) ? (n === Number.POSITIVE_INFINITY ? '∞' : '—') : n.toFixed(d));
+    console.log(`\n=== LIVE-LOOP LOOK — ${new Date(st.at).toISOString()} ===`);
+    console.log(`constants ${constantsHash()} ${st.constantsOk ? '(matches the epoch)' : '(DIFFERS from the epoch — NOT EVALUABLE)'}: looks ${SEQ_CONSTANTS.looks.join('/')} @ ${SEQ_CONSTANTS.lookConfidences.map((c) => `${c * 100}%`).join('/')}, PF ≥ ${SEQ_CONSTANTS.minProfitFactor}, REJECT UCB${SEQ_CONSTANTS.rejectConfidence * 100} < 0, hard stop −${SEQ_CONSTANTS.hardStopDrawdown * 100}%`);
+    if (!st.epoch) {
+        console.log("epoch: NONE — 'epoch new' opens epoch 1; nothing to evaluate.\n");
+    } else {
+        const e = st.epoch;
+        console.log(`epoch ${e.id}: ${e.status.toUpperCase()}${e.stopReason ? ` — ${e.stopReason}` : ''} since ${new Date(e.startedAt).toISOString()} fp ${e.fingerprint || '?'} netliq ${e.netLiq !== null ? `$${e.netLiq.toFixed(2)}` : 'UNAVAILABLE'}${e.policyLabel ? ` policy ${e.policyLabel}` : ''}`);
+        if (st.sample) console.log(`deployable sample: n ${st.sample.n} (${st.sample.days} entry days), net R ${f(st.sample.sumR, 2)}, mean R ${f(st.sample.meanR)}, PF ${f(st.sample.profitFactor, 2)}, net $${st.sample.netUsd.toFixed(2)}, open in cohort ${st.openInCohort}${st.sample.nextLook ? ` — next look at n=${st.sample.nextLook} (INFORMATIONAL until then)` : ''}`);
+        console.log('looks (recorded in the epoch):');
+        for (const l of e.looks) console.log(`  n=${l.n} ${new Date(l.at).toISOString().slice(0, 10)}: ${l.decision} — LCB ${f(l.lcb)}, UCB95 ${f(l.ucb95)}, net R ${f(l.sumR, 2)}, PF ${f(l.profitFactor, 2)}`);
+        if (e.looks.length === 0) console.log('  none yet');
+        for (const l of st.looksThisPass) console.log(`  THIS RUN n=${l.lookN}: ${l.decision} @${l.lookConfidence * 100}% — ${l.reasons.join('; ')}`);
+        if (st.band) console.log(`band '${st.band.band}': n ${st.band.n}, net $${st.band.netUsd.toFixed(2)}, PF ${f(st.band.profitFactor, 2)} — bar ${st.band.barMet === null ? 'not yet judged (n < 20)' : st.band.barMet ? 'MET' : 'NOT MET (blocks ACCEPT)'}`);
+        if (st.drawdown) console.log(`drawdown from epoch: ${st.drawdown.pct.toFixed(2)}% (min $${st.drawdown.minNetLiq.toFixed(0)} over ${st.drawdown.samples} samples; hard stop −5%)`);
+        console.log(`ladder: rung ${st.ladder.rung}%${st.ladder.eligibility ? ` — ${st.ladder.eligibility.eligible ? `STEP-UP to ${st.ladder.eligibility.nextRung}% ELIGIBLE (${st.ladder.eligibility.reason})` : `next ${st.ladder.eligibility.nextRung ?? '—'}% at n ≥ ${st.ladder.eligibility.milestone ?? '—'} (${st.ladder.eligibility.reason})`}` : ''}`);
+        console.log(`score deciles: ${st.decile ? `Spearman rho ${st.decile.rho.toFixed(3)} p ${st.decile.p.toFixed(3)} n ${st.decile.n}` : 'n/a'}`);
+        console.log('shadow vs incumbent:');
+        for (const s of st.shadow) {
+            console.log(`  ${s.variant}: ${s.status !== 'active' ? s.status : s.summary ? `n ${s.summary.n} (${s.summary.days}d) ΣR ${f(s.summary.sumR, 2)} meanR ${f(s.summary.meanR)}${s.diff ? ` · daily ΔR LCB ${f(s.diff.lcb)} median ${f(s.diff.median)}` : ''}${s.candidate ? ' · PROMOTION CANDIDATE' : ''}` : 'no rows'}`);
+        }
+        console.log(`integrity: ${st.anomalies.length === 0 ? 'CLEAN' : `ANOMALIES — ${st.anomalies.join('; ')}`}`);
+        if (st.stoppedThisPass) console.log(`*** EPOCH STOPPED THIS RUN: ${st.stoppedThisPass}`);
+        console.log('');
+    }
+    process.exit(0);
+}
 
 // Pins (VALIDATION-PROTOCOL.md). The live target is €10K ≈ $11,700; the
 // epoch NetLiq must sit inside ±10% of it (REQ-VAL-007) — FX drift and a
@@ -399,7 +443,7 @@ const shadowOnlyRows = allRows.filter((r) => !DEPLOYABLE_CLASSES.has(r.trade_cla
 
 const net = (r: Row) => r.realized_pnl - (r.commissions ?? 0);
 const n = rows.length;
-console.log(`\n=== VALIDATION SCORECARD — ${windowLabel} ===`);
+console.log(`\n=== VALIDATION SCORECARD (LEGACY frozen-sample evaluator — informational since 2026-09-05; the live-loop looks decide: --look) — ${windowLabel} ===`);
 console.log(deployableLine);
 console.log(`deployable sample n = ${n} (protocol needs >= 100)${shadowOnlyRows.length ? `; ${shadowOnlyRows.length} shadow-only row(s) reported separately` : ''}`);
 if (n < 100) verdictFails.push(`deployable sample n=${n} < 100`);

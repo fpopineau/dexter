@@ -210,8 +210,12 @@ export const BEHAVIOR_EXCLUDE: readonly string[] = [
     'src/services/dashboard-page.ts',
     'src/services/runtime-attestation.ts',
     'src/services/scan-health.ts',
-    // Control plane: the operator's per-trade powers and status readers.
+    // Control plane: the operator's per-trade powers and status readers,
+    // and the WP3 loop (epoch/ladder writers, looks, digest, operator
+    // commands) — it decides about the EPOCH, never about a trade; the
+    // behavior READERS (epoch-state, ladder-state, live-switch) stay in.
     'src/services/loop-control.ts',
+    'src/services/loop',
     'src/gateway/loop-commands.ts',
     // Alert delivery: transport and formatting of decisions made elsewhere.
     'src/gateway/outcome-alerts.ts',

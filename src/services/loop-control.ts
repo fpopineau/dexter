@@ -22,6 +22,7 @@ import { getProposal, type TradeProposal } from './trade-proposals.js';
 import { describeLiveSwitch } from './live-switch.js';
 import { readLadderState, BOTTOM_RUNG } from './ladder-state.js';
 import { readEpochState } from './epoch-state.js';
+import { readEpochRecord } from './loop/epoch-control.js';
 
 export type VetoDecision = 'reject' | 'cancel-bracket' | 'refuse-filled' | 'refuse-status';
 
@@ -83,16 +84,22 @@ export async function killPosition(symbol: string): Promise<{ ok: boolean; messa
 
 export function ladderStatusLine(dataDir?: string): string {
     const s = readLadderState(dataDir);
-    if (!s) return `ladder: rung ${BOTTOM_RUNG}% (bottom — no state file; WP3 adds the ladder's movement)`;
-    return `ladder: rung ${s.rung}%${s.since ? ` since ${s.since}` : ''}${s.lastStepUpNetLiq ? ` (last step-up NetLiq $${s.lastStepUpNetLiq.toFixed(0)})` : ''}`;
+    const rec = readEpochRecord(dataDir);
+    const queued = rec?.status === 'running' && rec.stepUpEligible
+        ? ` · STEP-UP to ${rec.stepUpEligible.nextRung}% ELIGIBLE (${rec.stepUpEligible.reason}) — 'ladder up' then 'ladder up confirm'`
+        : '';
+    if (!s) return `ladder: rung ${BOTTOM_RUNG}% (bottom — no state file yet; 'epoch new' writes it)${queued}`;
+    return `ladder: rung ${s.rung}%${s.since ? ` since ${s.since.slice(0, 10)}` : ''}${s.lastStepUpNetLiq ? ` · automatic step-down at −5% from $${s.lastStepUpNetLiq.toFixed(0)}` : ' · no step-down mark yet'}${queued}`;
 }
 
 export function epochStatusLine(dataDir?: string): string {
     const r = readEpochState(dataDir);
-    if (r.kind === 'absent') return 'epoch: none started (no state file — intake open; WP3 adds epochs)';
+    if (r.kind === 'absent') return "epoch: none started (no state file — intake open). 'epoch new' opens epoch 1.";
     if (r.kind === 'corrupt') return `epoch: STATE FILE UNREADABLE (${r.error}) — new entries are refused until it is fixed`;
     const s = r.state;
-    return `epoch ${s.id}: ${s.status.toUpperCase()}${s.status === 'stopped' ? ` — ${s.stopReason ?? 'no reason recorded'}` : ''} (fp ${s.fingerprint || '?'})`;
+    const rec = readEpochRecord(dataDir);
+    const looks = rec?.looks.length ? ` · looks ${rec.looks.map((l) => `n${l.n}:${l.decision}`).join(', ')}` : ' · no look yet';
+    return `epoch ${s.id}: ${s.status.toUpperCase()}${s.status === 'stopped' ? ` — ${s.stopReason ?? 'no reason recorded'}` : ''} since ${new Date(s.startedAt).toISOString().slice(0, 10)} (fp ${s.fingerprint || '?'}${rec?.netLiq ? `, NetLiq $${rec.netLiq.toFixed(0)}` : ''})${looks}${rec?.firstAcceptAt ? ` · ACCEPT recorded ${new Date(rec.firstAcceptAt).toISOString().slice(0, 10)}` : ''}${rec?.promotionPending ? ` · promotion pending: ${rec.promotionPending.variant}` : ''}`;
 }
 
 export function liveStatusLine(dataDir?: string): string {

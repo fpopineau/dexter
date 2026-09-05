@@ -8,6 +8,10 @@ function fakeCore(log: string[]): LoopCommandCore {
         liveStatus: async () => 'live switch: OFF (no state file)',
         ladderStatus: async () => 'ladder: rung 0.25% (bottom, no state file)',
         epochStatus: async () => 'epoch: none started (no state file)',
+        ladderUp: async (confirm) => { log.push(`ladderUp:${confirm}`); return `ladder up ${confirm ? 'applied' : 'asked'}`; },
+        epochNew: async (carry, confirm) => { log.push(`epochNew:${carry}:${confirm}`); return `epoch new carry=${carry} confirm=${confirm}`; },
+        promote: async (variant, confirm) => { log.push(`promote:${variant}:${confirm}`); return `promote ${variant} ${confirm ? 'recorded' : 'asked'}`; },
+        digest: async () => { log.push('digest'); return 'DIGEST'; },
     };
 }
 
@@ -24,14 +28,27 @@ describe('loop commands (REQ-LIVE-003 — control-plane grammar, routed outside 
         expect(await handleLoopCommand('live status', fakeCore(log))).toContain('live switch');
         expect(await handleLoopCommand('ladder', fakeCore(log))).toContain('rung');
         expect(await handleLoopCommand('epoch', fakeCore(log))).toContain('epoch');
-        expect(log).toEqual([]);
+        expect(await handleLoopCommand('digest', fakeCore(log))).toBe('DIGEST');
+        expect(log).toEqual(['digest']);
     });
 
-    test('mutating loop commands are not available until WP3/WP4 — named, not silently ignored', async () => {
+    test('WP3 mutating commands: two-step grammar (ask, then confirm), carry flag, variant names with punctuation', async () => {
         const log: string[] = [];
-        for (const body of ['live on', 'live off', 'live on ABC123', 'ladder up', 'epoch new', 'promote exit-ratchet']) {
-            const reply = await handleLoopCommand(body, fakeCore(log));
-            expect(reply).toMatch(/not available until WP[34]/);
+        expect(await handleLoopCommand('ladder up', fakeCore(log))).toBe('ladder up asked');
+        expect(await handleLoopCommand('Ladder Up Confirm', fakeCore(log))).toBe('ladder up applied');
+        expect(await handleLoopCommand('epoch new', fakeCore(log))).toBe('epoch new carry=false confirm=false');
+        expect(await handleLoopCommand('epoch new carry', fakeCore(log))).toBe('epoch new carry=true confirm=false');
+        expect(await handleLoopCommand('epoch new carry confirm', fakeCore(log))).toBe('epoch new carry=true confirm=true');
+        expect(await handleLoopCommand('epoch new confirm', fakeCore(log))).toBe('epoch new carry=false confirm=true');
+        expect(await handleLoopCommand('promote exit-x2.0', fakeCore(log))).toBe('promote exit-x2.0 asked');
+        expect(await handleLoopCommand('promote gate-off:noise-stop confirm', fakeCore(log))).toBe('promote gate-off:noise-stop recorded');
+        expect(log).toEqual(['ladderUp:false', 'ladderUp:true', 'epochNew:false:false', 'epochNew:true:false', 'epochNew:true:true', 'epochNew:false:true', 'promote:exit-x2.0:false', 'promote:gate-off:noise-stop:true']);
+    });
+
+    test('live on/off stay named-but-unavailable until WP4', async () => {
+        const log: string[] = [];
+        for (const body of ['live on', 'live off', 'live on ABC123']) {
+            expect(await handleLoopCommand(body, fakeCore(log))).toMatch(/not available until WP4/);
         }
         expect(log).toEqual([]);
     });
@@ -41,5 +58,7 @@ describe('loop commands (REQ-LIVE-003 — control-plane grammar, routed outside 
         expect(await handleLoopCommand('what is the tape doing?', fakeCore(log))).toBeNull();
         expect(await handleLoopCommand('accept P-1234', fakeCore(log))).toBeNull();
         expect(await handleLoopCommand('kill the lights', fakeCore(log))).toBeNull();
+        expect(await handleLoopCommand('ladder up please', fakeCore(log))).toBeNull();
+        expect(await handleLoopCommand('digest me', fakeCore(log))).toBeNull();
     });
 });

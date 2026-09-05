@@ -72,6 +72,7 @@ export const DASHBOARD_HTML = `<!DOCTYPE html>
     <h3>Proposals</h3><table id="proposals"></table>
     <h3>Profit trail</h3><table id="trail"></table>
     <h3>Swing candidates (last scan)</h3><table id="patterns"></table>
+    <h3>Loop (live-loop WP3)</h3><div id="loop" class="dim" style="white-space:pre-wrap;font-size:11px"></div>
   </aside>
   <div id="splitter" title="drag to resize"></div>
   <main>
@@ -312,6 +313,20 @@ function refresh(){
   fetch('/api/overview').then(function(r){ return r.json(); }).then(renderOverview).catch(function(){});
 }
 
+// Live-loop WP3 (REQ-DIGEST-005): the digest's four sections, full length
+// (WhatsApp truncates each at 12 lines; the page does not).
+function renderLoop(d){
+  var s = d.digest && d.digest.sections; if(!s){ el('loop').textContent = 'no loop data'; return; }
+  function sec(title, lines){ return title + '\\n' + (lines||[]).map(function(l){ return '  ' + l; }).join('\\n'); }
+  el('loop').textContent = [
+    'as of ' + new Date(d.at).toLocaleString(),
+    sec('TEST STATUS', s.status), sec('FILLS', s.fills), sec('FUNNEL', s.funnel), sec('SHADOW', s.shadow)
+  ].join('\\n\\n');
+}
+function refreshLoop(){
+  fetch('/api/loop').then(function(r){ return r.json(); }).then(renderLoop).catch(function(){});
+}
+
 var toastTimer = null;
 // kind: '' pending (orange), 'ok' transient green, 'fail' persistent red
 // banner — a refusal must outlive the operator's glance, not race it.
@@ -363,8 +378,9 @@ el('tf1d').addEventListener('click', function(){ state.tf='1d'; setTf(); });
 function setTf(){ el('tf1m').classList.toggle('on', state.tf==='1min');
   el('tf1d').classList.toggle('on', state.tf==='1d'); loadBars(); }
 
-initChart(); initSplitter(); setTf(); refresh();
+initChart(); initSplitter(); setTf(); refresh(); refreshLoop();
 setInterval(refresh, 30000);
+setInterval(refreshLoop, 300000);
 setInterval(loadBars, 60000);
 </script>
 </body>

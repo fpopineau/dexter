@@ -88,6 +88,14 @@ describe('writeRuntimeAttestation (the gateway-side writer)', () => {
         // Pre-verification (no IBKR in tests): the account is honestly
         // unverified, never invented.
         expect(onDisk.accountType).toBe('unverified');
+        // Live-loop WP3 (REQ-FP-003): the loop's state as the process sees
+        // it. The test data dir has no state files: switch null (no file),
+        // veto window 0 (default), bottom rung, no epoch.
+        expect(onDisk.liveSwitch === null || typeof onDisk.liveSwitch === 'boolean').toBe(true);
+        expect(typeof onDisk.vetoWindowMin).toBe('number');
+        expect(typeof onDisk.rung).toBe('number');
+        expect(onDisk.epochId === null || typeof onDisk.epochId === 'string').toBe(true);
+        expect([null, 'running', 'stopped']).toContain(onDisk.epochStatus);
     }, 30_000);
 
     test('review-33: stop AWAITS the stopped record, and racing running writes can never bury it', async () => {

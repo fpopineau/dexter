@@ -2544,3 +2544,136 @@ the protocol's fingerprint paragraph carries a dated amendment already.
 | REQ-SIM-007 | structural: `simulator.db`, no order-id columns, no import from the simulator into any order path (`grep -r "simulator" src/services/proposal-executor.ts src/tools/ibkr` is empty) |
 | REQ-FP-001 | `strategy-fingerprint.test.ts` — classification pin (behavior included / excluded named), every exclusion exists |
 | REQ-FP-002 | `strategy-fingerprint.test.ts` — REAL temp repo: excluded edits (dirty and committed) leave the identity, a behavior edit moves it, an untracked behavior file dirties it, a test file does not; legacy suites re-pinned (`scripts/` no longer dirties) |
+
+## Live-loop WP3 landed (2026-09-05) — sequential test, size ladder, epochs, nightly digest
+
+Implements REQ-SEQ-001..007, REQ-LADDER-001..004, REQ-EPOCH-001..004,
+REQ-DIGEST-001..005 and REQ-FP-003. The ephemeral `docs/day2day/WP3-PLAN.md`
+carries the task graph for the review and is deleted once read.
+
+### Fingerprint discipline recorded at landing
+
+Every WP3 module lives on an excluded path: `src/utils/sequential-test.ts`
+(pre-registered exclusion) and the new `src/services/loop/` directory
+(`epoch-control`, `ladder-control`, `journal`, `sample`, `looks`, `digest`,
+`nightly`, `operator`, `promote`, `alerts`). The ONE behavior-path edit is
+the `'src/services/loop'` entry in `BEHAVIOR_EXCLUDE`; it lands before the
+first gateway restart, so epoch 1 opens on an identity WP4's live-switch
+writer (also under `src/services/loop/`) cannot move. `gateway.ts` is not
+touched: the nightly looks + digest run as the tail of the simulator's
+17:10 ET job (settle → looks → digest; `SIMULATOR` must stay on), the
+equity guards hook into the excluded `equity-series.ts` sampler, and the
+behavior readers (`epoch-state`, `ladder-state`, `live-switch`) stay in the
+identity untouched.
+
+### Precisions recorded at landing (append-only; they refine the requirements above)
+
+- REQ-EPOCH-001 precision: `epoch new` is the epoch-creating command. It
+  performs the performance reset itself (`setPerformanceBaseline` with the
+  USD NetLiq), writes `epoch-state.json` (a superset record: `netLiq`,
+  `constantsHash`, `looksDone`, `looks`, `firstAcceptAt`, `stepUpEligible`,
+  `promotionPending`, `carryRung`), appends `epochs.jsonl` (ids count up:
+  `epoch-N`), resets the ladder (unless `carry`) and journals one line. The
+  legacy `performance reset` keeps resetting only the baseline (its router
+  is a behavior path). Refused, fail closed, when IBKR cannot report the USD
+  NetLiq (the hard stop needs the denominator) or the identity is
+  unresolved (an epoch must record the fingerprint it trades). Two-step
+  confirm while an epoch is RUNNING; immediate when none or stopped.
+- REQ-EPOCH-002 precision: anomaly-driven stops are detected at the nightly
+  look from the EOD triage run stamp (`eod-triage-run.json` status `failed`
+  for today — the UNRESOLVED OVERNIGHT EXCESS alarm stamps the same run);
+  the triage service is a behavior path and is not hooked. A stop writes
+  `live-switch.json` `{enabled:false, by:'system', reason}` unless the
+  switch already reads false (the operator's own record is kept). Stops are
+  idempotent: the first reason stands.
+- REQ-SEQ-001 precision: the sample mirrors the scorecard's SAMPLE_WHERE
+  (closed, proposed at/after the epoch start, entry filled, realized P&L
+  known, not cancelled, source not adopted/test/smoke, note free of the
+  untrustworthy marker); deployable = classes NOT disabled in the raw live
+  config (`liveDisabledClasses`); shadow-only classes are reported apart.
+  A row whose planned-risk basis or commissions are missing is an
+  integrity anomaly: the looks are FROZEN that night (no decision, the
+  anomaly named in the digest), never a zero.
+- REQ-SEQ-002/003 precision: a look is evaluated over the whole in-epoch
+  sample on the night its count first reaches the boundary (several trades
+  may close the same day: the look is labelled by the boundary, computed
+  on n). Each boundary is evaluated once (`looksDone`). Under 5 entry days
+  the look is NOT-EVALUABLE and is still recorded (it will not re-fire).
+  The constants hash of the running module must equal the epoch's — a
+  mismatch makes every look NOT EVALUABLE until a new epoch.
+- REQ-SEQ-003 precision (UCB): the REJECT bound reuses the day-block
+  bootstrap by negation (UCB(x) = −LCB(−x) at 95%); `day-bootstrap.ts` is
+  unchanged.
+- REQ-SEQ-004 precision: the hard stop and the ladder step-down are
+  evaluated by the equity sampler on every 5-minute mark (the letter of the
+  requirement) AND re-checked at the nightly look from the marked series
+  since the epoch start (belt and braces); a guard failure never loses the
+  sample.
+- REQ-SEQ-005 precision: `--look` runs the SAME `runNightlyLooks` the
+  nightly job runs — a boundary reached at run time is recorded then (the
+  nightly finds it done); alerts have no transport in the script context,
+  journal lines are written. The legacy scorecard header and verdict are
+  labelled LEGACY.
+- REQ-SEQ-006 precision: the difference is DAILY summed R over the
+  incumbent's trading days; a variant day without rows contributes 0
+  (variants are subsets or re-geometries of the same sources). Promotion
+  candidate = ≥ 30 settled sim trades over ≥ 10 days AND difference LCB > 0.
+- REQ-SEQ-007 precision: the band line is judged on the deployable sample's
+  `trigger_band = '60-74'` rows; `barMet` is null under 20 trades, else
+  net USD ≥ 0. An ACCEPT computed at a look while `barMet === false` is
+  downgraded to CONTINUE with the reason recorded.
+- REQ-LADDER-001 precision: eligibility is recomputed every night and
+  QUEUED in the epoch record (`stepUpEligible`); `ladder up` shows the
+  evidence and arms a 10-minute confirm; `ladder up confirm` applies it
+  with `lastStepUpNetLiq` = the marked NetLiq at confirm time (refused when
+  IBKR cannot report it — the step-down mark must be anchored). A stopped
+  epoch is never eligible.
+- REQ-LADDER-002 precision: after a step-down the mark re-anchors at the
+  current NetLiq (one drawdown costs one rung; the next needs another −5%).
+- REQ-EPOCH-004 precision: `promote <variant>` shows the variant's shadow
+  evidence and the exact change (`funnel-75` → `OPP_TRIGGER_SCORE=75`,
+  `exit-ratchet` → `exit_style: ratchet`, `exit-x2.0` → `take_atr_mult:
+  2.0`, `class-*` → the live class flag with its own ≥30-trade bar,
+  `weights-calibrated` → the calibrator's `--apply`); `stop-x/3` and every
+  `gate-off:*` variant print "needs a SPEC change" — they are evidence
+  about a rule, not a switch. `promote … confirm` journals and stamps
+  `promotionPending` on the epoch; the next `epoch new` labels its policy
+  with that variant.
+- REQ-DIGEST-002 precision: "scanned" = distinct snapshot symbols today;
+  "triggered" = trigger-events.json entries today (single + breadth);
+  "evaluated" = triggered − spend-cap refusals; lanes = proposal `source`.
+- REQ-DIGEST-005 precision: each WhatsApp section keeps its first 11 lines
+  plus a "… N more line(s) on the dashboard /api/loop" line; `/api/loop`
+  returns the last nightly result or a fresh build (cached 60 s); the
+  dashboard "Loop" panel renders the four sections in full and refreshes
+  every 5 minutes.
+- REQ-FP-003 precision: the attestation records `liveSwitch` (null = no
+  state file), `vetoWindowMin`, `rung`, `epochId` and `epochStatus`
+  (`stopped` for a corrupt latch, matching the gate's fail-closed read).
+- Journal lines (REQ-EPOCH-001/002, REQ-LADDER-001/002, REQ-EPOCH-004) are
+  appended to `docs/day2day/VALIDATION-JOURNAL.md` (override:
+  `DEXTER_JOURNAL_PATH`) as `- <date> — <line>`; a failed append is logged
+  as an error and never blocks the act it records.
+
+### Test traceability (WP3)
+
+| REQ | Test |
+|---|---|
+| REQ-SEQ-001 | `sequential-test.test.ts` (`netRForRow`: null on a missing basis/commissions); `loop/looks.test.ts` (anomaly freezes the looks) |
+| REQ-SEQ-002 | `sequential-test.test.ts` (`lookBoundaryReached`, confidences per look, NOT-EVALUABLE under 5 days); `loop/looks.test.ts` (boundary evaluated once, informational between looks, constants mismatch) |
+| REQ-SEQ-003 | `sequential-test.test.ts` (ACCEPT / REJECT / CONTINUE, UCB by negation); `loop/looks.test.ts` (ACCEPT recorded + alert, REJECT stops the epoch) |
+| REQ-SEQ-004 | `sequential-test.test.ts` (`hardStopDue`); `loop/epoch-control.test.ts` (`evaluateEquityGuards` hard stop); `loop/looks.test.ts` (nightly re-check) |
+| REQ-SEQ-005 | smoke-run `bun run scripts/validation-scorecard.ts --look` against the paper ledger (no epoch: prints the constants and "epoch: NONE"); same module as `nightly.ts` by construction |
+| REQ-SEQ-006 | `sequential-test.test.ts` (`dailyDifferenceBounds`); `loop/looks.test.ts` (`shadowLines`: candidate flag, incumbent has no diff, inactive named) |
+| REQ-SEQ-007 | `sequential-test.test.ts` (`bandLine`); `loop/looks.test.ts` (ACCEPT withheld while the band reads negative at n ≥ 20) |
+| REQ-LADDER-001 | `sequential-test.test.ts` (`ladderEligibility`); `loop/operator.test.ts` (evidence, two-step, refused when not eligible / NetLiq missing / no pending); `loop/looks.test.ts` (eligibility queued) |
+| REQ-LADDER-002 | `sequential-test.test.ts` (`stepDownDue`); `loop/epoch-control.test.ts` (step-down, re-anchor, never below 0.25) |
+| REQ-LADDER-003 | `loop/epoch-control.test.ts` (reset vs carry); `loop/operator.test.ts` (`epoch new carry`) |
+| REQ-LADDER-004 | `loop-commands.test.ts` (`ladder` routes to the status line); `loop-control.ts` status text |
+| REQ-EPOCH-001 | `loop/epoch-control.test.ts` (baseline reset + record + ladder + journal; the behavior reader accepts the record); `loop/operator.test.ts` (refusals, two-step while running) |
+| REQ-EPOCH-002 | `loop/epoch-control.test.ts` (stop once, live switch OFF by system, idempotent); `loop/looks.test.ts` (triage failed → stop) |
+| REQ-EPOCH-003 | same code path on both profiles (no account branch in `src/services/loop/`); `loop/looks.test.ts` (a stopped epoch is not restarted by the looks) |
+| REQ-EPOCH-004 | `loop/operator.test.ts` (evidence + change text, confirm records journal + `promotionPending`, unknown variant refused) |
+| REQ-DIGEST-001..004 | `loop/digest.test.ts` (fills with bps/twin, funnel counts and gates, shadow + band line, status lines) |
+| REQ-DIGEST-005 | `loop/digest.test.ts` (`truncateSection`, WhatsApp format); `loop-commands.test.ts` (`digest`); `/api/loop` and the Loop panel verified by the digest smoke-run over the live ledgers |
+| REQ-FP-003 | `strategy-fingerprint.test.ts` (loop paths excluded; every exclusion exists); `runtime-attestation.test.ts` (new fields present); doc changes |

@@ -25,6 +25,9 @@ import { parseEquitySeries, type EquitySample } from '@/utils/equity-series-math
 import { getNetLiquidation } from './daily-loss-guard.js';
 import { liveDisabledClasses } from '@/tools/ibkr/risk-rules.js';
 import { listTrackable } from './trade-proposals.js';
+import { emitLoopAlert } from './loop/alerts.js';
+import { evaluateEquityGuards } from './loop/epoch-control.js';
+import { appendJournalLine } from './loop/journal.js';
 
 export { parseEquitySeries, portfolioDrawdown, etDayOf, type EquitySample, type PortfolioDrawdown } from '@/utils/equity-series-math.js';
 
@@ -109,6 +112,16 @@ export async function sampleEquityOnce(): Promise<EquitySample | null> {
     } catch (err) {
         logger.warn(`[equity-series] append failed: ${err}`);
         return null;
+    }
+    // Live-loop WP3 (REQ-SEQ-004, REQ-LADDER-002): the same marked NetLiq
+    // drives the epoch's −5% hard stop and the ladder's automatic step-down.
+    // Both write only the loop's own state files (epoch-state, ladder-state,
+    // live-switch OFF) and journal/alert; a failure here never loses the
+    // sample.
+    try {
+        evaluateEquityGuards(netLiq, { now: sample.ts, journal: (line) => { appendJournalLine(line); }, alert: emitLoopAlert });
+    } catch (err) {
+        logger.error(`[equity-series] loop guards failed: ${err instanceof Error ? err.message : err}`);
     }
     return sample;
 }

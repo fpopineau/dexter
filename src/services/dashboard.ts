@@ -228,6 +228,15 @@ async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> 
             res.end(body);
             return;
         }
+        if (url.pathname === '/api/loop') {
+            // Live-loop WP3 (REQ-DIGEST-005): the full digest tables and the
+            // loop status behind the WhatsApp summary (cached 60 s).
+            const { loopStatusForApi } = await import('./loop/nightly.js');
+            const body = JSON.stringify(await loopStatusForApi());
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(body);
+            return;
+        }
         if (url.pathname === '/api/bars') {
             const symbol = (url.searchParams.get('symbol') ?? '').toUpperCase();
             const size = url.searchParams.get('size') === '1d' ? '1d' : '1min';

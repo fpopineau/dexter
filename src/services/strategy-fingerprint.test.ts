@@ -593,6 +593,7 @@ describe('behavior-path identity (REQ-FP-001/002 — live-loop WP2: observabilit
         for (const p of ['src/services/simulator/settle.ts', 'src/services/simulator/fill-model.ts', 'src/services/benchmark.ts',
             'src/services/excursion-sweeper.ts', 'src/services/equity-series.ts', 'src/services/dashboard.ts', 'src/services/dashboard-page.ts',
             'src/services/runtime-attestation.ts', 'src/services/loop-control.ts', 'src/services/scan-health.ts',
+            'src/services/loop/epoch-control.ts', 'src/services/loop/looks.ts', 'src/services/loop/digest.ts', 'src/services/loop/operator.ts',
             'src/gateway/loop-commands.ts', 'src/gateway/outcome-alerts.ts', 'src/gateway/mover-alerts.ts', 'src/gateway/health-alerts.ts',
             'src/utils/day-bootstrap.ts', 'src/utils/equity-series-math.ts', 'src/utils/sequential-test.ts',
             'src/backtest/engine.ts', 'src/components/App.tsx', 'src/controllers/x.ts', 'src/commands/x.ts', 'src/cli.ts', 'src/index.tsx',
@@ -606,7 +607,6 @@ describe('behavior-path identity (REQ-FP-001/002 — live-loop WP2: observabilit
         const { existsSync } = await import('node:fs');
         for (const p of BEHAVIOR_EXCLUDE) {
             if (p.includes('*')) continue; // glob entries
-            if (p.endsWith('sequential-test.ts')) continue; // WP3 lands it; pre-registered exclusion
             expect(existsSync(join(process.cwd(), p))).toBe(true);
         }
     });
