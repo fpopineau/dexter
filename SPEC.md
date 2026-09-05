@@ -3267,3 +3267,179 @@ schedule's false-ACCEPT by roughly three points; 5-session blocks still hurt
 at the early looks for the same degeneracy reason. Decision unchanged:
 `blockDays` stays 1, schedule A stays. Where the realised false-ACCEPT rate is
 quoted (VALIDATION-JOURNAL), 11–14 % is the honest range, not 11 % alone.
+
+## Overnight benchmark and candidate archive (2026-09-05) — WP7
+
+Closes AUD-13. The intraday benchmark treats the opening gap as
+uncapturable and the simulator replays proposals and refusals only; an
+overnight selection is a bet on the gap, and the candidates the judgment
+never admitted leave no trace. WP7 archives the observable universe
+point-in-time before the close, gives every eligible overnight candidate a
+mechanical twin under the lane contract, joins each candidate to what the
+system did with it, and reports the common perimeter nightly. It first
+fixes the bar loader whose coverage check read the overnight gap as a hole
+(every GTC twin settled before this date is 'unknown' for that reason).
+
+### Domain deltas
+
+- `src/services/simulator/bars.ts`: `sessionSegments(fromT, toT, cal)` and
+  `coverageOkAcross` — coverage is judged per regular-session segment
+  intersecting the window; the gap between sessions is not a hole.
+- `src/services/candidate-archive.ts`: `candidate-archive.db` table
+  `candidates` (UNIQUE(day, lane, symbol)); `CandidateRow` (capture,
+  eligibility + reasons, versioned levels, disposition, replay outcome);
+  pure `overnightEligibility`, `overnightLevels`, `cupEligibility`,
+  `cupLevels`, `candidatesFromSnapshot`, `candidatesFromPatternScan`,
+  `disposeCandidates`; `captureCandidatesOnce(deps)`; cron 15:35 ET.
+- `src/services/overnight-benchmark.ts`: `runOvernightBenchmarkOnce(deps)`,
+  `formatOvernightReport`.
+- `CANDIDATE_LEVELS_VERSION = 'v1'`; env `CANDIDATE_ARCHIVE` (default on).
+
+### Requirements
+
+- REQ-SIM-003 amended: bar coverage is judged per regular-session segment
+  (09:30–16:00 ET, 13:00 on a half-day; weekends and holidays skipped)
+  intersecting the window — every segment must be covered without a gap
+  over the tolerance, the space between segments is not a hole. GTC rows
+  replay on regular-session bars only (Dexter's brackets never set
+  `outsideRth`; the gap-aware stop already prices an open through the
+  stop). The earlier "GTC rows may fill in extended hours" assumption is
+  withdrawn.
+- REQ-BENCH-001 (point-in-time archive): once per trading day at 15:35 ET
+  the candidate archive captures, per lane, the observable universe — the
+  overnight lane from the latest pre-close opportunity snapshot (every
+  scored candidate, with the snapshot timestamp as source), the
+  cup-and-handle lane from the latest nightly pattern scan (cup matches
+  only, with detector version and state). Each row carries the capture
+  time, the observed price, daily ATR, day move, rank, the lane's mechanical
+  levels and their version. The first capture of a (day, lane, symbol)
+  stands; later captures the same day are ignored. A day without a capture
+  has no universe (reported, never backfilled).
+- REQ-BENCH-002 (deterministic eligibility): a row is `eligible` when the
+  deterministic subset of the lane's rules holds, else `ineligible` with
+  the reasons listed: overnight — `stale-data`, `price-missing`,
+  `min-price`, `atr-missing`, `day-move-unknown`, `counter-move`,
+  `earnings-within-2d` (calendar unknown → eligible with `note:earnings-unknown`);
+  cup — `stale-scan` (last bar older than the prior session), `not-cup`.
+  LLM reasons are never reconstructed.
+- REQ-BENCH-003 (disposition): at replay each overnight row is joined to
+  the day's ledger for its symbol — `proposed` (an overnight-lane proposal
+  created that day, ref = proposal id), `refused` (a refusal recorded that
+  day in the pre-close window, ref = gate), else `not-admitted`.
+- REQ-BENCH-004 (mechanical twin v1, pessimistic): entry MKT at the first
+  bar after capture (fill-model semantics), stop = price ∓
+  `stop_atr_multiplier` × daily ATR, target = price ± take-x % of price
+  (`formulaTakePct` on ATR %), flat at the overnight lane deadline
+  (`laneExitDeadline('overnight', capturedAt)`); bars through the
+  simulator loader (stream → archive → IBKR), no covered source → `unknown`;
+  sized at the current rung against the epoch NetLiq, simulator
+  commissions, `netR` against |price − stop| × quantity; gap % = the next
+  session's first bar open vs the capture price, signed toward the
+  direction. Outcomes persist on the candidate row; a row is replayed once
+  (status `settled` / `unknown`), pending rows older than 5 days are
+  marked `unknown: expired`.
+- REQ-BENCH-005 (report): after the nightly settle, one line block per
+  capture day replayed: eligible / seen counts with the ineligibility
+  reasons tallied; the universe's n, mean R, W/L/F, gap median and the
+  count of adverse gaps beyond the overnight stress; the top-5-by-rank
+  mean R; the judgment's proposed rows with their twin R; refused rows by
+  gate; the not-admitted mean R; unknowns. Delivered through the simulator
+  report callbacks (WhatsApp).
+- REQ-BENCH-006 (observability only): the candidate archive and the
+  overnight benchmark never write `sim_trades` or `proposals`, hold no
+  order ids, and no look, ladder or verdict reads `candidates`.
+- REQ-BENCH-007 (archive universe): the nightly bar archive adds the
+  symbols of OPEN GTC rows (multi-session twins need every session) and the
+  prior day's eligible candidates (their next-session bars), after the
+  watchlist and today's proposal symbols, before the snapshot symbols; the
+  cap and its warning are unchanged.
+
+### Invariants
+
+- Nothing archived is ever re-priced: a candidate's price, ATR, levels and
+  version are the values observed at capture.
+- The mechanical twin never flatters: the same fill model as the simulator
+  (trade-through, stop-first ties, gap-aware stops, MKT at the next bar).
+- The benchmark never feeds a look; the lane verdicts read the epoch
+  sample only.
+
+### Non-goals (WP7)
+
+Replaying cup-and-handle candidates (15-session horizon — with the swing
+benchmark, later); reconstructing the judgment's reasons; a portfolio
+simulation with budgets and competition among candidates (the common
+perimeter is per candidate, R per unit risk); a retroactive universe for
+days before the archive existed.
+
+### Acceptance criteria
+
+- [x] a two-session GTC window is covered by two session blocks; a hole inside a session still fails; weekends and half-days are honoured (REQ-SIM-003)
+- [x] capture builds rows with eligibility reasons and v1 levels; the first capture of a day stands (REQ-BENCH-001/002)
+- [x] disposition join names proposed / refused:<gate> / not-admitted (REQ-BENCH-003)
+- [x] the twin replays with the pessimistic model, computes the gap and R, and persists once (REQ-BENCH-004)
+- [x] the report lists universe / top-5 / judgment / not-admitted / unknown (REQ-BENCH-005)
+- [x] the archive universe adds open-GTC symbols and prior-day candidates within the cap (REQ-BENCH-007)
+
+### Landed (2026-09-05) — WP7 precisions and traceability
+
+- REQ-SIM-003 precision: `sessionSegments` builds one segment per trading
+  day of the window (ET-frame day arithmetic; weekend by day-of-week,
+  holiday and half-day from the market calendar); a segment's end is the
+  earlier of the window end and the session close — the window-end bar
+  (the deadline bar) is inside the segment, a bar stamped at the close is
+  not. `loadSimBars` with `rth: true` judges every segment; `rth: false`
+  keeps the legacy single-window judgement (no production caller). The
+  settle passes `rth: true` for every row. Evidence of the defect: every
+  GTC twin in `simulator.db` before this date carries "no covered bar
+  source" (the only GTC rows are unknown).
+- REQ-LANE-006 precision: the `lane-overnight` variant now flattens at the
+  lane deadline (`VariantContext.overnightFlatAtFor`, 10:00 ET next
+  session) as the sweeper closes the real row; before, its twin stayed
+  open until a level was hit.
+- REQ-BENCH-001 precision: the capture reads the engine's in-memory latest
+  snapshot and requires phase `pre-close` with today's date; the cup lane
+  reads the persisted pattern-scan file. Daily ATR comes from
+  `fetchDailyRiskContext` per candidate (fail → `atr-missing`); earnings
+  from `findUpcomingEarnings(symbols, 2)` (an unknown calendar day →
+  `null` for every symbol → `note:earnings-unknown`). A capture on a
+  market holiday is skipped.
+- REQ-BENCH-002 precision: `levels-invalid` marks a row whose mechanical
+  geometry is impossible (stop through zero); it replaces the earnings
+  note. Duplicate symbols in a snapshot keep the higher rank.
+- REQ-BENCH-003 precision: the disposition join runs every night over the
+  rows of the days replayed (including rows not yet due), so a proposal
+  registered after the capture is still credited; the cup lane also
+  accepts a cup-lane proposal created within the next two calendar days
+  (the Pre-Market Brief proposes the morning after the scan).
+- REQ-BENCH-004 precision: the MKT entry window is one hour after capture
+  (a capture after the close finds no bar and settles `unfilled`, honest);
+  `open` at the end of the bars (the deadline bar missing) is `unknown`
+  with the note "bars ended before the deadline bar"; 0 shares at the rung
+  settles with the outcome and `netR` null ("R undefined"); `gapPct` is
+  computed even when the twin does not fill.
+- REQ-BENCH-005 precision: mean R over settled rows with a defined R; the
+  adverse-gap count uses `overnight_gap_stress_pct`; the report is sent
+  once per capture day replayed that night, through the simulator
+  callbacks, after the settle report and before the looks.
+- REQ-BENCH-007 precision: "open GTC rows" = `listExposure()` rows with
+  `tif = 'GTC'` (executing/executed); "prior day" = the most recent
+  overnight capture day strictly before today. The cap warning now states
+  how many symbols were dropped.
+- Not touched: the intraday benchmark (`benchmark.ts`) and its ledger.
+
+| REQ | Test |
+|---|---|
+| REQ-SIM-003 (amended) | `simulator/bars.test.ts` (segments: two-session window, weekend/holiday/half-day, outside-session; coverage across; segment filter; `loadSimBars` two-session archive covered, legacy judgement refuses) |
+| REQ-LANE-006 (precision) | `simulator/variants.test.ts` fixture (`overnightFlatAtFor`); `settle.ts` context |
+| REQ-BENCH-001 | `candidate-archive.test.ts` (snapshot → rows, dedupe, levels + deadline, cup lane archived not replayed, first capture stands, capture skips) |
+| REQ-BENCH-002 | `candidate-archive.test.ts` (every reason named; earnings note; levels v1 long/short/impossible; cup levels) |
+| REQ-BENCH-003 | `candidate-archive.test.ts` (proposed / refused in the pre-close window / not admitted; another lane does not count); `overnight-benchmark.test.ts` (join at replay, credited in the report) |
+| REQ-BENCH-004 | `overnight-benchmark.test.ts` (twin spec, gap signed, eod-flat at 10:00 with R at the rung, stop through the open at the open, no bars → unknown, not due untouched, horizon expiry) |
+| REQ-BENCH-005 | `overnight-benchmark.test.ts` (`formatOvernightReport`: tallies, universe, top-5, judgment, gaps) |
+| REQ-BENCH-006 | structural: `candidate-archive.db` has no order-id columns; no import of `candidate-archive.js` outside `overnight-benchmark.ts`, `simulator/index.ts`, `archive-scheduler.ts`, `gateway.ts` and the script |
+| REQ-BENCH-007 | `archive-scheduler.test.ts` (`orderArchiveUniverse` priority, case-fold, cap, dropped count) |
+
+Plan decisions 1–6 (`docs/day2day/WP7-PLAN.md`) are implemented as written
+and await ratification at the review.
+
+Harness at landing: `bun test` 1102 pass (101 files), `tsc --noEmit` clean, Jest 1083 pass under Node. The read-only script runs without an archive ("no candidate archive yet").

@@ -3,7 +3,7 @@ import { DEFAULT_RULES } from '@/tools/ibkr/risk-rules.js';
 import { activeVariants, sizeAtRung, VARIANTS_V1, variantByName, type SimSource, type VariantContext } from './variants.js';
 
 const T0 = Date.UTC(2026, 8, 10, 14, 0, 0);
-const ctx: VariantContext = { rules: { ...DEFAULT_RULES, take_atr_mult: 1.5, take_floor_pct: 3, take_cap_pct: 10 }, flatAtFor: () => T0 + 3 * 3_600_000 };
+const ctx: VariantContext = { rules: { ...DEFAULT_RULES, take_atr_mult: 1.5, take_floor_pct: 3, take_cap_pct: 10 }, flatAtFor: () => T0 + 3 * 3_600_000, overnightFlatAtFor: () => T0 + 20 * 3_600_000 };
 
 function proposal(overrides: Partial<SimSource> = {}): SimSource {
     return {

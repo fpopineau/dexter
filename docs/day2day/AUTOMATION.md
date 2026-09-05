@@ -308,6 +308,31 @@ summed and mean R, and the twin-vs-actual slippage line; a failed settle is
 reported, never skipped. The simulator can never reach the broker (its own
 database, no order ids).
 
+### Candidate archive + overnight benchmark — `src/services/candidate-archive.ts`, `src/services/overnight-benchmark.ts` (WP7)
+At 15:35 ET the archive captures the observable universe, point-in-time and
+per lane, into `.dexter/data/candidate-archive.db`: the overnight lane from
+the latest pre-close opportunity snapshot (every scored candidate with its
+price, daily ATR, day move, rank), the cup-and-handle lane from the nightly
+pattern scan (cup matches, detector version, state). Each row gets a
+deterministic eligibility verdict with reasons (stale data, min price, ATR
+missing, day move unknown or against the direction, earnings within 2 days)
+and versioned mechanical levels — overnight v1: MKT at the next bar, stop at
+`stop_atr_multiplier` × ATR, target at take-x, flat at the 10:00 ET deadline.
+The first capture of a day stands; nothing archived is ever re-priced. After
+the nightly settle, the overnight benchmark replays every due eligible row
+with the simulator's pessimistic fill model against next-session bars, records
+the gap (next open vs capture price), fill, exit and R at the rung, joins each
+row to what the system did with it (proposed / refused by gate / not admitted),
+and sends one 🌙 block per capture day: the whole universe, the top-5 by rank,
+the judgment's picks, the not-admitted rest, unknowns. Cup rows are archived,
+not replayed (later WP). Since WP7 bar coverage is judged per regular-session
+segment (the overnight gap is not a hole) and GTC twins replay on regular-session
+bars — before that every GTC twin settled 'unknown'. The bar archive's universe
+gains the symbols of open GTC rows and the prior day's eligible candidates.
+Read-only table: `bun run scripts/overnight-benchmark.ts --day YYYY-MM-DD`.
+Disable the capture with `CANDIDATE_ARCHIVE=false`. Nightly order: archive
+16:20 → benchmark 16:45 → settle 17:10 → overnight benchmark → looks → digest.
+
 ### Lane deadline sweeper — `src/services/lane-deadline-sweeper.ts` (four-lane WP5)
 Every proposal carries a lane contract (`strategyId`: intraday / overnight /
 swing / cup-and-handle / earnings-bet; `src/services/lane-contract.ts`). The

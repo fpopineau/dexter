@@ -21,6 +21,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
 import { logger } from '@/utils';
+import { isMarketHalfDay, isMarketHoliday } from '@/utils/market-hours.js';
 import { getIntradayBars } from '../data-archive.js';
 import { barTimeFrameMs, etFrameMs } from '../outcome-tracker.js';
 import type { SimBar } from './fill-model.js';
@@ -54,7 +55,8 @@ export function coverageOk(bars: SimBar[], fromT: number, toT: number, maxGapMs:
 }
 
 /** Pure: keep regular-session bars (09:30 → 16:00 ET, 13:00 on a half day),
- *  or everything when `rth` is false. */
+ *  or everything when `rth` is false. Single-day semantics (one half-day
+ *  flag); multi-session windows go through `sessionSegments`. */
 export function sessionFilter(bars: SimBar[], opts: { rth: boolean; halfDay: boolean }): SimBar[] {
     if (!opts.rth) return bars;
     const close = opts.halfDay ? HALF_DAY_CLOSE_MIN : RTH_CLOSE_MIN;
@@ -64,6 +66,62 @@ export function sessionFilter(bars: SimBar[], opts: { rth: boolean; halfDay: boo
     });
 }
 
+/** The market calendar the segment builder consults (ET ISO dates). */
+export interface SessionCalendar {
+    isHoliday(dateIso: string): boolean;
+    isHalfDay(dateIso: string): boolean;
+}
+
+export const marketCalendar: SessionCalendar = { isHoliday: isMarketHoliday, isHalfDay: isMarketHalfDay };
+
+export interface SessionSegment {
+    from: number;
+    /** min(window end, session close) — inclusive: the deadline bar at the window end belongs to the segment. */
+    to: number;
+    /** The session close (exclusive: a bar stamped at the close is a post-close print). */
+    close: number;
+    dateIso: string;
+}
+
+/**
+ * Pure (REQ-SIM-003 amended, WP7): the regular-session segments that
+ * intersect [fromT, toT] (ET-frame ms) — one per trading day, 09:30 → 16:00
+ * (13:00 on a half-day), weekends and holidays skipped. Coverage is judged
+ * per segment: the overnight gap between two sessions is NOT a hole. Before
+ * this, every GTC twin spanning a close came back 'unknown' (the coverage
+ * check saw an 8-hour gap; simulator.db, 2026-09-05).
+ */
+export function sessionSegments(fromT: number, toT: number, cal: SessionCalendar = marketCalendar): SessionSegment[] {
+    const out: SessionSegment[] = [];
+    if (!(toT > fromT)) return out;
+    for (let dayStart = Math.floor(fromT / DAY_MS) * DAY_MS; dayStart <= toT; dayStart += DAY_MS) {
+        const d = new Date(dayStart);
+        const dow = d.getUTCDay();
+        if (dow === 0 || dow === 6) continue;
+        const dateIso = d.toISOString().slice(0, 10);
+        if (cal.isHoliday(dateIso)) continue;
+        const open = dayStart + RTH_OPEN_MIN * 60_000;
+        const close = dayStart + (cal.isHalfDay(dateIso) ? HALF_DAY_CLOSE_MIN : RTH_CLOSE_MIN) * 60_000;
+        const from = Math.max(fromT, open);
+        const to = Math.min(toT, close);
+        if (to > from) out.push({ from, to, close, dateIso });
+    }
+    return out;
+}
+
+/** Pure: every segment covered (start, end, no internal gap over the
+ *  tolerance); no segment at all (a window entirely outside the sessions)
+ *  is NOT covered — there is nothing to replay honestly. */
+export function coverageOkAcross(bars: SimBar[], segments: SessionSegment[], maxGapMs: number): boolean {
+    if (segments.length === 0) return false;
+    return segments.every((s) => coverageOk(bars.filter((b) => b.t >= s.from - maxGapMs && b.t <= s.to + maxGapMs), s.from, s.to, maxGapMs));
+}
+
+/** Pure: keep the bars inside any segment (the regular sessions of the window). */
+export function segmentFilter(bars: SimBar[], segments: SessionSegment[]): SimBar[] {
+    return bars.filter((b) => segments.some((s) => b.t >= s.from && b.t <= s.to && b.t < s.close));
+}
+
 export interface SimBarLoaders {
     stream: (symbol: string, fromT: number, toT: number) => Promise<SimBar[]>;
     archive: (symbol: string, fromT: number, toT: number) => Promise<SimBar[]>;
@@ -71,15 +129,23 @@ export interface SimBarLoaders {
 }
 
 export interface LoadOptions {
+    /** Regular-session bars only. Every simulator row uses true since WP7:
+     *  Dexter's brackets never set `outsideRth`, so a stop cannot fill
+     *  after hours; the gap-aware model prices an open through the stop. */
     rth: boolean;
+    /** Legacy single-day flag (rth without a calendar). Ignored when a
+     *  calendar is supplied — the segments carry each day's own close. */
     halfDay: boolean;
     maxGapMs: { stream: number; archive: number; ibkr: number };
+    /** Session calendar for multi-session windows (default: market hours). */
+    calendar?: SessionCalendar;
 }
 
 export const DEFAULT_MAX_GAP_MS = { stream: 60_000, archive: 5 * 60_000, ibkr: 5 * 60_000 };
 
-/** Try the sources in order; the first one whose session-filtered bars
- *  cover the window wins. A loader failure counts as no data. */
+/** Try the sources in order; the first one whose session bars cover every
+ *  regular-session segment of the window wins. A loader failure counts as
+ *  no data. `rth: false` keeps the legacy single-window judgement. */
 export async function loadSimBars(
     symbol: string,
     fromT: number,
@@ -88,6 +154,7 @@ export async function loadSimBars(
     loaders: SimBarLoaders = defaultLoaders,
 ): Promise<{ bars: SimBar[]; source: SimBarSource } | null> {
     const attempts: Array<[SimBarSource, keyof SimBarLoaders]> = [['stream-5s', 'stream'], ['archive-1m', 'archive'], ['ibkr-1m', 'ibkr']];
+    const segments = opts.rth ? sessionSegments(fromT, toT, opts.calendar ?? marketCalendar) : null;
     for (const [source, key] of attempts) {
         let raw: SimBar[];
         try {
@@ -96,8 +163,15 @@ export async function loadSimBars(
             logger.warn(`[simulator] ${symbol}: ${source} loader failed — ${err instanceof Error ? err.message : err}`);
             continue;
         }
-        const bars = sessionFilter(raw.filter((b) => b.t >= fromT - opts.maxGapMs[key] && b.t <= toT + opts.maxGapMs[key]), opts);
-        if (coverageOk(bars, fromT, toT, opts.maxGapMs[key])) return { bars, source };
+        const gap = opts.maxGapMs[key];
+        const windowed = raw.filter((b) => b.t >= fromT - gap && b.t <= toT + gap);
+        if (segments) {
+            const bars = segmentFilter(windowed, segments);
+            if (coverageOkAcross(bars, segments, gap)) return { bars, source };
+        } else {
+            const bars = sessionFilter(windowed, opts);
+            if (coverageOk(bars, fromT, toT, gap)) return { bars, source };
+        }
     }
     return null;
 }

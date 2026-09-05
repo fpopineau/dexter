@@ -130,12 +130,49 @@ export async function runSimulatorSettleOnce(): Promise<SettleRunCounts | null> 
     } finally {
         inFlight = false;
     }
+    // WP7 (REQ-BENCH-004/005): the overnight benchmark replays yesterday's
+    // archived universe after the settle — observability, its own store; a
+    // failure is reported and never blocks the looks.
+    await runOvernightBenchmarkSafely(today);
     // Live-loop WP3: the nightly pipeline is settle → LOOKS → DIGEST. The
     // looks run whether or not the settle succeeded (a failed settle leaves
     // the shadow section stale, the deployable verdict does not depend on
     // it); runLoopNightly never throws.
     await runLoopNightly();
     return counts;
+}
+
+async function runOvernightBenchmarkSafely(today: string): Promise<void> {
+    try {
+        const { runOvernightBenchmarkOnce } = await import('../overnight-benchmark.js');
+        const archive = await import('../candidate-archive.js');
+        const { listProposals: listAll, listRefusalsSince: refusalsSince } = await import('../trade-proposals.js');
+        const { counts, reports } = await runOvernightBenchmarkOnce({
+            now: Date.now(),
+            rules: getRiskRules(),
+            rungPct: currentRung(),
+            netLiq: getPerformanceBaseline()?.netLiq ?? FALLBACK_NETLIQ_USD,
+            commissions: simCommissionConfig(),
+            listPending: () => archive.listCandidates({ lane: 'overnight', replayStatus: 'pending' }),
+            listDays: async (days) => (await Promise.all(days.map((day) => archive.listCandidates({ day })))).flat(),
+            update: archive.updateCandidate,
+            loadBars: (symbol, fromT, toT, opts) => loadSimBars(symbol, fromT, toT, { ...opts, maxGapMs: DEFAULT_MAX_GAP_MS }),
+            isHalfDay: isMarketHalfDay,
+            ledgerSince: async (sinceMs) => ({
+                proposals: (await listAll(undefined, 1000)).filter((p) => p.createdAt >= sinceMs)
+                    .map((p) => ({ id: p.id, symbol: p.symbol, strategyId: p.strategyId, createdAt: p.createdAt })),
+                refusals: (await refusalsSince(sinceMs)).map((r) => ({ symbol: r.symbol, createdAt: r.createdAt, gate: r.gate })),
+            }),
+        });
+        logger.info(`[overnight-benchmark] ${today}: ${JSON.stringify(counts)}`);
+        for (const msg of reports) {
+            for (const cb of [...callbacks]) { try { await cb(msg); } catch (err) { logger.error(`[overnight-benchmark] report callback failed: ${err}`); } }
+        }
+    } catch (err) {
+        const msg = `🌙 Overnight benchmark ${today} FAILED — ${err instanceof Error ? err.message : err}`;
+        logger.error(`[overnight-benchmark] ${msg}`);
+        for (const cb of [...callbacks]) { try { await cb(msg); } catch { /* delivery is best-effort */ } }
+    }
 }
 
 async function report(today: string, counts: SettleRunCounts): Promise<void> {

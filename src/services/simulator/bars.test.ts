@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { coverageOk, frameToEpochMs, loadSimBars, sessionFilter, type SimBarLoaders } from './bars.js';
+import { coverageOk, coverageOkAcross, frameToEpochMs, loadSimBars, segmentFilter, sessionFilter, sessionSegments, type SimBarLoaders } from './bars.js';
 import type { SimBar } from './fill-model.js';
 import { etFrameMs } from '../outcome-tracker.js';
 
@@ -19,6 +19,59 @@ describe('coverageOk (REQ-SIM-003 — bars must span the window without gaps)', 
         expect(coverageOk(bars([at(9, 40), at(9, 41)]), at(9, 30), at(9, 41), 2 * M)).toBe(false);
         expect(coverageOk(bars([at(9, 31), at(9, 32)]), at(9, 30), at(9, 45), 2 * M)).toBe(false);
         expect(coverageOk([], at(9, 30), at(9, 45), 2 * M)).toBe(false);
+    });
+});
+
+describe('sessionSegments + coverageOkAcross (REQ-SIM-003 amended — the overnight gap is not a hole)', () => {
+    const cal = { isHoliday: (d: string) => d === '2026-09-07', isHalfDay: (d: string) => d === '2026-11-27' };
+    const DAY = 86_400_000;
+    // 2026-09-10 is a Thursday; 11 Friday; 14 Monday.
+    test('a 15:35 → next-day 10:00 window splits into two regular-session segments', () => {
+        const segs = sessionSegments(at(15, 35), D + DAY + 10 * 3_600_000, cal);
+        expect(segs.map((s) => [s.dateIso, s.from, s.to, s.close])).toEqual([
+            ['2026-09-10', at(15, 35), at(16, 0), at(16, 0)],
+            ['2026-09-11', D + DAY + 9.5 * 3_600_000, D + DAY + 10 * 3_600_000, D + DAY + 16 * 3_600_000],
+        ]);
+    });
+
+    test('weekends and holidays are skipped; a half-day closes at 13:00; a window outside every session has no segment', () => {
+        // Friday 09-11 15:00 → Monday 09-14 10:00: Sat/Sun produce nothing
+        const fri = D + DAY;
+        const segs = sessionSegments(fri + 15 * 3_600_000, fri + 3 * DAY + 10 * 3_600_000, cal);
+        expect(segs.map((s) => s.dateIso)).toEqual(['2026-09-11', '2026-09-14']);
+        // Labor Day 2026-09-07 (Mon) is a holiday in this calendar: Fri 09-04 → Tue 09-08
+        const fri4 = D - 6 * DAY;
+        expect(sessionSegments(fri4 + 15 * 3_600_000, fri4 + 4 * DAY + 10 * 3_600_000, cal).map((s) => s.dateIso)).toEqual(['2026-09-04', '2026-09-08']);
+        // half-day 2026-11-27 (Fri): the segment ends at 13:00
+        const nov27 = Date.UTC(2026, 10, 27);
+        const h = sessionSegments(nov27 + 9 * 3_600_000, nov27 + 16 * 3_600_000, cal);
+        expect(h).toEqual([{ dateIso: '2026-11-27', from: nov27 + 9.5 * 3_600_000, to: nov27 + 13 * 3_600_000, close: nov27 + 13 * 3_600_000 }]);
+        // 17:00 → 19:00 same day: outside the session
+        expect(sessionSegments(at(17, 0), at(19, 0), cal)).toEqual([]);
+        expect(coverageOkAcross(bars([at(17, 0)]), [], M)).toBe(false);
+    });
+
+    test('coverage across: both segments covered → ok; a hole inside one session → not ok; the gap between sessions is ignored', () => {
+        const segs = sessionSegments(at(15, 57), D + DAY + 9.5 * 3_600_000 + 3 * M, cal);
+        const day1 = [at(15, 57), at(15, 58), at(15, 59)];
+        const day2 = [0, 1, 2, 3].map((i) => D + DAY + 9.5 * 3_600_000 + i * M);
+        expect(coverageOkAcross(bars([...day1, ...day2]), segs, 2 * M)).toBe(true);
+        expect(coverageOkAcross(bars([...day1, day2[0], day2[3]]), segs, 2 * M)).toBe(false); // hole inside session 2
+        expect(coverageOkAcross(bars(day2), segs, 2 * M)).toBe(false);                        // session 1 missing
+        // 15:56 precedes the window, 16:00 is a post-close print, the 09:33 deadline bar (window end) is kept
+        expect(segmentFilter(bars([at(15, 56), ...day1, at(16, 0), ...day2]), segs).map((b) => b.t)).toEqual([...day1, ...day2]);
+    });
+
+    test('loadSimBars with rth judges per segment: a two-session archive window is covered (the old single-window check refused it)', async () => {
+        const from = at(15, 58);
+        const to = D + DAY + 9.5 * 3_600_000 + 2 * M;
+        const twoSessions = bars([at(15, 58), at(15, 59), D + DAY + 9.5 * 3_600_000, D + DAY + 9.5 * 3_600_000 + M, D + DAY + 9.5 * 3_600_000 + 2 * M]);
+        const loaders: SimBarLoaders = { stream: async () => [], archive: async () => twoSessions, ibkr: async () => [] };
+        const r = await loadSimBars('MU', from, to, { rth: true, halfDay: false, maxGapMs: { stream: M, archive: 2 * M, ibkr: 2 * M }, calendar: cal }, loaders);
+        expect(r?.source).toBe('archive-1m');
+        expect(r?.bars).toHaveLength(5);
+        // the legacy single-window judgement (rth false) still sees the overnight gap as a hole
+        expect(await loadSimBars('MU', from, to, { rth: false, halfDay: false, maxGapMs: { stream: M, archive: 2 * M, ibkr: 2 * M } }, loaders)).toBeNull();
     });
 });
 

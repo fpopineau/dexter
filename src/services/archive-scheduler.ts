@@ -51,27 +51,51 @@ function etDateString(now = new Date()): string {
     return `${et.getFullYear()}-${String(et.getMonth() + 1).padStart(2, '0')}-${String(et.getDate()).padStart(2, '0')}`;
 }
 
+export interface UniverseParts {
+    watchlist: string[];
+    /** Symbols with proposals created today. */
+    proposals: string[];
+    /** REQ-BENCH-007: symbols with OPEN GTC rows — a multi-session twin needs every session's bars. */
+    openGtc: string[];
+    /** REQ-BENCH-007: the prior capture day's eligible overnight candidates — their next-session bars are TODAY's. */
+    priorCandidates: string[];
+    /** Today's opportunity-snapshot symbols. */
+    snapshot: string[];
+}
+
+/** Pure (REQ-BENCH-007): priority order under the cap — watchlist, today's
+ *  proposals, open GTC rows, prior-day candidates, then the snapshot. */
+export function orderArchiveUniverse(parts: UniverseParts, cap: number): { symbols: string[]; dropped: number } {
+    const ordered = [...parts.watchlist, ...parts.proposals, ...parts.openGtc, ...parts.priorCandidates, ...parts.snapshot]
+        .map((s) => s.trim().toUpperCase()).filter(Boolean);
+    const unique = [...new Set(ordered)];
+    return { symbols: unique.slice(0, cap), dropped: Math.max(0, unique.length - cap) };
+}
+
 /**
  * Build today's archival universe. Watchlist symbols come first so a tight
  * cap never silently drops what the user explicitly asked to keep.
  */
 export async function buildArchiveUniverse(): Promise<string[]> {
     const dayStart = etDayStartMs();
-    const ordered: string[] = [...watchlistSymbols()];
-
-    const [proposalSymbols, snapshotSymbols] = await Promise.all([
+    const today = etDateString();
+    const [proposalSymbols, snapshotSymbols, openGtc, priorCandidates] = await Promise.all([
         listProposalSymbolsSince(dayStart).catch(() => [] as string[]),
         getSnapshotSymbolsSince(dayStart).catch(() => [] as string[]),
+        import('./trade-proposals.js').then((m) => m.listExposure()).then((rows) => rows.filter((t) => t.tif === 'GTC').map((t) => t.symbol)).catch(() => [] as string[]),
+        import('./candidate-archive.js').then(async (m) => {
+            const priorDay = (await m.listCandidateDays('overnight')).find((d) => d < today);
+            return priorDay ? m.listEligibleCandidateSymbols(priorDay, 'overnight') : [];
+        }).catch(() => [] as string[]),
     ]);
-    ordered.push(...proposalSymbols.map((s) => s.toUpperCase()));
-    ordered.push(...snapshotSymbols.map((s) => s.toUpperCase()));
-
-    const unique = [...new Set(ordered)];
     const cap = maxSymbols();
-    if (unique.length > cap) {
-        logger.warn(`[archive-scheduler] universe ${unique.length} symbols capped at ${cap} (DATA_ARCHIVE_MAX_SYMBOLS)`);
+    const { symbols, dropped } = orderArchiveUniverse(
+        { watchlist: watchlistSymbols(), proposals: proposalSymbols, openGtc, priorCandidates, snapshot: snapshotSymbols }, cap,
+    );
+    if (dropped > 0) {
+        logger.warn(`[archive-scheduler] universe ${symbols.length + dropped} symbols capped at ${cap} (DATA_ARCHIVE_MAX_SYMBOLS) — ${dropped} dropped`);
     }
-    return unique.slice(0, cap);
+    return symbols;
 }
 
 /** One archival run. Exported for manual invocation and scripts. */

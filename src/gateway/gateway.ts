@@ -33,6 +33,7 @@ import { handleProposalCommand } from './proposal-commands.js';
 import { resolveRoute } from './routing/resolve-route.js';
 import { resolveSessionStorePath, upsertSessionMeta } from './sessions/store.js';
 import { startBenchmark, stopBenchmark } from '@/services/benchmark.js';
+import { startCandidateArchive, stopCandidateArchive } from '@/services/candidate-archive.js';
 import { startDashboard, stopDashboard } from '@/services/dashboard.js';
 import { startEodTriage, stopEodTriage } from '@/services/eod-triage.js';
 import { startNewsPulse, stopNewsPulse } from '@/services/news-pulse.js';
@@ -351,6 +352,10 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     // candidates, surfaced via the news_pulse tool. Read-only context.
     startNewsPulse();
     startBenchmark();
+    // WP7 (REQ-BENCH-001): 15:35 ET point-in-time capture of the observable
+    // universe per lane (overnight + cup-and-handle) — its own database; the
+    // overnight benchmark replays it after the nightly settle.
+    startCandidateArchive();
     // Live-loop WP2 (REQ-SIM-006): nightly shadow-variant settle at 17:10 ET,
     // after the benchmark — observability only, writes simulator.db.
     startSimulator();
@@ -462,6 +467,7 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
       stopEodTriage();
       stopNewsPulse();
       stopBenchmark();
+      stopCandidateArchive();
       stopSimulator();
       stopDashboard();
       // Review-33/34: EVERY synchronous stop signal above fires before

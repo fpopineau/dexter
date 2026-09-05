@@ -20,9 +20,10 @@
 
 import type { RiskRules } from '@/tools/ibkr/risk-rules.js';
 import { logger } from '@/utils';
+import { laneExitDeadline } from '../lane-contract.js';
 import { etFrameMs } from '../outcome-tracker.js';
 import { triggerBand, type RefusalRecord, type TradeProposal } from '../trade-proposals.js';
-import { DEFAULT_MAX_GAP_MS, type SimBarSource } from './bars.js';
+import { DEFAULT_MAX_GAP_MS, frameToEpochMs, type SimBarSource } from './bars.js';
 import { commissionsFor, netR, simulateBracket, type CommissionConfig, type SimBar, type SimSpec } from './fill-model.js';
 import type { SettleRunCounts } from './report.js';
 import type { SimTrade } from './store.js';
@@ -160,7 +161,10 @@ async function settleOne(
 
     const horizonEnd = spec.flatAt ?? nowFrame;
     const halfDay = deps.isHalfDay(etIsoOfFrame(src.createdAt));
-    const loaded = await deps.loadBars(src.symbol, src.createdAt, horizonEnd, { rth: src.tif === 'DAY', halfDay });
+    // WP7 (REQ-SIM-003 amended): regular-session bars for EVERY row — the
+    // brackets never set outsideRth, so a GTC stop cannot fill after hours;
+    // coverage is judged per session segment, the overnight gap is no hole.
+    const loaded = await deps.loadBars(src.symbol, src.createdAt, horizonEnd, { rth: true, halfDay });
     const basisEntry = spec.entry ?? null;
     const quantity = basisEntry !== null ? sizeAt(basisEntry, spec.stop, deps.rungPct, deps.netLiq) : 0;
     const base: SimTrade = {
@@ -255,6 +259,12 @@ export async function runSettleOnce(depsIn: SettleDeps): Promise<SettleRunCounts
     const ctx: VariantContext = {
         rules: deps.rules,
         flatAtFor: (createdAt) => flatAtFrameFor(createdAt, deps.isHalfDay(etIsoOfFrame(createdAt))),
+        // REQ-LANE-006 precision (WP7): the overnight twin exits at the lane
+        // deadline (10:00 ET next session) like the sweeper closes the real row.
+        overnightFlatAtFor: (createdAt) => {
+            const deadline = laneExitDeadline('overnight', frameToEpochMs(createdAt), deps.rules);
+            return deadline === null ? null : etFrameMs(deadline);
+        },
     };
     const variants = activeVariants();
 

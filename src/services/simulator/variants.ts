@@ -65,6 +65,9 @@ export interface VariantContext {
     rules: RiskRules;
     /** ET-frame ms of the flat-by-close bar for the ET day containing `createdAt`. */
     flatAtFor: (createdAt: number) => number;
+    /** ET-frame ms of the overnight lane's exit deadline (10:00 ET next
+     *  session) for a row created at `createdAt`; null = no deadline. */
+    overnightFlatAtFor: (createdAt: number) => number | null;
 }
 
 export interface VariantDef {
@@ -208,7 +211,9 @@ export const VARIANTS_V1: readonly VariantDef[] = [
         description: 'overnight-lane proposals (REQ-LANE-002): next-session hold, entry dies with the close, exit at the lane deadline',
         status: 'active',
         applies: (s) => s.kind === 'proposal' && s.strategyId === 'overnight' && hasLevels(s),
-        spec: (s, ctx) => baseSpec(s, ctx),
+        // The deadline sweeper closes the real row at 10:00 ET next session;
+        // the twin flattens there too (eod-flat at that bar's close).
+        spec: (s, ctx) => baseSpec(s, ctx, { flatAt: ctx.overnightFlatAtFor(s.createdAt) }),
     },
     {
         name: 'lane-cup-and-handle',

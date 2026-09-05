@@ -201,6 +201,7 @@ Everything else has sensible defaults:
 | `LIVE_VETO_WINDOW_MIN` | 0 | veto window before an announced auto-execution places |
 | `LLM_DAILY_SPEND_CAP_USD` | 10 | daily LLM spend cap for evaluation lanes (0 = off; needs `LLM_PRICE_IN_USD_PER_MTOK` + `LLM_PRICE_OUT_USD_PER_MTOK`) |
 | `SIMULATOR` | true | nightly shadow-variant settle (17:10 ET) into `simulator.db`; `SIM_COMMISSION_PER_SHARE_USD` / `SIM_COMMISSION_MIN_USD` set the commission assumption |
+| `CANDIDATE_ARCHIVE` | true | 15:35 ET point-in-time capture of the overnight and cup-and-handle universes into `candidate-archive.db`; the 🌙 overnight benchmark block after the nightly settle replays yesterday's eligible candidates (mechanical twin: MKT at the next bar, stop 1.5 ATR, take-x, flat 10:00) and compares the universe, the top-5 by rank and the judgment's picks. Observability only. `bun run scripts/overnight-benchmark.ts --day YYYY-MM-DD` prints the table |
 | `OPP_HEALTH_EMPTY_CYCLES` | 3 | zero-scan cycles before the scanner-health WhatsApp alert |
 | `UNIVERSE_EXTRA_SYMBOLS` | — | mega-cap watchlist for the nightly archive + swing pattern scan |
 | `OPP_MARKET_CAP_MIN` / `_MAX` | unset | restrict engine scans to a cap band (USD), e.g. 1e9–5e9 for midcaps; unset = unchanged behavior |
