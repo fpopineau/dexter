@@ -2768,7 +2768,7 @@ dir (verified at landing: the switch reads OFF).
 
 ## Audit 2026-09-05 response — point-by-point verdicts, fixes landed, plan for the rest
 
-The operator's `AUDIT.md` (dated 2026-09-05, reference `dacaa63`) examined
+The operator's `AUDIT-2026-09-05.md` (dated 2026-09-05, reference `dacaa63`) examined
 strategy coherence, instructions, selection, sizing, protection, exits and
 the new validation path. Each finding was verified against HEAD before this
 response; verdicts below are evidence-based, fixes are pre-epoch (epoch 1
@@ -2873,3 +2873,23 @@ constants hash), changing it later ends the epoch.
    fence or follows the paper rehearsal.
 4. The 17 legacy rows with unknown outcomes: reconcile from broker
    statements or mark `legacy/unreconciled` (they never enter a look).
+
+### Operator decisions 2026-09-05 (audit response)
+
+1. Sequential-test schedule: **A kept** (99 / 97.5 / 96 / 95, replicates
+   1000). The measured 10.3 % false-ACCEPT rate (12.3 % under heavier
+   clustering) is accepted for the power it buys (66 % at +0.25 R); the
+   constants hash is unchanged.
+2. `keep`: **REQ-EOD-003 stands as ratified** — operator overrides hold
+   their excess, loudly; AUD-05 is closed as a policy choice, not a defect.
+3. Scope: **WP5–WP8 enter the September fence** (four-lane contract, sizer
+   composition, overnight benchmark + candidate archive, lane-conditional
+   discovery). The discovery's scope fence (no backtest recalibration, no
+   new data sources, no options/fractional/second broker) is unchanged.
+4. Legacy unknown outcomes: the 17 `agent` rows (2026-07-14..08-06) are
+   **marked** `legacy/unreconciled` in `proposals.db` (note appended by
+   `scripts/ops/mark-legacy-unknown.ts`, idempotent); they never enter a
+   look and are not reconstructed.
+
+The audit document is committed as `AUDIT-2026-09-05.md` with the cleared
+points struck through and the open ones pointed at their WP.

@@ -54,3 +54,4 @@ after the WP1..WP3 gateway restart; from there the control plane
   overlay, epoch latch, spend cap, live/veto seams). Fingerprint after the
   restart: _pending_ (the scorecard prints it; record here).
 - epoch 1 START _pending_ — `epoch 1 START <iso> fp <12hex> netliq $<n> rung 0.25`
+- 2026-09-05 — sequential-test schedule A (99/97.5/96/95, 1000 replicates) RATIFIED after calibration: 10.3% measured false ACCEPT under a zero-edge null, 66% power at +0.25 R (`scripts/calibrate-sequential-test.ts`); the "≈5% familywise" claim is withdrawn. Audit 2026-09-05 R0 remediation landed pre-epoch (commit cedf852).
