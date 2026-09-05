@@ -3254,8 +3254,8 @@ liquidity-adjusted ADV per session.
 Acceptance criteria above: all checked at landing (`bun test` 1083 pass,
 `tsc --noEmit` clean, Jest 1064 pass under Node).
 
-Plan decisions 1–5 (`docs/day2day/WP6-PLAN.md`) are implemented as written
-and await ratification at the review.
+Plan decisions 1–5 (`docs/day2day/WP6-PLAN.md`) are implemented as written;
+RATIFIED by the operator 2026-09-05 (see § Operator decisions 2026-09-06).
 
 ### Block-bootstrap sensitivity under regime streaks (2026-09-05, note to REQ-SEQ-002)
 
@@ -3439,8 +3439,8 @@ days before the archive existed.
 | REQ-BENCH-006 | structural: `candidate-archive.db` has no order-id columns; no import of `candidate-archive.js` outside `overnight-benchmark.ts`, `simulator/index.ts`, `archive-scheduler.ts`, `gateway.ts` and the script |
 | REQ-BENCH-007 | `archive-scheduler.test.ts` (`orderArchiveUniverse` priority, case-fold, cap, dropped count) |
 
-Plan decisions 1–6 (`docs/day2day/WP7-PLAN.md`) are implemented as written
-and await ratification at the review.
+Plan decisions 1–6 (`docs/day2day/WP7-PLAN.md`) are implemented as written;
+RATIFIED by the operator 2026-09-06 (see § Operator decisions 2026-09-06).
 
 Harness at landing: `bun test` 1102 pass (101 files), `tsc --noEmit` clean, Jest 1083 pass under Node. The read-only script runs without an archive ("no candidate archive yet").
 
@@ -3582,7 +3582,71 @@ a lane ranking for swing or earnings-bet.
 | REQ-DISC-005 | `scripts/validate-lane-ranker.ts` smoke-run read-only |
 | REQ-DISC-006 | inspection (`DEFAULT_RULES`, `risk-rules.live.yaml`) |
 
-Plan decisions 1–6 (`docs/day2day/WP8-PLAN.md`) are implemented as written
-and await ratification at the review.
+Plan decisions 1–6 (`docs/day2day/WP8-PLAN.md`) are implemented as written;
+RATIFIED by the operator 2026-09-06 (see § Operator decisions 2026-09-06).
 
 Harness at landing: `bun test` 1110 pass (102 files), `tsc --noEmit` clean, Jest 1091 pass under Node; `scripts/validate-lane-ranker.ts` and `scripts/overnight-benchmark.ts` smoke-run read-only against the live data directory.
+
+### Operator decisions 2026-09-06 (WP6, WP7, WP8 plan decisions RATIFIED)
+
+The operator ratified the plan decisions of WP6 ("OK for WP6 decisions",
+2026-09-05) and of WP7 and WP8 ("OK for WP7 and WP8 decisions",
+2026-09-06). They are absorbed here so the plan documents
+(`docs/day2day/WP6..WP8-PLAN.md`) are ephemeral and may be deleted.
+
+**WP6 — sizer composition.**
+1. Creation does not fetch the broker book: the creation context is the
+   proposals store priced at the worst entry basis; acceptance re-checks
+   with marks and the broker union; a drift refuses, never resizes.
+2. An unpriceable open row does not refuse creation: the headroom cap is
+   skipped with a note; acceptance keeps its strict refusal.
+3. Cost model: commissions per side = max(`commission_min_usd`, qty ×
+   `commission_per_share_usd`); spread crossing = qty × entry × spread %;
+   slippage = 2 × qty × entry × `slippage_bps` / 10,000; missing spread →
+   commissions + slippage only, noted; refuse above
+   `max_cost_to_target_pct` of qty × |target − entry|.
+4. The sector cap at creation uses the same UNKNOWN bucket as acceptance;
+   in tests the sector is unknown and the cap skips.
+5. `strategyVersion` is the strategy fingerprint; no extra column.
+
+**WP7 — overnight benchmark + candidate archive.**
+1. Bar coverage per regular-session segment; GTC twins replay on
+   regular-session bars (`outsideRth` false system-wide); the "GTC rows may
+   fill in extended hours" assumption is withdrawn.
+2. One capture per lane per day at 15:35 ET from the latest pre-close
+   snapshot; the first capture of a day stands; a missed capture is a day
+   without a universe (reported, never backfilled).
+3. Eligibility = the deterministic subset of the overnight lane's rules;
+   LLM reasons are never reconstructed; the disposition join records
+   proposed / refused:<gate> / not-admitted.
+4. Mechanical levels v1: MKT at the next bar, stop = price ∓
+   `stop_atr_multiplier` × daily ATR, target = price ± take-x %, exit at
+   the lane deadline; rows keep the version they were captured with.
+5. Cup-and-handle candidates are archived, not replayed (15-session
+   horizon belongs with the swing benchmark, later).
+6. R is rung-invariant, USD at the current rung against the epoch NetLiq;
+   the report goes through the simulator callbacks; the benchmark never
+   writes `sim_trades`, no look reads `candidates`.
+
+**WP8 — lane-conditional scoring.**
+1. Overnight ranker `eod-continuation-v1` = significance 0–40 (|day move| /
+   daily ATR %, to 3×) + closing strength 0–20 (vs VWAP toward the
+   direction, to +2 %) + liquidity 0–20 (log10 dollar volume, $1M → $100M)
+   + RVOL 0–20 (to 3×); exclusions stale / price / ATR / move unknown /
+   counter-move; earnings are not a ranking factor.
+2. The intraday composite is unchanged, named `composite-v1` (weight
+   provenance = the scorer's `weightsSource`); the trigger rank is the
+   intraday lane rank; cup uses `detector-v1`; swing and earnings-bet have
+   no lane rank.
+3. Lane rank and ranker version are stamped server-side; the model cannot
+   pass them; an unseen symbol gets null with the version recorded.
+4. The pooled "Score deciles" line is retired: rank→R per lane from the
+   lane rank (legacy from the model's score), never pooled; < 5 rows → n/a.
+5. Sizing confidence stays flat; `scripts/validate-lane-ranker.ts` is the
+   pre-registered pass any change must clear.
+6. No new discovery scans in WP8; an intraday pullback lane is measured in
+   the WP7 archive first.
+
+The September fence (WP5–WP8, decision 3 of 2026-09-05) is complete; the
+programme's remaining human steps are the restart, `epoch new`, and the
+paper rehearsal the WP3/WP4 machinery already governs.
