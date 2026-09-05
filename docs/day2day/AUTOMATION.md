@@ -17,13 +17,13 @@ The pipeline is split into three layers:
 | Layer | Nature | Cost | Components |
 |---|---|---|---|
 | Continuous scanning | Deterministic, no LLM | IBKR pacing only | Opportunity Engine |
-| Judgment | LLM, event/schedule-driven | API tokens | Trigger evaluations, 09:35/15:30 cron briefs |
+| Judgment | LLM, event/schedule-driven | API tokens | Trigger evaluations, 09:35 / pre-close (close − 30 min) cron briefs |
 | Execution | Human-gated, deterministic | — | Proposal executor (bracket orders) |
 
 ```
 IBKR scanners ──> filter ──> signal scorer ──> composite ranking ──> snapshot (SQLite)
    (multi-code, session-aware cadence, no LLM)            │
-                                                          ├──> cron briefs 09:35 / 15:30 ──> LLM ──> proposals ──> WhatsApp
+                                                          ├──> cron briefs 09:35 / close−30 ──> LLM ──> proposals ──> WhatsApp
                                                           └──> threshold triggers ─────────> LLM ──> proposals ──> WhatsApp
                                                                             (risk gate at creation) ──┐
                                                   human "accept P-XXXX" (WhatsApp) or TUI approval ───┘
@@ -288,8 +288,11 @@ seeded jobs; schedules stay user-tunable):
   (web_search) and risk (risk_manager), registers ≤ 3 intraday proposals
   (90 min expiry) with accept instructions.
 - **Midday Check** (12:00) — positions + mean-reversion scan.
-- **Pre-Close Review** (15:30) — positions hold/trim/close, then ≤ 2 overnight
-  proposals (45 min expiry) validated against overnight risk limits.
+- **Pre-Close Review** (30 min before the session close — 15:30 ET, 12:30 ET
+  on a half-day; schedule kind `session-close`, market calendar) — positions
+  hold/trim/close, then ≤ 2 overnight proposals (expiry clamped to the bell)
+  validated against overnight risk limits. The executor never runs a
+  session-close job past the day's close.
 
 ### Event triggers — engine + `src/gateway/trigger-alerts.ts`
 When a candidate enters the **top 3** with `compositeRank ≥ OPP_TRIGGER_SCORE`

@@ -3784,3 +3784,75 @@ seven are fixed here.
 | 7 | `overnight-benchmark.test.ts` (report on gross R with net USD; header) |
 
 Harness at landing: `bun test` 1116 pass (102 files), `tsc --noEmit` clean, Jest 1097 pass under Node.
+
+## Close-relative Pre-Close Review (2026-09-06)
+
+The Pre-Close Review ran on a fixed `30 15 * * 1-5` cron, so on a half-day
+(13:00 close) it never ran and the overnight lane had no review at all
+(review 2026-09-06, second pass, finding 3 caveat). The cron subsystem
+gains a calendar-driven schedule kind and the seeded job moves to it.
+
+### Domain deltas
+
+- `CronScheduleSessionClose = { kind: 'session-close'; offsetMin; tz? }`
+  (`src/cron/types.ts`); `computeNextRunAtMs` handles it via
+  `nextSessionCloseFire` (`src/cron/schedule.ts`), which walks the ET
+  calendar: weekdays, `isMarketHoliday` skipped, close 16:00 or 13:00
+  (`isMarketHalfDay`), fire = close − offset.
+- `sessionCloseMsFor(nowMs)` — the day's close, null off trading days; the
+  executor refuses to run a session-close job at or past it.
+- `TradingJobDef.schedule` (any kind) + `legacySchedules`; the seed
+  migrates a stored job that still carries a legacy seed schedule
+  (`carriesLegacySchedule`, canonical key order) and leaves a tuned one
+  alone.
+- The `cron` tool accepts and prints the new kind.
+
+### Requirements
+
+- REQ-CRON-001: a `session-close` schedule fires `offsetMin` minutes
+  before the US regular-session close on every trading day, from the
+  market calendar (weekends and holidays skipped, half-days at 13:00);
+  `offsetMin` outside [0, 360] is invalid (the job disables like any
+  invalid schedule).
+- REQ-CRON-002: the executor never runs a session-close job at or after
+  the day's close, nor on a non-trading day — a catch-up after an outage
+  cannot review positions after the bell; the run is skipped and
+  rescheduled.
+- REQ-CRON-003: the seeded Pre-Close Review is
+  `{ kind: 'session-close', offsetMin: 30, tz: 'America/New_York' }` with
+  active hours 11:30–16:00 ET (wide enough for a 12:30 half-day fire; the
+  close guard, not the window, bounds it). A stored job still carrying the
+  legacy `30 15 * * 1-5` seed follows the new seed at the next gateway boot
+  (schedule, active hours, next run); an operator-tuned schedule is left
+  untouched. The review's prompt speaks in close-relative terms (entry
+  expiry by the bell, bet expiry 5 minutes before the close).
+
+### Invariants
+
+- The other seeded jobs (08:00, 09:35, 12:00) are unchanged.
+- The cron store's schedule is part of the strategy fingerprint (review-24);
+  epoch 1 has not opened, so the migration lands on the identity the first
+  restart establishes.
+
+### Non-goals
+
+Close-relative active hours as a general feature (the close guard covers
+the one job that needs it); a session-open kind (the 09:35 job is fine at a
+fixed clock — the open never moves).
+
+### Acceptance criteria
+
+- [x] full day → 15:30 ET; half-day 2026-11-27 → 12:30 ET; Friday evening → Monday; Labor Day skipped; offset 0 = the close; invalid offsets refused (REQ-CRON-001)
+- [x] `sessionCloseMsFor` returns the close on trading days and null otherwise (REQ-CRON-002)
+- [x] a legacy seed schedule is recognised whatever the key order; a tuned schedule is not (REQ-CRON-003)
+
+| REQ | Test |
+|---|---|
+| REQ-CRON-001/002 | `src/cron/schedule.test.ts` |
+| REQ-CRON-003 | `src/cron/schedule.test.ts` (`carriesLegacySchedule`); the migration path is exercised at the next gateway boot on the operator's store (verified: the stored job carries exactly the legacy seed) |
+
+The earlier caveat in § Review 2026-09-06, second pass ("the Pre-Close
+Review cron itself is fixed at 15:30 ET and does not run on a half-day") is
+closed by this section.
+
+Harness at landing: `bun test` 1121 pass (103 files), `tsc --noEmit` clean, Jest 1102 pass under Node.

@@ -319,7 +319,7 @@ All times ET; weekends and NYSE holidays are skipped automatically.
 | 10:30–15:00 | engine midday scans (10 min) | occasional triggers |
 | 12:00 | **Midday Check** | positions + mean-reversion look |
 | 15:00–16:00 | engine pre-close scans (5 min) | |
-| 15:30 | **Pre-Close Review** | hold/trim/close advice, **every position checked for earnings ≤2 days**, expiring DAY exits flagged, ≤2 overnight proposals (45 min expiry) |
+| close − 30 min (15:30; 12:30 on a half-day) | **Pre-Close Review** | hold/trim/close advice, **every position checked for earnings ≤2 days**, expiring DAY exits flagged, ≤2 overnight proposals (45 min expiry) |
 | any time | a candidate enters top-3 with rank ≥ 75 | trigger alert with a proposal, if the evaluation finds a catalyst |
 | RTH, every 60 s | **profit trail** watches each intraday position's peak (swing/earnings-bet exempt) | 📉➡️💰 auto-close alert when a winner ≥2.5×ATR pulls back 0.75×ATR from its peak |
 | 15:52 | **EOD triage** of unresolved DAY positions | 🌇 report: losing-and-fading closed before the bell; the rest keep their overnight chance |
@@ -370,7 +370,7 @@ A proposal is a persisted, expiring trade recommendation:
 P-3F2A LONG 50 NVDA @182.5 stop 178.2 target 191.0 (score 82) [open]
 ```
 
-**Who creates them:** the 09:35 and 15:30 briefs, event triggers, or the
+**Who creates them:** the 09:35 and pre-close (close − 30 min) briefs, event triggers, or the
 agent when you ask it to. Creation never trades.
 
 **Trade classes (2026-08):** every proposal carries a `tradeClass` that

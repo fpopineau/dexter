@@ -110,8 +110,9 @@ Create via `trade_proposals` (action `create`):
 - `stop`: real structure for the POST-print session (it manages the
   reaction, not the gap); `target`: an honest objective ≥2× the stop
   distance, informed by `avgAbsMovePct`.
-- `expiresMinutes`: enough to reach 15:55 and no more (25 from the 15:30
-  review) — an unaccepted bet must not survive into the print.
+- `expiresMinutes`: enough to reach 5 minutes before the close and no more
+  (25 from the pre-close review, which starts 30 min before the close) — an
+  unaccepted bet must not survive into the print.
 - `rationale`: one line of record ("7 of 8 up, worst gap −12%, 3 inferred"),
   one line of signal ("beat streak 4Q + implied 6% vs 9% avg").
 

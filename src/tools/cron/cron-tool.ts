@@ -30,6 +30,7 @@ Jobs run as isolated agent turns with full tool access, delivering results via W
 - **at**: One-shot at a specific time. \`{{ "kind": "at", "at": "2026-04-01T14:00:00Z" }}\`
 - **every**: Recurring interval in milliseconds. \`{{ "kind": "every", "everyMs": 3600000 }}\` (1 hour)
 - **cron**: Cron expression with optional timezone. \`{{ "kind": "cron", "expr": "0 9 * * 1-5", "tz": "America/New_York" }}\`
+- **session-close**: N minutes before the US regular-session close on every trading day, from the market calendar (16:00 ET, 13:00 ET on a half-day; weekends and holidays skipped). \`{{ "kind": "session-close", "offsetMin": 30 }}\` — use it for anything that must happen "before the bell".
 
 ## Fulfillment Modes
 
@@ -65,6 +66,11 @@ const scheduleSchema = z.union([
     kind: z.enum(['cron']),
     expr: z.string().describe('Cron expression (5 or 6 fields)'),
     tz: z.string().optional().describe('IANA timezone (default: system timezone)'),
+  }),
+  z.object({
+    kind: z.enum(['session-close']),
+    offsetMin: z.number().min(0).max(360).describe('Minutes before the US regular-session close (16:00 ET; 13:00 ET on a half-day); trading days only'),
+    tz: z.string().optional().describe('IANA timezone (default: America/New_York)'),
   }),
 ]);
 
@@ -214,6 +220,8 @@ function formatSchedule(schedule: CronSchedule): string {
     }
     case 'cron':
       return `${schedule.expr}${schedule.tz ? ` (${schedule.tz})` : ''}`;
+    case 'session-close':
+      return `${schedule.offsetMin} min before the US session close on trading days (16:00 ET; 13:00 ET on a half-day)${schedule.tz ? ` (${schedule.tz})` : ''}`;
   }
 }
 

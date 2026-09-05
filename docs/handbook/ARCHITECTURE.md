@@ -284,7 +284,7 @@ Daily rhythm (ET, trading days):
 10:30  engine midday         every 10 min
 12:00  Midday Check          positions + mean-reversion scan
 15:00  engine pre-close      every 5 min
-15:30  Pre-Close Review      hold/trim/close + ≤2 overnight proposals (45 min)
+close−30 Pre-Close Review    hold/trim/close + ≤2 overnight proposals (15:30; 12:30 half-day)
 16:00  market close
 16:20  archive scheduler     1-min & 5-min bars for the day's universe
 all day event triggers       top-3 & rank ≥ 75 → evaluation → proposal

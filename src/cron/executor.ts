@@ -11,7 +11,7 @@ import { cleanMarkdownForWhatsApp } from '../gateway/utils.js';
 import { getSetting } from '../utils/config.js';
 import { dexterPath } from '../utils/paths.js';
 import { saveCronStore } from './store.js';
-import { computeNextRunAtMs } from './schedule.js';
+import { computeNextRunAtMs, sessionCloseMsFor } from './schedule.js';
 import type { ActiveHours, CronJob, CronStore } from './types.js';
 
 const LOG_PATH = dexterPath('gateway-debug.log');
@@ -103,6 +103,17 @@ export async function executeCronJob(
     debugLog(`[cron] job ${job.id}: outside active hours, skipping`);
     scheduleNextRun(job, store);
     return;
+  }
+  // 0b. A session-close job never runs past the day's close (a catch-up
+  // after a gateway outage must not review positions after the bell) nor
+  // on a non-trading day — the calendar guards it, not a fixed window.
+  if (job.schedule.kind === 'session-close') {
+    const close = sessionCloseMsFor(Date.now(), job.schedule.tz ?? 'America/New_York');
+    if (close === null || Date.now() >= close) {
+      debugLog(`[cron] job ${job.id}: session-close job past the close or not a trading day, skipping`);
+      scheduleNextRun(job, store);
+      return;
+    }
   }
 
   debugLog(`[cron] executing job "${job.name}" (${job.id})`);
