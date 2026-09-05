@@ -88,9 +88,13 @@ export function buildEpochSample(proposals: TradeProposal[], epoch: EpochIdentit
             netUsd: p.realizedPnl - (p.commissions ?? 0),
             band: p.triggerBand,
             tradeClass: p.tradeClass,
+            // REQ-LANE-006/007: the lane, or 'legacy' for a pre-contract row.
+            strategyId: p.strategyId ?? 'legacy',
             score: p.score,
         };
-        if (shadowClasses.has(p.tradeClass)) shadowTrades.push(t); else trades.push(t);
+        // Deployable = the classes enabled in the live config; a legacy row
+        // (no lane) is never part of a lane cohort and is reported apart.
+        if (shadowClasses.has(p.tradeClass) || t.strategyId === 'legacy') shadowTrades.push(t); else trades.push(t);
     }
     if (models.size > 1) anomalies.push(`judgment purity: ${models.size} distinct models in the cohort (${[...models].join(', ')}) — one model per epoch`);
     return { trades, shadowTrades, anomalies, openInCohort, models: [...models], unmodelled };

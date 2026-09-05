@@ -25,6 +25,7 @@ function trades(rs: number[], opts: { days?: number; band?: '60-74' | '75+' | nu
         netUsd: r * 30,
         band: opts.band ?? '60-74',
         tradeClass: 'intraday' as const,
+        strategyId: 'intraday' as const,
         score: 60 + (i % 40),
     }));
 }

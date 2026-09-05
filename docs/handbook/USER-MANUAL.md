@@ -382,6 +382,31 @@ in proposal lines, and broken out per class in performance reports:
 | `swing` | up to ~2 weeks, GTC | `swing_risk_pct` | max `max_swing_positions` (3) | stop distance |
 | `earnings-bet` | through one print, GTC | `earnings_bet_risk_pct` | max `max_earnings_bets` (1) | worst-case gap (`worstCaseGapPct`, floored at `earnings_bet_gap_floor_pct`) |
 
+**Lanes (four-lane contract, 2026-09-05):** on top of the risk class, every
+proposal names its `strategyId` — the strategy, separate from the risk
+horizon. The lane fixes the class, the TIF, the holding horizon, the exit
+policy and the exit deadline; a combination that dodges a gate is refused
+at creation. Rows created before the contract show `legacy`.
+
+| Lane | Risk class | TIF | Horizon | Exit policy | Deadline | Budget |
+|---|---|---|---|---|---|---|
+| `intraday` (default) | intraday | DAY | same session | take-at-x% (or ratchet) | none — the 15:52 triage closes it | min(rung, ceiling) |
+| `overnight` | swing | GTC | next session | bracket + deadline | 10:00 ET next trading session | `overnight_risk_pct`, gap-stress capped |
+| `swing` | swing | GTC | multi-session | structural + deadline | fill + `swing_max_hold_days` (10) at 15:50 ET | `swing_risk_pct`, gap-stress capped |
+| `cup-and-handle` | swing | GTC | multi-session | structural + deadline | fill + `cup_max_hold_days` (15) at 15:50 ET | `swing_risk_pct`, gap-stress capped |
+| `earnings-bet` | earnings-bet | GTC | through one print | bracket | none | worst-case gap |
+
+Overnight setups are registered from 15:00 ET and their entry expiry is
+clamped to the close: an unfilled overnight entry never arms the next
+morning. Overnight, swing and cup-and-handle share the swing pool of 3
+(overnight at most 2) and are disabled on a live account until each lane's
+own record passes. The deadline sweeper closes a still-open position at its
+deadline through the safe close path and stamps the row; a close that does
+not confirm flat is an incident on WhatsApp. Sizing for these lanes is
+composed at creation with the gap-stress budget: at live scale the WHOLE
+overnight book is capped near 7.5% of NetLiq (1.5% daily loss / 20% stress),
+so expect small sizes — that is the ratified risk, not a bug.
+
 Swings and earnings bets require GTC brackets and a `company-snapshot`
 card; earnings bets additionally require the `earnings_bet_intel`
 evidence bar (≥8 prints, ≥75% consistency, ≥1 external signal) and are

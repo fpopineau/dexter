@@ -24,7 +24,8 @@ import { dirname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { assertProposalRisk, type RiskGateContext } from './proposal-risk-gate.js';
 import { oppositeDirectionConflict } from './vehicle-complexes.js';
-import type { TradeClass } from '@/tools/ibkr/risk-rules.js';
+import { getRiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
+import { isStrategyId, laneExitDeadline, resolveLaneContract, type ExitPolicyId, type HoldingHorizon, type StrategyId } from './lane-contract.js';
 
 export type ProposalStatus = 'open' | 'executing' | 'executed' | 'closed' | 'rejected' | 'expired' | 'failed';
 
@@ -77,6 +78,20 @@ export interface TradeProposal {
      *  identity was unresolved). The epoch sample refuses rows whose
      *  fingerprint differs from the epoch's (audit 2026-09-05, AUD-11). */
     strategyFingerprint: string | null;
+    // --- Four-lane contract (WP5, REQ-LANE-001..005) ---
+    /** The lane; null = legacy row (pre-WP5), never in a lane cohort. */
+    strategyId: StrategyId | null;
+    /** The setup inside the lane (e.g. 'pullback', 'cup-and-handle'). */
+    setupId: string | null;
+    holdingHorizon: HoldingHorizon | null;
+    exitPolicyId: ExitPolicyId | null;
+    /** Epoch ms the lane's hold ends (stamped at entry fill); null = no
+     *  deadline of its own (intraday: the triage; earnings-bet: the bracket). */
+    exitDeadline: number | null;
+    /** When the deadline sweeper attempted the close (one attempt). */
+    deadlineClosedAt: number | null;
+    /** Detector version that produced a pattern-lane setup. */
+    detectorVersion: string | null;
     /** Market-regime tag at creation (protocol breadth criterion). */
     regime: string | null;
     /** Failure or rejection detail. */
@@ -527,6 +542,18 @@ const OUTCOME_COLUMNS: Array<[string, string]> = [
     // REQ-RISK-008: pre-open accept with the spread check DEFERRED to the
     // 09:31 ET re-check (0/1).
     ['spread_deferred', 'INTEGER'],
+    // Four-lane contract (WP5, 2026-09-05, REQ-LANE-001/003/005): the
+    // strategy identity separate from the risk class, the setup, the
+    // holding horizon, the exit policy, the exit deadline stamped at entry
+    // fill, the deadline-close attempt stamp, and the detector version for
+    // pattern lanes. NULL strategy_id = a legacy row (REQ-LANE-007).
+    ['strategy_id', 'TEXT'],
+    ['setup_id', 'TEXT'],
+    ['holding_horizon', 'TEXT'],
+    ['exit_policy_id', 'TEXT'],
+    ['exit_deadline', 'INTEGER'],
+    ['deadline_closed_at', 'INTEGER'],
+    ['detector_version', 'TEXT'],
 ];
 
 /** Replay/instrumentation columns added after the refusals-table release. */
@@ -597,6 +624,13 @@ interface Row {
     planned_quantity: number | null;
     model: string | null;
     strategy_fingerprint: string | null;
+    strategy_id: string | null;
+    setup_id: string | null;
+    holding_horizon: string | null;
+    exit_policy_id: string | null;
+    exit_deadline: number | null;
+    deadline_closed_at: number | null;
+    detector_version: string | null;
     regime: string | null;
     note: string | null;
     executed_at: number | null;
@@ -652,6 +686,13 @@ function fromRow(r: Row): TradeProposal {
         plannedQuantity: r.planned_quantity ?? null,
         model: r.model ?? null,
         strategyFingerprint: r.strategy_fingerprint ?? null,
+        strategyId: isStrategyId(r.strategy_id) ? r.strategy_id : null,
+        setupId: r.setup_id ?? null,
+        holdingHorizon: (r.holding_horizon === 'same-session' || r.holding_horizon === 'next-session' || r.holding_horizon === 'multi-session') ? r.holding_horizon : null,
+        exitPolicyId: (r.exit_policy_id === 'take-x' || r.exit_policy_id === 'ratchet' || r.exit_policy_id === 'bracket+deadline' || r.exit_policy_id === 'structural+deadline' || r.exit_policy_id === 'bracket') ? r.exit_policy_id : null,
+        exitDeadline: r.exit_deadline ?? null,
+        deadlineClosedAt: r.deadline_closed_at ?? null,
+        detectorVersion: r.detector_version ?? null,
         regime: r.regime ?? null,
         note: r.note,
         executedAt: r.executed_at ?? null,
@@ -708,6 +749,13 @@ export interface CreateProposalInput {
     tif?: 'DAY' | 'GTC';
     /** Trade class; defaults to 'intraday'. */
     tradeClass?: TradeClass;
+    /** Four-lane contract (REQ-LANE-001): the lane; omitted = derived from
+     *  the class. The contract fixes class/TIF/horizon/exit policy. */
+    strategyId?: StrategyId | null;
+    /** The setup inside the lane (free label, normalised). */
+    setupId?: string | null;
+    /** Detector version for pattern-lane setups (server-side). */
+    detectorVersion?: string | null;
     /** Take-at-x% override (WP-EXIT): the model's x within the take band;
      *  omitted = the ATR formula. Gate-validated, then stamped. */
     takePct?: number;
@@ -743,6 +791,13 @@ export async function countOpenByClass(tradeClass: TradeClass, excludeId?: strin
         `SELECT * FROM proposals WHERE status IN ('executing', 'executed')`,
     ).all();
     return rows.map(fromRow).filter((t) => t.tradeClass === tradeClass && t.id !== excludeId).length;
+}
+
+/** Test hook: pin the creation clock (the overnight lane's entry window is
+ *  wall-clock dependent). null restores Date.now(). */
+let testClock: (() => number) | null = null;
+export function __setCreationClockForTests(clock: (() => number) | null): void {
+    testClock = clock;
 }
 
 export async function createProposal(
@@ -808,8 +863,34 @@ export async function createProposal(
     });
 
     const database = await getDb();
-    const now = Date.now();
+    const now = testClock?.() ?? Date.now();
     const expiry = now + (input.expiresMinutes ?? DEFAULT_EXPIRY_MIN) * 60_000;
+
+    // Four-lane contract (REQ-LANE-001/002/003): deterministic lane → class
+    // → TIF → horizon → exit policy; an inconsistent triple or an overnight
+    // setup outside its window is refused here, after the risk gate, before
+    // persistence. The lane cap on overnight rows is counted server-side.
+    const rules = getRiskRules();
+    const lane = resolveLaneContract({
+        strategyId: input.strategyId ?? null,
+        tradeClass,
+        tif: input.tif === 'GTC' ? 'GTC' : 'DAY',
+        setupId: input.setupId ?? null,
+        createdAtMs: now,
+        expiresAtMs: expiry,
+    }, rules);
+    if (!lane.ok) {
+        throw new Error(`[lane-contract] REFUSED ${input.symbol.toUpperCase()}: ${lane.violations.join('; ')}`);
+    }
+    if (lane.contract.strategyId === 'overnight') {
+        const openOvernight = await countOpenByStrategy('overnight');
+        if (openOvernight >= rules.max_overnight_lane_positions) {
+            throw new Error(
+                `[lane-contract] REFUSED ${input.symbol.toUpperCase()}: ${openOvernight} overnight-lane position(s) already open/working — ` +
+                `max ${rules.max_overnight_lane_positions}; close or cancel one first, or skip`,
+            );
+        }
+    }
 
     let id = '';
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -825,8 +906,9 @@ export async function createProposal(
          (id, created_at, expires_at, updated_at, status, symbol, direction, entry_type,
           entry, entry_limit, stop, target, quantity, tif, trade_class, worst_case_gap_pct,
           score, rationale, source, order_ids, note,
-          extension_atr, vwap_dist_pct, day_move_pct, minutes_since_open)
-         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
+          extension_atr, vwap_dist_pct, day_move_pct, minutes_since_open,
+          strategy_id, setup_id, holding_horizon, exit_policy_id, detector_version)
+         VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
         id, now, expiry, now,
         input.symbol.trim().toUpperCase(), input.direction, input.entryType,
@@ -836,6 +918,8 @@ export async function createProposal(
         input.score ?? null, input.rationale, input.source,
         input.entryContext?.extensionAtr ?? null, input.entryContext?.vwapDistPct ?? null,
         input.entryContext?.dayMovePct ?? null, input.entryContext?.minutesSinceOpen ?? null,
+        lane.contract.strategyId, lane.contract.setupId, lane.contract.holdingHorizon, lane.contract.exitPolicyId,
+        input.detectorVersion ?? null,
     );
 
     // Judgment-purity stamp (review 2026-08-21): record which model
@@ -993,12 +1077,57 @@ export async function recordPartialEntryDowngrade(id: string, filledQty: number,
     ).run(filledQty, note, Date.now(), id.trim().toUpperCase());
 }
 
-/** Record the entry order's fill. */
+/** Record the entry order's fill. REQ-LANE-003: the FIRST fill stamps the
+ *  lane's exit deadline from the market calendar (next session 10:00 ET for
+ *  the overnight lane; fill + hold days at 15:50 ET for swing / cup); a
+ *  cumulative re-fill never moves it. */
 export async function markEntryFilled(id: string, price: number, at = Date.now()): Promise<void> {
     const database = await getDb();
+    const key = id.trim().toUpperCase();
     database.query<void>(
         `UPDATE proposals SET entry_fill_price = ?, entry_filled_at = ?, updated_at = ? WHERE id = ?`,
-    ).run(price, at, Date.now(), id.trim().toUpperCase());
+    ).run(price, at, Date.now(), key);
+    const row = database.query<Row>(`SELECT * FROM proposals WHERE id = ?`).all(key)[0];
+    if (row && row.exit_deadline == null && isStrategyId(row.strategy_id)) {
+        try {
+            const deadline = laneExitDeadline(row.strategy_id, at, getRiskRules());
+            if (deadline !== null) {
+                database.query<void>(`UPDATE proposals SET exit_deadline = ? WHERE id = ? AND exit_deadline IS NULL`).run(deadline, key);
+                logger.info(`[proposals] ${key} ${row.strategy_id} lane: exit deadline ${new Date(deadline).toISOString()}`);
+            }
+        } catch (err) {
+            logger.error(`[proposals] ${key}: lane deadline NOT stamped — ${err instanceof Error ? err.message : err}`);
+        }
+    }
+}
+
+/** REQ-LANE-003: executed, filled rows whose lane deadline has passed and
+ *  that the deadline sweeper has not attempted yet (one attempt each). */
+export async function listDeadlineDue(nowMs: number): Promise<TradeProposal[]> {
+    const database = await getDb();
+    const rows = database.query<Row>(
+        `SELECT * FROM proposals
+         WHERE status = 'executed' AND entry_fill_price IS NOT NULL
+           AND exit_deadline IS NOT NULL AND exit_deadline <= ? AND deadline_closed_at IS NULL
+         ORDER BY exit_deadline ASC`,
+    ).all(nowMs);
+    return rows.map(fromRow);
+}
+
+/** REQ-LANE-003: stamp the deadline-close attempt (once) with its note. */
+export async function markDeadlineClosed(id: string, at: number, note: string): Promise<void> {
+    const database = await getDb();
+    database.query<void>(
+        `UPDATE proposals SET deadline_closed_at = ?, note = CASE WHEN note IS NULL OR note = '' THEN ? ELSE note || ' — ' || ? END, updated_at = ?
+         WHERE id = ? AND deadline_closed_at IS NULL`,
+    ).run(at, note, note, Date.now(), id.trim().toUpperCase());
+}
+
+/** Real commitments of a lane (executing/executed) — the overnight lane cap. */
+export async function countOpenByStrategy(strategyId: StrategyId, excludeId?: string): Promise<number> {
+    const database = await getDb();
+    const rows = database.query<Row>(`SELECT * FROM proposals WHERE status IN ('executing', 'executed')`).all();
+    return rows.map(fromRow).filter((t) => t.strategyId === strategyId && t.id !== excludeId).length;
 }
 
 /** Round-7 review: adopted rows had no resolution lifecycle — the broker

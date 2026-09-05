@@ -93,6 +93,9 @@ export interface RTrade {
     netUsd: number;
     band: '60-74' | '75+' | null;
     tradeClass: 'intraday' | 'swing' | 'earnings-bet';
+    /** Four-lane contract (REQ-LANE-006): the lane; 'legacy' for rows
+     *  created before the contract existed. */
+    strategyId: 'intraday' | 'overnight' | 'swing' | 'cup-and-handle' | 'earnings-bet' | 'legacy';
     score?: number | null;
 }
 

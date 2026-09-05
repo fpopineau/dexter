@@ -50,6 +50,7 @@ import { startRuntimeAttestation, stopRuntimeAttestation } from '@/services/runt
 import { startSpreadRecheck, stopSpreadRecheck } from '@/services/spread-recheck.js';
 import { startSimulator, stopSimulator } from '@/services/simulator/index.js';
 import { startVetoWindowSweeper, stopVetoWindowSweeper } from '@/services/veto-window.js';
+import { startLaneDeadlineSweeper, stopLaneDeadlineSweeper } from '@/services/lane-deadline-sweeper.js';
 import { assertSpendConfig } from '@/services/llm-spend.js';
 import { makeDebugLog } from './debug-log.js';
 import { registerScanHealthAlerts } from './health-alerts.js';
@@ -326,6 +327,10 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
     // (REQ-LIVE-002, inert while LIVE_VETO_WINDOW_MIN=0).
     startSpreadRecheck();
     startVetoWindowSweeper();
+    // Four-lane contract (WP5, REQ-LANE-003): lane exit deadlines (overnight
+    // 10:00 ET next session; swing/cup hold limits) closed through the safe
+    // close path, every 60 s in the regular session.
+    startLaneDeadlineSweeper();
     // Marked NetLiq series (REQ-VAL-006): the validation scorecard judges
     // PORTFOLIO drawdown from this series, not from closed trades.
     startEquitySeries();
@@ -450,6 +455,7 @@ export async function startGateway(params: { configPath?: string } = {}): Promis
       stopFlatExitSweeper();
       stopSpreadRecheck();
       stopVetoWindowSweeper();
+      stopLaneDeadlineSweeper();
       stopEquitySeries();
       stopKillSwitchGuardian();
       stopExcursionSweeper();

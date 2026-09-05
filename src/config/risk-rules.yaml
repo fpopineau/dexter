@@ -92,6 +92,15 @@ profit_trail_replaces_target: true # Runner mode: on arming, cancel the fixed ta
 #        a gap, so sizing assumes the worst historical post-print move.
 swing_risk_pct: 0.5 # Per-trade risk budget for swing positions (% of NetLiq)
 max_swing_positions: 3 # Max concurrent swing positions (executed + working)
+# --- Four-lane contract (WP5, 2026-09-05) — RESEARCH PARAMETERS, ratified
+# as such (AUDIT-2026-09-05.md §1/§10), not live settings. The overnight and
+# cup-and-handle lanes ride the swing class and its pool above.
+overnight_risk_pct: 0.5 # overnight lane per-trade budget (% of NetLiq)
+max_overnight_lane_positions: 2 # inside max_swing_positions
+overnight_entry_window_min: 60 # overnight registration opens this many minutes before the close (15:00 ET full day, 12:00 ET half-day); expiry clamps to the close
+overnight_exit_minutes_et: 600 # 10:00 ET next trading session — the lane's exit deadline
+swing_max_hold_days: 10 # trading days after the fill, closed at 15:50 ET on the last day
+cup_max_hold_days: 15 # trading days after the fill
 earnings_bet_enabled: true # Paper profile: the class is live for its burn-in
 max_earnings_bets: 1 # One open earnings bet at a time — training wheels
 earnings_bet_risk_pct: 0.25 # Worst-case gap loss budget (% of NetLiq)

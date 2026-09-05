@@ -45,6 +45,8 @@ export interface SimSource {
     quantity: number;
     tif: 'DAY' | 'GTC';
     tradeClass: 'intraday' | 'swing' | 'earnings-bet';
+    /** Four-lane contract (REQ-LANE-006): the lane; null = legacy row / refusal. */
+    strategyId: 'intraday' | 'overnight' | 'swing' | 'cup-and-handle' | 'earnings-bet' | null;
     /** ET-frame ms. */
     createdAt: number;
     /** ET-frame ms; null for refusals (they use the default validity). */
@@ -83,7 +85,9 @@ function hasLevels(src: SimSource): boolean {
 }
 
 function entryDeadline(src: SimSource): number {
-    if (src.tif === 'GTC') return src.createdAt + GTC_ENTRY_HORIZON_MS;
+    // REQ-LANE-003: an overnight-lane entry dies with its (close-clamped)
+    // expiry even though its bracket is GTC — the sweeper cancels it.
+    if (src.tif === 'GTC' && src.strategyId !== 'overnight') return src.createdAt + GTC_ENTRY_HORIZON_MS;
     return (src.expiresAt ?? src.createdAt + DEFAULT_VALIDITY_MS) + ENTRY_GRACE_MS;
 }
 
@@ -181,10 +185,36 @@ export const VARIANTS_V1: readonly VariantDef[] = [
         },
     },
     {
-        name: 'class-swing',
-        description: 'swing-class proposals (disabled on live) — their own record, GTC carried',
+        name: 'exit-fixed-3',
+        description: 'intraday rows: target at a FIXED +3% from entry, stop unchanged — the AUD-01 comparison against the ATR formula',
         status: 'active',
-        applies: (s) => s.kind === 'proposal' && s.tradeClass === 'swing' && hasLevels(s),
+        applies: (s) => isIntraday(s) && hasLevels(s),
+        spec: (s, ctx) => {
+            const basis = s.entry;
+            if (basis === null) return null;
+            const target = s.direction === 'long' ? basis * 1.03 : basis * 0.97;
+            return baseSpec(s, ctx, { target });
+        },
+    },
+    {
+        name: 'class-swing',
+        description: 'swing-lane proposals (disabled on live) — their own record, GTC carried; legacy swing rows included',
+        status: 'active',
+        applies: (s) => s.kind === 'proposal' && s.tradeClass === 'swing' && (s.strategyId === 'swing' || s.strategyId === null) && hasLevels(s),
+        spec: (s, ctx) => baseSpec(s, ctx),
+    },
+    {
+        name: 'lane-overnight',
+        description: 'overnight-lane proposals (REQ-LANE-002): next-session hold, entry dies with the close, exit at the lane deadline',
+        status: 'active',
+        applies: (s) => s.kind === 'proposal' && s.strategyId === 'overnight' && hasLevels(s),
+        spec: (s, ctx) => baseSpec(s, ctx),
+    },
+    {
+        name: 'lane-cup-and-handle',
+        description: 'cup-and-handle lane proposals (REQ-LANE-005): their own record apart from other swings',
+        status: 'active',
+        applies: (s) => s.kind === 'proposal' && s.strategyId === 'cup-and-handle' && hasLevels(s),
         spec: (s, ctx) => baseSpec(s, ctx),
     },
     {

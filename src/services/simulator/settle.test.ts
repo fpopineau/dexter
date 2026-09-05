@@ -16,7 +16,7 @@ function proposal(overrides: Partial<TradeProposal> = {}): TradeProposal {
         id: 'P-0001', createdAt: CREATED, expiresAt: CREATED + 120 * M, updatedAt: CREATED, status: 'closed', symbol: 'MU', direction: 'long',
         entryType: 'LMT', entry: 100, entryLimit: null, stop: 97, target: 106, quantity: 7, tif: 'DAY', tradeClass: 'intraday',
         worstCaseGapPct: null, score: 66, rationale: 'x', source: 'trigger', orderIds: [1, 2, 3], orderPermIds: null,
-        plannedQuantity: null, model: null, strategyFingerprint: null, regime: null, note: null, executedAt: CREATED, entryFillPrice: 100.05, entryFilledAt: CREATED + M,
+        plannedQuantity: null, model: null, strategyFingerprint: null, strategyId: null, setupId: null, holdingHorizon: null, exitPolicyId: null, exitDeadline: null, deadlineClosedAt: null, detectorVersion: null, regime: null, note: null, executedAt: CREATED, entryFillPrice: 100.05, entryFilledAt: CREATED + M,
         exitFillPrice: 106, exitReason: 'target', realizedPnl: 41.65, commissions: 2, closedAt: CREATED + 60 * M, keptOvernightAt: null,
         mfePct: null, maePct: null, extensionAtr: null, vwapDistPct: null, dayMovePct: null, minutesSinceOpen: null,
         takePct: 6, takePctSource: 'formula', postExitMfePct: null, postExitMaePct: null, takeCounterfactual: null,
@@ -104,7 +104,7 @@ describe('runSettleOnce (REQ-SIM-001/005/006)', () => {
         const r = await runSettleOnce(d);
         const rows = [...d.store.rows.values()];
         const variants = rows.filter((x) => x.sourceId === 'P-0001').map((x) => x.variant).sort();
-        expect(variants).toEqual(['exit-ratchet', 'exit-x2.0', 'incumbent', 'stop-x/3']);
+        expect(variants).toEqual(['exit-fixed-3', 'exit-ratchet', 'exit-x2.0', 'incumbent', 'stop-x/3']);
         const inc = rows.find((x) => x.variant === 'incumbent' && x.sourceId === 'P-0001')!;
         expect(inc.quantity).toBe(10);                 // 0.25% × 12,000 / $3
         expect(inc.outcome).toBe('target');
@@ -118,7 +118,7 @@ describe('runSettleOnce (REQ-SIM-001/005/006)', () => {
         expect(gateOff.sourceKind).toBe('refusal');
         expect(gateOff.sourceId).toBe('R-77');
         expect(r.failed).toBe(0);
-        expect(r.evaluated).toBe(5);
+        expect(r.evaluated).toBe(6);
     });
 
     test('a settled row is not re-simulated; an open GTC row is; missing bars → unknown; a DAY row whose flat bar is in the future waits', async () => {

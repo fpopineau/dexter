@@ -297,6 +297,21 @@ summed and mean R, and the twin-vs-actual slippage line; a failed settle is
 reported, never skipped. The simulator can never reach the broker (its own
 database, no order ids).
 
+### Lane deadline sweeper — `src/services/lane-deadline-sweeper.ts` (four-lane WP5)
+Every proposal carries a lane contract (`strategyId`: intraday / overnight /
+swing / cup-and-handle / earnings-bet; `src/services/lane-contract.ts`). The
+lanes beyond the session get an exit deadline stamped at entry fill from the
+market calendar — overnight: 10:00 ET of the next trading session; swing and
+cup-and-handle: 15:50 ET on the last allowed trading day (10 / 15), pulled to
+12:50 ET on a half-day. Every 60 s during the regular session the sweeper
+closes a still-open position at or past its deadline through `closePosition`
+(cancel exits, market-close, confirm flat), stamping `deadline_closed_at`
+first so a working close is never doubled. A close that does not confirm
+flat is an incident (WhatsApp alert, `kill SYMBOL`). An overnight entry that
+never filled dies with its expiry (clamped to the close) through the
+stale-entry sweep. The lanes ride the swing risk class at the 15:52 triage:
+the earnings guard and the whole-book vet apply; flat-by-close does not.
+
 ### Nightly looks + digest — `src/services/loop/` (live-loop WP3)
 The tail of the nightly pipeline (settle → LOOKS → DIGEST) runs right after
 the simulator settle, whether or not the settle succeeded. The looks rebuild
@@ -494,6 +509,11 @@ manual acceptance:
 | `SIMULATOR` | true | nightly shadow-variant settle at 17:10 ET into `simulator.db` (REQ-SIM-006); observability only |
 | `SIM_COMMISSION_PER_SHARE_USD` / `SIM_COMMISSION_MIN_USD` | 0.005 / 1.00 | the simulator's per-side commission assumption (IBKR fixed tier) |
 | `DEXTER_JOURNAL_PATH` | `docs/day2day/VALIDATION-JOURNAL.md` | where the loop appends its epoch/ladder/promotion lines (WP3) |
+
+Lane parameters live in the risk yamls, not env (WP5, research parameters):
+`overnight_risk_pct` (0.5 base / 0.75 live), `max_overnight_lane_positions`
+(2), `overnight_entry_window_min` (60 → from 15:00 ET on a full day), `overnight_exit_minutes_et`
+(600 = 10:00), `swing_max_hold_days` (10), `cup_max_hold_days` (15).
 | `OPP_HEALTH_EMPTY_CYCLES` | 3 | consecutive zero-scan cycles (market open) before a degraded-scanner WhatsApp alert |
 | `UNIVERSE_EXTRA_SYMBOLS` | — | watchlist archived nightly + swing-pattern-scanned regardless of the cap band |
 | `AUTO_EXECUTE_PAPER` | false | paper-only auto-execution of proposals (all sources) |

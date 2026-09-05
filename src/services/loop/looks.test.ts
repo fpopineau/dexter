@@ -13,7 +13,7 @@ const T0 = Date.UTC(2026, 8, 10, 14, 0, 0);
 const DAY = 86_400_000;
 
 function rtrades(rs: number[], band: '60-74' | '75+' = '75+'): RTrade[] {
-    return rs.map((r, i) => ({ id: `P-${i}`, entryDay: `2026-09-${String(10 + (i % 12)).padStart(2, '0')}`, closedAt: T0 + i * 60_000, netR: r, netUsd: r * 30, band, tradeClass: 'intraday', score: 60 + (i % 30) }));
+    return rs.map((r, i) => ({ id: `P-${i}`, entryDay: `2026-09-${String(10 + (i % 12)).padStart(2, '0')}`, closedAt: T0 + i * 60_000, netR: r, netUsd: r * 30, band, tradeClass: 'intraday', strategyId: 'intraday', score: 60 + (i % 30) }));
 }
 
 function simRow(variant: string, id: string, netR: number, dayOffset: number): SimTrade {

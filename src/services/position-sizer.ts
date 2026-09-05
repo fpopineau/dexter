@@ -32,6 +32,7 @@
 
 import { getRiskRules, type RiskRules, type TradeClass } from '@/tools/ibkr/risk-rules.js';
 import { currentRung } from './ladder-state.js';
+import { stressNotionalCapUsd, type StrategyId } from './lane-contract.js';
 
 export interface SizeInput {
     entry: number;
@@ -43,6 +44,12 @@ export interface SizeInput {
     /** Trade class; defaults to 'intraday'. Selects the risk budget and,
      *  for 'earnings-bet', switches to worst-case-gap sizing. */
     tradeClass?: TradeClass;
+    /** Lane (REQ-LANE-004): 'overnight' funds from overnight_risk_pct. */
+    strategyId?: StrategyId | null;
+    /** Notional (USD) of the overnight-capable book already working or
+     *  held (swing class + kept overnight), supplied server-side — the
+     *  gap-stress budget this new position must fit beside. */
+    overnightBookNotionalUsd?: number | null;
     /** Earnings bets only: the symbol's worst historical adverse post-print
      *  move (%). The sizer floors it at earnings_bet_gap_floor_pct; omitted
      *  → the floor alone is assumed. Ignored for other classes. */
@@ -104,7 +111,8 @@ export function confidenceMultiplier(score: number | null | undefined, rules: Ri
  *  0.25 when absent) is the evidence-earned position on the ladder. Swing
  *  and earnings-bet budgets are untouched in WP1. `rungPct` is injectable
  *  so pure tests pin the arithmetic without a state file. */
-export function classRiskPct(tradeClass: TradeClass, rules: RiskRules, rungPct: number = currentRung()): number {
+export function classRiskPct(tradeClass: TradeClass, rules: RiskRules, rungPct: number = currentRung(), strategyId?: StrategyId | null): number {
+    if (strategyId === 'overnight') return rules.overnight_risk_pct; // REQ-LANE-002/004
     switch (tradeClass) {
         case 'swing': return rules.swing_risk_pct;
         case 'earnings-bet': return rules.earnings_bet_risk_pct;
@@ -133,7 +141,7 @@ export function computeQuantity(input: SizeInput, rules: RiskRules = getRiskRule
         ? gapRiskPerShare(input.entry, input.worstCaseGapPct, rules)
         : stopDistance;
     const multiplier = confidenceMultiplier(input.score, rules);
-    const fullBudget = (classRiskPct(tradeClass, rules, rungPct) / 100) * input.netLiquidation;
+    const fullBudget = (classRiskPct(tradeClass, rules, rungPct, input.strategyId) / 100) * input.netLiquidation;
     const riskBudget = Math.round(fullBudget * multiplier * 100) / 100;
 
     if (tradeClass === 'earnings-bet' && !rules.earnings_bet_enabled) {
@@ -170,8 +178,33 @@ export function computeQuantity(input: SizeInput, rules: RiskRules = getRiskRule
     // really outgrew the account) is still the gate's to refuse.
     const byRisk = floorToPlaceable(riskBudget / riskPerShare, fractional);
     const byCap = floorToPlaceable((maxPositionValue * CAP_DRIFT_MARGIN) / input.entry, fractional);
-    const quantity = Math.min(byRisk, byCap);
     const minQty = fractional ? FRACTIONAL_STEP : 1;
+
+    // REQ-LANE-004 (AUD-06 partial): an overnight-capable position (the
+    // swing risk class — overnight, swing and cup lanes) is ALSO bounded at
+    // creation by the per-position overnight cap and by the gap-stress
+    // budget the whole overnight book must fit — the 15:52 vet used to be
+    // the first place a swing sized at 15% met the 7.5% stress reality.
+    let overnightCapValue: number | null = null;
+    if (tradeClass === 'swing') {
+        const posCap = (rules.max_overnight_position_pct / 100) * input.netLiquidation;
+        const stressCap = stressNotionalCapUsd(rules, input.netLiquidation, input.overnightBookNotionalUsd ?? 0);
+        overnightCapValue = stressCap === null ? posCap : Math.min(posCap, stressCap);
+    }
+    const byOvernight = overnightCapValue === null
+        ? Number.POSITIVE_INFINITY
+        : floorToPlaceable((overnightCapValue * CAP_DRIFT_MARGIN) / input.entry, fractional);
+    if (byOvernight < minQty && overnightCapValue !== null) {
+        return {
+            quantity: null, multiplier, riskBudget,
+            reason:
+                `the overnight budget allows at most $${overnightCapValue.toFixed(0)} of notional for this position ` +
+                `(per-position overnight cap ${rules.max_overnight_position_pct}% and the ${rules.overnight_gap_stress_pct}% gap-stress ` +
+                `vs the ${rules.max_daily_loss_pct}% daily-loss budget, minus the $${Math.max(0, input.overnightBookNotionalUsd ?? 0).toFixed(0)} ` +
+                `already riding overnight) — one share at $${input.entry} exceeds it; pick a cheaper name, wait for the book to clear, or skip`,
+        };
+    }
+    const quantity = Math.min(byRisk, byCap, byOvernight);
 
     if (quantity < minQty) {
         const maxAffordableEntry = Math.floor(maxPositionValue * 100) / 100;

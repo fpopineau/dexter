@@ -643,6 +643,61 @@ describe('trigger band stamps (REQ-TRIG-002/003 — the 60-74 class is measurabl
     });
 });
 
+describe('four-lane contract (REQ-LANE-001/002/003/007)', () => {
+    const et = (y: number, m: number, d: number, hh: number, mm: number) => Date.UTC(y, m - 1, d, hh + 4, mm, 0, 0); // EDT
+    const etOf = (ms: number) => new Date(ms).toLocaleString('en-US', { timeZone: 'America/New_York', hour12: false });
+
+    test('the contract is stamped at creation: an omitted strategy follows the class; cup-and-handle rides the swing class with its own lane and setup', async () => {
+        const { __setCreationClockForTests } = await import('./trade-proposals.js');
+        __setCreationClockForTests(() => et(2026, 9, 10, 10, 0)); // Thu 10:00 ET
+        try {
+            const day = await createProposal(validInput({ symbol: 'LNIN' }), { dailyAtr: 4 });
+            expect(day).toMatchObject({ strategyId: 'intraday', holdingHorizon: 'same-session', exitPolicyId: 'take-x', setupId: null, exitDeadline: null });
+            const cup = await createProposal(validInput({ symbol: 'LNCP', tif: 'GTC', tradeClass: 'swing', strategyId: 'cup-and-handle', detectorVersion: 'v1' }), { dailyAtr: 4 });
+            expect(cup).toMatchObject({ strategyId: 'cup-and-handle', tradeClass: 'swing', setupId: 'cup-and-handle', holdingHorizon: 'multi-session', exitPolicyId: 'structural+deadline', detectorVersion: 'v1' });
+            expect((await getProposal(cup.id))?.strategyId).toBe('cup-and-handle');
+            // a strategy on the wrong class or an intraday GTC is refused by the contract
+            await expect(createProposal(validInput({ symbol: 'LNBD', tif: 'DAY', tradeClass: 'intraday', strategyId: 'overnight' }), { dailyAtr: 4 })).rejects.toThrow(/lane-contract|risk-gate/);
+        } finally {
+            __setCreationClockForTests(null);
+        }
+    });
+
+    test('overnight lane: window and expiry enforced at creation; the lane cap counts open rows; the deadline is stamped at the FIRST fill from the calendar', async () => {
+        const { __setCreationClockForTests, markEntryFilled, listDeadlineDue, markDeadlineClosed } = await import('./trade-proposals.js');
+        __setCreationClockForTests(() => et(2026, 9, 10, 14, 30)); // before the window
+        try {
+            await expect(createProposal(validInput({ symbol: 'OVN0', tif: 'GTC', tradeClass: 'swing', strategyId: 'overnight', expiresMinutes: 20 }), { dailyAtr: 4 })).rejects.toThrow(/window opens at 15:00 ET/);
+            __setCreationClockForTests(() => et(2026, 9, 10, 15, 30)); // Thu 15:30 ET
+            await expect(createProposal(validInput({ symbol: 'OVN0', tif: 'GTC', tradeClass: 'swing', strategyId: 'overnight', expiresMinutes: 45 }), { dailyAtr: 4 })).rejects.toThrow(/expire by the close/);
+            const a = await createProposal(validInput({ symbol: 'OVNA', tif: 'GTC', tradeClass: 'swing', strategyId: 'overnight', setupId: 'EOD continuation', expiresMinutes: 25 }), { dailyAtr: 4 });
+            expect(a).toMatchObject({ strategyId: 'overnight', setupId: 'eod-continuation', holdingHorizon: 'next-session', exitPolicyId: 'bracket+deadline', exitDeadline: null });
+            const b = await createProposal(validInput({ symbol: 'OVNB', tif: 'GTC', tradeClass: 'swing', strategyId: 'overnight', expiresMinutes: 25 }), { dailyAtr: 4 });
+            await setProposalStatus(a.id, 'executed');
+            await setProposalStatus(b.id, 'executed');
+            // two open → the lane cap (2) refuses a third
+            await expect(createProposal(validInput({ symbol: 'OVNC', tif: 'GTC', tradeClass: 'swing', strategyId: 'overnight', expiresMinutes: 25 }), { dailyAtr: 4 })).rejects.toThrow(/overnight-lane position/);
+            // fill on Thursday 15:40 ET → deadline Friday 10:00 ET; a later cumulative re-fill does not move it
+            await markEntryFilled(a.id, 100.1, et(2026, 9, 10, 15, 40));
+            const filled = (await getProposal(a.id))!;
+            expect(etOf(filled.exitDeadline!)).toContain('9/11/2026, 10:00:00');
+            await markEntryFilled(a.id, 100.2, et(2026, 9, 10, 15, 45));
+            expect((await getProposal(a.id))!.exitDeadline).toBe(filled.exitDeadline);
+            // due listing: not before the deadline; at it; never after the one attempt
+            expect((await listDeadlineDue(filled.exitDeadline! - 1)).map((p) => p.id)).toEqual([]);
+            expect((await listDeadlineDue(filled.exitDeadline!)).map((p) => p.id)).toEqual([a.id]);
+            await markDeadlineClosed(a.id, filled.exitDeadline!, 'lane deadline close attempted (overnight)');
+            expect((await listDeadlineDue(filled.exitDeadline! + 3_600_000)).map((p) => p.id)).toEqual([]);
+            expect((await getProposal(a.id))!.deadlineClosedAt).toBe(filled.exitDeadline);
+            expect((await getProposal(a.id))!.note).toContain('lane deadline close attempted');
+            await setProposalStatus(a.id, 'rejected');
+            await setProposalStatus(b.id, 'rejected');
+        } finally {
+            __setCreationClockForTests(null);
+        }
+    });
+});
+
 describe('veto-window due listing (REQ-LIVE-002/007 — due rows in creation order; not-yet-due, non-open and expired rows never listed)', () => {
     test('listDueAutoExecutions', async () => {
         const now = Date.now();

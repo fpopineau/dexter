@@ -72,6 +72,36 @@ describe('computeQuantity — €3.7K live account', () => {
     });
 });
 
+describe('computeQuantity — four-lane contract (REQ-LANE-004: overnight-capable sizing composes the gap-stress budget)', () => {
+    // Live shape: 1.5% daily loss, 20% stress → the WHOLE overnight book ≤ 7.5% of NetLiq; per-position overnight cap 15%.
+    const LIVE_LANES: RiskRules = {
+        ...DEFAULT_RULES, max_position_pct: 15, max_daily_loss_pct: 1.5, overnight_gap_stress_pct: 20, max_overnight_position_pct: 15,
+        swing_risk_pct: 0.75, overnight_risk_pct: 0.75, max_risk_per_trade_pct: 0.5,
+    };
+    const NETLIQ = 11_700;
+
+    test('a swing-class position is capped by the stress budget: $877 notional → 8 shares at $100 even though risk and the position cap allow more', () => {
+        // risk: 0.75% × 11,700 = $87.75 / $2 stop = 43 shares; position cap 15% = $1,755 → 17 shares; stress cap $877.5 × 0.995 / 100 = 8.
+        const r = computeQuantity({ entry: 100, stop: 98, score: 85, netLiquidation: NETLIQ, tradeClass: 'swing', strategyId: 'swing' }, LIVE_LANES, 0.5);
+        expect(r.quantity).toBe(8);
+        // the existing overnight book eats the budget: $500 already riding → $377.5 left → 3 shares
+        expect(computeQuantity({ entry: 100, stop: 98, score: 85, netLiquidation: NETLIQ, tradeClass: 'swing', strategyId: 'swing', overnightBookNotionalUsd: 500 }, LIVE_LANES, 0.5).quantity).toBe(3);
+        // a $1,000 name cannot ride the night at all — refused with the overnight reason
+        const big = computeQuantity({ entry: 1000, stop: 980, score: 85, netLiquidation: NETLIQ, tradeClass: 'swing', strategyId: 'swing' }, LIVE_LANES, 0.5);
+        expect(big.quantity).toBeNull();
+        expect(big.reason).toContain('overnight budget');
+    });
+
+    test('the overnight lane funds from overnight_risk_pct; intraday is untouched by the stress cap; stress 0 disables it', () => {
+        const ovn = computeQuantity({ entry: 50, stop: 49, score: 85, netLiquidation: NETLIQ, tradeClass: 'swing', strategyId: 'overnight' }, { ...LIVE_LANES, overnight_risk_pct: 0.25 }, 0.5);
+        expect(ovn.riskBudget).toBeCloseTo(29.25, 2); // 0.25% × 11,700
+        const intraday = computeQuantity({ entry: 1000, stop: 990, score: 85, netLiquidation: NETLIQ, tradeClass: 'intraday', strategyId: 'intraday' }, LIVE_LANES, 0.5);
+        expect(intraday.quantity).toBe(1); // 15% cap = $1,755 → 1 share; no overnight cap on the intraday class
+        const noStress = computeQuantity({ entry: 100, stop: 98, score: 85, netLiquidation: NETLIQ, tradeClass: 'swing', strategyId: 'swing' }, { ...LIVE_LANES, overnight_gap_stress_pct: 0 }, 0.5);
+        expect(noStress.quantity).toBe(17); // only the 15% per-position overnight cap binds
+    });
+});
+
 describe('computeQuantity — $1M paper account (sizer must also serve paper)', () => {
     test('produces the familiar risk-budget sizing', () => {
         // budget = 1,000,000 × 0.25% = 2500 at full confidence; stop distance 3.5

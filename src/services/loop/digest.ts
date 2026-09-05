@@ -123,6 +123,8 @@ export function buildStatusSection(inp: DigestInputs): string[] {
     if (st.drawdown) lines.push(`Drawdown from epoch: ${st.drawdown.pct.toFixed(2)}% (min $${st.drawdown.minNetLiq.toFixed(0)} vs $${st.drawdown.epochNetLiq.toFixed(0)}, ${st.drawdown.samples} samples; hard stop at −5%)`);
     lines.push(`Ladder: rung ${st.ladder.rung}% · effective risk ${st.ladder.effectivePct}% (ceiling ${st.ladder.ceilingPct}%)${st.ladder.state?.lastStepUpNetLiq ? ` · step-down mark $${st.ladder.state.lastStepUpNetLiq.toFixed(0)}` : ''}${st.ladder.eligibility ? ` · ${st.ladder.eligibility.eligible ? `STEP-UP to ${st.ladder.eligibility.nextRung}% ELIGIBLE — 'ladder up'` : st.ladder.eligibility.reason.includes('ceiling') ? `at the ceiling — no further rung has effect` : `next ${st.ladder.eligibility.nextRung ?? '—'}% at n ≥ ${st.ladder.eligibility.milestone ?? '—'}`}` : ''}`);
     if (st.shadowSample) lines.push(`Shadow-only classes (apart): n ${st.shadowSample.n}, ΣR ${num(st.shadowSample.sumR)}, net ${usd(st.shadowSample.netUsd)}`);
+    // REQ-LANE-006: one line per lane with rows (the verdict stays on the deployable sample).
+    if (st.lanes.length) lines.push(`Lanes: ${st.lanes.map((l) => `${l.strategyId} n ${l.stats.n} ΣR ${num(l.stats.sumR)} PF ${num(l.stats.profitFactor)}`).join(' · ')}`);
     if (st.models.length) lines.push(`Judgment: ${st.models.join(', ')}`);
     lines.push(`Score deciles: ${st.decile ? `Spearman rho ${st.decile.rho.toFixed(2)} (p ${st.decile.p.toFixed(3)}, n ${st.decile.n})` : 'n/a'}`);
     if (e.promotionPending) lines.push(`Promotion pending: ${e.promotionPending.variant} — apply the change, restart, 'epoch new'`);

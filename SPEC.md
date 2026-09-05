@@ -2893,3 +2893,205 @@ constants hash), changing it later ends the epoch.
 
 The audit document is committed as `AUDIT-2026-09-05.md` with the cleared
 points struck through and the open ones pointed at their WP.
+
+## Four-lane contract (2026-09-05) — WP5: strategy identity separate from the risk horizon
+
+Direction confirmed by the operator (AUDIT-2026-09-05.md §3/§10, decision
+2026-09-05: WP5–WP8 enter the September fence): expose four strategies —
+intraday, overnight, swing, cup-and-handle — with separate evidence, while
+the risk machinery stays common. Earnings bets remain a separate experiment.
+
+### Problem
+
+`TradeClass` conflates the strategy with its risk horizon: an overnight
+continuation has no contract of its own (it was "a swing"), a cup-and-handle
+is a detector output filed under swing, the exit policy is implicit in the
+class, and no row records when its thesis expires. The looks therefore
+cannot separate lanes, and a horizon violation (a swing held for a month,
+an overnight that never leaves) is invisible.
+
+### Domain deltas
+
+- `StrategyId = 'intraday' | 'overnight' | 'swing' | 'cup-and-handle' | 'earnings-bet'`
+  (the lane identity); `HoldingHorizon = 'same-session' | 'next-session' |
+  'multi-session'`; `ExitPolicyId = 'take-x' | 'ratchet' | 'bracket+deadline'
+  | 'structural+deadline' | 'bracket'`. `TradeClass` keeps its meaning: the
+  RISK class the sizer, gate, triage and caps operate on.
+- Proposal columns (ADDED, never rewritten): `strategy_id`, `setup_id`,
+  `holding_horizon`, `exit_policy_id`, `exit_deadline` (epoch ms),
+  `deadline_closed_at`, `detector_version`. NULL `strategy_id` = a legacy
+  row (pre-WP5), reported apart and never in a lane cohort.
+- `src/services/lane-contract.ts`: the deterministic table lane → risk
+  class / tif / horizon / exit policy / budget / hold limit, the exit
+  deadline calendar math, the stress-composed notional cap.
+- Risk-rule keys: `overnight_risk_pct`, `max_overnight_lane_positions`,
+  `overnight_entry_window_min`, `overnight_exit_minutes_et`,
+  `swing_max_hold_days`, `cup_max_hold_days` — research parameters, ratified
+  as such (AUDIT §1: "paramètres de recherche à valider").
+
+### Requirements
+
+- REQ-LANE-001: every proposal carries the contract at creation
+  (`strategy_id`, `setup_id`, `holding_horizon`, `exit_policy_id`,
+  `detector_version` when a detector produced the setup). The model may name
+  `strategyId`/`setupId`; the mapping strategy → risk class → horizon →
+  exit policy → budget is DETERMINISTIC (`resolveLaneContract`) and a
+  combination that dodges a gate is refused at creation
+  (`[lane-contract] REFUSED …`). Omitted `strategyId` derives from the
+  class: intraday → intraday, swing → swing, earnings-bet → earnings-bet.
+- REQ-LANE-002 (the table):
+  | strategy | risk class | tif | horizon | exit policy | deadline | budget |
+  |---|---|---|---|---|---|---|
+  | intraday | intraday | DAY | same-session | take-x (or ratchet per `exit_style`) | none — the 15:52 triage owns the close | min(rung, ceiling) |
+  | overnight | swing | GTC | next-session | bracket+deadline | next trading session at `overnight_exit_minutes_et` (10:00 ET) | `overnight_risk_pct`, stress-composed |
+  | swing | swing | GTC | multi-session | structural+deadline | fill + `swing_max_hold_days` trading days at 15:50 ET | `swing_risk_pct`, stress-composed |
+  | cup-and-handle | swing | GTC | multi-session | structural+deadline | fill + `cup_max_hold_days` trading days at 15:50 ET | `swing_risk_pct`, stress-composed |
+  | earnings-bet | earnings-bet | GTC | next-session | bracket | none | gap-sized (unchanged) |
+  Overnight, swing and cup-and-handle share the swing risk pool
+  (`max_swing_positions`, `swing_enabled` — disabled on live until each lane
+  earns its record; the shadow forcing on paper applies); overnight is
+  additionally capped at `max_overnight_lane_positions`. The TIF is an
+  execution property: the contract fixes it, the model does not choose it.
+- REQ-LANE-003 (deadlines): an overnight proposal is created only at or
+  after `overnight_entry_window_min` (15:00 ET) and expires no later
+  than the session close (`expiresMinutes` clamped), so an unfilled entry
+  dies with the day — the expiry sweep cancels a resting GTC parent past
+  `expires_at`; it never arms the next day. The exit deadline is stamped at
+  ENTRY FILL (`markEntryFilled`) from the lane's rule and the market
+  calendar (weekends, holidays, half-days: a half-day deadline moves to
+  12:50 ET). A deadline sweeper (`lane-deadline-sweeper.ts`, every 60 s in
+  the regular session) closes a still-open position at or after its
+  deadline through the safe close path (`closePosition`), stamps
+  `deadline_closed_at`, and reports; a close that does not confirm flat is
+  an incident line, never a conversion to a longer lane. Friday → Monday is
+  one "next session" with a longer calendar duration, measured as such.
+- REQ-LANE-004 (sizing composes the overnight budget, AUD-06 partial): for
+  the swing risk class the sizer caps the notional at BOTH
+  `max_overnight_position_pct` and the gap-stress budget
+  (`max_daily_loss_pct / overnight_gap_stress_pct` × NetLiq, minus the
+  stress already carried by the existing overnight book supplied
+  server-side), rounds to whole shares and refuses below one share with the
+  reason. The accept-time gate and the 15:52 vet are unchanged in force;
+  sector/liquidity composition stays in WP6.
+- REQ-LANE-005 (cup-and-handle lane): the detector stamps
+  `detectorVersion 'v1'` and a `state` — `pivot-ready` (close below the
+  pivot) or `breakout-confirmed` (close at/above the pivot, within the
+  detector's 2 % ceiling); the nightly scan keeps EVERY match per symbol
+  (`matches[]`) while ranking by the strongest; a cup-and-handle proposal
+  carries `strategyId 'cup-and-handle'`, `setupId 'cup-and-handle'`,
+  `detectorVersion`, the swing risk class and `cup_max_hold_days`. Detection
+  quality and trade performance are evaluated apart (the lane cohort vs the
+  scan archive).
+- REQ-LANE-006 (per-lane cohorts): the epoch sample carries `strategyId`;
+  the deployable verdict stays the deployable lane set (the classes enabled
+  in the live yaml — today intraday); every other lane is reported with its
+  own running stats in the digest and `/api/loop`; the simulator adds
+  `lane-overnight`, `lane-cup-and-handle` (by strategy) and `exit-fixed-3`
+  (intraday rows: target at +3 % from entry, stop unchanged — the AUD-01
+  comparison against the formula and the structural target); `class-swing`
+  keeps the swing lane and legacy swing rows.
+- REQ-LANE-007 (legacy): rows without `strategy_id` are `legacy`; they are
+  never reclassified from current settings and never enter a lane cohort.
+- REQ-LANE-008 (surfaces): the `trade_proposals` tool exposes `strategyId`
+  and `setupId`; the Pre-Close cron registers overnight setups as
+  `strategyId "overnight"` (swing class, GTC, expiry before the bell,
+  quantity omitted) and the Pre-Market cron labels cup-and-handle
+  candidates; `swing_patterns` returns states and the detector version;
+  RULES.md, the overnight skill, USER-MANUAL and AUTOMATION describe the
+  lanes and the deadline sweeper.
+- REQ-LANE-009 (AUD-02 research, no runtime change):
+  `scripts/remaining-excursion.ts` tabulates post-entry MFE/MAE by entry
+  hour, class and lane from the closed ledger — the evidence a
+  time-remaining target rule would be built on.
+
+### Invariants
+
+- The lane never loosens a gate: every lane passes the same risk gate,
+  kill-switch, epoch latch, vet and guard as before; the contract only adds
+  refusals (window, horizon, TIF) and deadlines.
+- No silent post-accept resize; a deadline close is a close, never a
+  reclassification; a keep never changes `strategy_id`.
+- Exits, triage, guardian and `close`/`kill` are never gated by a lane.
+
+### Non-goals (WP5)
+
+Sector/liquidity composition in the sizer (WP6); an overnight benchmark and
+the eligible-candidate archive (WP7); lane-conditional scoring (WP8);
+retest-state detection for cup-and-handle (needs archived breakout history);
+a distinct `overnight` risk class (the swing class is the overnight-capable
+class; a separate class would duplicate caps and triage paths for no
+evidence gain).
+
+### Acceptance criteria
+
+- [ ] `resolveLaneContract` table pinned; overnight outside its window,
+      overnight with expiry past the close, intraday GTC, cup/overnight on a
+      non-swing class all refused (REQ-LANE-001/002/003)
+- [ ] deadlines: Friday fill → Monday 10:00 ET; holiday skipped; half-day
+      → 12:50 ET; swing fill + 10 trading days at 15:50 ET (REQ-LANE-003)
+- [ ] deadline sweeper: due rows selected, closed via the safe path, stamped;
+      not-yet-due and already-flat rows untouched (REQ-LANE-003)
+- [ ] sizer: swing-class notional capped by the stress budget minus the
+      existing book; overnight lane uses `overnight_risk_pct` (REQ-LANE-004)
+- [ ] detector states and versions; scan keeps all matches (REQ-LANE-005)
+- [ ] sample/digest/simulator lanes; legacy NULL apart (REQ-LANE-006/007)
+- [ ] tool schema, crons, skills, docs (REQ-LANE-008); research script runs
+      read-only (REQ-LANE-009)
+
+### WP5 landed (2026-09-05) — precisions and traceability
+
+Landed before epoch 1 opened (the restart carries WP1..WP5; the identity
+moves once more). The ephemeral `docs/day2day/WP5-PLAN.md` carries the task
+graph for the review.
+
+Precisions recorded at landing (append-only):
+
+- REQ-LANE-001 precision: the contract is resolved in `createProposal`
+  AFTER the risk gate and before persistence; the tool derives the class
+  from the lane (`laneClassOf`) so the model may omit `tradeClass`; an
+  explicit class that contradicts the lane is a tool error, never an
+  override. `detectorVersion` is filled server-side from the latest pattern
+  scan for a cup-and-handle proposal.
+- REQ-LANE-002 precision: no new `TradeClass` — overnight and cup-and-handle
+  ride the swing class, so `swing_enabled: false` on live disables all three
+  lanes together and the shadow forcing on paper enables them together.
+  The overnight lane counts in `max_swing_positions` AND
+  `max_overnight_lane_positions`.
+- REQ-LANE-003 precision: the deadline is stamped by `markEntryFilled` on
+  the FIRST fill only (a cumulative re-fill never moves it); the sweeper
+  stamps `deadline_closed_at` BEFORE issuing the close, so a crash mid-close
+  cannot re-fire it; a row already flat at its deadline is stamped without
+  an order (the bracket exit owns the close). The half-day pull is to close
+  − 10 min (12:50 ET). The overnight entry expiry is refused, not silently
+  clamped, when it passes the close (the message names the maximum
+  `expiresMinutes`).
+- REQ-LANE-004 precision: the stress cap is per NEW position against the
+  budget minus the stress the existing overnight book already carries
+  (server-side from `listExposure`: swing/earnings-bet rows and kept
+  intraday rows, at fill or planned entry). The per-position overnight cap
+  binds alongside; both apply with the 0.5 % cap-drift margin. Earnings
+  bets keep their gap sizing (the stress cap does not apply to that class).
+- REQ-LANE-005 precision: `state` is 'breakout-confirmed' when the last
+  close is at/above the pivot (the detector's own 2 % ceiling excludes
+  extended breakouts), else 'pivot-ready'; the snapshot carries
+  `detectorVersion` and every candidate its `matches[]`.
+- REQ-LANE-006 precision: the epoch sample marks a row without a lane
+  `legacy` and files it with the shadow rows (never deployable, never a
+  lane cohort); lane stats run over deployable AND shadow rows; the digest
+  adds one "Lanes:" line. The simulator rebuilds a reopened row's lane from
+  the variant that opened it.
+- Exit attribution: a deadline close is tracked like every deliberate close
+  (`manual` at the tracker) with `deadline_closed_at` as the distinguishing
+  stamp — no new `ExitReason`.
+
+| REQ | Test |
+|---|---|
+| REQ-LANE-001 | `lane-contract.test.ts` (derivation, class/TIF refusals, setup normalisation); `tools/proposals/index.test.ts` (`laneClassOf`, `coherent`); `trade-proposals.test.ts` (contract persisted, cup lane) |
+| REQ-LANE-002 | `lane-contract.test.ts` (table pin, exit policies); `trade-proposals.test.ts` (overnight lane cap) |
+| REQ-LANE-003 | `lane-contract.test.ts` (window, expiry clamp, deadlines: Fri→Mon, Labor Day, half-day, +10/+15 trading days); `trade-proposals.test.ts` (deadline at first fill, due listing, one attempt); `lane-deadline-sweeper.test.ts` (select, close, already flat, incidents, throw) |
+| REQ-LANE-004 | `lane-contract.test.ts` (`stressNotionalCapUsd`); `position-sizer.test.ts` (stress and overnight caps bind, book eats the budget, overnight budget key, intraday untouched, stress 0) |
+| REQ-LANE-005 | `pattern-detectors.test.ts` (version, state); scan shape by type (`matches[]`, `detectorVersion`) |
+| REQ-LANE-006 | `loop/sample.test.ts` (lane on rows, legacy apart); `loop/digest.test.ts` (Lanes line); `simulator/variants.test.ts` (`exit-fixed-3`, `lane-overnight`, `lane-cup-and-handle`, `class-swing` scope, overnight entry deadline) |
+| REQ-LANE-007 | `loop/sample.test.ts` (NULL lane → legacy) |
+| REQ-LANE-008 | doc/cron/skill/rule changes; `risk-rules-validation.test.ts` (the six keys load) |
+| REQ-LANE-009 | `scripts/remaining-excursion.ts` smoke-run read-only |

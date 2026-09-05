@@ -16,6 +16,7 @@ function statusWith(over: Partial<LoopStatus> = {}, dir?: string): LoopStatus {
         band: null, shadow: [], drawdown: null, decile: null,
         ladder: { state: readLadderState(dir), rung: readLadderState(dir)?.rung ?? 0.25, ceilingPct: 1.0, effectivePct: readLadderState(dir)?.rung ?? 0.25, eligibility: { eligible: true, nextRung: 0.5, milestone: 25, reason: 'n 30 ≥ 25, net R 9.50 > 0' } },
         models: [],
+        lanes: [],
         ...over,
     };
 }

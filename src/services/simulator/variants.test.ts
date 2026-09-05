@@ -8,7 +8,7 @@ const ctx: VariantContext = { rules: { ...DEFAULT_RULES, take_atr_mult: 1.5, tak
 function proposal(overrides: Partial<SimSource> = {}): SimSource {
     return {
         kind: 'proposal', id: 'P-0001', symbol: 'MU', direction: 'long', entryType: 'LMT', entry: 100, entryLimit: null,
-        stop: 97, target: 106, quantity: 10, tif: 'DAY', tradeClass: 'intraday', createdAt: T0, expiresAt: T0 + 120 * 60_000,
+        stop: 97, target: 106, quantity: 10, tif: 'DAY', tradeClass: 'intraday', strategyId: 'intraday', createdAt: T0, expiresAt: T0 + 120 * 60_000,
         takePct: 6, dailyAtr: 4, triggerBand: '60-74', lane: 'trigger', gate: null, score: 66,
         ...overrides,
     };
@@ -18,7 +18,7 @@ describe('variant registry v1 (REQ-SIM-004)', () => {
     test('the registry names every pre-registered variant; weights-calibrated is inactive until WP3', () => {
         const names = VARIANTS_V1.map((v) => v.name);
         for (const n of ['incumbent', 'funnel-75', 'gate-off:noise-stop', 'gate-off:entry-pricing', 'gate-off:chase', 'gate-off:extension',
-            'gate-off:risk-reward', 'gate-off:microstructure', 'exit-ratchet', 'exit-x2.0', 'stop-x/3', 'class-swing', 'class-earnings-bet', 'weights-calibrated']) {
+            'gate-off:risk-reward', 'gate-off:microstructure', 'exit-ratchet', 'exit-x2.0', 'stop-x/3', 'exit-fixed-3', 'class-swing', 'lane-overnight', 'lane-cup-and-handle', 'class-earnings-bet', 'weights-calibrated']) {
             expect(names).toContain(n);
         }
         expect(variantByName('weights-calibrated')?.status).toMatch(/inactive/);
@@ -35,6 +35,22 @@ describe('variant registry v1 (REQ-SIM-004)', () => {
         expect(v.spec(proposal({ tif: 'GTC', tradeClass: 'swing' }), ctx)!.flatAt).toBeNull();
         // the entry may rest 30 min past the proposal's expiry (the sweeper's grace)
         expect(spec.entryDeadline).toBe(T0 + 150 * 60_000);
+    });
+
+    test('WP5 lanes: exit-fixed-3 targets +3% from entry; lane-overnight/lane-cup by strategy; class-swing keeps swing + legacy swing rows; an overnight GTC entry dies with its expiry', () => {
+        const fixed = variantByName('exit-fixed-3')!;
+        expect(fixed.spec(proposal(), ctx)!.target).toBeCloseTo(103, 9);
+        expect(fixed.spec(proposal({ direction: 'short' }), ctx)!.target).toBeCloseTo(97, 9);
+        expect(fixed.applies(proposal({ tradeClass: 'swing', strategyId: 'swing' }))).toBe(false);
+        const ovn = proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'overnight', expiresAt: T0 + 25 * 60_000 });
+        expect(variantByName('lane-overnight')!.applies(ovn)).toBe(true);
+        expect(variantByName('class-swing')!.applies(ovn)).toBe(false);
+        expect(variantByName('class-swing')!.applies(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'swing' }))).toBe(true);
+        expect(variantByName('class-swing')!.applies(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: null }))).toBe(true);
+        expect(variantByName('lane-cup-and-handle')!.applies(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'cup-and-handle' }))).toBe(true);
+        // entry deadline: an ordinary GTC swing may rest 3 days; the overnight lane dies at expiry + grace
+        expect(variantByName('lane-overnight')!.spec(ovn, ctx)!.entryDeadline).toBe(T0 + 55 * 60_000);
+        expect(variantByName('class-swing')!.spec(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'swing' }), ctx)!.entryDeadline).toBe(T0 + 3 * 86_400_000);
     });
 
     test('funnel-75: what the OLD bar would have traded — trigger rows in the 75+ band, plus every non-trigger lane', () => {
@@ -85,12 +101,12 @@ describe('variant registry v1 (REQ-SIM-004)', () => {
 
     test('class variants select by class and carry GTC overnight', () => {
         const swing = variantByName('class-swing')!;
-        expect(swing.applies(proposal({ tradeClass: 'swing', tif: 'GTC' }))).toBe(true);
+        expect(swing.applies(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'swing' }))).toBe(true);
         expect(swing.applies(proposal())).toBe(false);
-        expect(swing.spec(proposal({ tradeClass: 'swing', tif: 'GTC' }), ctx)!.flatAt).toBeNull();
+        expect(swing.spec(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'swing' }), ctx)!.flatAt).toBeNull();
         const bet = variantByName('class-earnings-bet')!;
         expect(bet.applies(proposal({ tradeClass: 'earnings-bet', tif: 'GTC' }))).toBe(true);
-        expect(bet.applies(proposal({ tradeClass: 'swing', tif: 'GTC' }))).toBe(false);
+        expect(bet.applies(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'swing' }))).toBe(false);
     });
 });
 

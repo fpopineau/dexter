@@ -14,6 +14,8 @@
 
 import { DynamicStructuredTool } from '@langchain/core/tools';
 import { z } from 'zod';
+import { deriveStrategyId, LANE_TABLE, type StrategyId } from '@/services/lane-contract.js';
+import type { TradeClass } from '@/tools/ibkr/risk-rules.js';
 import { acceptProposal, autoExecuteProposal, isAutoExecuteEnabled } from '@/services/proposal-executor.js';
 import {
     createProposal,
@@ -82,8 +84,12 @@ const CreateSchema = z.object({
         .describe('Number of shares (decimals allowed when the account profile enables fractional trading). OMIT to auto-size (recommended): the position sizer computes shares from the account risk budget, the confidence score, and the stop distance — this is the only way sizing stays correct across account sizes. Pass explicitly only when the user demanded a specific quantity.'),
     tif: z.enum(['DAY', 'GTC']).default('DAY')
         .describe("Bracket time-in-force. Use 'GTC' for overnight/swing setups so the stop and target SURVIVE the market close; 'DAY' brackets expire at the bell and can leave a filled position unprotected overnight."),
-    tradeClass: z.enum(['intraday', 'swing', 'earnings-bet']).default('intraday')
-        .describe("Trade class. 'intraday' (default): hours to a few nights. 'swing': pattern trade (pullback/flat-base/cup-and-handle) held up to ~2 weeks — requires tif GTC, capped at 3 concurrent, sized from the swing risk budget. 'earnings-bet': a DELIBERATE hold through an earnings print — requires tif GTC, one at a time, sized so a worst-case gap costs no more than the earnings-bet budget (the stop cannot protect through a print). Never label a trade earnings-bet to dodge the exit-before-print rule of other classes; the class has stricter sizing, not looser."),
+    tradeClass: z.enum(['intraday', 'swing', 'earnings-bet']).optional()
+        .describe("Risk class. Usually OMIT it — the lane (strategyId) fixes it: intraday → 'intraday'; overnight, swing and cup-and-handle → 'swing' (GTC exits, gap-stress sizing, swing pool of 3); earnings-bet → 'earnings-bet' (a DELIBERATE hold through a print, one at a time, sized to the worst-case gap). Passing a class that contradicts the lane is refused. Never label a trade earnings-bet to dodge the exit-before-print rule of other classes; the class has stricter sizing, not looser."),
+    strategyId: z.enum(['intraday', 'overnight', 'swing', 'cup-and-handle', 'earnings-bet']).optional()
+        .describe("The LANE (four-lane contract). 'intraday' (default): same session, flat by close, take-at-x% target, tif DAY. 'overnight': registered from 15:00 ET, GTC bracket, an unfilled entry dies with the close (expiry clamps to the bell), the position exits at 10:00 ET next session at the latest — a stated reason the move survives the night is required. 'swing': multi-session pattern trade (pullback / flat-base), GTC, closed by 15:50 ET on its 10th trading day at the latest. 'cup-and-handle': the cup lane from swing_patterns, GTC, 15 trading days max. 'earnings-bet': through-print bet (its own rules). Omitted = derived from tradeClass."),
+    setupId: z.string().max(40).optional()
+        .describe("The setup inside the lane, lowercase-with-dashes, e.g. 'pullback', 'flat-base', 'cup-and-handle', 'eod-continuation', 'gap-continuation', 'catalyst-reversal'. Cup-and-handle defaults to its own."),
     worstCaseGapPct: z.coerce.number().min(0).max(100).optional()
         .describe("Earnings bets only: the symbol's worst ADVERSE post-print move in %, from its own earnings history (e.g. 18 for -18%). The sizer floors this at the configured minimum gap assumption. Omit if unknown — the floor alone is used."),
     score: z.coerce.number().min(0).max(150).optional().describe('Signal/composite score backing this proposal.'),
@@ -118,7 +124,19 @@ const PerformanceSchema = z.object({
 
 const ProposalsSchema = z.discriminatedUnion('action', [CreateSchema, ListSchema, GetSchema, RejectSchema, PerformanceSchema]);
 
-function coherent(input: z.infer<typeof CreateSchema>): string | null {
+/** Four-lane contract (REQ-LANE-001): the lane fixes the risk class. An
+ *  explicit class that contradicts the lane is an error, never a silent
+ *  override; an omitted class is derived. */
+export function laneClassOf(input: { strategyId?: StrategyId; tradeClass?: TradeClass }): { tradeClass: TradeClass; strategyId: StrategyId } | { error: string } {
+    const strategyId: StrategyId = input.strategyId ?? deriveStrategyId(input.tradeClass ?? 'intraday');
+    const laneClass = LANE_TABLE[strategyId].tradeClass;
+    if (input.tradeClass !== undefined && input.tradeClass !== laneClass) {
+        return { error: `strategyId '${strategyId}' rides the '${laneClass}' risk class — omit tradeClass or set '${laneClass}'` };
+    }
+    return { tradeClass: laneClass, strategyId };
+}
+
+export function coherent(input: { direction: 'long' | 'short'; entry: number; stop: number; target: number; tif: 'DAY' | 'GTC'; tradeClass: TradeClass; strategyId: StrategyId; worstCaseGapPct?: number }): string | null {
     if (input.direction === 'long' && !(input.stop < input.entry && input.entry < input.target)) {
         return 'long proposal requires stop < entry < target';
     }
@@ -128,7 +146,7 @@ function coherent(input: z.infer<typeof CreateSchema>): string | null {
     // A multi-day class on a DAY bracket leaves the position unprotected at
     // the first close — structurally incoherent, not a style choice.
     if (input.tradeClass !== 'intraday' && input.tif !== 'GTC') {
-        return `${input.tradeClass} proposals require tif GTC — a DAY bracket expires at the close and leaves the position unprotected`;
+        return `${input.strategyId} (${input.tradeClass} class) proposals require tif GTC — a DAY bracket expires at the close and leaves the position unprotected`;
     }
     if (input.worstCaseGapPct != null && input.tradeClass !== 'earnings-bet') {
         return 'worstCaseGapPct only applies to earnings-bet proposals';
@@ -145,7 +163,10 @@ export function createTradeProposalsTool() {
         func: async (input) => {
             switch (input.action) {
                 case 'create': {
-                    const problem = coherent(input);
+                    const laneClass = laneClassOf(input);
+                    if ('error' in laneClass) return formatToolResult({ error: laneClass.error });
+                    const lane = { tradeClass: laneClass.tradeClass, strategyId: laneClass.strategyId };
+                    const problem = coherent({ ...input, ...lane });
                     if (problem) return formatToolResult({ error: problem });
                     try {
                         // Server-side daily ATR + EMA10 for the noise-stop
@@ -179,10 +200,29 @@ export function createTradeProposalsTool() {
                         // context: a data failure arrives as nulls and the
                         // gate refuses — the evidence bar must not be
                         // satisfiable by breaking the data source.
-                        const betEvidence = input.tradeClass === 'earnings-bet'
+                        const betEvidence = lane.tradeClass === 'earnings-bet'
                             ? await (await import('@/services/earnings-reactions.js'))
                                 .fetchEarningsBetEvidence(input.symbol, input.direction)
                             : undefined;
+
+                        // REQ-LANE-004: the overnight-capable book already
+                        // working or held (swing class / kept overnight) —
+                        // the gap-stress budget this position must fit beside.
+                        // REQ-LANE-005: the detector version of a pattern lane.
+                        let overnightBookNotionalUsd: number | null = null;
+                        let detectorVersion: string | null = null;
+                        if (lane.tradeClass === 'swing') {
+                            const { listExposure } = await import('@/services/trade-proposals.js');
+                            const book = await listExposure().catch(() => []);
+                            overnightBookNotionalUsd = book
+                                .filter((t) => t.tradeClass !== 'intraday' || t.keptOvernightAt !== null)
+                                .reduce((s, t) => s + Math.abs(t.quantity) * (t.entryFillPrice ?? t.entry ?? 0), 0);
+                            if (lane.strategyId === 'cup-and-handle') {
+                                const { getLatestPatternScan } = await import('@/services/pattern-scanner.js');
+                                const snap = getLatestPatternScan();
+                                detectorVersion = snap?.candidates.find((c) => c.symbol.toUpperCase() === input.symbol.toUpperCase())?.detectorVersion ?? snap?.detectorVersion ?? null;
+                            }
+                        }
 
                         // Auto-sizing: quantity omitted → the deterministic
                         // sizer computes shares from live NetLiq, the score
@@ -205,7 +245,8 @@ export function createTradeProposalsTool() {
                                 : input.entry;
                             const sized = computeQuantity({
                                 entry: sizingBasis, stop: input.stop, score: input.score, netLiquidation: netLiq,
-                                tradeClass: input.tradeClass, worstCaseGapPct: input.worstCaseGapPct,
+                                tradeClass: lane.tradeClass, worstCaseGapPct: input.worstCaseGapPct,
+                                strategyId: lane.strategyId, overnightBookNotionalUsd,
                             });
                             if (sized.quantity == null) {
                                 logger.warn(`[trade-proposals] auto-size refused: ${input.symbol} ${input.direction} @${input.entry} stop ${input.stop} score ${input.score ?? '—'} — ${sized.reason}`);
@@ -232,7 +273,10 @@ export function createTradeProposalsTool() {
                             target: input.target,
                             quantity,
                             tif: input.tif,
-                            tradeClass: input.tradeClass,
+                            tradeClass: lane.tradeClass,
+                            strategyId: lane.strategyId,
+                            setupId: input.setupId,
+                            detectorVersion,
                             takePct: input.takePct,
                             worstCaseGapPct: input.worstCaseGapPct,
                             score: input.score,

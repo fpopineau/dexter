@@ -577,7 +577,7 @@ describe('REQ-LIVE-006: on a live account the disabled classes are sim-only (nev
         // cutover restart) — the creation-time class gate could not see it.
         setAccountProfile('paper');
         const since = Date.now();
-        const swing = await createProposal({ symbol: 'SWNG', direction: 'long', entryType: 'LMT', entry: 100, stop: 97.5, target: 106, quantity: 10, score: 70, rationale: 'live swing', source: 'test', tradeClass: 'swing' }, ATR_CTX);
+        const swing = await createProposal({ symbol: 'SWNG', direction: 'long', entryType: 'LMT', entry: 100, stop: 97.5, target: 106, quantity: 10, score: 70, rationale: 'live swing', source: 'test', tradeClass: 'swing', tif: 'GTC' }, ATR_CTX);
         process.env.IBKR_PORT = '4001';
         process.env.IBKR_ALLOW_LIVE = 'true';
         __setManagedAccountsForTests(['U7654321']);
@@ -585,7 +585,7 @@ describe('REQ-LIVE-006: on a live account the disabled classes are sim-only (nev
         writeFileSync(join(dir, 'live-switch.json'), JSON.stringify({ enabled: true, by: 'operator' }));
         try {
             // On the live profile the class gate refuses a NEW swing row outright.
-            await expect(createProposal({ symbol: 'SWNH', direction: 'long', entryType: 'LMT', entry: 100, stop: 97.5, target: 106, quantity: 10, score: 70, rationale: 'live swing 2', source: 'test', tradeClass: 'swing' }, ATR_CTX))
+            await expect(createProposal({ symbol: 'SWNH', direction: 'long', entryType: 'LMT', entry: 100, stop: 97.5, target: 106, quantity: 10, score: 70, rationale: 'live swing 2', source: 'test', tradeClass: 'swing', tif: 'GTC' }, ATR_CTX))
                 .rejects.toThrow(/swing class is disabled/);
             // AUD-10: with NO epoch file the live verdict refuses — absent is not running.
             const noEpoch = await autoExecuteProposal(swing.id);
@@ -616,7 +616,7 @@ describe('REQ-LIVE-006: on a live account the disabled classes are sim-only (nev
         __setManagedAccountsForTests(['DU111111']);
         wf(join(dir, 'trading-halt.json'), JSON.stringify({ date: today, reason: 'test halt', dailyPnL: -9999, netLiquidation: 100_000, trippedAt: 'now' }));
         try {
-            const paperSwing = await createProposal({ symbol: 'PSWG', direction: 'long', entryType: 'LMT', entry: 100, stop: 97.5, target: 106, quantity: 10, score: 70, rationale: 'paper swing', source: 'test', tradeClass: 'swing' }, ATR_CTX);
+            const paperSwing = await createProposal({ symbol: 'PSWG', direction: 'long', entryType: 'LMT', entry: 100, stop: 97.5, target: 106, quantity: 10, score: 70, rationale: 'paper swing', source: 'test', tradeClass: 'swing', tif: 'GTC' }, ATR_CTX);
             const out = await autoExecuteProposal(paperSwing.id);
             expect(out.message).not.toContain('sim-only');
             expect((await getProposal(paperSwing.id))?.status).toBe('open');

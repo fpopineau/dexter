@@ -11,7 +11,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getDailyBars, listDailySymbols } from './data-archive.js';
-import { dailyAtrOf, detectPatterns, type PatternMatch } from './pattern-detectors.js';
+import { dailyAtrOf, DETECTOR_VERSION, detectPatterns, type PatternMatch } from './pattern-detectors.js';
 import { isMarketHalfDay, isMarketHoliday } from '@/utils/market-hours.js';
 import { logger } from '@/utils';
 
@@ -26,12 +26,17 @@ export interface PatternCandidate extends PatternMatch {
     close: number;
     dailyAtr: number | null;
     lastBar: string;
+    /** REQ-LANE-005: EVERY match on the symbol (strongest first) — the
+     *  primary fields above are the strongest; a cup-and-handle is never
+     *  masked by a higher-scoring other pattern on the same symbol. */
+    matches: PatternMatch[];
 }
 
 export interface PatternScanSnapshot {
     ranAt: number;
     scanned: number;
     eligible: number;
+    detectorVersion: string;
     candidates: PatternCandidate[];
 }
 
@@ -54,13 +59,15 @@ export async function runPatternScan(): Promise<PatternScanSnapshot> {
 
         const matches = detectPatterns(bars);
         if (matches.length === 0) continue;
-        // Keep only the strongest pattern per symbol.
+        // Rank by the strongest pattern; keep EVERY match (REQ-LANE-005 —
+        // the cup-and-handle lane reads its own matches, whatever else fired).
         candidates.push({
             symbol,
             close: lastBar.close,
             dailyAtr: dailyAtrOf(bars),
             lastBar: lastBar.time.slice(0, 8),
             ...matches[0],
+            matches,
         });
     }
 
@@ -69,6 +76,7 @@ export async function runPatternScan(): Promise<PatternScanSnapshot> {
         ranAt: started,
         scanned: symbols.length,
         eligible,
+        detectorVersion: DETECTOR_VERSION,
         candidates: candidates.slice(0, TOP_N),
     };
     writeFileSync(snapshotPath(), JSON.stringify(snapshot, null, 2));

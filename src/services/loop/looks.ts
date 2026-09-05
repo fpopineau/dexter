@@ -29,6 +29,7 @@ import {
     type DifferenceBounds,
     type LadderEligibility,
     type LookResult,
+    type RTrade,
     type RunningStats,
 } from '@/utils/sequential-test.js';
 import { etDayOf } from '@/utils/equity-series-math.js';
@@ -64,6 +65,9 @@ export interface LoopStatus {
     ladder: { state: LadderState | null; rung: number; ceilingPct: number; effectivePct: number; eligibility: LadderEligibility | null };
     /** Judgment provenance across the sample (AUD-11). */
     models: string[];
+    /** REQ-LANE-006: running stats per lane over EVERY sample row (deployable
+     *  and shadow); the verdict itself stays on `sample`. */
+    lanes: Array<{ strategyId: RTrade['strategyId']; stats: RunningStats }>;
     drawdown: { epochNetLiq: number; minNetLiq: number; pct: number; samples: number } | null;
     anomalies: string[];
     decile: { rho: number; p: number; n: number } | null;
@@ -96,6 +100,15 @@ function dailyRByVariant(rows: SimTrade[]): Map<string, Map<string, number>> {
     return out;
 }
 
+/** REQ-LANE-006: per-lane running stats, lanes in contract order, legacy last. */
+export function laneStats(trades: RTrade[]): Array<{ strategyId: RTrade['strategyId']; stats: RunningStats }> {
+    const order: RTrade['strategyId'][] = ['intraday', 'overnight', 'swing', 'cup-and-handle', 'earnings-bet', 'legacy'];
+    return order
+        .map((strategyId) => ({ strategyId, rows: trades.filter((t) => t.strategyId === strategyId) }))
+        .filter((l) => l.rows.length > 0)
+        .map((l) => ({ strategyId: l.strategyId, stats: runningStats(l.rows) }));
+}
+
 /** REQ-SEQ-006: per-variant summaries and difference bounds vs the incumbent. */
 export function shadowLines(rows: SimTrade[]): ShadowLine[] {
     const summaries = new Map(summarizeVariants(rows).map((s) => [s.variant, s]));
@@ -120,7 +133,7 @@ export async function runNightlyLooks(deps: LooksDeps): Promise<LoopStatus> {
     const base: LoopStatus = {
         at: deps.now, epoch: rec, constantsOk: true, sample: null, shadowSample: null, openInCohort: 0, looksThisPass: [],
         band: null, shadow: [], ladder: { state: ladderState, rung, ceilingPct, effectivePct: Math.min(rung, ceilingPct), eligibility: null },
-        models: [], drawdown: null, anomalies: [], decile: null, stoppedThisPass: null,
+        models: [], lanes: [], drawdown: null, anomalies: [], decile: null, stoppedThisPass: null,
     };
     if (!rec) {
         base.anomalies.push('no epoch started — `epoch new` opens epoch 1 (the looks evaluate nothing until then)');
@@ -209,6 +222,7 @@ export async function runNightlyLooks(deps: LooksDeps): Promise<LoopStatus> {
         shadow: shadowLines(simRows),
         ladder: { state: readLadderState(deps.dataDir), rung, ceilingPct, effectivePct: Math.min(rung, ceilingPct), eligibility },
         models: sample.models,
+        lanes: laneStats([...sample.trades, ...sample.shadowTrades]),
         drawdown,
         anomalies,
         decile: spearman(decilePairs),

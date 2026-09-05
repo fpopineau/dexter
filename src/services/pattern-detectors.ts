@@ -24,8 +24,21 @@ export interface DailyBar {
 
 export type PatternName = 'pullback-in-uptrend' | 'flat-base' | 'cup-and-handle';
 
+/** REQ-LANE-005: the detector heuristics are versioned — a lane cohort
+ *  records which version produced its setups. */
+export const DETECTOR_VERSION = 'v1';
+
+/** Where the setup stands relative to its pivot at the last close:
+ *  'pivot-ready' (below the pivot, waiting for the trigger) or
+ *  'breakout-confirmed' (closed at/above the pivot within the detector's
+ *  extension ceiling). 'retest' needs breakout history the archive does not
+ *  keep yet (WP7). */
+export type PatternState = 'pivot-ready' | 'breakout-confirmed';
+
 export interface PatternMatch {
     pattern: PatternName;
+    detectorVersion: string;
+    state: PatternState;
     /** 0–100, deterministic quality score (base 60 + measured qualities). */
     score: number;
     /** The breakout/resumption level the setup pivots on. */
@@ -97,6 +110,8 @@ export function detectPullbackInUptrend(bars: DailyBar[]): PatternMatch | null {
     const stop = r2(lowRecent * 0.995);
     return {
         pattern: 'pullback-in-uptrend',
+        detectorVersion: DETECTOR_VERSION,
+        state: last(bars).close >= hi20 ? 'breakout-confirmed' : 'pivot-ready',
         score: Math.min(95, score),
         pivot: r2(hi20),
         suggestedEntry: entry,
@@ -159,6 +174,8 @@ export function detectFlatBase(bars: DailyBar[]): PatternMatch | null {
 
     return {
         pattern: 'flat-base',
+        detectorVersion: DETECTOR_VERSION,
+        state: last(bars).close >= best.hi ? 'breakout-confirmed' : 'pivot-ready',
         score: Math.min(95, score),
         pivot: r2(best.hi),
         suggestedEntry: r2(best.hi * 1.002),
@@ -244,6 +261,8 @@ export function detectCupAndHandle(bars: DailyBar[]): PatternMatch | null {
 
     return {
         pattern: 'cup-and-handle',
+        detectorVersion: DETECTOR_VERSION,
+        state: c >= handleHigh ? 'breakout-confirmed' : 'pivot-ready',
         score: Math.min(98, score),
         pivot: r2(handleHigh),
         suggestedEntry: r2(handleHigh * 1.002),

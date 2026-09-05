@@ -34,6 +34,9 @@ describe('pullback-in-uptrend', () => {
         expect(m!.pivot).toBeCloseTo(100 * 1.008, 0); // the 20d high
         expect(m!.suggestedStop).toBeLessThan(94.5);
         expect(m!.note).toContain('pullback to EMA20');
+        // REQ-LANE-005: versioned, and below the pivot = waiting for the trigger
+        expect(m!.detectorVersion).toBe('v1');
+        expect(m!.state).toBe('pivot-ready');
     });
 
     test('rejects a downtrend and a too-deep pullback', () => {

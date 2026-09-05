@@ -21,13 +21,19 @@ after the universe sweep): pullback-in-uptrend, flat-base, cup-and-handle.
   requests). Useful when the nightly sweep just added history.
 
 Each candidate carries the measured evidence (note), the pattern pivot, a
-suggested STP_LMT trigger just above it, a structure stop, and the daily ATR
-for sizing. These are MULTI-DAY setups: propose them as tif GTC with
-entryType STP_LMT (trigger = suggestedEntry, entryLimit slightly above), a
-structure stop near suggestedStop (respect the 0.4× ATR floor), and a target
-at a real objective. They complement — never replace — catalyst verification:
-check news before proposing, and skip candidates with earnings inside the
-holding window.
+suggested STP_LMT trigger just above it, a structure stop, the daily ATR
+for sizing, its state ('pivot-ready' = below the pivot, waiting;
+'breakout-confirmed' = closed at/above the pivot), the detector version, and
+EVERY match on the symbol (matches[] — a cup-and-handle is listed even when
+another pattern scores higher). These are MULTI-DAY setups: propose them as
+tif GTC with entryType STP_LMT (trigger = suggestedEntry, entryLimit slightly
+above), a structure stop near suggestedStop (respect the 0.4× ATR floor), and
+a target at a real objective. LANES (four-lane contract): a cup-and-handle
+match is proposed with strategyId "cup-and-handle" (its own cohort, hold
+limit cup_max_hold_days); pullback and flat-base with strategyId "swing" and
+setupId "pullback" / "flat-base". They complement — never replace — catalyst
+verification: check news before proposing, and skip candidates with earnings
+inside the holding window.
 `.trim();
 
 const Schema = z.object({

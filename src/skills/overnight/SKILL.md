@@ -117,14 +117,21 @@ The pre-close review PROPOSES — this skill's output is trade proposals
 when candidates qualify, not only an action plan. Two lanes, both inside
 the 15:00–16:00 window:
 
-### 4.1 Overnight Setups (at most 2)
+### 4.1 Overnight Setups (at most 2) — the OVERNIGHT lane
 From the opportunities snapshot and the watchlist: candidates whose move
 has a stated reason to survive the night (catalyst, pattern
 continuation). Prefer lower-ATR names; check `earnings_calendar`
 (withinDays 2) and `event_risk` (macro binaries) first. Register with
-`trade_proposals`: `tif` "GTC" so the bracket survives the close,
-quantity OMITTED, `expiresMinutes` 45. The acceptance gate enforces the
-overnight caps — propose honest levels and let it answer.
+`trade_proposals`: `strategyId` "overnight", `setupId` (e.g.
+"eod-continuation"), `tif` "GTC" so the exits survive the close, quantity
+OMITTED, `expiresMinutes` so the ENTRY dies by the bell (the contract
+refuses an expiry past the close — an unfilled overnight entry must never
+arm the next morning). The lane's contract: swing risk class and pool,
+sized to the gap-stress budget (at live scale the WHOLE overnight book is
+capped near 7.5% of NetLiq — expect small sizes), exit by 10:00 ET next
+session at the latest (the deadline sweeper closes what the bracket did
+not). The acceptance gate and the 15:52 vet enforce the overnight caps —
+propose honest levels and let them answer.
 
 ### 4.2 The Earnings-Bet Window (at most 1)
 15:00–15:55 is the ONLY entry window for an earnings bet. Where a

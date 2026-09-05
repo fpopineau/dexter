@@ -60,6 +60,7 @@ export function sourceFromProposal(p: TradeProposal): SimSource | null {
         quantity: p.quantity,
         tif: p.tif,
         tradeClass: p.tradeClass,
+        strategyId: p.strategyId,
         createdAt: etFrameMs(p.createdAt),
         expiresAt: etFrameMs(p.expiresAt),
         takePct: p.takePct,
@@ -95,6 +96,7 @@ export function sourceFromRefusal(r: RefusalRecord): SimSource | null {
         quantity: r.quantity ?? 0,
         tif: 'DAY',
         tradeClass: 'intraday',
+        strategyId: null,
         createdAt: etFrameMs(r.createdAt),
         expiresAt: null,
         takePct: null,
@@ -272,9 +274,14 @@ export async function runSettleOnce(depsIn: SettleDeps): Promise<SettleRunCounts
     for (const o of openRows) {
         if (seen.has(`${o.sourceKind}|${o.sourceId}`)) continue;
         seen.add(`${o.sourceKind}|${o.sourceId}`);
+        // REQ-LANE-006: the lane is rebuilt from the variant that opened the
+        // row (lane variants apply by strategy), else from the class.
+        const strategyId: SimSource['strategyId'] = o.variant === 'lane-overnight' ? 'overnight'
+            : o.variant === 'lane-cup-and-handle' ? 'cup-and-handle'
+            : o.tradeClass === 'swing' ? 'swing' : o.tradeClass === 'earnings-bet' ? 'earnings-bet' : 'intraday';
         sources.push({
             kind: o.sourceKind, id: o.sourceId, symbol: o.symbol, direction: o.direction, entryType: o.entryType, entry: o.entry,
-            entryLimit: o.entryLimit, stop: o.stop, target: o.target ?? o.stop, quantity: o.quantity, tif: o.tif, tradeClass: o.tradeClass,
+            entryLimit: o.entryLimit, stop: o.stop, target: o.target ?? o.stop, quantity: o.quantity, tif: o.tif, tradeClass: o.tradeClass, strategyId,
             createdAt: etFrameMs(o.createdAt), expiresAt: null, takePct: null, dailyAtr: null, triggerBand: null, lane: 'reopened', gate: null, score: null,
         });
     }

@@ -119,8 +119,25 @@ export interface RiskRules {
     /** Per-trade risk budget for the 'swing' class (% of net liquidation).
      *  Swings are fewer and wider-stopped than intraday trades. */
     swing_risk_pct: number;
-    /** Max concurrent swing-class positions (executed + working). */
+    /** Max concurrent swing-class positions (executed + working). The
+     *  overnight and cup-and-handle lanes ride this class and pool. */
     max_swing_positions: number;
+    // --- Four-lane contract (WP5, 2026-09-05; research parameters) ---
+    /** Per-trade risk budget of the OVERNIGHT lane (% of NetLiq). */
+    overnight_risk_pct: number;
+    /** Max concurrent overnight-lane positions inside the swing pool. */
+    max_overnight_lane_positions: number;
+    /** Overnight entries may be registered this many minutes before the
+     *  session close (60 → from 15:00 ET on a full day, 12:00 ET on a
+     *  half-day); the expiry is clamped to the close. */
+    overnight_entry_window_min: number;
+    /** The overnight lane exits at this minute of the NEXT trading session
+     *  (600 = 10:00 ET) unless its bracket exited first. */
+    overnight_exit_minutes_et: number;
+    /** Hard hold limit of the swing lane, trading days after the fill. */
+    swing_max_hold_days: number;
+    /** Hard hold limit of the cup-and-handle lane, trading days after the fill. */
+    cup_max_hold_days: number;
     /** Master switch for the 'earnings-bet' class. false = the gate refuses
      *  every earnings-bet proposal (used to keep the class paper-only until
      *  it has a track record). */
@@ -209,6 +226,12 @@ export const DEFAULT_RULES: RiskRules = {
     swing_enabled: true,
     swing_risk_pct: 0.5,
     max_swing_positions: 3,
+    overnight_risk_pct: 0.5,
+    max_overnight_lane_positions: 2,
+    overnight_entry_window_min: 60,
+    overnight_exit_minutes_et: 600,
+    swing_max_hold_days: 10,
+    cup_max_hold_days: 15,
     earnings_bet_enabled: false,
     max_earnings_bets: 1,
     earnings_bet_risk_pct: 0.25,
@@ -282,6 +305,12 @@ const RULE_SCHEMA: Record<keyof RiskRules, RuleSpec> = {
     swing_enabled: bool,
     swing_risk_pct: num(0, 10, { minExclusive: true }),
     max_swing_positions: num(0, 50, { integer: true }),
+    overnight_risk_pct: num(0, 10, { minExclusive: true }),
+    max_overnight_lane_positions: num(0, 10, { integer: true }),
+    overnight_entry_window_min: num(1, 240, { integer: true }),
+    overnight_exit_minutes_et: num(0, 1439, { integer: true }),
+    swing_max_hold_days: num(1, 60, { integer: true }),
+    cup_max_hold_days: num(1, 90, { integer: true }),
     earnings_bet_enabled: bool,
     max_earnings_bets: num(0, 10, { integer: true }),
     earnings_bet_risk_pct: num(0, 10, { minExclusive: true }),

@@ -28,6 +28,19 @@ afterAll(() => {
     try { rmSync(dir, { recursive: true, force: true }); } catch { /* held by sqlite */ }
 });
 
+describe('trade_proposals tool — lane derivation (REQ-LANE-001)', () => {
+    test('laneClassOf: the lane fixes the class; an omitted class derives; a contradicting class is an error', async () => {
+        const { laneClassOf, coherent } = await import('./index.js');
+        expect(laneClassOf({})).toEqual({ tradeClass: 'intraday', strategyId: 'intraday' });
+        expect(laneClassOf({ tradeClass: 'swing' })).toEqual({ tradeClass: 'swing', strategyId: 'swing' });
+        expect(laneClassOf({ strategyId: 'overnight' })).toEqual({ tradeClass: 'swing', strategyId: 'overnight' });
+        expect(laneClassOf({ strategyId: 'cup-and-handle' })).toEqual({ tradeClass: 'swing', strategyId: 'cup-and-handle' });
+        expect(laneClassOf({ strategyId: 'overnight', tradeClass: 'intraday' })).toMatchObject({ error: expect.stringContaining("rides the 'swing' risk class") });
+        expect(coherent({ direction: 'long', entry: 100, stop: 98, target: 104, tif: 'DAY', tradeClass: 'swing', strategyId: 'overnight' })).toContain('require tif GTC');
+        expect(coherent({ direction: 'long', entry: 100, stop: 98, target: 104, tif: 'GTC', tradeClass: 'swing', strategyId: 'overnight' })).toBeNull();
+    });
+});
+
 describe('trade_proposals tool — argument coercion', () => {
     // XML-based tool parsers (e.g. vLLM's Qwen3XMLToolParser) deliver every
     // argument as a string. The schemas must coerce numerics instead of

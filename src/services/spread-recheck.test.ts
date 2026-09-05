@@ -7,7 +7,7 @@ function row(overrides: Partial<TradeProposal> = {}): TradeProposal {
         id: 'P-SPRD', createdAt: 1, expiresAt: 2, updatedAt: 1, status: 'executed', symbol: 'PL', direction: 'long',
         entryType: 'LMT', entry: 20, entryLimit: null, stop: 19, target: 22, quantity: 10, tif: 'DAY', tradeClass: 'intraday',
         worstCaseGapPct: null, score: 65, rationale: 'x', source: 'trigger', orderIds: [1, 2, 3], orderPermIds: null,
-        plannedQuantity: null, model: null, strategyFingerprint: null, regime: null, note: null, executedAt: 1, entryFillPrice: null, entryFilledAt: null,
+        plannedQuantity: null, model: null, strategyFingerprint: null, strategyId: null, setupId: null, holdingHorizon: null, exitPolicyId: null, exitDeadline: null, deadlineClosedAt: null, detectorVersion: null, regime: null, note: null, executedAt: 1, entryFillPrice: null, entryFilledAt: null,
         exitFillPrice: null, exitReason: null, realizedPnl: null, commissions: null, closedAt: null, keptOvernightAt: null,
         mfePct: null, maePct: null, extensionAtr: null, vwapDistPct: null, dayMovePct: null, minutesSinceOpen: null,
         takePct: null, takePctSource: null, postExitMfePct: null, postExitMaePct: null, takeCounterfactual: null,

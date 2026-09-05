@@ -9,7 +9,8 @@ function row(over: Partial<TradeProposal> = {}): TradeProposal {
     return {
         id: 'P-0001', createdAt: T0 + 1000, expiresAt: T0 + 2, updatedAt: T0 + 3, status: 'closed', symbol: 'MU', direction: 'long', entryType: 'LMT', entry: 100,
         entryLimit: null, stop: 97, target: 106, quantity: 10, tif: 'DAY', tradeClass: 'intraday', worstCaseGapPct: null, score: 66, rationale: 'x', source: 'trigger',
-        orderIds: [1, 2, 3], orderPermIds: null, plannedQuantity: null, model: 'anthropic:claude-sonnet-5', strategyFingerprint: 'abcdef123456', regime: null, note: null,
+        orderIds: [1, 2, 3], orderPermIds: null, plannedQuantity: null, model: 'anthropic:claude-sonnet-5', strategyFingerprint: 'abcdef123456',
+        strategyId: 'intraday', setupId: null, holdingHorizon: 'same-session', exitPolicyId: 'take-x', exitDeadline: null, deadlineClosedAt: null, detectorVersion: null, regime: null, note: null,
         executedAt: T0 + 2000, entryFillPrice: 100, entryFilledAt: T0 + 3000, exitFillPrice: 106, exitReason: 'target', realizedPnl: 60, commissions: 2, closedAt: T0 + 3_600_000,
         keptOvernightAt: null, mfePct: null, maePct: null, extensionAtr: null, vwapDistPct: null, dayMovePct: null, minutesSinceOpen: null, takePct: 6, takePctSource: 'formula',
         postExitMfePct: null, postExitMaePct: null, takeCounterfactual: null, dailyAtrAtCreation: 4, triggerRank: 66, triggerBand: '60-74', autoExecuteAt: null, spreadDeferred: false,
@@ -27,10 +28,12 @@ describe('buildEpochSample (REQ-SEQ-001; audit AUD-11 hardening)', () => {
             row({ id: 'P-0005', exitReason: 'cancelled', realizedPnl: 0 }), // cancelled
             row({ id: 'P-0006', note: 'NOT trustworthy: test fill' }),
             row({ id: 'P-0007', entryFillPrice: null, realizedPnl: null }), // never filled
-            row({ id: 'P-0008', tradeClass: 'swing' }),
+            row({ id: 'P-0008', tradeClass: 'swing', strategyId: 'overnight' }),
+            row({ id: 'P-0009', strategyId: null }), // legacy: no lane → reported apart (REQ-LANE-007)
         ], EPOCH, new Set(['swing', 'earnings-bet']));
         expect(s.trades.map((t) => t.id)).toEqual(['P-0001']);
-        expect(s.shadowTrades.map((t) => t.id)).toEqual(['P-0008']);
+        expect(s.shadowTrades.map((t) => [t.id, t.strategyId])).toEqual([['P-0008', 'overnight'], ['P-0009', 'legacy']]);
+        expect(s.trades[0].strategyId).toBe('intraday');
         expect(s.openInCohort).toBe(1);
         expect(s.anomalies).toEqual([]);
         expect(s.trades[0].netR).toBeCloseTo(58 / 30, 6);

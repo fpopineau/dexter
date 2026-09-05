@@ -97,6 +97,10 @@ swing_enabled: false # fail-closed until the class's own ≥30-trade shadow reco
 # (halved from the 1.5% draft) — REVIEW.
 swing_risk_pct: 0.75 # ≈$88 max loss per swing stop-out on $11.7K
 max_swing_positions: 3
+# Four-lane contract (WP5): the overnight lane's budget follows the swing
+# budget at this scale (RESEARCH parameter). Note the gap-stress cap binds
+# first: 1.5% / 20% = 7.5% of NetLiq (≈$877) for the WHOLE overnight book.
+overnight_risk_pct: 0.75
 # Earnings bets are LIVE-DISABLED until the class's own ≥30-trade shadow
 # record passes (same bar as every class). The SHADOW-LIVE run forces this
 # true as a documented deviation (DEXTER_RISK_PROFILE=live on paper) so
