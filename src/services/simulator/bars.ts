@@ -23,7 +23,7 @@ import { fetchBars } from '@/tools/ibkr/signal-scorer.js';
 import { logger } from '@/utils';
 import { isMarketHalfDay, isMarketHoliday } from '@/utils/market-hours.js';
 import { getIntradayBars } from '../data-archive.js';
-import { barTimeFrameMs, etFrameMs } from '../outcome-tracker.js';
+import { barTimeFrameMs, etFrameMs, frameToEpochMs } from '../outcome-tracker.js';
 import type { SimBar } from './fill-model.js';
 
 export type SimBarSource = 'stream-5s' | 'archive-1m' | 'ibkr-1m';
@@ -33,14 +33,9 @@ const RTH_OPEN_MIN = 9 * 60 + 30;
 const RTH_CLOSE_MIN = 16 * 60;
 const HALF_DAY_CLOSE_MIN = 13 * 60;
 
-/** ET-frame ms → the epoch ms whose ET wall clock reads that frame. */
-export function frameToEpochMs(frameMs: number): number {
-    // etFrameMs(epoch) = epoch + offset(epoch); the offset is stable across
-    // the day except at a DST transition, so one correction step suffices.
-    const guess = frameMs - (etFrameMs(frameMs) - frameMs);
-    const err = etFrameMs(guess) - frameMs;
-    return err === 0 ? guess : guess - err;
-}
+/** ET-frame ms → the epoch ms whose ET wall clock reads that frame (lives
+ *  in outcome-tracker next to etFrameMs; re-exported for the loaders). */
+export { frameToEpochMs } from '../outcome-tracker.js';
 
 /** Pure: does the bar series cover [fromT, toT] without holes? */
 export function coverageOk(bars: SimBar[], fromT: number, toT: number, maxGapMs: number): boolean {

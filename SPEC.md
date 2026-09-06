@@ -3959,3 +3959,19 @@ One finding; verified and fixed.
 | 1 | `simulator/settle.test.ts` (EDT-created row settled in EST keeps its exact instants, twice) |
 
 Harness at landing: `bun test` 1128 pass (103 files), `tsc --noEmit` clean, Jest 1109 pass under Node.
+
+## Review 2026-09-06, seventh pass (commit `8122e84`) — response
+
+One finding; verified and fixed.
+
+| # | Finding | Verdict | Action |
+|---|---|---|---|
+| 1 | The 3-day GTC entry window (and the grace / default validity) were added in the ET wall-clock frame, so across a DST change they spanned 71 or 73 real hours while the real sweeps compare ELAPSED epoch time | VALID (P2) | durations are added in epoch space (`addElapsedToFrame` in `outcome-tracker.ts`; `frameToEpochMs` moved beside `etFrameMs`, re-exported by the bar loader); autumn and spring cases pinned to 72 real hours (REQ-SIM-004 precision) |
+
+- REQ-SIM-004 (precision): every simulated duration — 3-day GTC horizon, 30-min acceptance grace, 120-min default validity — is elapsed time, never frame arithmetic.
+
+| Finding | Test |
+|---|---|
+| 1 | `simulator/variants.test.ts` (accepted 2026-10-30 12:00 EDT → dead 2026-11-02 16:00 UTC; accepted 2026-03-06 10:00 EST → dead 2026-03-09 15:00 UTC) |
+
+Harness at landing: `bun test` 1129 pass (103 files), `tsc --noEmit` clean, Jest 1110 pass under Node.

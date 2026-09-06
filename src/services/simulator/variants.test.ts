@@ -124,3 +124,18 @@ describe('sizeAtRung (REQ-SIM-005 — every variant sized at the current rung)',
         expect(sizeAtRung({ entry: 100, stop: 100, rungPct: 0.25, netLiq: 12_000 })).toBe(0);
     });
 });
+
+describe('review 2026-09-06, seventh pass — the 3-day GTC window is 72 ELAPSED hours across a DST change', () => {
+    test('autumn: accepted Fri 2026-10-30 12:00 EDT → dead Mon 2026-11-02 16:00 UTC (11:00 EST), not 12:00 EST; spring: accepted Fri 2026-03-06 10:00 EST → dead Mon 2026-03-09 15:00 UTC (11:00 EDT), not 10:00', async () => {
+        const { etFrameMs } = await import('../outcome-tracker.js');
+        const v = variantByName('class-swing')!;
+        const autumnAccepted = Date.UTC(2026, 9, 30, 16, 0, 0);
+        const a = v.spec(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'swing', createdAt: etFrameMs(autumnAccepted - 3_600_000), executedAt: etFrameMs(autumnAccepted) }), ctx)!;
+        expect(a.entryDeadline).toBe(etFrameMs(autumnAccepted + 72 * 3_600_000)); // 2026-11-02 16:00 UTC
+        expect(a.entryDeadline).toBe(Date.UTC(2026, 10, 2, 11, 0, 0));           // 11:00 EST in the frame — one hour EARLIER than a frame add
+        const springAccepted = Date.UTC(2026, 2, 6, 15, 0, 0);
+        const s = v.spec(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'swing', createdAt: etFrameMs(springAccepted - 3_600_000), executedAt: etFrameMs(springAccepted) }), ctx)!;
+        expect(s.entryDeadline).toBe(etFrameMs(springAccepted + 72 * 3_600_000)); // 2026-03-09 15:00 UTC
+        expect(s.entryDeadline).toBe(Date.UTC(2026, 2, 9, 11, 0, 0));            // 11:00 EDT — one hour LATER than a frame add
+    });
+});

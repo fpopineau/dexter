@@ -159,6 +159,22 @@ export function etFrameMs(epochMs: number): number {
     return Date.UTC(et.getFullYear(), et.getMonth(), et.getDate(), et.getHours(), et.getMinutes(), et.getSeconds());
 }
 
+/** ET-frame ms → the epoch ms whose ET wall clock reads that frame (the
+ *  inverse of etFrameMs; the offset is stable across the day except at a
+ *  DST transition, so one correction step suffices). */
+export function frameToEpochMs(frameMs: number): number {
+    const guess = frameMs - (etFrameMs(frameMs) - frameMs);
+    const err = etFrameMs(guess) - frameMs;
+    return err === 0 ? guess : guess - err;
+}
+
+/** ET-frame ms of `durationMs` ELAPSED after a frame instant — measured in
+ *  epoch time, so 72 h is 72 real hours across a DST change (review
+ *  2026-09-06, seventh pass: adding in the frame gave 71 or 73). */
+export function addElapsedToFrame(frameMs: number, durationMs: number): number {
+    return etFrameMs(frameToEpochMs(frameMs) + durationMs);
+}
+
 /** IBKR sends this sentinel for "no value" numeric fields. */
 const IB_UNSET = 1.7e308;
 

@@ -24,6 +24,7 @@
  */
 
 import type { RiskRules } from '@/tools/ibkr/risk-rules.js';
+import { addElapsedToFrame } from '../outcome-tracker.js';
 import { formulaTakePct } from '../proposal-risk-gate.js';
 import type { SimSpec } from './fill-model.js';
 
@@ -95,17 +96,21 @@ function hasLevels(src: SimSource): boolean {
 }
 
 function entryDeadline(src: SimSource): number {
+    // Durations are ELAPSED time (epoch), like the real sweeps' `now − x`
+    // comparisons — never added in the ET frame, where 72 h across a DST
+    // change is 71 or 73 real hours (review 2026-09-06, seventh pass).
+    const anchor = src.executedAt ?? src.createdAt;
     // REQ-LANE-003: an overnight-lane entry dies with its (close-clamped)
     // expiry even though its bracket is GTC — the sweeper cancels it. Other
     // GTC entries are patient: the zombie sweep counts its 3 days from the
     // ACCEPTANCE (`executed_at`), so the twin does too (review 2026-09-06,
     // fourth pass, finding 1); a never-accepted row counts from creation.
-    if (src.tif === 'GTC' && src.strategyId !== 'overnight') return (src.executedAt ?? src.createdAt) + GTC_ENTRY_HORIZON_MS;
+    if (src.tif === 'GTC' && src.strategyId !== 'overnight') return addElapsedToFrame(anchor, GTC_ENTRY_HORIZON_MS);
     // The real sweep (REQ-ENTRY-001) cancels once BOTH the expiry has passed
     // and the acceptance grace has run: deadline = max(expiry, accepted +
     // grace) — not expiry + grace (review 2026-09-06, second pass, finding 5).
-    const expiry = src.expiresAt ?? src.createdAt + DEFAULT_VALIDITY_MS;
-    return Math.max(expiry, (src.executedAt ?? src.createdAt) + ENTRY_GRACE_MS);
+    const expiry = src.expiresAt ?? addElapsedToFrame(src.createdAt, DEFAULT_VALIDITY_MS);
+    return Math.max(expiry, addElapsedToFrame(anchor, ENTRY_GRACE_MS));
 }
 
 function baseSpec(src: SimSource, ctx: VariantContext, overrides: Partial<SimSpec> = {}): SimSpec {
