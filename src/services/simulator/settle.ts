@@ -164,15 +164,17 @@ async function settleOne(
     if (spec.flatAt !== null && src.tif === 'DAY' && spec.flatAt > nowFrame) { counts.skipped++; return; }
     counts.evaluated++;
 
-    // DAY rows replay to their flat bar; GTC rows to tonight — their real
-    // deadline is anchored on the FILL (unknown until simulated), so the
-    // creation-anchored flatAt is only a lower bound (second pass, finding 5).
-    const horizonEnd = src.tif === 'DAY' && spec.flatAt !== null ? Math.min(spec.flatAt, nowFrame) : nowFrame;
+    // The bar window ends at the creation-anchored deadline (or tonight) —
+    // never later than the mandatory exit, so an overnight twin out at
+    // 10:00 does not need the afternoon's bars (third pass, finding 4). A
+    // fill-anchored deadline LATER than that (swing / cup filled on a later
+    // session) extends the window in a second load below.
+    const horizonEnd = spec.flatAt !== null ? Math.min(spec.flatAt, nowFrame) : nowFrame;
     const halfDay = deps.isHalfDay(etIsoOfFrame(src.createdAt));
     // WP7 (REQ-SIM-003 amended): regular-session bars for EVERY row — the
     // brackets never set outsideRth, so a GTC stop cannot fill after hours;
     // coverage is judged per session segment, the overnight gap is no hole.
-    const loaded = await deps.loadBars(src.symbol, src.createdAt, horizonEnd, { rth: true, halfDay });
+    let loaded = await deps.loadBars(src.symbol, src.createdAt, horizonEnd, { rth: true, halfDay });
     const basisEntry = spec.entry ?? null;
     const quantity = basisEntry !== null ? sizeAt(basisEntry, spec.stop, deps.rungPct, deps.netLiq) : 0;
     const base: SimTrade = {
@@ -189,6 +191,7 @@ async function settleOne(
         target: spec.target,
         quantity,
         tif: src.tif,
+        strategyId: src.strategyId,
         createdAt: deps.now - (nowFrame - src.createdAt), // back to epoch ms (same offset as now)
         barSource: loaded?.source ?? null,
         fillAt: null, fillPrice: null, exitAt: null, exitPrice: null,
@@ -214,11 +217,28 @@ async function settleOne(
         const probe = simulateBracket(loaded.bars, { ...spec, flatAt: null });
         if (probe.fillAt !== null) {
             const anchored = ctx.laneFlatAtFor(src.strategyId, src.tradeClass, probe.fillAt);
-            if (anchored !== null) finalSpec = { ...spec, flatAt: anchored };
+            if (anchored !== null && anchored !== spec.flatAt) {
+                finalSpec = { ...spec, flatAt: anchored };
+                // A later deadline needs more bars (up to tonight); a load
+                // that fails leaves the first bars — the row then reads
+                // 'open' and settles another night, never a fabricated exit.
+                if (anchored > horizonEnd) {
+                    const extended = await deps.loadBars(src.symbol, src.createdAt, Math.min(anchored, nowFrame), { rth: true, halfDay });
+                    if (extended) loaded = extended;
+                }
+            }
         }
     }
     const r = simulateBracket(loaded.bars, finalSpec);
-    const row: SimTrade = { ...base, fillAt: r.fillAt, fillPrice: r.fillPrice, exitAt: r.exitAt, exitPrice: r.exitPrice, outcome: r.outcome, note: r.note ?? null };
+    const row: SimTrade = { ...base, barSource: loaded.source, fillAt: r.fillAt, fillPrice: r.fillPrice, exitAt: r.exitAt, exitPrice: r.exitPrice, outcome: r.outcome, note: r.note ?? null };
+    // A patient entry whose window is still open tonight is PENDING, not
+    // unfilled (third pass, finding 2): the bars ran out before the entry
+    // deadline — the row stays open and replays tomorrow.
+    if (r.outcome === 'unfilled' && finalSpec.entryDeadline > nowFrame) {
+        counts.open++;
+        await deps.store.upsert({ ...row, status: 'open', note: 'entry not yet filled — window still open' });
+        return;
+    }
     if (r.outcome === 'open') {
         if (base.horizonDays * 1 >= GTC_HORIZON_DAYS || src.createdAt < nowFrame - GTC_HORIZON_DAYS * DAY_MS) {
             counts.unknown++;
@@ -303,17 +323,21 @@ export async function runSettleOnce(depsIn: SettleDeps): Promise<SettleRunCounts
         if (s) sources.push(s);
     }
     // Open rows older than the lookback still need their nightly pass: the
-    // store row carries enough to rebuild the source.
-    const openRows = await deps.store.listOpen();
+    // store row carries enough to rebuild the source. The INCUMBENT row is
+    // preferred (it carries the as-proposed levels — a variant row carries
+    // its own re-geometry), and the lane comes from the persisted
+    // `strategyId` so every variant rebuilds the SAME contract (third pass,
+    // finding 3); rows written before the column fall back to the variant
+    // name, then the class.
+    const openRows = [...await deps.store.listOpen()].sort((a, b) => Number(b.variant === 'incumbent') - Number(a.variant === 'incumbent'));
     const seen = new Set(sources.map((s) => `${s.kind}|${s.id}`));
     for (const o of openRows) {
         if (seen.has(`${o.sourceKind}|${o.sourceId}`)) continue;
         seen.add(`${o.sourceKind}|${o.sourceId}`);
-        // REQ-LANE-006: the lane is rebuilt from the variant that opened the
-        // row (lane variants apply by strategy), else from the class.
-        const strategyId: SimSource['strategyId'] = o.variant === 'lane-overnight' ? 'overnight'
-            : o.variant === 'lane-cup-and-handle' ? 'cup-and-handle'
-            : o.tradeClass === 'swing' ? 'swing' : o.tradeClass === 'earnings-bet' ? 'earnings-bet' : 'intraday';
+        const strategyId: SimSource['strategyId'] = o.strategyId
+            ?? (o.variant === 'lane-overnight' ? 'overnight'
+                : o.variant === 'lane-cup-and-handle' ? 'cup-and-handle'
+                : o.tradeClass === 'swing' ? 'swing' : o.tradeClass === 'earnings-bet' ? 'earnings-bet' : 'intraday');
         sources.push({
             kind: o.sourceKind, id: o.sourceId, symbol: o.symbol, direction: o.direction, entryType: o.entryType, entry: o.entry,
             entryLimit: o.entryLimit, stop: o.stop, target: o.target ?? o.stop, quantity: o.quantity, tif: o.tif, tradeClass: o.tradeClass, strategyId,

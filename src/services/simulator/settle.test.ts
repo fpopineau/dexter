@@ -180,3 +180,71 @@ describe('runSettleOnce (REQ-SIM-001/005/006)', () => {
         expect(await d.store.find('incumbent', 'proposal', 'P-0001')).not.toBeNull();
     });
 });
+
+describe('review 2026-09-06, third pass (findings 2–4)', () => {
+    /** ET-frame bars: Thu 15:31 → 16:00 around 100, Fri 09:30 → 10:00 drifting to 102. */
+    function overnightBars(): SimBar[] {
+        const out: SimBar[] = [];
+        const thu = etFrameMs(Date.UTC(2026, 8, 10, 19, 30, 0)); // Thu 15:30 ET
+        for (let i = 1; i <= 30; i++) out.push({ t: thu + i * M, open: 100.4, high: 100.6, low: 99.8, close: 100.2 }); // trades through a 100 limit
+        const fri = etFrameMs(Date.UTC(2026, 8, 11, 13, 30, 0)); // Fri 09:30 ET
+        for (let i = 0; i <= 30; i++) { const px = 101 + i / 30; out.push({ t: fri + i * M, open: px, high: px + 0.2, low: px - 0.2, close: px }); }
+        return out;
+    }
+
+    test('finding 4: an overnight twin out at 10:00 settles from bars that END at 10:00 — the window never asks for the afternoon', async () => {
+        const created = Date.UTC(2026, 8, 10, 19, 30, 0); // Thu 15:30 ET
+        const bars = overnightBars();
+        const last = bars[bars.length - 1].t;
+        const requested: number[] = [];
+        const d = deps({
+            now: Date.UTC(2026, 8, 11, 21, 10, 0), // Fri 17:10 ET
+            listProposalsSince: async () => [proposal({ id: 'P-OVN', symbol: 'OVN', tif: 'GTC', tradeClass: 'swing', strategyId: 'overnight', createdAt: created, expiresAt: created + 25 * M, executedAt: created + M, entry: 100, stop: 97, target: 110 })],
+            listRefusalsSince: async () => [],
+            // a loader that has NOTHING after Fri 10:00 refuses any window past it
+            loadBars: async (_s, _from, toT) => { requested.push(toT); return toT > last + M ? null : { bars, source: 'archive-1m' as const }; },
+        });
+        await runSettleOnce(d);
+        const twin = (await d.store.find('lane-overnight', 'proposal', 'P-OVN'))!;
+        expect(twin.status).toBe('settled');
+        expect(twin.outcome).toBe('eod-flat');
+        expect(twin.exitAt).toBe(last); // the 10:00 deadline bar
+        expect(twin.strategyId).toBe('overnight');
+        expect(Math.max(...requested)).toBeLessThanOrEqual(last + M);
+    });
+
+    test('finding 2: a patient GTC entry not filled tonight stays OPEN while its window lasts, then fills on a later pass; finding 3: a reopened row keeps its lane', async () => {
+        const created = Date.UTC(2026, 8, 10, 14, 0, 0); // Thu 10:00 ET
+        const belowTrigger = winningBars(90); // trades 90–97: never touches a 100 STP_LMT trigger
+        const d = deps({
+            now: Date.UTC(2026, 8, 10, 21, 30, 0),
+            listProposalsSince: async () => [proposal({ id: 'P-CUP', symbol: 'CUP', tif: 'GTC', tradeClass: 'swing', strategyId: 'cup-and-handle', entryType: 'STP_LMT', entry: 100, entryLimit: 100.5, stop: 96, target: 108, createdAt: created, expiresAt: created + 3 * 86_400_000 })],
+            listRefusalsSince: async () => [],
+            loadBars: async () => ({ bars: belowTrigger, source: 'archive-1m' as const }),
+        });
+        await runSettleOnce(d);
+        const cup = (await d.store.find('lane-cup-and-handle', 'proposal', 'P-CUP'))!;
+        expect(cup.status).toBe('open');
+        expect(cup.outcome).toBe('unfilled');
+        expect(cup.note).toContain('window still open');
+        expect(cup.strategyId).toBe('cup-and-handle');
+        const inc = (await d.store.find('incumbent', 'proposal', 'P-CUP'))!;
+        expect(inc.status).toBe('open');
+        expect(inc.strategyId).toBe('cup-and-handle');
+        // next night, beyond the lookback: the sources are rebuilt from the open rows — the lane survives and the trigger fills
+        const d2 = deps({
+            now: Date.UTC(2026, 8, 15, 21, 30, 0), // Tue 17:30 ET, past the 3-day lookback
+            listProposalsSince: async () => [],
+            listRefusalsSince: async () => [],
+            loadBars: async () => ({ bars: [...belowTrigger, ...winningBars(100).map((b) => ({ ...b, t: b.t + 86_400_000 }))], source: 'archive-1m' as const }),
+        });
+        d2.store.rows = d.store.rows;
+        await runSettleOnce(d2);
+        const cup2 = (await d2.store.find('lane-cup-and-handle', 'proposal', 'P-CUP'))!;
+        expect(cup2.strategyId).toBe('cup-and-handle');
+        expect(cup2.fillPrice).not.toBeNull();
+        expect(cup2.status).not.toBe('unknown');
+        const inc2 = (await d2.store.find('incumbent', 'proposal', 'P-CUP'))!;
+        expect(inc2.strategyId).toBe('cup-and-handle'); // not rebuilt as a plain swing
+    });
+});

@@ -908,15 +908,23 @@ export async function closePosition(symbolRaw: string, source = 'close command')
         // inferred — the fill proves the ORDER completed, and only a fresh
         // position snapshot proves the ACCOUNT is flat (quantity can drift
         // between the preflight snapshot and execution).
+        // Review 2026-09-06 (third pass, finding 1): the verification reads
+        // the snapshot's COMPLETE flag — a symbol absent from a PARTIAL book
+        // is not proven flat; that is "unverified" (null), never true.
         let flatSuffix: string;
         let flat: boolean | null;
         try {
-            const after = (await fetchPositions(api)).find((p) => p.symbol === symbol);
+            const snap = await requestPositions(api);
+            const after = snap.positions.find((p) => p.symbol === symbol);
             if (after && after.quantity !== 0) {
                 flat = false;
                 flatSuffix = `⚠️ the position is NOT flat: ${after.quantity > 0 ? 'LONG' : 'SHORT'} ${Math.abs(after.quantity)} remains — ` +
                     `review 'positions' NOW (over-close race or drifted quantity).`;
                 logger.error(`[position-actions] ${symbol}: post-close position check shows ${after.quantity} — NOT flat`);
+            } else if (!snap.complete) {
+                flat = null;
+                flatSuffix = "⚠️ flatness could NOT be verified — the positions snapshot was PARTIAL and the symbol was absent from it; check 'positions'.";
+                logger.warn(`[position-actions] ${symbol}: post-close positions snapshot incomplete — flat NOT verified`);
             } else {
                 flat = true;
                 flatSuffix = 'the position book confirms FLAT.';

@@ -36,6 +36,12 @@ export interface SimTrade {
     /** Rung-sized quantity (REQ-SIM-005). */
     quantity: number;
     tif: 'DAY' | 'GTC';
+    /** The source's lane (REQ-LANE-006) — persisted so a row reopened
+     *  beyond the lookback rebuilds the SAME contract for every variant
+     *  (review 2026-09-06 third pass, finding 3: a cup source rebuilt from
+     *  its incumbent row had become a swing). Null on rows written before
+     *  the column existed and on legacy sources. */
+    strategyId?: 'intraday' | 'overnight' | 'swing' | 'cup-and-handle' | 'earnings-bet' | null;
     /** Source creation, epoch ms. */
     createdAt: number;
     barSource: SimBarSource | null;
@@ -124,13 +130,15 @@ async function getDb(): Promise<SqliteDatabase> {
         CREATE INDEX IF NOT EXISTS ix_sim_trades_created ON sim_trades (created_at);
         CREATE INDEX IF NOT EXISTS ix_sim_trades_status ON sim_trades (status);
     `);
+    // Additive, idempotent (rows written before the column keep NULL).
+    try { db.exec('ALTER TABLE sim_trades ADD COLUMN strategy_id TEXT'); } catch { /* already present */ }
     return db;
 }
 
 interface Row {
     id: number; variant: string; source_kind: string; source_id: string; symbol: string; direction: string; trade_class: string;
     entry_type: string; entry: number | null; entry_limit: number | null; stop: number; target: number | null; quantity: number;
-    tif: string; created_at: number; bar_source: string | null; fill_at: number | null; fill_price: number | null;
+    tif: string; strategy_id?: string | null; created_at: number; bar_source: string | null; fill_at: number | null; fill_price: number | null;
     exit_at: number | null; exit_price: number | null; outcome: string; commissions: number | null; net_usd: number | null;
     net_r: number | null; status: string; bias_note: string; settled_at: number; horizon_days: number; note: string | null;
 }
@@ -151,6 +159,8 @@ function fromRow(r: Row): SimTrade {
         target: r.target,
         quantity: r.quantity,
         tif: r.tif === 'GTC' ? 'GTC' : 'DAY',
+        strategyId: r.strategy_id === 'intraday' || r.strategy_id === 'overnight' || r.strategy_id === 'swing' || r.strategy_id === 'cup-and-handle' || r.strategy_id === 'earnings-bet'
+            ? r.strategy_id : null,
         createdAt: r.created_at,
         barSource: (r.bar_source as SimBarSource | null) ?? null,
         fillAt: r.fill_at,
@@ -173,20 +183,20 @@ export async function upsertSimTrade(t: SimTrade): Promise<void> {
     const database = await getDb();
     database.query<void>(
         `INSERT INTO sim_trades (variant, source_kind, source_id, symbol, direction, trade_class, entry_type, entry, entry_limit, stop, target,
-             quantity, tif, created_at, bar_source, fill_at, fill_price, exit_at, exit_price, outcome, commissions, net_usd, net_r, status,
+             quantity, tif, strategy_id, created_at, bar_source, fill_at, fill_price, exit_at, exit_price, outcome, commissions, net_usd, net_r, status,
              bias_note, settled_at, horizon_days, note)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(variant, source_kind, source_id) DO UPDATE SET
              symbol = excluded.symbol, direction = excluded.direction, trade_class = excluded.trade_class, entry_type = excluded.entry_type,
              entry = excluded.entry, entry_limit = excluded.entry_limit, stop = excluded.stop, target = excluded.target,
-             quantity = excluded.quantity, tif = excluded.tif, created_at = excluded.created_at, bar_source = excluded.bar_source,
+             quantity = excluded.quantity, tif = excluded.tif, strategy_id = excluded.strategy_id, created_at = excluded.created_at, bar_source = excluded.bar_source,
              fill_at = excluded.fill_at, fill_price = excluded.fill_price, exit_at = excluded.exit_at, exit_price = excluded.exit_price,
              outcome = excluded.outcome, commissions = excluded.commissions, net_usd = excluded.net_usd, net_r = excluded.net_r,
              status = excluded.status, bias_note = excluded.bias_note, settled_at = excluded.settled_at,
              horizon_days = excluded.horizon_days, note = excluded.note`,
     ).run(
         t.variant, t.sourceKind, t.sourceId, t.symbol.toUpperCase(), t.direction, t.tradeClass, t.entryType, t.entry, t.entryLimit, t.stop, t.target,
-        t.quantity, t.tif, t.createdAt, t.barSource, t.fillAt, t.fillPrice, t.exitAt, t.exitPrice, t.outcome, t.commissions, t.netUsd, t.netR, t.status,
+        t.quantity, t.tif, t.strategyId ?? null, t.createdAt, t.barSource, t.fillAt, t.fillPrice, t.exitAt, t.exitPrice, t.outcome, t.commissions, t.netUsd, t.netR, t.status,
         t.biasNote, t.settledAt, t.horizonDays, t.note,
     );
 }

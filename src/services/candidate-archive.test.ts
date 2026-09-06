@@ -140,12 +140,21 @@ describe('disposeCandidates (REQ-BENCH-003)', () => {
             ],
             refusals: [
                 { symbol: 'AMD', direction: 'long', createdAt: CAPTURED + 2 * 60_000, gate: 'noise-stop' },
-                { symbol: 'NVDA', direction: 'long', createdAt: Date.UTC(2026, 8, 10, 14, 0, 0), gate: 'chase' }, // 10:00 ET — morning refusal, not the pre-close window
+                { symbol: 'NVDA', direction: 'long', createdAt: Date.UTC(2026, 8, 10, 14, 0, 0), gate: 'chase' }, // 10:00 ET — before the capture snapshot: not this window's refusal
             ],
         });
         expect(out.map((r) => [r.symbol, r.disposition, r.dispositionRef])).toEqual([
             ['MU', 'proposed', 'P-0101'], ['AMD', 'refused', 'noise-stop'], ['NVDA', 'not-admitted', null], ['SOXL', 'not-admitted', null],
         ]);
+    });
+
+    test('third pass, finding 5: on a half-day the pre-close window starts at 12:00 — a 12:06 refusal after a 12:05 capture is attributed', () => {
+        // 2026-11-27 (half-day, EST): capture snapshot 12:00 ET, captured 12:05, refused 12:06
+        const snapTs = Date.UTC(2026, 10, 27, 17, 0, 0);
+        const capturedAt = Date.UTC(2026, 10, 27, 17, 5, 0);
+        const rows = candidatesFromSnapshot(snapshot([opp({ symbol: 'HALF' })], 'pre-close', snapTs), { capturedAt, rules, dailyAtr: new Map([['HALF', 3]]), earnings: new Map() });
+        const out = disposeCandidates(rows, { proposals: [], refusals: [{ symbol: 'HALF', direction: 'long', createdAt: Date.UTC(2026, 10, 27, 17, 6, 0), gate: 'noise-stop' }] });
+        expect(out[0]).toMatchObject({ disposition: 'refused', dispositionRef: 'noise-stop' });
     });
 
     test('review 2026-09-06 second pass, finding 4: a late SHORT is not attributed to the long candidate; a proposal decided against an EARLIER snapshot than the row\'s first sighting is not a pick from this universe', () => {

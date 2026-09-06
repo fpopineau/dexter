@@ -332,12 +332,12 @@ export function disposeCandidates(rows: CandidateRow[], ledger: DispositionLedge
             && (dayOf(p.createdAt) === row.day || nextDayOk(p.createdAt))
             && (p.snapshotTs ?? p.createdAt) >= rowTs);
         if (proposal) return { ...row, disposition: 'proposed', dispositionRef: proposal.id };
-        const refusal = ledger.refusals.find((r) => {
-            if (r.symbol.toUpperCase() !== sym || r.direction !== row.direction || dayOf(r.createdAt) !== row.day || r.createdAt < rowTs) return false;
-            if (row.lane !== 'overnight') return true;
-            const et = new Date(new Date(r.createdAt).toLocaleString('en-US', { timeZone: ET }));
-            return et.getHours() >= 15;
-        });
+        // A refusal counts when it is not earlier than the row's capture
+        // snapshot — that snapshot IS the pre-close window's start, on a
+        // half-day at 12:00 (third pass, finding 5: a fixed "≥ 15:00" test
+        // dropped every half-day refusal).
+        const refusal = ledger.refusals.find((r) =>
+            r.symbol.toUpperCase() === sym && r.direction === row.direction && dayOf(r.createdAt) === row.day && r.createdAt >= rowTs);
         if (refusal) return { ...row, disposition: 'refused', dispositionRef: refusal.gate };
         return { ...row, disposition: 'not-admitted', dispositionRef: null };
     });

@@ -3856,3 +3856,42 @@ Review cron itself is fixed at 15:30 ET and does not run on a half-day") is
 closed by this section.
 
 Harness at landing: `bun test` 1121 pass (103 files), `tsc --noEmit` clean, Jest 1102 pass under Node.
+
+## Review 2026-09-06, third pass (commit `e9a65c4`) — response
+
+Five further findings; each verified against the code and each holds. All
+five are fixed here.
+
+| # | Finding | Verdict | Action |
+|---|---|---|---|
+| 1 | `closePosition` built `flat: true` from `fetchPositions`, which returns a non-empty PARTIAL book — an absent symbol read as flat | VALID (P1) | the post-close verification reads `requestPositions` and its `complete` flag: absent from a partial book = `flat: null` (unverified), never true; the sweeper then retries |
+| 2 | A patient GTC entry unfilled on its first simulated night was settled `unfilled` and never revisited | VALID (P1) | an unfilled row whose entry deadline is still ahead of tonight is stored `open` ("window still open") and replays the next night (REQ-SIM-004 amended) |
+| 3 | A source reopened beyond the lookback rebuilt its lane from the first open row's variant name — a cup source rebuilt from its incumbent row became a swing, and its other variants were deduplicated | VALID (P1) | `sim_trades.strategy_id` persists the lane on every row; the rebuild reads it (fallback: variant name, then class) and prefers the INCUMBENT row's as-proposed levels (REQ-LANE-006 precision) |
+| 4 | GTC rows loaded bars to tonight, so an overnight twin out at 10:00 became `unknown` for want of the afternoon's bars | VALID (P2) | the window ends at the creation-anchored deadline (or tonight); only a LATER fill-anchored deadline extends it in a second load; a failed extension leaves the row `open`, never a fabricated exit (REQ-SIM-003 precision) |
+| 5 | Refusal attribution required an ET hour ≥ 15, so half-day pre-close refusals were never attributed | VALID (P2) | a refusal counts when it is not earlier than the row's capture snapshot (which is, by construction, in the pre-close window — 12:00 on a half-day) (REQ-BENCH-003 amended) |
+
+### Amended requirements
+
+- REQ-LANE-003 (precision): `closePosition`'s `flat` is true only against a
+  COMPLETE positions snapshot; a partial snapshot without the symbol yields
+  null, and the deadline sweeper treats null as not confirmed.
+- REQ-SIM-003 (precision): the replay window of a GTC row is
+  [creation, min(creation-anchored lane deadline, tonight)], extended to
+  min(fill-anchored deadline, tonight) only when the fill moves the
+  deadline later; a failed extension keeps the first bars.
+- REQ-SIM-004 (amended): an unfilled GTC twin whose entry deadline is
+  still in the future is `open` (outcome `unfilled`) and replays nightly
+  until it fills or the window closes.
+- REQ-LANE-006 (precision): `sim_trades.strategy_id` carries the lane;
+  reopened sources rebuild from it, preferring the incumbent row's levels.
+- REQ-BENCH-003 (amended): refusals are attributed by symbol, direction,
+  day and capture-snapshot order — no fixed clock.
+
+| Finding | Test |
+|---|---|
+| 1 | `position-actions.ts` verification path (type-checked; the sweeper's `flat === true` gate is tested in `lane-deadline-sweeper.test.ts`) |
+| 2, 3 | `simulator/settle.test.ts` (unfilled cup twin stays open with its lane; beyond the lookback the rebuilt source keeps `cup-and-handle` for the incumbent too and fills on a later pass) |
+| 4 | `simulator/settle.test.ts` (an overnight twin settles from bars ending at 10:00; no window past it is requested) |
+| 5 | `candidate-archive.test.ts` (half-day 12:05 capture, 12:06 refusal → refused) |
+
+Harness at landing: `bun test` 1124 pass (103 files), `tsc --noEmit` clean, Jest 1105 pass under Node.
