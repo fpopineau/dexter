@@ -44,6 +44,13 @@ export interface SimTrade {
     strategyId?: 'intraday' | 'overnight' | 'swing' | 'cup-and-handle' | 'earnings-bet' | null;
     /** Source creation, epoch ms. */
     createdAt: number;
+    /** Source acceptance and validity end, epoch ms — persisted so a row
+     *  reopened beyond the lookback keeps the REAL entry window (the 3-day
+     *  GTC horizon runs from the acceptance; the overnight expiry is
+     *  close-clamped) — review 2026-09-06, fifth pass. Null on rows written
+     *  before the columns existed (the rebuild then counts from creation). */
+    executedAt?: number | null;
+    expiresAt?: number | null;
     barSource: SimBarSource | null;
     /** ET-frame ms. */
     fillAt: number | null;
@@ -135,6 +142,8 @@ async function getDb(): Promise<SqliteDatabase> {
     // lane, and every sibling row of the same source takes it — otherwise an
     // old cup incumbent reopened beyond the lookback rebuilt a swing.
     try { db.exec('ALTER TABLE sim_trades ADD COLUMN strategy_id TEXT'); } catch { /* already present */ }
+    try { db.exec('ALTER TABLE sim_trades ADD COLUMN executed_at INTEGER'); } catch { /* already present */ }
+    try { db.exec('ALTER TABLE sim_trades ADD COLUMN expires_at INTEGER'); } catch { /* already present */ }
     db.exec(`
         UPDATE sim_trades SET strategy_id = 'overnight' WHERE strategy_id IS NULL AND variant = 'lane-overnight';
         UPDATE sim_trades SET strategy_id = 'cup-and-handle' WHERE strategy_id IS NULL AND variant = 'lane-cup-and-handle';
@@ -153,7 +162,8 @@ async function getDb(): Promise<SqliteDatabase> {
 interface Row {
     id: number; variant: string; source_kind: string; source_id: string; symbol: string; direction: string; trade_class: string;
     entry_type: string; entry: number | null; entry_limit: number | null; stop: number; target: number | null; quantity: number;
-    tif: string; strategy_id?: string | null; created_at: number; bar_source: string | null; fill_at: number | null; fill_price: number | null;
+    tif: string; strategy_id?: string | null; created_at: number; executed_at?: number | null; expires_at?: number | null;
+    bar_source: string | null; fill_at: number | null; fill_price: number | null;
     exit_at: number | null; exit_price: number | null; outcome: string; commissions: number | null; net_usd: number | null;
     net_r: number | null; status: string; bias_note: string; settled_at: number; horizon_days: number; note: string | null;
 }
@@ -177,6 +187,8 @@ function fromRow(r: Row): SimTrade {
         strategyId: r.strategy_id === 'intraday' || r.strategy_id === 'overnight' || r.strategy_id === 'swing' || r.strategy_id === 'cup-and-handle' || r.strategy_id === 'earnings-bet'
             ? r.strategy_id : null,
         createdAt: r.created_at,
+        executedAt: r.executed_at ?? null,
+        expiresAt: r.expires_at ?? null,
         barSource: (r.bar_source as SimBarSource | null) ?? null,
         fillAt: r.fill_at,
         fillPrice: r.fill_price,
@@ -198,20 +210,21 @@ export async function upsertSimTrade(t: SimTrade): Promise<void> {
     const database = await getDb();
     database.query<void>(
         `INSERT INTO sim_trades (variant, source_kind, source_id, symbol, direction, trade_class, entry_type, entry, entry_limit, stop, target,
-             quantity, tif, strategy_id, created_at, bar_source, fill_at, fill_price, exit_at, exit_price, outcome, commissions, net_usd, net_r, status,
+             quantity, tif, strategy_id, created_at, executed_at, expires_at, bar_source, fill_at, fill_price, exit_at, exit_price, outcome, commissions, net_usd, net_r, status,
              bias_note, settled_at, horizon_days, note)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(variant, source_kind, source_id) DO UPDATE SET
              symbol = excluded.symbol, direction = excluded.direction, trade_class = excluded.trade_class, entry_type = excluded.entry_type,
              entry = excluded.entry, entry_limit = excluded.entry_limit, stop = excluded.stop, target = excluded.target,
-             quantity = excluded.quantity, tif = excluded.tif, strategy_id = excluded.strategy_id, created_at = excluded.created_at, bar_source = excluded.bar_source,
+             quantity = excluded.quantity, tif = excluded.tif, strategy_id = excluded.strategy_id, created_at = excluded.created_at,
+             executed_at = excluded.executed_at, expires_at = excluded.expires_at, bar_source = excluded.bar_source,
              fill_at = excluded.fill_at, fill_price = excluded.fill_price, exit_at = excluded.exit_at, exit_price = excluded.exit_price,
              outcome = excluded.outcome, commissions = excluded.commissions, net_usd = excluded.net_usd, net_r = excluded.net_r,
              status = excluded.status, bias_note = excluded.bias_note, settled_at = excluded.settled_at,
              horizon_days = excluded.horizon_days, note = excluded.note`,
     ).run(
         t.variant, t.sourceKind, t.sourceId, t.symbol.toUpperCase(), t.direction, t.tradeClass, t.entryType, t.entry, t.entryLimit, t.stop, t.target,
-        t.quantity, t.tif, t.strategyId ?? null, t.createdAt, t.barSource, t.fillAt, t.fillPrice, t.exitAt, t.exitPrice, t.outcome, t.commissions, t.netUsd, t.netR, t.status,
+        t.quantity, t.tif, t.strategyId ?? null, t.createdAt, t.executedAt ?? null, t.expiresAt ?? null, t.barSource, t.fillAt, t.fillPrice, t.exitAt, t.exitPrice, t.outcome, t.commissions, t.netUsd, t.netR, t.status,
         t.biasNote, t.settledAt, t.horizonDays, t.note,
     );
 }

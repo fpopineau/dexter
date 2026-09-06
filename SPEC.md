@@ -3928,3 +3928,20 @@ four are fixed here.
 | 4 | `cron/schedule.test.ts` (2026-09-10 15:30 ET = 19:30 UTC and the half-day 12:30 ET = 17:30 UTC, independent of any zone) |
 
 Harness at landing: `bun test` 1126 pass (103 files), `tsc --noEmit` clean, Jest 1107 pass under Node.
+
+## Review 2026-09-06, fifth pass (commit `bd1df00`) — response
+
+One finding; verified and fixed.
+
+| # | Finding | Verdict | Action |
+|---|---|---|---|
+| 1 | A source rebuilt beyond the lookback reset `executedAt` (and `expiresAt`) to null, so the acceptance-anchored GTC window fell back to creation | VALID (P2) | `sim_trades.executed_at` / `expires_at` are persisted on every row and the rebuild reads them; rows written before the columns keep null and count from creation (documented) (REQ-SIM-004 precision) |
+
+- REQ-SIM-004 (precision): the sim row carries the source's acceptance and
+  validity end; a reopened source keeps the real entry window.
+
+| Finding | Test |
+|---|---|
+| 1 | `simulator/settle.test.ts` (an entry accepted 2 h after creation, reopened beyond the lookback, fills inside acceptance + 3 days and keeps `executedAt` on the row) |
+
+Harness at landing: `bun test` 1127 pass (103 files), `tsc --noEmit` clean, Jest 1108 pass under Node.

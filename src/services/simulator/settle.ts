@@ -193,6 +193,8 @@ async function settleOne(
         tif: src.tif,
         strategyId: src.strategyId,
         createdAt: deps.now - (nowFrame - src.createdAt), // back to epoch ms (same offset as now)
+        executedAt: src.executedAt === null ? null : deps.now - (nowFrame - src.executedAt),
+        expiresAt: src.expiresAt === null ? null : deps.now - (nowFrame - src.expiresAt),
         barSource: loaded?.source ?? null,
         fillAt: null, fillPrice: null, exitAt: null, exitPrice: null,
         outcome: 'unknown',
@@ -348,7 +350,13 @@ export async function runSettleOnce(depsIn: SettleDeps): Promise<SettleRunCounts
         sources.push({
             kind: o.sourceKind, id: o.sourceId, symbol: o.symbol, direction: o.direction, entryType: o.entryType, entry: o.entry,
             entryLimit: o.entryLimit, stop: o.stop, target: o.target ?? o.stop, quantity: o.quantity, tif: o.tif, tradeClass: o.tradeClass, strategyId,
-            createdAt: etFrameMs(o.createdAt), expiresAt: null, executedAt: null, takePct: null, dailyAtr: null, triggerBand: null, lane: 'reopened', gate: null, score: null,
+            // The real entry window survives the rebuild (fifth pass): the
+            // acceptance and expiry are persisted on the row; rows written
+            // before those columns count from creation, as before.
+            createdAt: etFrameMs(o.createdAt),
+            expiresAt: o.expiresAt == null ? null : etFrameMs(o.expiresAt),
+            executedAt: o.executedAt == null ? null : etFrameMs(o.executedAt),
+            takePct: null, dailyAtr: null, triggerBand: null, lane: 'reopened', gate: null, score: null,
         });
     }
     counts.sources = sources.length;

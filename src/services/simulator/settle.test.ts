@@ -276,3 +276,31 @@ describe('review 2026-09-06, fourth pass (finding 2 — rows written before the 
         expect(cup.settledAt).toBe(d.now);
     });
 });
+
+describe('review 2026-09-06, fifth pass — the acceptance survives the rebuild beyond the lookback', () => {
+    test('a GTC entry accepted 2 h after creation keeps its window to acceptance + 3 days when reopened: a fill 1 h before that window ends is taken', async () => {
+        // Tue 2026-09-01: created 08:00 ET, accepted 10:00 ET → real window ends Fri 10:00 ET (creation + 3 d would end Fri 08:00)
+        const created = Date.UTC(2026, 8, 1, 12, 0, 0);
+        const accepted = Date.UTC(2026, 8, 1, 14, 0, 0);
+        const friOpen = etFrameMs(Date.UTC(2026, 8, 4, 13, 30, 0)); // Fri 09:30 ET
+        const crossing: SimBar[] = [];
+        for (let i = 0; i <= 30; i++) crossing.push({ t: friOpen + i * M, open: 99 + i * 0.1, high: 99.5 + i * 0.1, low: 98.8 + i * 0.1, close: 99.2 + i * 0.1 }); // trades through a 100 trigger around 09:40
+        const d = deps({
+            now: Date.UTC(2026, 8, 4, 21, 30, 0), // Fri 17:30 ET — beyond the 3-day lookback
+            listProposalsSince: async () => [],
+            listRefusalsSince: async () => [],
+            loadBars: async () => ({ bars: crossing, source: 'archive-1m' as const }),
+        });
+        await d.store.upsert({
+            variant: 'incumbent', sourceKind: 'proposal', sourceId: 'P-ACC', symbol: 'ACC', direction: 'long', tradeClass: 'swing', strategyId: 'swing',
+            entryType: 'STP_LMT', entry: 100, entryLimit: 100.5, stop: 96, target: 108, quantity: 3, tif: 'GTC', createdAt: created, executedAt: accepted, expiresAt: created + 3 * 86_400_000,
+            barSource: 'archive-1m', fillAt: null, fillPrice: null, exitAt: null, exitPrice: null, outcome: 'unfilled', commissions: null, netUsd: null, netR: null,
+            status: 'open', biasNote: 'pessimistic', settledAt: created, horizonDays: 3, note: 'entry not yet filled — window still open',
+        });
+        await runSettleOnce(d);
+        const inc = (await d.store.find('incumbent', 'proposal', 'P-ACC'))!;
+        expect(inc.fillPrice).not.toBeNull(); // filled inside the acceptance-anchored window
+        expect(inc.outcome).not.toBe('unfilled');
+        expect(inc.executedAt).toBe(accepted); // and the acceptance is still on the row for the next rebuild
+    });
+});
