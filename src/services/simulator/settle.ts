@@ -192,9 +192,13 @@ async function settleOne(
         quantity,
         tif: src.tif,
         strategyId: src.strategyId,
-        createdAt: deps.now - (nowFrame - src.createdAt), // back to epoch ms (same offset as now)
-        executedAt: src.executedAt === null ? null : deps.now - (nowFrame - src.executedAt),
-        expiresAt: src.expiresAt === null ? null : deps.now - (nowFrame - src.expiresAt),
+        // Back to epoch ms with the offset of the INSTANT itself, not of the
+        // replay night (review 2026-09-06, sixth pass): a row settled across a
+        // DST change kept shifting its creation, acceptance and expiry by an
+        // hour on every pass.
+        createdAt: frameToEpochMs(src.createdAt),
+        executedAt: src.executedAt === null ? null : frameToEpochMs(src.executedAt),
+        expiresAt: src.expiresAt === null ? null : frameToEpochMs(src.expiresAt),
         barSource: loaded?.source ?? null,
         fillAt: null, fillPrice: null, exitAt: null, exitPrice: null,
         outcome: 'unknown',

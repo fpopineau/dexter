@@ -3945,3 +3945,17 @@ One finding; verified and fixed.
 | 1 | `simulator/settle.test.ts` (an entry accepted 2 h after creation, reopened beyond the lookback, fills inside acceptance + 3 days and keeps `executedAt` on the row) |
 
 Harness at landing: `bun test` 1127 pass (103 files), `tsc --noEmit` clean, Jest 1108 pass under Node.
+
+## Review 2026-09-06, sixth pass (commit `d563867`) — response
+
+One finding; verified and fixed.
+
+| # | Finding | Verdict | Action |
+|---|---|---|---|
+| 1 | The sim row converted `createdAt`, `executedAt` and `expiresAt` back to epoch ms with the REPLAY night's UTC offset, so a row settled across a DST change drifted an hour per pass | VALID (P2) | the conversion uses `frameToEpochMs` (the instant's own offset); a DST round-trip test pins creation, acceptance and expiry across the 2026-11-01 change, on the first pass and on a rebuild (REQ-SIM-004 precision) |
+
+| Finding | Test |
+|---|---|
+| 1 | `simulator/settle.test.ts` (EDT-created row settled in EST keeps its exact instants, twice) |
+
+Harness at landing: `bun test` 1128 pass (103 files), `tsc --noEmit` clean, Jest 1109 pass under Node.

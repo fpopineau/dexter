@@ -304,3 +304,31 @@ describe('review 2026-09-06, fifth pass — the acceptance survives the rebuild 
         expect(inc.executedAt).toBe(accepted); // and the acceptance is still on the row for the next rebuild
     });
 });
+
+describe('review 2026-09-06, sixth pass — timestamps survive a replay across the DST change', () => {
+    test('a row created/accepted in EDT and settled in EST keeps its exact creation, acceptance and expiry instants (and again on a rebuild)', async () => {
+        const created = Date.UTC(2026, 9, 30, 14, 0, 0);   // Fri 2026-10-30 10:00 EDT
+        const accepted = Date.UTC(2026, 9, 30, 16, 0, 0);  // 12:00 EDT
+        const expiry = created + 3 * 86_400_000;
+        const bars = winningBars(90).map((b) => ({ ...b, t: etFrameMs(created) + (b.t - etFrameMs(CREATED)) })); // never touches a 100 trigger
+        const d = deps({
+            now: Date.UTC(2026, 10, 2, 22, 30, 0), // Mon 2026-11-02 17:30 EST — after the 11-01 change
+            listProposalsSince: async () => [proposal({ id: 'P-DST', symbol: 'DST', tif: 'GTC', tradeClass: 'swing', strategyId: 'swing', entryType: 'STP_LMT', entry: 100, entryLimit: 100.5, stop: 96, target: 108, createdAt: created, executedAt: accepted, expiresAt: expiry })],
+            listRefusalsSince: async () => [],
+            loadBars: async () => ({ bars, source: 'archive-1m' as const }),
+        });
+        await runSettleOnce(d);
+        const row = (await d.store.find('incumbent', 'proposal', 'P-DST'))!;
+        expect(row.createdAt).toBe(created);
+        expect(row.executedAt).toBe(accepted);
+        expect(row.expiresAt).toBe(expiry);
+        // a second night, rebuilt from the open row: still the same instants
+        const d2 = deps({ now: Date.UTC(2026, 10, 3, 22, 30, 0), listProposalsSince: async () => [], listRefusalsSince: async () => [], loadBars: async () => ({ bars, source: 'archive-1m' as const }) });
+        d2.store.rows = d.store.rows;
+        await runSettleOnce(d2);
+        const again = (await d2.store.find('incumbent', 'proposal', 'P-DST'))!;
+        expect(again.createdAt).toBe(created);
+        expect(again.executedAt).toBe(accepted);
+        expect(again.expiresAt).toBe(expiry);
+    });
+});
