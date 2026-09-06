@@ -2398,8 +2398,8 @@ after this check and do not collide.
 Implements REQ-TRIG-001..004, REQ-SCAN-004..008, REQ-RISK-008..011,
 REQ-LLM-001..002 and the REQ-LIVE-001..003 seams from the live-loop section.
 Harness at landing: `bun test` 947/0 (80 files), `tsc --noEmit` clean, Jest
-green at 4 workers. The ephemeral `docs/day2day/WP1-PLAN.md` carries the
-task graph for the review and is deleted once the operator has read it.
+green at 4 workers. The plan document was retired on 2026-09-06 (§ Plan
+documents retired); its decisions are recorded there.
 
 ### Precisions recorded at landing (append-only; they refine, not change, the requirements above)
 
@@ -2468,8 +2468,7 @@ task graph for the review and is deleted once the operator has read it.
 ## Live-loop WP2 landed (2026-09-05) — in-process simulator, shadow-variant registry, fingerprint narrowing
 
 Implements REQ-SIM-001..007 and — pulled forward from WP3 — REQ-FP-001/002.
-The ephemeral `docs/day2day/WP2-PLAN.md` carries the task graph for the
-review and is deleted once read.
+The plan document was retired on 2026-09-06 (§ Plan documents retired).
 
 ### Sequencing decision recorded at landing
 
@@ -2548,8 +2547,8 @@ the protocol's fingerprint paragraph carries a dated amendment already.
 ## Live-loop WP3 landed (2026-09-05) — sequential test, size ladder, epochs, nightly digest
 
 Implements REQ-SEQ-001..007, REQ-LADDER-001..004, REQ-EPOCH-001..004,
-REQ-DIGEST-001..005 and REQ-FP-003. The ephemeral `docs/day2day/WP3-PLAN.md`
-carries the task graph for the review and is deleted once read.
+REQ-DIGEST-001..005 and REQ-FP-003. The plan document was retired on
+2026-09-06 (§ Plan documents retired).
 
 ### Fingerprint discipline recorded at landing
 
@@ -2682,8 +2681,8 @@ identity untouched.
 
 ## Live-loop WP4 landed (2026-09-05) — live-automation plumbing, switched OFF
 
-Implements REQ-LIVE-004..009. The ephemeral `docs/day2day/WP4-PLAN.md`
-carries the task graph for the review and is deleted once read.
+Implements REQ-LIVE-004..009. The plan document was retired on 2026-09-06
+(§ Plan documents retired).
 
 ### Sequencing recorded at landing
 
@@ -3041,8 +3040,8 @@ evidence gain).
 ### WP5 landed (2026-09-05) — precisions and traceability
 
 Landed before epoch 1 opened (the restart carries WP1..WP5; the identity
-moves once more). The ephemeral `docs/day2day/WP5-PLAN.md` carries the task
-graph for the review.
+moves once more). The plan document was retired on 2026-09-06 (§ Plan
+documents retired).
 
 Precisions recorded at landing (append-only):
 
@@ -3254,7 +3253,7 @@ liquidity-adjusted ADV per session.
 Acceptance criteria above: all checked at landing (`bun test` 1083 pass,
 `tsc --noEmit` clean, Jest 1064 pass under Node).
 
-Plan decisions 1–5 (`docs/day2day/WP6-PLAN.md`) are implemented as written;
+Plan decisions 1–5 (§ Operator decisions 2026-09-06) are implemented as written;
 RATIFIED by the operator 2026-09-05 (see § Operator decisions 2026-09-06).
 
 ### Block-bootstrap sensitivity under regime streaks (2026-09-05, note to REQ-SEQ-002)
@@ -3439,7 +3438,7 @@ days before the archive existed.
 | REQ-BENCH-006 | structural: `candidate-archive.db` has no order-id columns; no import of `candidate-archive.js` outside `overnight-benchmark.ts`, `simulator/index.ts`, `archive-scheduler.ts`, `gateway.ts` and the script |
 | REQ-BENCH-007 | `archive-scheduler.test.ts` (`orderArchiveUniverse` priority, case-fold, cap, dropped count) |
 
-Plan decisions 1–6 (`docs/day2day/WP7-PLAN.md`) are implemented as written;
+Plan decisions 1–6 (§ Operator decisions 2026-09-06) are implemented as written;
 RATIFIED by the operator 2026-09-06 (see § Operator decisions 2026-09-06).
 
 Harness at landing: `bun test` 1102 pass (101 files), `tsc --noEmit` clean, Jest 1083 pass under Node. The read-only script runs without an archive ("no candidate archive yet").
@@ -3582,7 +3581,7 @@ a lane ranking for swing or earnings-bet.
 | REQ-DISC-005 | `scripts/validate-lane-ranker.ts` smoke-run read-only |
 | REQ-DISC-006 | inspection (`DEFAULT_RULES`, `risk-rules.live.yaml`) |
 
-Plan decisions 1–6 (`docs/day2day/WP8-PLAN.md`) are implemented as written;
+Plan decisions 1–6 (§ Operator decisions 2026-09-06) are implemented as written;
 RATIFIED by the operator 2026-09-06 (see § Operator decisions 2026-09-06).
 
 Harness at landing: `bun test` 1110 pass (102 files), `tsc --noEmit` clean, Jest 1091 pass under Node; `scripts/validate-lane-ranker.ts` and `scripts/overnight-benchmark.ts` smoke-run read-only against the live data directory.
@@ -3591,8 +3590,8 @@ Harness at landing: `bun test` 1110 pass (102 files), `tsc --noEmit` clean, Jest
 
 The operator ratified the plan decisions of WP6 ("OK for WP6 decisions",
 2026-09-05) and of WP7 and WP8 ("OK for WP7 and WP8 decisions",
-2026-09-06). They are absorbed here so the plan documents
-(`docs/day2day/WP6..WP8-PLAN.md`) are ephemeral and may be deleted.
+2026-09-06). They are absorbed here; the plan documents were
+retired on 2026-09-06 (§ Plan documents retired).
 
 **WP6 — sizer composition.**
 1. Creation does not fetch the broker book: the creation context is the
@@ -3975,3 +3974,104 @@ One finding; verified and fixed.
 | 1 | `simulator/variants.test.ts` (accepted 2026-10-30 12:00 EDT → dead 2026-11-02 16:00 UTC; accepted 2026-03-06 10:00 EST → dead 2026-03-09 15:00 UTC) |
 
 Harness at landing: `bun test` 1129 pass (103 files), `tsc --noEmit` clean, Jest 1110 pass under Node.
+
+## Plan documents retired (2026-09-06)
+
+The eight ephemeral plan documents (`docs/day2day/WP1..WP8-PLAN.md`) are
+deleted on the operator's instruction; this SPEC is the only record. Each
+work package's contract, landing precisions and traceability live in its
+own section above; the plan-level decisions that were not already recorded
+as precisions are absorbed here, verbatim in substance. Every one was
+ratified at its review (WP1–WP5 implicitly by the commits that followed,
+WP6–WP8 explicitly — § Operator decisions 2026-09-06 — with the later
+amendments of the same day's review responses).
+
+### WP1 — funnel throughput + behavior seams (§ Live-loop WP1 landed)
+
+1. Large-cap reserved slots are bounded by `OPP_LARGECAP_RESERVE` (default
+   5, best scan ranks first), not by the lane's own row count (recorded as
+   the REQ-SCAN-006 precision).
+2. Complex constituent admission (REQ-SCAN-007) uses the ATR-normalised bar
+   `|move| ≥ 1.0 × dailyATR%` with a 1 % floor, not the sentinel's 5 % raw bar.
+3. `loop-commands` answers read-only `live status` / `ladder` / `epoch` from
+   the state files; the mutating commands arrived with WP3/WP4.
+4. The spend meter hooks the agent runner's `DoneEvent.tokenUsage` (one
+   write per run, no edit inside `src/agent`).
+5. `AUTO_EXECUTE_PAPER=true` stays the master auto-exec switch on every
+   account type; the live branch adds its conditions on top (WP4).
+
+### WP2 — simulator + shadow variants + fingerprint narrowing (§ Live-loop WP2 landed)
+
+1. `sim_trades` lives in its own `simulator.db` (REQ-SIM-007 structural).
+2. Every simulator time uses the ET-frame convention (`barTimeFrameMs` /
+   `etFrameMs`); since the seventh review pass, DURATIONS are elapsed epoch
+   time (`addElapsedToFrame`).
+3. `sizeAtRung`'s base is the epoch NetLiq (`performance-epoch.json`,
+   fallback $11,700). The claim "R is rung-invariant" was withdrawn on
+   2026-09-06 (gross R is the size-invariant label; net R is informational).
+4. Ratchet exits are classified `target` above the fill and `stop`
+   otherwise, with a note.
+5. Settle at 17:10 ET plus a boot catch-up; open GTC rows re-settle nightly
+   until they exit, reach their lane deadline (since the review responses)
+   or the 28-day horizon (`unknown: horizon expired`).
+6. Fingerprint policy: `src` (+ root runtime configs, SOUL.md) is INCLUDED
+   by default; an explicit EXCLUDE list names observability / control-plane
+   / evaluator / TUI paths and every `*.test.ts`; `scripts/` leaves the
+   identity.
+
+### WP3 — sequential test, ladder, epochs, digest (§ Live-loop WP3 landed)
+
+1. `epoch new` is the epoch-creating command (performance reset + record +
+   ladder reset + journal); the legacy `performance reset` only resets the
+   baseline.
+2. Anomaly-driven epoch stops are detected at the nightly look from the EOD
+   triage run stamp (`failed`); the triage service itself is not hooked.
+3. The −5 % hard stop and the ladder step-down are evaluated by the equity
+   sampler every 5 minutes AND re-checked at the nightly look.
+4. The REJECT rule's UCB reuses the day-block bootstrap by negation
+   (UCB(x) = −LCB(−x)).
+5. Shadow-vs-incumbent compares DAILY summed R over the incumbent's days (a
+   variant day without rows contributes 0).
+6. Promotion prints the per-variant config change and the restart +
+   `epoch new` steps; gate-off variants print "requires a SPEC change".
+
+### WP4 — live-automation plumbing, switched OFF (§ Live-loop WP4 landed)
+
+1. `live on` never starts an epoch; the confirmation instructs `epoch new`
+   (no carry); `epoch new carry` is refused on a live account.
+2. A challenge mismatch refuses and KEEPS the pending challenge until its
+   expiry; expiry clears it.
+3. `live status` prints the switch line plus every live-verdict condition
+   as the process sees it.
+4. Sim-only marking happens in the auto-exec live branch (`rejected`,
+   `sim-only:` note, refusal row); a hand `accept` of such a row on live is
+   refused by the class gate; the simulator settles it either way.
+5. No placement-path fake broker: the "open → due → executed" path is
+   pinned as far as the gates.
+
+### WP5 — four-lane contract (§ Four-lane contract WP5)
+
+1. Overnight lane: entries from the last hour before the close (the
+   Pre-Close Review is close-relative since 2026-09-06), expiry clamped to
+   the close, exit at 10:00 ET next session (`overnight_exit_minutes_et`
+   600), budget `overnight_risk_pct` (0.5 base / 0.75 live), at most 2
+   concurrent (`max_overnight_lane_positions`) inside the swing pool of 3
+   (open rows count at creation, commitments at acceptance — review
+   2026-09-06).
+2. Hold limits: swing 10 and cup-and-handle 15 trading sessions AFTER the
+   fill session, closing at 15:50 ET on the last day (wording aligned
+   2026-09-06).
+3. The swing risk class is the overnight-capable class; no new `TradeClass`.
+4. A deadline close is tracked `manual` with `deadline_closed_at` as the
+   distinguishing stamp (confirmed-flat semantics since 2026-09-06); no new
+   `ExitReason`.
+5. Cup states: `pivot-ready` / `breakout-confirmed` (pivot fixed before the
+   last bar since 2026-09-06); `retest` needs breakout history the archive
+   does not keep.
+6. `exit-fixed-3` is the AUD-01 comparison variant; the intraday take
+   policy itself is unchanged.
+
+### WP6 — WP8
+
+Decisions recorded and ratified in § Operator decisions 2026-09-06, amended
+where the review responses of 2026-09-06 say so.
