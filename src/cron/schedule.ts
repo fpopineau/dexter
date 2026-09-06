@@ -38,28 +38,35 @@ function closeMinutes(dateStr: string): number {
     return isMarketHalfDay(dateStr) ? 13 * 60 : 16 * 60;
 }
 
-/** Epoch ms of the regular-session close of the trading day containing
- *  `nowMs`, or null when that day is not a trading day (weekend, holiday).
- *  The executor refuses to run a session-close job past this instant. */
-export function sessionCloseMsFor(nowMs: number, tz: string = ET): number | null {
-    const start = dayStartMs(nowMs, tz);
-    const p = tzParts(start + 12 * 3_600_000, tz);
+/** Smallest offset: a job AT the close could never run (the executor
+ *  refuses to start at or past the close) — fourth pass, finding 3. */
+export const SESSION_CLOSE_MIN_OFFSET_MIN = 1;
+export const SESSION_CLOSE_MAX_OFFSET_MIN = 6 * 60;
+
+/** Epoch ms of the US regular-session close of the New York trading day
+ *  containing `nowMs`, or null when that day is not a trading day (weekend,
+ *  holiday). Always New York time — the close does not move with any
+ *  configured zone. The executor refuses to run a session-close job at or
+ *  past this instant. */
+export function sessionCloseMsFor(nowMs: number): number | null {
+    const start = dayStartMs(nowMs, ET);
+    const p = tzParts(start + 12 * 3_600_000, ET);
     if (!isTradingDay(p)) return null;
     return start + closeMinutes(p.dateStr) * 60_000;
 }
 
-/** Next instant `offsetMin` minutes before the close of a trading day,
- *  strictly after `nowMs` (+ the refire gap). Searches 20 calendar days. */
-export function nextSessionCloseFire(nowMs: number, offsetMin: number, tz: string = ET): number | undefined {
-    let start = dayStartMs(nowMs, tz);
+/** Next instant `offsetMin` minutes before the New York close of a trading
+ *  day, strictly after `nowMs` (+ the refire gap). Searches 20 calendar days. */
+export function nextSessionCloseFire(nowMs: number, offsetMin: number): number | undefined {
+    let start = dayStartMs(nowMs, ET);
     for (let i = 0; i < 20; i++) {
-        const p = tzParts(start + 12 * 3_600_000, tz);
+        const p = tzParts(start + 12 * 3_600_000, ET);
         if (isTradingDay(p)) {
             const fire = start + (closeMinutes(p.dateStr) - offsetMin) * 60_000;
             if (fire > nowMs + MIN_REFIRE_GAP_MS) return fire;
         }
         // +26 h lands in the next calendar day whatever the DST shift; re-anchor to midnight.
-        start = dayStartMs(start + 26 * 3_600_000, tz);
+        start = dayStartMs(start + 26 * 3_600_000, ET);
     }
     return undefined;
 }
@@ -110,8 +117,8 @@ export function computeNextRunAtMs(schedule: CronSchedule, nowMs: number): numbe
     }
 
     case 'session-close': {
-      if (!Number.isFinite(schedule.offsetMin) || schedule.offsetMin < 0 || schedule.offsetMin > 6 * 60) return undefined;
-      return nextSessionCloseFire(nowMs, schedule.offsetMin, schedule.tz || ET);
+      if (!Number.isFinite(schedule.offsetMin) || schedule.offsetMin < SESSION_CLOSE_MIN_OFFSET_MIN || schedule.offsetMin > SESSION_CLOSE_MAX_OFFSET_MIN) return undefined;
+      return nextSessionCloseFire(nowMs, schedule.offsetMin);
     }
   }
 }

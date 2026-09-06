@@ -108,7 +108,7 @@ export async function executeCronJob(
   // after a gateway outage must not review positions after the bell) nor
   // on a non-trading day — the calendar guards it, not a fixed window.
   if (job.schedule.kind === 'session-close') {
-    const close = sessionCloseMsFor(Date.now(), job.schedule.tz ?? 'America/New_York');
+    const close = sessionCloseMsFor(Date.now());
     if (close === null || Date.now() >= close) {
       debugLog(`[cron] job ${job.id}: session-close job past the close or not a trading day, skipping`);
       scheduleNextRun(job, store);

@@ -55,6 +55,8 @@ describe('variant registry v1 (REQ-SIM-004)', () => {
         expect(variantByName('lane-overnight')!.spec(ovn, ctx)!.entryDeadline).toBe(T0 + 30 * 60_000); // max(expiry 25 min, creation + 30 min grace)
         expect(variantByName('lane-overnight')!.spec({ ...ovn, executedAt: T0 + 20 * 60_000 }, ctx)!.entryDeadline).toBe(T0 + 50 * 60_000); // accepted at 20 → 50
         expect(variantByName('class-swing')!.spec(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'swing' }), ctx)!.entryDeadline).toBe(T0 + 3 * 86_400_000);
+        // fourth pass, finding 1: a patient GTC entry's 3 days run from the ACCEPTANCE, as the real zombie sweep counts them
+        expect(variantByName('class-swing')!.spec(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'swing', executedAt: T0 + 2 * 3_600_000 }), ctx)!.entryDeadline).toBe(T0 + 2 * 3_600_000 + 3 * 86_400_000);
     });
 
     test('funnel-75: what the OLD bar would have traded — trigger rows in the 75+ band, plus every non-trigger lane', () => {

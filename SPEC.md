@@ -3895,3 +3895,36 @@ five are fixed here.
 | 5 | `candidate-archive.test.ts` (half-day 12:05 capture, 12:06 refusal → refused) |
 
 Harness at landing: `bun test` 1124 pass (103 files), `tsc --noEmit` clean, Jest 1105 pass under Node.
+
+## Review 2026-09-06, fourth pass (commit `1610f4a`) — response
+
+Four further findings; each verified against the code and each holds. All
+four are fixed here.
+
+| # | Finding | Verdict | Action |
+|---|---|---|---|
+| 1 | The simulated 3-day GTC entry horizon ran from creation; the real zombie sweep counts from ACCEPTANCE (`executed_at`) | VALID (P2) | `entryDeadline` = (accepted ?? created) + 3 days for patient GTC entries (REQ-SIM-004 amended) |
+| 2 | `strategy_id` was added without backfilling: an old cup incumbent reopened beyond the lookback still rebuilt a swing | VALID (P2) | the store backfills at open (lane variants name their lane; sibling rows of the same source take it); the rebuild derives the lane from the whole open-row GROUP of a source (column, then a lane variant's name, then the class) — pre-migration rows included (REQ-LANE-006 precision) |
+| 3 | A `session-close` job with `offsetMin: 0` was scheduled AT the close and refused by the executor forever | VALID (P2) | offsets are ≥ 1 minute (`SESSION_CLOSE_MIN_OFFSET_MIN`): the schema and `computeNextRunAtMs` refuse 0 (REQ-CRON-001 amended) |
+| 4 | A configurable timezone moved the US close (Europe/Paris scheduled 16:00 Paris) | VALID (P2) | the close is a New York instant: the schedule kind has no timezone field; the computation is fixed to America/New_York (REQ-CRON-001 amended) |
+
+### Amended requirements
+
+- REQ-SIM-004 (amended): a patient GTC twin's entry deadline is 3 days
+  after the acceptance (`executedAt`), after the creation for a never-
+  accepted row; overnight-lane entries keep their close-clamped expiry.
+- REQ-LANE-006 (precision): `sim_trades.strategy_id` is backfilled on
+  open; a reopened source's lane comes from any open row of that source
+  (column, lane-variant name, class — in that order).
+- REQ-CRON-001 (amended): `session-close` = `{ kind, offsetMin }` with
+  1 ≤ offsetMin ≤ 360, always relative to the New York close; there is no
+  timezone field and 0 is invalid.
+
+| Finding | Test |
+|---|---|
+| 1 | `simulator/variants.test.ts` (an accepted GTC entry's window runs from the acceptance) |
+| 2 | `simulator/settle.test.ts` (two open rows without a lane column — incumbent first — rebuild as cup-and-handle and settle together under one contract) |
+| 3 | `cron/schedule.test.ts` (offset 1 → 15:59 ET; offset 0 → undefined) |
+| 4 | `cron/schedule.test.ts` (2026-09-10 15:30 ET = 19:30 UTC and the half-day 12:30 ET = 17:30 UTC, independent of any zone) |
+
+Harness at landing: `bun test` 1126 pass (103 files), `tsc --noEmit` clean, Jest 1107 pass under Node.

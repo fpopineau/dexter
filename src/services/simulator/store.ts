@@ -130,8 +130,23 @@ async function getDb(): Promise<SqliteDatabase> {
         CREATE INDEX IF NOT EXISTS ix_sim_trades_created ON sim_trades (created_at);
         CREATE INDEX IF NOT EXISTS ix_sim_trades_status ON sim_trades (status);
     `);
-    // Additive, idempotent (rows written before the column keep NULL).
+    // Additive, idempotent. Rows written before the column are BACKFILLED
+    // (review 2026-09-06, fourth pass, finding 2): a lane variant names its
+    // lane, and every sibling row of the same source takes it — otherwise an
+    // old cup incumbent reopened beyond the lookback rebuilt a swing.
     try { db.exec('ALTER TABLE sim_trades ADD COLUMN strategy_id TEXT'); } catch { /* already present */ }
+    db.exec(`
+        UPDATE sim_trades SET strategy_id = 'overnight' WHERE strategy_id IS NULL AND variant = 'lane-overnight';
+        UPDATE sim_trades SET strategy_id = 'cup-and-handle' WHERE strategy_id IS NULL AND variant = 'lane-cup-and-handle';
+        UPDATE sim_trades SET strategy_id = 'earnings-bet' WHERE strategy_id IS NULL AND trade_class = 'earnings-bet';
+        UPDATE sim_trades SET strategy_id = (
+            SELECT s2.strategy_id FROM sim_trades s2
+            WHERE s2.source_kind = sim_trades.source_kind AND s2.source_id = sim_trades.source_id AND s2.strategy_id IS NOT NULL
+            LIMIT 1)
+        WHERE strategy_id IS NULL AND EXISTS (
+            SELECT 1 FROM sim_trades s3
+            WHERE s3.source_kind = sim_trades.source_kind AND s3.source_id = sim_trades.source_id AND s3.strategy_id IS NOT NULL);
+    `);
     return db;
 }
 

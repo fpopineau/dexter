@@ -96,8 +96,11 @@ function hasLevels(src: SimSource): boolean {
 
 function entryDeadline(src: SimSource): number {
     // REQ-LANE-003: an overnight-lane entry dies with its (close-clamped)
-    // expiry even though its bracket is GTC — the sweeper cancels it.
-    if (src.tif === 'GTC' && src.strategyId !== 'overnight') return src.createdAt + GTC_ENTRY_HORIZON_MS;
+    // expiry even though its bracket is GTC — the sweeper cancels it. Other
+    // GTC entries are patient: the zombie sweep counts its 3 days from the
+    // ACCEPTANCE (`executed_at`), so the twin does too (review 2026-09-06,
+    // fourth pass, finding 1); a never-accepted row counts from creation.
+    if (src.tif === 'GTC' && src.strategyId !== 'overnight') return (src.executedAt ?? src.createdAt) + GTC_ENTRY_HORIZON_MS;
     // The real sweep (REQ-ENTRY-001) cancels once BOTH the expiry has passed
     // and the acceptance grace has run: deadline = max(expiry, accepted +
     // grace) — not expiry + grace (review 2026-09-06, second pass, finding 5).

@@ -329,15 +329,22 @@ export async function runSettleOnce(depsIn: SettleDeps): Promise<SettleRunCounts
     // `strategyId` so every variant rebuilds the SAME contract (third pass,
     // finding 3); rows written before the column fall back to the variant
     // name, then the class.
-    const openRows = [...await deps.store.listOpen()].sort((a, b) => Number(b.variant === 'incumbent') - Number(a.variant === 'incumbent'));
+    const allOpen = await deps.store.listOpen();
+    const openRows = [...allOpen].sort((a, b) => Number(b.variant === 'incumbent') - Number(a.variant === 'incumbent'));
     const seen = new Set(sources.map((s) => `${s.kind}|${s.id}`));
     for (const o of openRows) {
         if (seen.has(`${o.sourceKind}|${o.sourceId}`)) continue;
         seen.add(`${o.sourceKind}|${o.sourceId}`);
-        const strategyId: SimSource['strategyId'] = o.strategyId
-            ?? (o.variant === 'lane-overnight' ? 'overnight'
-                : o.variant === 'lane-cup-and-handle' ? 'cup-and-handle'
-                : o.tradeClass === 'swing' ? 'swing' : o.tradeClass === 'earnings-bet' ? 'earnings-bet' : 'intraday');
+        // The lane is a property of the SOURCE: any open row of the same
+        // source that carries it (persisted column, or a lane variant's name
+        // on rows written before the column) names it for all — fourth pass,
+        // finding 2: the incumbent's class alone is not the lane.
+        const group = allOpen.filter((r) => r.sourceKind === o.sourceKind && r.sourceId === o.sourceId);
+        const fromColumn = group.find((r) => r.strategyId)?.strategyId ?? null;
+        const fromVariant = group.some((r) => r.variant === 'lane-overnight') ? 'overnight'
+            : group.some((r) => r.variant === 'lane-cup-and-handle') ? 'cup-and-handle' : null;
+        const strategyId: SimSource['strategyId'] = fromColumn ?? fromVariant
+            ?? (o.tradeClass === 'swing' ? 'swing' : o.tradeClass === 'earnings-bet' ? 'earnings-bet' : 'intraday');
         sources.push({
             kind: o.sourceKind, id: o.sourceId, symbol: o.symbol, direction: o.direction, entryType: o.entryType, entry: o.entry,
             entryLimit: o.entryLimit, stop: o.stop, target: o.target ?? o.stop, quantity: o.quantity, tif: o.tif, tradeClass: o.tradeClass, strategyId,

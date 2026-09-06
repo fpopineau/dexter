@@ -248,3 +248,31 @@ describe('review 2026-09-06, third pass (findings 2–4)', () => {
         expect(inc2.strategyId).toBe('cup-and-handle'); // not rebuilt as a plain swing
     });
 });
+
+describe('review 2026-09-06, fourth pass (finding 2 — rows written before the lane column)', () => {
+    test('an old cup source whose open rows carry NO strategyId is rebuilt as cup-and-handle from its lane variant, incumbent included', async () => {
+        const created = Date.UTC(2026, 8, 1, 14, 0, 0);
+        const d = deps({
+            now: Date.UTC(2026, 8, 15, 21, 30, 0), // far beyond the lookback: only the open rows remain
+            listProposalsSince: async () => [],
+            listRefusalsSince: async () => [],
+            loadBars: async () => ({ bars: winningBars(90), source: 'archive-1m' as const }), // never touches the 100 trigger
+        });
+        const openRow = (variant: string): SimTrade => ({
+            variant, sourceKind: 'proposal', sourceId: 'P-OLD', symbol: 'OLD', direction: 'long', tradeClass: 'swing',
+            entryType: 'STP_LMT', entry: 100, entryLimit: 100.5, stop: 96, target: 108, quantity: 3, tif: 'GTC', createdAt: created,
+            barSource: 'archive-1m', fillAt: null, fillPrice: null, exitAt: null, exitPrice: null, outcome: 'unfilled', commissions: null, netUsd: null, netR: null,
+            status: 'open', biasNote: 'pessimistic', settledAt: created, horizonDays: 2, note: null,
+            // no strategyId: written before the column existed
+        });
+        await d.store.upsert(openRow('incumbent'));          // encountered first — its class says 'swing'
+        await d.store.upsert(openRow('lane-cup-and-handle')); // the lane variant names the lane
+        await runSettleOnce(d);
+        const inc = (await d.store.find('incumbent', 'proposal', 'P-OLD'))!;
+        const cup = (await d.store.find('lane-cup-and-handle', 'proposal', 'P-OLD'))!;
+        expect(inc.strategyId).toBe('cup-and-handle');
+        expect(cup.strategyId).toBe('cup-and-handle');
+        expect(inc.settledAt).toBe(d.now); // both re-evaluated this pass under one contract
+        expect(cup.settledAt).toBe(d.now);
+    });
+});

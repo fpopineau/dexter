@@ -3,11 +3,13 @@
 export type CronScheduleAt = { kind: 'at'; at: string };
 export type CronScheduleEvery = { kind: 'every'; everyMs: number; anchorMs?: number };
 export type CronScheduleCron = { kind: 'cron'; expr: string; tz?: string };
-/** Fires `offsetMin` minutes before the US regular-session CLOSE on every
- *  trading day (weekday, not a holiday) — 16:00 ET, 13:00 ET on a half-day.
- *  The market calendar decides, not a fixed clock (review 2026-09-06: a
- *  15:30 cron never ran on a 13:00 close). */
-export type CronScheduleSessionClose = { kind: 'session-close'; offsetMin: number; tz?: string };
+/** Fires `offsetMin` minutes (≥ 1) before the US regular-session CLOSE on
+ *  every trading day (weekday, not a holiday) — 16:00 ET, 13:00 ET on a
+ *  half-day. The market calendar decides, not a fixed clock (review
+ *  2026-09-06: a 15:30 cron never ran on a 13:00 close). The close is a New
+ *  York instant: there is no timezone field to move it (fourth pass,
+ *  finding 4). */
+export type CronScheduleSessionClose = { kind: 'session-close'; offsetMin: number };
 
 export type CronSchedule = CronScheduleAt | CronScheduleEvery | CronScheduleCron | CronScheduleSessionClose;
 

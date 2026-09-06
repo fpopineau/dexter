@@ -19,11 +19,17 @@ describe('session-close schedule (review 2026-09-06 — the Pre-Close Review fol
         expect(nextSessionCloseFire(et(2026, 9, 5, 12, 0), 30)).toBe(et(2026, 9, 8, 15, 30)); // Sat → skips Mon holiday → Tue
     });
 
-    test('offset 0 is the close itself; computeNextRunAtMs dispatches and refuses a nonsense offset', () => {
-        expect(nextSessionCloseFire(et(2026, 9, 10, 10, 0), 0)).toBe(et(2026, 9, 10, 16, 0));
-        expect(computeNextRunAtMs({ kind: 'session-close', offsetMin: 30, tz: 'America/New_York' }, et(2026, 9, 10, 10, 0))).toBe(et(2026, 9, 10, 15, 30));
+    test('the offset is at least one minute (a job AT the close could never run past the executor guard — fourth pass, finding 3); computeNextRunAtMs dispatches and refuses nonsense offsets', () => {
+        expect(computeNextRunAtMs({ kind: 'session-close', offsetMin: 30 }, et(2026, 9, 10, 10, 0))).toBe(et(2026, 9, 10, 15, 30));
+        expect(computeNextRunAtMs({ kind: 'session-close', offsetMin: 1 }, et(2026, 9, 10, 10, 0))).toBe(et(2026, 9, 10, 15, 59));
+        expect(computeNextRunAtMs({ kind: 'session-close', offsetMin: 0 }, et(2026, 9, 10, 10, 0))).toBeUndefined();
         expect(computeNextRunAtMs({ kind: 'session-close', offsetMin: -5 }, et(2026, 9, 10, 10, 0))).toBeUndefined();
         expect(computeNextRunAtMs({ kind: 'session-close', offsetMin: 9 * 60 }, et(2026, 9, 10, 10, 0))).toBeUndefined();
+    });
+
+    test('the close is a New York instant whatever zone the process or the operator lives in (fourth pass, finding 4): 2026-09-10 15:30 ET = 19:30 UTC', () => {
+        expect(nextSessionCloseFire(Date.UTC(2026, 8, 10, 10, 0, 0), 30)).toBe(Date.UTC(2026, 8, 10, 19, 30, 0));
+        expect(nextSessionCloseFire(Date.UTC(2026, 10, 27, 10, 0, 0), 30)).toBe(Date.UTC(2026, 10, 27, 17, 30, 0)); // half-day, EST: 12:30 ET = 17:30 UTC
     });
 
     test('sessionCloseMsFor: the day\'s close (16:00 / 13:00 ET), null on a weekend or holiday — the executor\'s "not past the close" guard', () => {
@@ -40,7 +46,7 @@ describe('seeded-schedule migration (trading-schedules — a legacy seed follows
         const def = { legacySchedules: [{ kind: 'cron' as const, expr: '30 15 * * 1-5', tz: 'America/New_York' }] };
         expect(carriesLegacySchedule({ schedule: { kind: 'cron', expr: '30 15 * * 1-5', tz: 'America/New_York' } }, def)).toBe(true);
         expect(carriesLegacySchedule({ schedule: { kind: 'cron', expr: '15 15 * * 1-5', tz: 'America/New_York' } }, def)).toBe(false); // operator-tuned
-        expect(carriesLegacySchedule({ schedule: { kind: 'session-close', offsetMin: 30, tz: 'America/New_York' } }, def)).toBe(false);
+        expect(carriesLegacySchedule({ schedule: { kind: 'session-close', offsetMin: 30 } }, def)).toBe(false);
         expect(carriesLegacySchedule({ schedule: { kind: 'cron', expr: '0 8 * * 1-5', tz: 'America/New_York' } }, {})).toBe(false);
     });
 });
