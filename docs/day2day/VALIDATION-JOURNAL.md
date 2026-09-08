@@ -57,3 +57,4 @@ after the WP1..WP3 gateway restart; from there the control plane
 - 2026-09-05 — sequential-test schedule A (99/97.5/96/95, now 10,000 replicates) RATIFIED after calibration: 10.3–11% measured false ACCEPT under a zero-edge null with independent days, 14% under ρ = 0.5 regime streaks, 66% power at +0.25 R (`scripts/calibrate-sequential-test.ts`); the "≈5% familywise" claim is withdrawn. Audit 2026-09-05 R0 remediation landed pre-epoch (commit cedf852).
 - 2026-09-06 — ladder RESET to rung 0.25% for epoch-1
 - 2026-09-06 — epoch-1 START 2026-09-06T21:33:39.997Z fp 5a37de4f2ccf constants 6f69718c525f netliq $12245.68 rung 0.25 policy incumbent
+- 2026-09-08 — epoch-1 STOP 2026-09-08T19:01:59.647Z — trigger-coverage correction
