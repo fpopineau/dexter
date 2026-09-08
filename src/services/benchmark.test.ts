@@ -173,7 +173,7 @@ describe('classifyRefusalGate', () => {
 
 describe('formatMoverLine', () => {
     const metrics = computeDayMetrics(100, 110, 118, 108, 115)!;
-    const base: FunnelStage = { seen: false, maxRank: null, triggered: false, proposed: false, refusedBy: [], executed: false, realizedPnl: null, capturePct: null };
+    const base: FunnelStage = { seen: false, maxRank: null, triggered: false, proposed: false, refusedBy: [], executed: false, placedUnfilled: false, entryPlaced: null, realizedPnl: null, capturePct: null };
 
     test('never seen is loud', () => {
         expect(formatMoverLine('ARM', metrics, base)).toContain('NEVER SEEN');
@@ -202,5 +202,16 @@ describe('formatMoverLine', () => {
         const line = formatMoverLine('SNDK', metrics, { ...base, seen: true, triggered: true, refusedBy: ['unaffordable', 'unaffordable'] });
         expect(line).toContain('refused: unaffordable');
         expect(line).not.toContain('unaffordable, unaffordable'); // deduped
+    });
+});
+
+describe('formatMoverLine — an accepted order that never filled is not an execution (2026-09-08 INTC)', () => {
+    test('placed-unfilled reads as "NEVER FILLED — no position" with the entry vs the day range, and never as EXECUTED pnl $0', () => {
+        const metrics = computeDayMetrics(95.8, 100.85, 106.09, 100.8, 105.5)!;
+        const base: FunnelStage = { seen: true, maxRank: 93, triggered: true, proposed: true, refusedBy: ['noise-stop'], executed: false, placedUnfilled: true, entryPlaced: 99.3, realizedPnl: null, capturePct: null };
+        const line = formatMoverLine('INTC', metrics, base);
+        expect(line).toContain('entry placed, NEVER FILLED — no position (entry 99.3 vs day low 100.8 / high 106.09)');
+        expect(line).not.toContain('EXECUTED');
+        expect(line).not.toContain('refused'); // the placed order is the more informative stage
     });
 });

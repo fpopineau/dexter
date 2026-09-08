@@ -146,3 +146,43 @@ describe('commissions and R', () => {
         expect(netR({ netUsd: 5, entry: 100, stop: 97, quantity: 0 })).toBeNull();
     });
 });
+
+describe('opening-range entry rule (entry-confirm, 2026-09-08)', () => {
+    const M = 60_000;
+    const D = Date.UTC(2026, 8, 8); // ET-frame midnight
+    const at = (h: number, m: number) => D + h * 3_600_000 + m * M;
+    const bar = (t: number, o: number, h: number, l: number, c: number) => ({ t, open: o, high: h, low: l, close: c });
+    // INTC-like: pre-market creation 08:14; 09:30–09:44 range high 103.24; breakout 10:30; run to 106.09; no 111 target
+    const bars = [
+        ...Array.from({ length: 15 }, (_, i) => bar(at(9, 30 + i), 101 + i * 0.1, i === 5 ? 103.24 : 101.5 + i * 0.1, 100.8 + i * 0.1, 101.2 + i * 0.1)),
+        ...Array.from({ length: 45 }, (_, i) => bar(at(9, 45 + i), 102.5, 103.1, 102.4, 102.8)),          // 09:45–10:29 under the range high
+        bar(at(10, 30), 103.27, 103.4, 103.2, 103.3),                                                    // crosses 103.24 from within → fills at the cap
+        ...Array.from({ length: 200 }, (_, i) => bar(at(10, 31 + i), 103.5 + i * 0.012, 103.7 + i * 0.012, 103.4 + i * 0.012, 103.6 + i * 0.012)),
+    ];
+    const base = { direction: 'long' as const, entryType: 'STP_LMT' as const, entry: null, entryLimit: null, stop: 0, target: null, createdAt: at(8, 14), entryDeadline: at(10, 44), flatAt: at(15, 52) };
+
+    test('resolves the trigger from the first 15 min after the open, fills the breakout at the band cap, keeps the stop distance and puts the target at x from the trigger', () => {
+        const r = simulateBracket(bars, { ...base, entryRule: { kind: 'opening-range', rangeMinutes: 15, bandPct: 0.3, stopDistance: 2.1, takePct: 7.52 } });
+        expect(r.resolved).toMatchObject({ entry: 103.24, entryLimit: 103.5497, stop: 101.14, target: 111.0036, armedAt: at(9, 45) });
+        expect(r.fillAt).toBe(at(10, 30));
+        expect(r.fillPrice).toBe(103.5497); // pessimistic: the band cap
+        expect(r.outcome).toBe('open');      // bars end before the flat bar and the 111 target is never printed
+    });
+
+    test('no breakout inside the entry window → unfilled; no session bars in the range → unknown; created after the flat bar → unknown', () => {
+        const flat = bars.filter((b) => b.t < at(10, 30));
+        expect(simulateBracket(flat, { ...base, entryRule: { kind: 'opening-range', rangeMinutes: 15, bandPct: 0.3, stopDistance: 2.1, takePct: 7.52 } }).outcome).toBe('unfilled');
+        const noRange = bars.filter((b) => b.t >= at(9, 45));
+        expect(simulateBracket(noRange, { ...base, entryRule: { kind: 'opening-range', rangeMinutes: 15, bandPct: 0.3, stopDistance: 2.1, takePct: 7.52 } }).outcome).toBe('unknown');
+        expect(simulateBracket(bars, { ...base, createdAt: at(15, 55), entryRule: { kind: 'opening-range', rangeMinutes: 15, bandPct: 0.3, stopDistance: 2.1, takePct: 7.52 } }).outcome).toBe('unknown');
+    });
+
+    test('short mirror: trigger at the range LOW, band below, stop above, target below', () => {
+        const sb = bars.map((b) => bar(b.t, 200 - b.open, 200 - b.low, 200 - b.high, 200 - b.close));
+        const r = simulateBracket(sb, { ...base, direction: 'short', entryRule: { kind: 'opening-range', rangeMinutes: 15, bandPct: 0.3, stopDistance: 2.1, takePct: 5 } });
+        expect(r.resolved!.entry).toBeCloseTo(200 - 103.24, 3);
+        expect(r.resolved!.entryLimit).toBeLessThan(r.resolved!.entry);
+        expect(r.resolved!.stop).toBeCloseTo(200 - 103.24 + 2.1, 3);
+        expect(r.resolved!.target).toBeLessThan(r.resolved!.entry);
+    });
+});

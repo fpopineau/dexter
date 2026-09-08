@@ -176,7 +176,7 @@ async function settleOne(
     // coverage is judged per session segment, the overnight gap is no hole.
     let loaded = await deps.loadBars(src.symbol, src.createdAt, horizonEnd, { rth: true, halfDay });
     const basisEntry = spec.entry ?? null;
-    const quantity = basisEntry !== null ? sizeAt(basisEntry, spec.stop, deps.rungPct, deps.netLiq) : 0;
+    let quantity = basisEntry !== null ? sizeAt(basisEntry, spec.stop, deps.rungPct, deps.netLiq) : 0;
     const base: SimTrade = {
         variant: variant.name,
         sourceKind: src.kind,
@@ -236,7 +236,16 @@ async function settleOne(
         }
     }
     const r = simulateBracket(loaded.bars, finalSpec);
-    const row: SimTrade = { ...base, barSource: loaded.source, fillAt: r.fillAt, fillPrice: r.fillPrice, exitAt: r.exitAt, exitPrice: r.exitPrice, outcome: r.outcome, note: r.note ?? null };
+    // A bar-resolved entry (entry-confirm) fixes its own geometry: the row
+    // records the RESOLVED levels and is sized on them, not on the source's.
+    const levels = r.resolved ?? null;
+    if (levels) quantity = sizeAt(levels.entry, levels.stop, deps.rungPct, deps.netLiq);
+    const stopForR = levels?.stop ?? spec.stop;
+    const entryForR = levels?.entry ?? basisEntry;
+    const row: SimTrade = {
+        ...base, barSource: loaded.source, fillAt: r.fillAt, fillPrice: r.fillPrice, exitAt: r.exitAt, exitPrice: r.exitPrice, outcome: r.outcome, note: r.note ?? null,
+        ...(levels ? { entryType: 'STP_LMT' as const, entry: levels.entry, entryLimit: levels.entryLimit, stop: levels.stop, target: levels.target, quantity } : {}),
+    };
     // A patient entry whose window is still open tonight is PENDING, not
     // unfilled (third pass, finding 2): the bars ran out before the entry
     // deadline — the row stays open and replays tomorrow.
@@ -279,7 +288,7 @@ async function settleOne(
         status: 'settled',
         commissions,
         netUsd,
-        netR: netR({ netUsd, entry: basisEntry ?? r.fillPrice, stop: spec.stop, quantity }),
+        netR: netR({ netUsd, entry: entryForR ?? r.fillPrice, stop: stopForR, quantity }),
     });
 }
 

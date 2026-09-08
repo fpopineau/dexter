@@ -192,7 +192,13 @@ export interface FunnelStage {
     triggered: boolean;
     proposed: boolean;
     refusedBy: string[];
+    /** A position was actually OPENED (an entry filled). An accepted order
+     *  that never filled is `placedUnfilled`, never an execution
+     *  (2026-09-08: INTC's resting bid read as "EXECUTED pnl $0"). */
     executed: boolean;
+    placedUnfilled: boolean;
+    /** The entry level of the unfilled order (for the "vs day low/high" line). */
+    entryPlaced: number | null;
     /** Realized P&L of trades closed today on this symbol (null = none). */
     realizedPnl: number | null;
     /** % of the post-entry available move that was captured (longs: high
@@ -212,6 +218,8 @@ export function formatMoverLine(symbol: string, m: DayMetrics, f: FunnelStage, c
     let stage: string;
     if (f.executed) {
         stage = `EXECUTED${f.realizedPnl != null ? ` pnl ${f.realizedPnl >= 0 ? '+' : ''}$${f.realizedPnl.toFixed(0)}` : ''}${f.capturePct != null ? `, captured ${f.capturePct.toFixed(0)}% of available` : ''}`;
+    } else if (f.placedUnfilled) {
+        stage = `entry placed, NEVER FILLED — no position${f.entryPlaced != null ? ` (entry ${f.entryPlaced} vs day low ${m.low} / high ${m.high})` : ''}`;
     } else if (f.refusedBy.length) stage = `refused: ${[...new Set(f.refusedBy)].join(', ')}`;
     else if (f.proposed) stage = 'proposed, not executed';
     else if (f.triggered) stage = 'triggered, no proposal';
@@ -331,7 +339,12 @@ export async function runBenchmarkOnce(): Promise<void> {
         if (!metrics) continue;
         const catalyst = await catalystFor(symbol);
         const props = proposalsToday.filter((p) => p.symbol === symbol);
-        const executed = props.filter((p) => p.status === 'executed' || p.status === 'closed');
+        // Executed = a position was OPENED (entry filled). An accepted order
+        // whose entry never filled (cancelled at expiry, or still resting)
+        // is placed-unfilled and stays out of the realized statistics.
+        const accepted = props.filter((p) => p.status === 'executed' || p.status === 'closed');
+        const executed = accepted.filter((p) => p.entryFillPrice != null);
+        const unfilled = accepted.filter((p) => p.entryFillPrice == null);
         const closedWithPnl = executed.filter((p) => p.realizedPnl != null);
         const realizedPnl = closedWithPnl.length
             ? Math.round(closedWithPnl.reduce((s, p) => s + (p.realizedPnl ?? 0), 0) * 100) / 100
@@ -351,6 +364,8 @@ export async function runBenchmarkOnce(): Promise<void> {
             proposed: props.length > 0,
             refusedBy: refusalsToday.filter((r) => r.symbol === symbol).map((r) => r.gate),
             executed: executed.length > 0,
+            placedUnfilled: executed.length === 0 && unfilled.length > 0,
+            entryPlaced: unfilled[0]?.entry ?? unfilled[0]?.entryLimit ?? null,
             realizedPnl,
             capturePct,
         };
@@ -408,6 +423,7 @@ export async function runBenchmarkOnce(): Promise<void> {
         triggered: ledgerMovers.filter((m) => m.triggered).length,
         proposed: ledgerMovers.filter((m) => m.proposed).length,
         executed: ledgerMovers.filter((m) => m.executed).length,
+        placedUnfilled: ledgerMovers.filter((m) => m.placedUnfilled).length,
     };
     const scoreLines = scoreboard
         .filter((g) => g.wouldStop + g.wouldTarget > 0)
@@ -417,7 +433,7 @@ export async function runBenchmarkOnce(): Promise<void> {
     const message =
         `📐 Capture report ${today}\n${moverLines.join('\n')}\n` +
         `Funnel: ${funnelCounts.movers} movers → ${funnelCounts.seen} seen → ${funnelCounts.triggered} triggered → ` +
-        `${funnelCounts.proposed} proposed → ${funnelCounts.executed} executed.` +
+        `${funnelCounts.proposed} proposed → ${funnelCounts.executed} executed${funnelCounts.placedUnfilled ? ` (+${funnelCounts.placedUnfilled} placed, never filled)` : ''}.` +
         (scoreLines.length ? `\nGate scoreboard (cumulative): ${scoreLines.join(' · ')}` : '');
 
     logger.info(`[benchmark] ${today}: ${funnelCounts.movers} movers, ${replayed} refusals replayed`);

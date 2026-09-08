@@ -315,7 +315,10 @@ At 17:10 ET (after the 16:45 benchmark), every proposal created in the last
 three days and every refusal with complete levels is replayed against real
 bars for each active shadow variant — `incumbent` (the as-traded twin),
 `funnel-75`, `gate-off:<gate>`, `exit-ratchet`, `exit-x2.0`, `stop-x/3`,
-`class-swing`, `class-earnings-bet` — sized at the current ladder rung, with
+`entry-confirm` (the intraday row re-entered as a STP_LMT breakout of the
+first 15 min after the open, +0.3 % band, stop distance kept, take-x from the
+trigger — 2026-09-08), `class-swing`, `class-earnings-bet` — sized at the
+current ladder rung, with
 IBKR-tier commissions, into `.dexter/data/simulator.db`. Fills are
 pessimistic by construction (trade-through entries and targets, gap-aware
 stops, stop-first ties, market at the next open); bars come from the 5-second

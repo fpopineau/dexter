@@ -15,6 +15,10 @@
  *   exit-ratchet       no fixed target; arm at +x, lock x−1, trail (REQ-EXIT-008)
  *   exit-x2.0          target at clamp(2.0 × ATR%, take band) from entry
  *   stop-x/3           stop tightened to x/3 from entry
+ *   entry-confirm      intraday rows re-entered as a STP_LMT breakout of the
+ *                      first 15 min after the open, geometry re-derived at
+ *                      the trigger (2026-09-08: the resting VWAP bid never
+ *                      filled on a gap-and-go)
  *   class-swing / class-earnings-bet   the disabled-on-live classes
  *   weights-calibrated INACTIVE until WP3 supplies calibrated weights
  *
@@ -32,6 +36,10 @@ import type { SimSpec } from './fill-model.js';
 export const ENTRY_GRACE_MS = 30 * 60_000;
 /** Deadline for a GTC entry that never filled (the 3-day zombie sweep). */
 export const GTC_ENTRY_HORIZON_MS = 3 * 86_400_000;
+/** `entry-confirm`: the opening range read for the trigger, and the limit
+ *  band above it (the Pre-Market Brief's own "entryLimit ~0.3% above"). */
+export const ENTRY_CONFIRM_RANGE_MIN = 15;
+export const ENTRY_CONFIRM_BAND_PCT = 0.3;
 
 export interface SimSource {
     kind: 'proposal' | 'refusal';
@@ -218,6 +226,24 @@ export const VARIANTS_V1: readonly VariantDef[] = [
             if (basis === null) return null;
             const target = s.direction === 'long' ? basis * 1.03 : basis * 0.97;
             return baseSpec(s, ctx, { target });
+        },
+    },
+    {
+        name: 'entry-confirm',
+        description: 'intraday rows: STP_LMT breakout of the first 15 min after the open (+0.3% band) instead of the resting entry; stop distance kept, take-x from the trigger, size at the rung — the INTC 2026-09-08 comparison',
+        status: 'active',
+        applies: (s) => isIntraday(s) && hasLevels(s) && s.entry !== null,
+        spec: (s, ctx) => {
+            const x = effectiveX(s, ctx.rules);
+            if (x === null || s.entry === null) return null;
+            // A confirmation order is a DAY order resting for the session: its
+            // entry window is the flat bar, not the resting bid's validity
+            // (INTC 2026-09-08: the 10:30 breakout came after the 10:14 expiry).
+            return baseSpec(s, ctx, {
+                entryType: 'STP_LMT', entry: null, entryLimit: null,
+                entryDeadline: ctx.flatAtFor(s.createdAt),
+                entryRule: { kind: 'opening-range', rangeMinutes: ENTRY_CONFIRM_RANGE_MIN, bandPct: ENTRY_CONFIRM_BAND_PCT, stopDistance: Math.abs(s.entry - s.stop), takePct: x },
+            });
         },
     },
     {

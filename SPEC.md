@@ -4075,3 +4075,81 @@ amendments of the same day's review responses).
 
 Decisions recorded and ratified in § Operator decisions 2026-09-06, amended
 where the review responses of 2026-09-06 say so.
+
+## Observation 2026-09-08 — epoch-1 day 1: INTC, the trigger budget and the resting bid
+
+### What the ledgers show (ET)
+
+- INTC surfaced in the dawn watch from 04:05 and was evaluated four times
+  before the open (04:26, 06:29, 07:13, 08:12). Two evaluations declined
+  for extension (RSI 94, +160 % YTD, the day-trade "don't chase" rule); one
+  died on geometry (a 1.25 % scalp target refused by the cost gate, then
+  the take policy); the fourth produced `P-EB01` at 08:14 — LMT 99.30 (the
+  pre-market VWAP), stop 97.20, target 106.77 (take-x = 1.5 × ATR % =
+  7.52 %), 14 shares, DAY — auto-executed on paper at 08:14:45.
+- The regular session opened at 100.85, printed its low 100.80 in the first
+  minute and never came back (high 106.09 at 13:18). The bid never filled;
+  the stale-entry sweeper cancelled it at 10:21. The operator bought 102 and
+  sold 106 by hand on another account (+3.92 % gross; invisible to the
+  ledger).
+- After the open INTC ranked 76–93 (second overall at 12:53) and no
+  single-name trigger fired: the 30 daily triggers were all spent
+  pre-market (cap first reached 08:16), the breadth day's +5 by 09:40; the
+  log records 37 suppressed evaluations for the rest of the session.
+
+Two structural facts, independent of INTC's outcome: (1) the dawn watch
+consumes the whole trigger budget before the open, leaving the regular
+session blind; (2) the intraday entry doctrine (rest at VWAP, never chase)
+converts a gap-and-go into a no-fill, and the model was never told it can
+shrink the take target through `takePct`.
+
+### Observability landed now (no fingerprint impact)
+
+- REQ-SIM-004 (variant added): `entry-confirm` — intraday proposals
+  replayed as a STP_LMT breakout of the first 15 minutes after the open
+  (limit band +0.3 %), the proposal's stop DISTANCE kept from the trigger,
+  the target at take-x from the trigger, sized at the rung on the resolved
+  levels. The fill model gains `SimSpec.entryRule` (opening-range) and
+  `SimResult.resolved`; the settle stores the resolved geometry on the
+  row. Bars inside the range never fill; the breakout must follow it. This
+  is the operator's "first confirmed pullback/breakout after the open"
+  comparison, measured over every intraday proposal of the epoch, with
+  fees, slippage and false starts — not on one winner.
+- REQ-BENCH (capture report precision): an accepted order whose entry never
+  filled is `placedUnfilled` ("entry placed, NEVER FILLED — no position,
+  entry X vs day low/high"), never "EXECUTED pnl $0"; only rows with an
+  entry fill count as executed and enter the realized statistics; the
+  funnel line prints the placed-never-filled count.
+
+### Proposed action (operator decision; behavior changes end epoch 1)
+
+Recommended, in line with the advisor's note of 2026-09-08:
+
+1. **Trigger budget by session window** (behavior change): split the daily
+   cap into pre-market / open-drive / midday / pre-close quotas with
+   roll-over of unused quota to later windows and the global cap unchanged
+   (30 + breadth bonus). The split is an experimental parameter fixed
+   before the new epoch — e.g. 8 / 10 / 9 / 3 of 30.
+2. **Close epoch 1 with the reason "trigger-coverage correction"**, keeping
+   its history and NOT counting it as a statistical REJECT; open epoch 2
+   with that single behavior change. Risk and exit rules unchanged.
+3. **Do not conclude "buy higher"**: from 102 with the same stop 97.20 the
+   trade is 0.83 : 1 — a new setup, not a better entry. Let `entry-confirm`
+   measure the confirmation entry across the epoch before touching the
+   day-trade doctrine.
+4. **Take target**: the tool already accepts a `takePct` override inside the
+   band; the trigger prompt and the day-trade skill never mention it. A
+   prompt precision ("a shorter x is allowed when structure says so") is a
+   behavior text change → epoch 2 with the budget split, or later.
+
+Decision owed: (a) the budget split values; (b) end epoch 1 now or run it
+as designed and carry the split to epoch 2.
+
+| Item | Test |
+|---|---|
+| entry-confirm fill rule | `simulator/fill-model.test.ts` (range trigger, band-cap fill, stop distance kept, target at x; no breakout → unfilled; no range bars / created after the flat bar → unknown; short mirror) |
+| entry-confirm variant | `simulator/variants.test.ts` (applies to intraday rows with levels; rule carries the stop distance and x; entry window = the flat bar) |
+| entry-confirm settle | `simulator/settle.test.ts` (P-EB01-like row: incumbent unfilled, confirmation twin fills the 10:30 breakout, sized on the resolved levels, flat at 15:52) |
+| capture report | `benchmark.test.ts` (placed-unfilled line, never EXECUTED pnl $0) |
+
+Harness at landing: `bun test` 1135 pass (103 files), `tsc --noEmit` clean, Jest 1116 pass under Node.

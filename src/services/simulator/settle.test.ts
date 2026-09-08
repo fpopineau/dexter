@@ -104,7 +104,7 @@ describe('runSettleOnce (REQ-SIM-001/005/006)', () => {
         const r = await runSettleOnce(d);
         const rows = [...d.store.rows.values()];
         const variants = rows.filter((x) => x.sourceId === 'P-0001').map((x) => x.variant).sort();
-        expect(variants).toEqual(['exit-fixed-3', 'exit-ratchet', 'exit-x2.0', 'incumbent', 'stop-x/3']);
+        expect(variants).toEqual(['entry-confirm', 'exit-fixed-3', 'exit-ratchet', 'exit-x2.0', 'incumbent', 'stop-x/3']);
         const inc = rows.find((x) => x.variant === 'incumbent' && x.sourceId === 'P-0001')!;
         expect(inc.quantity).toBe(10);                 // 0.25% × 12,000 / $3
         expect(inc.outcome).toBe('target');
@@ -118,7 +118,7 @@ describe('runSettleOnce (REQ-SIM-001/005/006)', () => {
         expect(gateOff.sourceKind).toBe('refusal');
         expect(gateOff.sourceId).toBe('R-77');
         expect(r.failed).toBe(0);
-        expect(r.evaluated).toBe(6);
+        expect(r.evaluated).toBe(7);
     });
 
     test('a settled row is not re-simulated; an open GTC row is; missing bars → unknown; a DAY row whose flat bar is in the future waits', async () => {
@@ -330,5 +330,40 @@ describe('review 2026-09-06, sixth pass — timestamps survive a replay across t
         expect(again.createdAt).toBe(created);
         expect(again.executedAt).toBe(accepted);
         expect(again.expiresAt).toBe(expiry);
+    });
+});
+
+describe('entry-confirm end to end (2026-09-08 INTC): the resting bid twin is unfilled, the confirmation twin fills the breakout and is sized on the resolved levels', () => {
+    test('P-EB01-like row: LMT 99.30 created 08:14 pre-market; RTH never below 100.80; breakout of the 09:30–09:44 range fills', async () => {
+        const created = Date.UTC(2026, 8, 8, 12, 14, 0); // Tue 08:14 ET
+        const frame = etFrameMs(created);
+        const D = Math.floor(frame / 86_400_000) * 86_400_000;
+        const at = (h: number, m: number) => D + h * 3_600_000 + m * M;
+        const bar = (t: number, o: number, h: number, l: number, c: number): SimBar => ({ t, open: o, high: h, low: l, close: c });
+        const bars: SimBar[] = [
+            ...Array.from({ length: 15 }, (_, i) => bar(at(9, 30 + i), 101 + i * 0.1, i === 5 ? 103.24 : 101.5 + i * 0.1, 100.8 + i * 0.1, 101.2 + i * 0.1)),
+            ...Array.from({ length: 45 }, (_, i) => bar(at(9, 45 + i), 102.5, 103.1, 102.4, 102.8)),
+            bar(at(10, 30), 103.27, 103.4, 103.2, 103.3),
+            ...Array.from({ length: 322 }, (_, i) => bar(at(10, 31 + i), 104 + i * 0.005, 104.2 + i * 0.005, 103.9 + i * 0.005, 104.1 + i * 0.005)), // to 15:52
+        ];
+        const d = deps({
+            now: Date.UTC(2026, 8, 8, 21, 30, 0),
+            listProposalsSince: async () => [proposal({ id: 'P-EB01', symbol: 'INTC', entry: 99.3, stop: 97.2, target: 106.77, takePct: null, dailyAtrAtCreation: 4.98, createdAt: created, expiresAt: created + 120 * M, executedAt: created + 20_000, entryFillPrice: null, entryFilledAt: null, exitFillPrice: null, exitReason: 'cancelled', realizedPnl: 0, status: 'closed' })],
+            listRefusalsSince: async () => [],
+            loadBars: async () => ({ bars, source: 'stream-5s' as const }),
+        });
+        await runSettleOnce(d);
+        const inc = (await d.store.find('incumbent', 'proposal', 'P-EB01'))!;
+        expect(inc.outcome).toBe('unfilled'); // the resting bid at the pre-market VWAP never traded
+        const conf = (await d.store.find('entry-confirm', 'proposal', 'P-EB01'))!;
+        expect(conf.entryType).toBe('STP_LMT');
+        expect(conf.entry).toBe(103.24);          // resolved trigger = range high
+        expect(conf.fillPrice).toBeCloseTo(103.5497, 3);
+        expect(conf.stop).toBeCloseTo(101.14, 3);  // the proposal's 2.10 stop distance from the trigger
+        expect(conf.target).toBeCloseTo(103.24 * (1 + 1.5 * (4.98 / 99.3)), 3); // take-x = 1.5 × ATR% (7.5226 %) from the trigger — not reached
+        expect(conf.outcome).toBe('eod-flat');     // flat at 15:52 with the day's drift
+        expect(conf.quantity).toBe(Math.floor((0.0025 * 12_000) / (103.24 - 101.14))); // sized on the RESOLVED levels at the rung
+        expect(conf.status).toBe('settled');
+        expect(conf.netR).not.toBeNull();
     });
 });

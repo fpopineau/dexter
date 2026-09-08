@@ -64,6 +64,35 @@ export interface SimSpec {
     /** ET-frame ms of the flat-by-close bar (DAY rows); null = GTC carry. */
     flatAt: number | null;
     ratchet?: RatchetSpec;
+    /** Levels resolved FROM THE BARS at simulation time (the `entry-confirm`
+     *  variant, 2026-09-08): a STP_LMT breakout of the post-open range. When
+     *  set, `entry`/`entryLimit`/`stop`/`target` above are ignored and the
+     *  result carries the resolved geometry. */
+    entryRule?: OpeningRangeRule;
+}
+
+/** "First confirmed move after the open": the trigger is the high (long) /
+ *  low (short) of the first `rangeMinutes` of the regular session on the
+ *  creation day (or after the creation, when created mid-session); the
+ *  limit band sits `bandPct` beyond it; the stop keeps the proposal's stop
+ *  DISTANCE from the trigger; the target sits `takePct` % from the trigger.
+ *  Everything is re-derived at that instant — the INTC 2026-09-08 lesson: a
+ *  resting bid at the pre-market VWAP never filled on a gap-and-go. */
+export interface OpeningRangeRule {
+    kind: 'opening-range';
+    rangeMinutes: number;
+    bandPct: number;
+    stopDistance: number;
+    takePct: number;
+}
+
+export interface ResolvedLevels {
+    entry: number;
+    entryLimit: number;
+    stop: number;
+    target: number;
+    /** ET-frame ms when the range closed and the trigger became live. */
+    armedAt: number;
 }
 
 export interface SimResult {
@@ -76,6 +105,37 @@ export interface SimResult {
     mfePct: number | null;
     maePct: number | null;
     note?: string;
+    /** Present when the spec carried an `entryRule`: the geometry it resolved to. */
+    resolved?: ResolvedLevels;
+}
+
+const RTH_OPEN_MIN = 9 * 60 + 30;
+const FLAT_MIN = 15 * 60 + 52;
+const DAY = 86_400_000;
+
+/** Pure: resolve an opening-range rule against the bars into a fixed
+ *  STP_LMT spec, or null when there is no range to read (no session bars
+ *  in the window, or the row was created at/after the flat bar). */
+export function resolveOpeningRange(bars: SimBar[], spec: SimSpec, rule: OpeningRangeRule): { spec: SimSpec; resolved: ResolvedLevels } | null {
+    const dayStart = Math.floor(spec.createdAt / DAY) * DAY;
+    const sessionOpen = dayStart + RTH_OPEN_MIN * 60_000;
+    if (spec.createdAt >= dayStart + FLAT_MIN * 60_000) return null; // created after the flat bar: no window today
+    const rangeStart = Math.max(spec.createdAt, sessionOpen);
+    const rangeEnd = rangeStart + rule.rangeMinutes * 60_000;
+    const inRange = bars.filter(validBar).filter((b) => b.t >= rangeStart && b.t < rangeEnd);
+    if (inRange.length === 0) return null;
+    const long = spec.direction === 'long';
+    const trigger = round4(long ? Math.max(...inRange.map((b) => b.high)) : Math.min(...inRange.map((b) => b.low)));
+    const band = rule.bandPct / 100;
+    const entryLimit = round4(long ? trigger * (1 + band) : trigger * (1 - band));
+    const stop = round4(long ? trigger - rule.stopDistance : trigger + rule.stopDistance);
+    const target = round4(long ? trigger * (1 + rule.takePct / 100) : trigger * (1 - rule.takePct / 100));
+    if (!(stop > 0) || !(target > 0)) return null;
+    return {
+        resolved: { entry: trigger, entryLimit, stop, target, armedAt: rangeEnd },
+        // Bars inside the range never fill: the breakout must come AFTER it.
+        spec: { ...spec, entryType: 'STP_LMT', entry: trigger, entryLimit, stop, target, createdAt: rangeEnd - 1, entryRule: undefined },
+    };
 }
 
 const round4 = (x: number) => Math.round(x * 1e4) / 1e4;
@@ -89,6 +149,14 @@ export function simulateBracket(barsIn: SimBar[], spec: SimSpec): SimResult {
     const bars = barsIn.filter(validBar).sort((a, b) => a.t - b.t);
     const long = spec.direction === 'long';
     const none: SimResult = { outcome: 'unfilled', fillAt: null, fillPrice: null, exitAt: null, exitPrice: null, mfePct: null, maePct: null };
+
+    // A bar-resolved entry (opening-range breakout): fix the geometry from the
+    // bars first, then replay it as an ordinary STP_LMT bracket.
+    if (spec.entryRule) {
+        const r = resolveOpeningRange(bars, spec, spec.entryRule);
+        if (!r) return { ...none, outcome: 'unknown', note: 'opening range unavailable (no session bars in the range window, or created after the flat bar)' };
+        return { ...simulateBracket(bars, r.spec), resolved: r.resolved };
+    }
 
     let filled = false;
     let fillAt: number | null = null;

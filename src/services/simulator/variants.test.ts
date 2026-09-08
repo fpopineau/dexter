@@ -139,3 +139,21 @@ describe('review 2026-09-06, seventh pass — the 3-day GTC window is 72 ELAPSED
         expect(s.entryDeadline).toBe(Date.UTC(2026, 2, 9, 11, 0, 0));            // 11:00 EDT — one hour LATER than a frame add
     });
 });
+
+describe('entry-confirm (2026-09-08 — the INTC comparison: confirmation breakout instead of the resting bid)', () => {
+    test('applies to intraday proposals with levels; the spec carries the opening-range rule with the proposal\'s stop distance and its x; swing rows and MKT-without-entry rows are out', () => {
+        const v = variantByName('entry-confirm')!;
+        expect(v.status).toBe('active');
+        expect(v.applies(proposal())).toBe(true);
+        expect(v.applies(proposal({ tradeClass: 'swing', tif: 'GTC', strategyId: 'swing' }))).toBe(false);
+        expect(v.applies(proposal({ entryType: 'MKT', entry: null }))).toBe(false);
+        const spec = v.spec(proposal({ entry: 99.3, stop: 97.2, takePct: null, dailyAtr: 4.98 }), ctx)!;
+        expect(spec.entryType).toBe('STP_LMT');
+        expect(spec.entry).toBeNull();
+        expect(spec.entryRule).toMatchObject({ kind: 'opening-range', rangeMinutes: 15, bandPct: 0.3 });
+        expect(spec.entryRule!.stopDistance).toBeCloseTo(2.1, 9);
+        expect(spec.entryRule!.takePct).toBeCloseTo(7.52, 1); // 1.5 × (4.98/99.3) = 7.52 %
+        expect(spec.flatAt).toBe(T0 + 3 * 3_600_000);
+        expect(spec.entryDeadline).toBe(T0 + 3 * 3_600_000); // a DAY confirmation order rests until the flat bar, not until the resting bid's expiry
+    });
+});
