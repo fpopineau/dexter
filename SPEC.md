@@ -4224,7 +4224,18 @@ the regular session keeps 22 (10 at the open-drive, 19 available at midday,
   replay, structural cap, bonus, zero quota, parse, env knob).
 - [x] Fingerprint moves (behavior path + new behavior-env key); epoch 1
   stopped with the stated reason; journal line written.
-- [ ] Operator: gateway restart, `epoch new` → epoch-2.
+- [x] Operator: gateway restart, `epoch new` → epoch-2 STARTED
+  2026-09-08T19:06:11.445Z, fp `4801bb194d6c` (the gateway's own value —
+  the authority; a bun-shell `strategyFingerprint()` on the same HEAD gave
+  `73cc1882b58c`: the surfaces are gathered in-process (env, settings, cron
+  config), so an out-of-process digest is not the epoch's and is never
+  quoted as such; the per-trade purity check runs on the gateway's
+  value), constants `6f69718c525f`,
+  NetLiq frozen $12,228.96, rung 0.25 %, policy incumbent. First cycle
+  under the budget: "trigger budget for 2026-09-08: 8/10/9/3 of 30/day",
+  three pre-close triggers (`budget k/30 in pre-close`) — the regular
+  session triggers again; the downstream gates (cost-to-target, take
+  level) then decided each one.
 
 | Item | Test |
 |---|---|
