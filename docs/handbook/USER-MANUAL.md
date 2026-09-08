@@ -196,6 +196,7 @@ Everything else has sensible defaults:
 | `OPP_TRIGGER_SCORE` | 60 | composite rank for event triggers (75 until 2026-09-05; proposals carry `trigger_band` '60-74' / '75+') |
 | `OPP_TRIGGER_COOLDOWN_MIN` | 30 | per-symbol trigger debounce |
 | `OPP_TRIGGER_MAX_PER_DAY` | 30 | trigger cap per ET day (10 until 2026-09-05) |
+| `OPP_TRIGGER_BUDGET` | 8/10/9/3 | pre-open/open-drive/midday/pre-close split of the cap; unused quota rolls to later windows (since 2026-09-08) |
 | `OPP_LARGECAP_LANE` / `_MIN_USD` / `_RESERVE` | true / 1e10 / 5 | large-cap scan lane + reserved candidate slots |
 | `PREMARKET_SPREAD_HARD_MULT` | 3 | pre-open DAY accept spread deferral bound (09:31 ET re-check) |
 | `LIVE_VETO_WINDOW_MIN` | 0 | veto window before an announced auto-execution places |

@@ -1,5 +1,14 @@
 import { describe, expect, test } from 'bun:test';
-import { scanVolumeFloor, triggerEligibility } from './opportunity-engine.js';
+import {
+    DEFAULT_TRIGGER_BUDGET,
+    formatTriggerBudget,
+    parseTriggerBudget,
+    scanVolumeFloor,
+    triggerBudget,
+    triggerBudgetAllowance,
+    triggerBudgetRemaining,
+    triggerEligibility,
+} from './opportunity-engine.js';
 
 const BASE = {
     onBreadthWatchlist: false,
@@ -155,6 +164,96 @@ describe('trigger defaults (REQ-TRIG-001 — live-loop WP1: bar 60, cap 30)', ()
             expect(triggerScore()).toBe(60);
             expect(triggerMaxPerDay()).toBe(30);
         } finally { restore(); }
+    });
+});
+
+describe('session-window trigger budget (REQ-TRIG-005 — the INTC lesson, 2026-09-08)', () => {
+    const CAP = 30;
+
+    test('default split is 8/10/9/3 of the 30 cap', () => {
+        expect(DEFAULT_TRIGGER_BUDGET).toEqual({ 'pre-open': 8, 'open-drive': 10, midday: 9, 'pre-close': 3 });
+        expect(formatTriggerBudget(DEFAULT_TRIGGER_BUDGET)).toBe('8/10/9/3');
+        expect(8 + 10 + 9 + 3).toBe(CAP);
+    });
+
+    test('allowances are CUMULATIVE: unused quota rolls forward, never backward', () => {
+        expect(triggerBudgetAllowance('pre-open', DEFAULT_TRIGGER_BUDGET, CAP)).toBe(8);
+        expect(triggerBudgetAllowance('open-drive', DEFAULT_TRIGGER_BUDGET, CAP)).toBe(18);
+        expect(triggerBudgetAllowance('midday', DEFAULT_TRIGGER_BUDGET, CAP)).toBe(27);
+        expect(triggerBudgetAllowance('pre-close', DEFAULT_TRIGGER_BUDGET, CAP)).toBe(30);
+        // Three fired pre-open → the open-drive window still has 15 (its 10
+        // plus the 5 the dawn watch left on the table).
+        expect(triggerBudgetRemaining('open-drive', 3, { budget: DEFAULT_TRIGGER_BUDGET, cap: CAP, bonus: 0 })).toBe(15);
+        // Nothing fired all day → the pre-close window may use the whole cap.
+        expect(triggerBudgetRemaining('pre-close', 0, { budget: DEFAULT_TRIGGER_BUDGET, cap: CAP, bonus: 0 })).toBe(30);
+    });
+
+    test('the INTC day: 30 pre-market evaluations fire 8, the regular session keeps 22', () => {
+        // 2026-09-08: the dawn watch spent the whole cap by 08:16 ET and the
+        // +10% day ranked 2nd at 12:53 in a blind session. Replay the rule.
+        const opts = { budget: DEFAULT_TRIGGER_BUDGET, cap: CAP, bonus: 0 };
+        let fired = 0;
+        for (let i = 0; i < 30; i++) if (triggerBudgetRemaining('pre-open', fired, opts) > 0) fired++;
+        expect(fired).toBe(8);
+        expect(triggerBudgetRemaining('open-drive', fired, opts)).toBe(10);
+        expect(triggerBudgetRemaining('midday', fired, opts)).toBe(19);
+        expect(triggerBudgetRemaining('pre-close', fired, opts)).toBe(22);
+    });
+
+    test('the global cap is structural: the cap wins whatever the split sums to', () => {
+        // Sums to 27: the pre-close window absorbs the 3 nobody was given.
+        const under = parseTriggerBudget('8/10/9/0')!;
+        expect(triggerBudgetAllowance('midday', under, CAP)).toBe(27);
+        expect(triggerBudgetAllowance('pre-close', under, CAP)).toBe(30);
+        // Sums to 45: earlier windows are clipped at the cap, never above it.
+        const over = parseTriggerBudget('20/20/5/0')!;
+        expect(triggerBudgetAllowance('pre-open', over, CAP)).toBe(20);
+        expect(triggerBudgetAllowance('open-drive', over, CAP)).toBe(30);
+        expect(triggerBudgetAllowance('midday', over, CAP)).toBe(30);
+        // Remaining never goes negative.
+        expect(triggerBudgetRemaining('pre-open', 12, { budget: DEFAULT_TRIGGER_BUDGET, cap: CAP, bonus: 0 })).toBe(0);
+        // A phase outside the four windows (idle/forced) gets the cap.
+        expect(triggerBudgetAllowance('idle', DEFAULT_TRIGGER_BUDGET, CAP)).toBe(30);
+    });
+
+    test('the breadth bonus widens the CURRENT window (correlated movers arrive together)', () => {
+        const opts = { budget: DEFAULT_TRIGGER_BUDGET, cap: CAP, bonus: 5 };
+        expect(triggerBudgetRemaining('pre-open', 0, opts)).toBe(13);
+        expect(triggerBudgetRemaining('pre-close', 0, opts)).toBe(35);
+        expect(triggerBudgetRemaining('pre-close', 35, opts)).toBe(0);
+    });
+
+    test('a 0 quota silences a window without touching the others (0/0/0/30 = regular session only)', () => {
+        const b = parseTriggerBudget('0/0/0/30')!;
+        expect(triggerBudgetAllowance('pre-open', b, CAP)).toBe(0);
+        expect(triggerBudgetAllowance('open-drive', b, CAP)).toBe(0);
+        expect(triggerBudgetAllowance('pre-close', b, CAP)).toBe(30);
+    });
+
+    test('parse: four non-negative integers separated by /; anything else is null', () => {
+        expect(parseTriggerBudget('8/10/9/3')).toEqual(DEFAULT_TRIGGER_BUDGET);
+        expect(parseTriggerBudget(' 8 / 10 / 9 / 3 ')).toEqual(DEFAULT_TRIGGER_BUDGET);
+        expect(parseTriggerBudget(undefined)).toBeNull();
+        expect(parseTriggerBudget('')).toBeNull();
+        expect(parseTriggerBudget('8/10/9')).toBeNull();
+        expect(parseTriggerBudget('8/10/9/3/1')).toBeNull();
+        expect(parseTriggerBudget('8/-1/9/3')).toBeNull();
+        expect(parseTriggerBudget('8/ten/9/3')).toBeNull();
+        expect(parseTriggerBudget('8.5/10/9/3')).toBeNull();
+    });
+
+    test('env knob: unset → default; malformed → default (logged); valid → bound', () => {
+        const saved = process.env.OPP_TRIGGER_BUDGET;
+        try {
+            delete process.env.OPP_TRIGGER_BUDGET;
+            expect(triggerBudget()).toEqual(DEFAULT_TRIGGER_BUDGET);
+            process.env.OPP_TRIGGER_BUDGET = 'all/of/it/now';
+            expect(triggerBudget()).toEqual(DEFAULT_TRIGGER_BUDGET);
+            process.env.OPP_TRIGGER_BUDGET = '5/15/8/2';
+            expect(triggerBudget()).toEqual({ 'pre-open': 5, 'open-drive': 15, midday: 8, 'pre-close': 2 });
+        } finally {
+            if (saved === undefined) delete process.env.OPP_TRIGGER_BUDGET; else process.env.OPP_TRIGGER_BUDGET = saved;
+        }
     });
 });
 

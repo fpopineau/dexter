@@ -4153,3 +4153,81 @@ as designed and carry the split to epoch 2.
 | capture report | `benchmark.test.ts` (placed-unfilled line, never EXECUTED pnl $0) |
 
 Harness at landing: `bun test` 1135 pass (103 files), `tsc --noEmit` clean, Jest 1116 pass under Node.
+
+## Decision 2026-09-08 — session-window trigger budget; epoch 1 closed as a trigger-coverage correction
+
+Operator decision on the § Observation 2026-09-08 proposal: (a) the split is
+**8 / 10 / 9 / 3** of the 30 cap (pre-open / open-drive / midday /
+pre-close); (b) epoch 1 is closed NOW with the reason "trigger-coverage
+correction", not carried. Risk and exit rules are unchanged; the take-target
+prompt precision (item 4) is NOT part of this change.
+
+### Requirement
+
+- REQ-TRIG-005: the daily single-name trigger cap (`triggerMaxPerDay()`,
+  REQ-TRIG-001) is budgeted per engine window. `OPP_TRIGGER_BUDGET` =
+  `a/b/c/d` (non-negative integers, pre-open / open-drive / midday /
+  pre-close; default `8/10/9/3`) defines CUMULATIVE allowances:
+  `triggerBudgetAllowance(phase) = min(cap, Σ quotas up to and including the
+  phase)`, the pre-close window (and any phase outside the four) = the cap.
+  A snapshot in window W may fire while `triggersFiredToday <
+  allowance(W) + breadthBonus`. Consequences, all pinned by test:
+  - unused quota rolls FORWARD (3 fired pre-open → 15 available at the
+    open-drive), never backward;
+  - the global invariant "≤ cap + breadth bonus per ET day" is structural
+    whatever the split sums to (a short split leaves the difference to the
+    pre-close window; a long split is clipped at the cap);
+  - the breadth bonus widens the CURRENT window (correlated movers arrive
+    together);
+  - a `0` quota silences a window (`0/0/0/30` = regular session only);
+  - a malformed value falls back to the default and is logged once — a typo
+    must not silently restore the one-counter behavior.
+  The engine logs the day's budget once per ET day, the window exhaustion
+  ("N roll to the next window") apart from the day's cap, and each TRIGGER
+  line carries `budget k/allowance in <window>`. `OPP_TRIGGER_BUDGET` is in
+  the fingerprint's behavior-env list.
+
+Replay of 2026-09-08 under the rule: the 30 pre-market evaluations fire 8;
+the regular session keeps 22 (10 at the open-drive, 19 available at midday,
+22 at the pre-close). The 12:53 INTC rank-93 snapshot would have triggered.
+
+### Epoch 1 closure
+
+- `epoch-1` (fp `5a37de4f2ccf`, started 2026-09-06T21:33:39.997Z, NetLiq
+  $12245.68) is STOPPED with the reason **trigger-coverage correction** via
+  `scripts/epoch-stop.ts` — the same `stopEpoch` path the REJECT look and
+  the hard stop use (status stopped, live switch OFF, journal line). The look
+  procedure never ran (0 looks, 0 accepted trades): the closure is NOT a
+  statistical REJECT and must not be read as evidence against the incumbent
+  policy. Its history stays: `epochs.jsonl` start line, the journal START +
+  STOP lines, the 2026-09-08 proposals ledger rows and the candidate
+  archive.
+- `scripts/epoch-stop.ts "<reason>"` is the operator's non-statistical
+  closure tool (control plane, outside the fingerprint). It needs no
+  gateway restart: the executor re-reads `epoch-state.json` on every accept.
+- Epoch 2 opens with this single behavior change: restart the gateway (new
+  fingerprint), then `epoch new` (no confirm — the epoch is stopped; rung
+  resets to 0.25 %; policy `incumbent`).
+
+### Non-goals
+
+- No change to the trigger bar, cooldown, eligibility windows, regime tilt,
+  breadth relief or the auto-executor cap.
+- No change to the intraday entry doctrine or the take policy (the
+  `entry-confirm` shadow variant measures the confirmation entry first).
+- Forced cycles (`forcePhase`) rank under the forced phase and spend that
+  window's allowance; they are operator-initiated and not budgeted apart.
+
+### Acceptance
+
+- [x] `bun test` pins REQ-TRIG-005 (defaults, cumulative allowances, INTC
+  replay, structural cap, bonus, zero quota, parse, env knob).
+- [x] Fingerprint moves (behavior path + new behavior-env key); epoch 1
+  stopped with the stated reason; journal line written.
+- [ ] Operator: gateway restart, `epoch new` → epoch-2.
+
+| Item | Test |
+|---|---|
+| REQ-TRIG-005 | `opportunity-engine.test.ts` § session-window trigger budget (8 tests) |
+
+Harness at landing: `bun test` 1143 pass (103 files), `tsc --noEmit` clean, Jest 1124 pass under Node.

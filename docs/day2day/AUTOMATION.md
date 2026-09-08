@@ -298,7 +298,13 @@ seeded jobs; schedules stay user-tunable):
 When a candidate enters the **top 3** with `compositeRank ≥ OPP_TRIGGER_SCORE`
 (default **60** since the live-loop WP1, 2026-09-05 — was 75) during loop
 cycles: debounce per symbol (`OPP_TRIGGER_COOLDOWN_MIN`, default 30) and
-daily cap (`OPP_TRIGGER_MAX_PER_DAY`, default **30** — was 10). A focused,
+daily cap (`OPP_TRIGGER_MAX_PER_DAY`, default **30** — was 10), split by
+session window (`OPP_TRIGGER_BUDGET`, default **8/10/9/3** for pre-open /
+open-drive / midday / pre-close since 2026-09-08, REQ-TRIG-005): the quotas
+are cumulative allowances, so unused quota rolls forward and the pre-close
+window may use whatever the day left; the breadth bonus widens the current
+window. Before the split the dawn watch spent the whole cap before the bell
+(2026-09-08: cap reached 08:16 ET, INTC's +10 % session blind). A focused,
 isolated agent run checks the news catalyst and risk; if actionable it
 registers a proposal and the alert lands on WhatsApp. Non-actionable
 evaluations are suppressed (and ledgered). The firing rank rides the run
@@ -566,6 +572,7 @@ manual acceptance:
 | `OPP_TRIGGER_SCORE` | 60 | composite threshold for event triggers (75 before 2026-09-05) |
 | `OPP_TRIGGER_COOLDOWN_MIN` | 30 | per-symbol trigger debounce |
 | `OPP_TRIGGER_MAX_PER_DAY` | 30 | trigger cap per ET day (10 before 2026-09-05) |
+| `OPP_TRIGGER_BUDGET` | 8/10/9/3 | session-window split of the cap (pre-open/open-drive/midday/pre-close), cumulative with roll-over (REQ-TRIG-005) |
 | `OPP_LARGECAP_LANE` / `_MIN_USD` / `_RESERVE` | true / 1e10 / 5 | large-cap scan lane and its reserved candidate slots (REQ-SCAN-006) |
 | `PREMARKET_SPREAD_HARD_MULT` | 3 | pre-open DAY accepts: spread over the cap but under cap × this is deferred to the 09:31 ET re-check (REQ-RISK-008) |
 | `LIVE_VETO_WINDOW_MIN` | 0 | minutes an announced auto-execution waits for `veto P-XXXX` (REQ-LIVE-002) |

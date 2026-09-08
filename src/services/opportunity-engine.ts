@@ -304,6 +304,75 @@ export function triggerMaxPerDay(): number {
     return Number.isFinite(n) && n > 0 ? n : 30;
 }
 
+// --- Session-window trigger budget (REQ-TRIG-005, 2026-09-08) --------------
+// The daily cap was ONE counter, and the dawn watch (04:00 ET, ~30 scan
+// cycles before the bell) spent it before the regular session existed: on
+// 2026-09-08 the cap was reached at 08:16 ET and the +10% INTC day ranked
+// 2nd at 12:53 in a session the engine could no longer trigger into. The
+// cap is now split into quotas per engine window, expressed as CUMULATIVE
+// allowances so unused quota rolls FORWARD and never backward: a window may
+// fire up to (quota of every window up to and including it) − (triggers
+// fired so far today). The last window's allowance is the whole cap, so the
+// global invariant — at most cap + breadth bonus per ET day — is structural
+// whatever the split sums to (a short split leaves the difference to the
+// pre-close window; a long split is clipped at the cap). The breadth bonus
+// widens the CURRENT window: correlated movers arrive together.
+//
+// OPP_TRIGGER_BUDGET = 'a/b/c/d' (pre-open / open-drive / midday / pre-close),
+// default 8/10/9/3 of the 30 cap. Fingerprinted: editing it ends the epoch.
+
+export const TRIGGER_BUDGET_WINDOWS = ['pre-open', 'open-drive', 'midday', 'pre-close'] as const;
+export type TriggerBudgetWindow = (typeof TRIGGER_BUDGET_WINDOWS)[number];
+export type TriggerBudget = Readonly<Record<TriggerBudgetWindow, number>>;
+export const DEFAULT_TRIGGER_BUDGET: TriggerBudget = { 'pre-open': 8, 'open-drive': 10, midday: 9, 'pre-close': 3 };
+
+export function formatTriggerBudget(b: TriggerBudget): string {
+    return TRIGGER_BUDGET_WINDOWS.map((w) => b[w]).join('/');
+}
+
+/** 'a/b/c/d' of non-negative integers → budget; anything else → null (the
+ *  caller falls back to the default and says so — a typo must not silently
+ *  restore the one-counter behavior). */
+export function parseTriggerBudget(raw: string | undefined): TriggerBudget | null {
+    if (raw === undefined) return null;
+    const parts = raw.split('/').map((p) => p.trim());
+    if (parts.length !== TRIGGER_BUDGET_WINDOWS.length || parts.some((p) => !/^\d+$/.test(p))) return null;
+    const [a, b, c, d] = parts.map(Number) as [number, number, number, number];
+    return { 'pre-open': a, 'open-drive': b, midday: c, 'pre-close': d };
+}
+
+let warnedBudgetRaw: string | null = null;
+export function triggerBudget(): TriggerBudget {
+    const raw = process.env.OPP_TRIGGER_BUDGET;
+    if (raw === undefined || raw.trim() === '') return DEFAULT_TRIGGER_BUDGET;
+    const parsed = parseTriggerBudget(raw);
+    if (parsed) return parsed;
+    if (warnedBudgetRaw !== raw) {
+        warnedBudgetRaw = raw;
+        logger.warn(`[opportunity-engine] OPP_TRIGGER_BUDGET='${raw}' is not 'a/b/c/d' of non-negative integers — using the default ${formatTriggerBudget(DEFAULT_TRIGGER_BUDGET)}`);
+    }
+    return DEFAULT_TRIGGER_BUDGET;
+}
+
+/** Cumulative allowance of a window: min(cap, Σ quotas up to and including
+ *  it). The last window — and any phase outside the four (idle, a forced
+ *  cycle's phase) — is the cap itself. */
+export function triggerBudgetAllowance(phase: EnginePhase, budget: TriggerBudget, cap: number): number {
+    const i = TRIGGER_BUDGET_WINDOWS.indexOf(phase as TriggerBudgetWindow);
+    if (i < 0 || i === TRIGGER_BUDGET_WINDOWS.length - 1) return cap;
+    const cumulative = TRIGGER_BUDGET_WINDOWS.slice(0, i + 1).reduce((sum, w) => sum + budget[w], 0);
+    return Math.min(cap, cumulative);
+}
+
+/** Triggers the current window may still fire today (never negative). */
+export function triggerBudgetRemaining(
+    phase: EnginePhase,
+    firedToday: number,
+    opts: { budget: TriggerBudget; cap: number; bonus: number },
+): number {
+    return Math.max(0, triggerBudgetAllowance(phase, opts.budget, opts.cap) + opts.bonus - firedToday);
+}
+
 /** Optional market-cap band for engine scans (USD). Unset = unchanged
  *  default behavior (scanner-loop's $500M floor, no ceiling). */
 /** Scan-coverage slice A (2026-08-25): the cumulative-volume scan floor
@@ -892,8 +961,9 @@ async function syncStreamSubscriptions(snapshot: OpportunitySnapshot): Promise<v
 // ---------------------------------------------------------------------------
 // Event triggers — fired from loop cycles only (not tool refreshes), when a
 // candidate enters the top 3 with compositeRank >= OPP_TRIGGER_SCORE.
-// Debounced per symbol (OPP_TRIGGER_COOLDOWN_MIN) and capped per trading day
-// (OPP_TRIGGER_MAX_PER_DAY).
+// Debounced per symbol (OPP_TRIGGER_COOLDOWN_MIN), capped per trading day
+// (OPP_TRIGGER_MAX_PER_DAY) and budgeted per session window
+// (OPP_TRIGGER_BUDGET, REQ-TRIG-005).
 // ---------------------------------------------------------------------------
 
 export type TriggerCallback = (opp: Opportunity, snapshot: OpportunitySnapshot) => void | Promise<void>;
@@ -1244,10 +1314,17 @@ async function evaluateTriggers(snapshot: OpportunitySnapshot): Promise<void> {
     if (triggerCallbacks.size === 0 || !snapshot.marketOpen) return;
 
     const today = etDateString();
+    const dailyCap = triggerMaxPerDay();
+    const budget = triggerBudget();
     if (today !== triggersDate) {
         triggersDate = today;
         triggersToday = 0;
         lastTriggerAt.clear();
+        // One line per ET day so the ledger shows the budget the day ran
+        // under; a split whose sum differs from the cap is legal (the cap
+        // wins, see triggerBudgetAllowance) but worth seeing.
+        const sum = TRIGGER_BUDGET_WINDOWS.reduce((s, w) => s + budget[w], 0);
+        logger.info(`[opportunity-engine] trigger budget for ${today}: ${formatTriggerBudget(budget)} of ${dailyCap}/day${sum !== dailyCap ? ` (split sums to ${sum}: the cap wins — earlier windows clip at ${dailyCap}, the pre-close window absorbs any shortfall)` : ''}`);
     }
 
     const threshold = triggerScore();
@@ -1258,7 +1335,12 @@ async function evaluateTriggers(snapshot: OpportunitySnapshot): Promise<void> {
     // exhausts the ordinary cap while half the movers are still unseen.
     const breadthDay = breadthActiveDate === today;
     const capBonus = breadthDay ? breadthCapBonus() : 0;
-    const maxTriggers = triggerMaxPerDay() + capBonus;
+    const maxTriggers = dailyCap + capBonus;
+    // REQ-TRIG-005: what THIS window may still fire — its cumulative quota
+    // (plus the bonus) minus everything fired today. Evaluated once per
+    // snapshot: the snapshot's phase is the window the candidates were
+    // ranked in.
+    const windowAllowance = triggerBudgetAllowance(snapshot.phase, budget, dailyCap) + capBonus;
     // …and threshold relief for watchlist names: correlated movers score
     // lower individually (SNAP at 68 vs the 75 bar on a +14% day).
     const watch = breadthDay ? breadthWatchlist() : null;
@@ -1301,6 +1383,12 @@ async function evaluateTriggers(snapshot: OpportunitySnapshot): Promise<void> {
             logger.info(`[opportunity-engine] trigger cap reached for today (${maxTriggers}${capBonus ? ` incl. breadth bonus +${capBonus}` : ''})`);
             return;
         }
+        if (triggersToday >= windowAllowance) {
+            // The day's cap is not spent — the WINDOW's share is. The rest
+            // rolls to the next window (REQ-TRIG-005); the log says how much.
+            logger.info(`[opportunity-engine] trigger budget for the ${snapshot.phase} window exhausted (${triggersToday} fired, window allowance ${windowAllowance}${capBonus ? ` incl. breadth bonus +${capBonus}` : ''}; ${maxTriggers - triggersToday} roll to the next window)`);
+            return;
+        }
         const last = lastTriggerAt.get(opp.symbol) ?? 0;
         if (now - last < cooldown) continue;
 
@@ -1310,7 +1398,8 @@ async function evaluateTriggers(snapshot: OpportunitySnapshot): Promise<void> {
             `[opportunity-engine] TRIGGER ${opp.symbol} (${opp.direction}, rank ${opp.compositeRank}` +
             `${opp.compositeRank < threshold ? `, breadth relief −${relief}` : ''}` +
             `${regimeAdj !== 0 ? `, regime tilt ${regimeAdj > 0 ? '+' : ''}${regimeAdj}` : ''}` +
-            `${!isReactor && idx >= 3 ? `, deep window pos ${idx + 1} at bar ${gate.effectiveThreshold}` : ''})`,
+            `${!isReactor && idx >= 3 ? `, deep window pos ${idx + 1} at bar ${gate.effectiveThreshold}` : ''}` +
+            `, budget ${triggersToday}/${windowAllowance} in ${snapshot.phase})`,
         );
         for (const cb of [...triggerCallbacks]) {
             try {

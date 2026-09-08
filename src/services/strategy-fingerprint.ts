@@ -273,6 +273,10 @@ const BEHAVIOR_ENV = [
     'EOD_TRIAGE', 'EOD_EARNINGS_GUARD', 'EOD_MACRO_WARNING',
     'ENTRY_EXPIRY_GRACE_MIN', 'STALE_ENTRY_MAX_DAYS',
     'OPPORTUNITY_ENGINE', 'OPP_TRIGGER_SCORE', 'OPP_TRIGGER_MAX_PER_DAY', 'OPP_TRIGGER_COOLDOWN_MIN',
+    // REQ-TRIG-005 (2026-09-08): the session-window split of the daily cap
+    // decides WHICH candidates reach an evaluation (the dawn watch vs the
+    // regular session) — a behavior knob, so its raw value is hashed.
+    'OPP_TRIGGER_BUDGET',
     'OPP_TOP_N', 'OPP_MAX_CANDIDATES', 'OPP_MARKET_CAP_MIN', 'OPP_MARKET_CAP_MAX',
     'OPP_DEEP_TRIGGER_MARGIN', 'OPP_EVENT_BOOST_MIN_PCT', 'OPP_MOVER_ALERT_PCT', 'OPP_MOVER_ALERT_RVOL',
     'OPP_SENTINEL', 'OPP_SENTINEL_CADENCE_MIN', 'OPP_SENTINEL_MOVE_PCT',
