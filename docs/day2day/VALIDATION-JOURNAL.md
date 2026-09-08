@@ -58,3 +58,5 @@ after the WP1..WP3 gateway restart; from there the control plane
 - 2026-09-06 — ladder RESET to rung 0.25% for epoch-1
 - 2026-09-06 — epoch-1 START 2026-09-06T21:33:39.997Z fp 5a37de4f2ccf constants 6f69718c525f netliq $12245.68 rung 0.25 policy incumbent
 - 2026-09-08 — epoch-1 STOP 2026-09-08T19:01:59.647Z — trigger-coverage correction
+- 2026-09-08 — ladder RESET to rung 0.25% for epoch-2
+- 2026-09-08 — epoch-2 START 2026-09-08T19:06:11.445Z fp 4801bb194d6c constants 6f69718c525f netliq $12228.96 rung 0.25 policy incumbent
