@@ -4336,7 +4336,10 @@ incumbent policy.
 - [x] Cron reserve verdicts (`llm-spend.test.ts`); budget default and
   replay (`opportunity-engine.test.ts`).
 - [x] Epoch 2 stopped with the stated reason; journal line.
-- [ ] Operator: gateway restart, `epoch new` → epoch-3.
+- [x] Operator: gateway restart, `epoch new` → epoch-3 STARTED
+  2026-09-09T15:18:45.341Z (11:18 ET), fp `7230906cf78f` (gateway-computed),
+  constants `6f69718c525f`, NetLiq frozen $12,218.11, rung 0.25 %, policy
+  incumbent, live switch OFF.
 
 | Item | Test |
 |---|---|
