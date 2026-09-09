@@ -4242,3 +4242,108 @@ the regular session keeps 22 (10 at the open-drive, 19 available at midday,
 | REQ-TRIG-005 | `opportunity-engine.test.ts` § session-window trigger budget (8 tests) |
 
 Harness at landing: `bun test` 1143 pass (103 files), `tsc --noEmit` clean, Jest 1124 pass under Node.
+
+## Decision 2026-09-09 — epoch-2 day-1 corrections; epoch 2 closed
+
+Operator decision on the P-9149 (DOCN) analysis: bundle the four
+corrections below, close epoch 2 (one noise trade, no look) and open epoch
+3 on the corrected build. None of them is a statistical verdict on the
+incumbent policy.
+
+### What the ledger showed
+
+- P-9149 DOCN long 7 @ 126.5, target 139.15 (x = 10 %, 1.49 ATR), placed
+  15:10 ET from a pre-close trigger, filled 15:46, flattened 15:52 by the
+  EOD triage at 126.18: −$2.24 gross, six bars, MFE 0.16 % / MAE 0.39 %.
+- The close alert's "Reason" carried IBKR 10148 for order 51 (the target):
+  the close had joined the exit OCA group, the broker had already cancelled
+  the siblings, and the cleanup's own cancel was answered "…ne peut pas être
+  annulé, indique : Cancelled." The classifier knew "state:" and "état:" but
+  not "indique :", so a benign answer became `not-cancellable`: two ERROR
+  lines and the broker text in the operator's message. The book re-read
+  confirmed both exits gone — the outcome was right, the alarm was not.
+- `commissions` = 1.00 on the row where a stop exit carries 2.03: every
+  deliberate close (EOD triage, `close`, profit-trail) booked the ENTRY side
+  only — `handleExecDetails` returned from the manual-exit branch before
+  registering the execution, so the close order's commission report found
+  no trade. Every 'manual' row in the ledger shows the pattern (1.00–1.05
+  vs 2.03 on 'stop' rows): net P&L overstated by one side on each, while
+  the simulator charges both.
+- The day's LLM spend reached $10.23 at 15:10 ET (38 trigger runs, $8.09);
+  27 refusals followed, including the 15:30 Pre-Close Review — the
+  overnight lane's only evaluation did not run.
+
+### Requirements
+
+- REQ-ACK-002 (amended): `classifyCancelRejection` reads the 10148/161
+  state token after "state:", "état:" OR "indique :" (French TWS as it
+  really phrases it); the DOCN message classifies `cancelled`, "indique :
+  Rempli" `filled`, an unknown token stays `not-cancellable`.
+- REQ-CLOSE-002: a registered close order's executions are indexed by
+  execId (`byManualExecId`) BEFORE the completeness check, and its
+  commission report is split across the trades it closed by the share
+  allocation rule of `handleManualExitFill` (first trade first, up to the
+  close order's quantity; one trade takes it all). A deliberate close books
+  both commission sides; rows already closed keep their recorded value (no
+  data to patch — read pre-2026-09-09 'manual' rows as one side short).
+- REQ-LANE-010: no NEW intraday entry inside the last
+  `intraday_entry_cutoff_min` minutes before the session close (risk rule,
+  default 60 → from 15:00 ET on a full day, 12:00 ET on a half-day; 0
+  disables; range 0..240). `intradayEntryCutoffViolation(nowMs, rules)` is
+  checked by `resolveLaneContract` at creation (same-session lanes only)
+  and by the executor at acceptance. Pre-market, post-close (the session
+  gate's job), weekends/holidays and every other lane are untouched — the
+  last hour belongs to the overnight lane, whose window opens at the same
+  minute by default. Wall-clock dependent: gated off under the test runner
+  unless a creation clock is pinned (the executor's session gate's
+  discipline); the pure check is pinned at explicit ET instants.
+- REQ-TRIG-005 (amended): `OPP_TRIGGER_BUDGET` default is `8/10/12/0`.
+  With REQ-LANE-010 a pre-close trigger could only buy an evaluation whose
+  proposal the contract refuses; the 3 move to midday. Cumulative
+  allowances 8 / 18 / 30 / 30 — the INTC replay still fires 8 pre-market
+  and keeps 22 for the regular session.
+- REQ-LLM-003: `LLM_SPEND_CRON_RESERVE_USD` (default 2, clamped to the cap,
+  fingerprinted) is the part of the daily cap kept for the `cron:*` lanes:
+  discovery lanes (trigger, breadth, mover) refuse to start once the day's
+  spend ≥ cap − reserve, cron lanes once ≥ cap; operator lanes are never
+  refused; reserve 0 is the previous behavior. The refusal names the
+  allowance it hit.
+
+### Epoch 2 closure
+
+- `epoch-2` (fp `4801bb194d6c`, started 2026-09-08T19:06:11Z, NetLiq
+  $12,228.96, one closed trade, no look) is STOPPED via
+  `scripts/epoch-stop.ts` with the reason **day-1 corrections: exit
+  commission attribution, 10148 token, intraday entry cutoff, cron spend
+  reserve** — not a REJECT. History kept (epochs.jsonl, journal, ledger).
+- Epoch 3 opens on this build: restart the gateway, `epoch new`.
+
+### Non-goals
+
+- The exit reason of a deliberate close stays `manual` (the note names the
+  source); the take policy's x is not time-scaled; the trigger bar,
+  cooldown and eligibility windows are unchanged.
+- No retroactive patch of `commissions` on closed rows.
+
+### Acceptance
+
+- [x] 10148 French phrasing pinned (`order-ack-cancel.test.ts`).
+- [x] Manual-close commission on the row, split across stacked legacy rows
+  (`outcome-tracker-partial.test.ts`).
+- [x] Intraday cutoff at 15:10 refused, 14:59 open, pre-market/post-close/
+  weekend/half-day/cutoff-0 pinned; overnight at 15:10 accepted
+  (`lane-contract.test.ts`).
+- [x] Cron reserve verdicts (`llm-spend.test.ts`); budget default and
+  replay (`opportunity-engine.test.ts`).
+- [x] Epoch 2 stopped with the stated reason; journal line.
+- [ ] Operator: gateway restart, `epoch new` → epoch-3.
+
+| Item | Test |
+|---|---|
+| REQ-ACK-002 (amended) | `tools/ibkr/order-ack-cancel.test.ts` § 10148 as French TWS phrases it |
+| REQ-CLOSE-002 | `outcome-tracker-partial.test.ts` § deliberate closes book BOTH commission sides |
+| REQ-LANE-010 | `lane-contract.test.ts` § REQ-LANE-010 intraday cutoff |
+| REQ-TRIG-005 (amended) | `opportunity-engine.test.ts` § session-window trigger budget |
+| REQ-LLM-003 | `llm-spend.test.ts` § REQ-LLM-003 cron reserve |
+
+Harness at landing: `bun test` 1148 pass (103 files), `tsc --noEmit` clean, Jest 1129 pass under Node.

@@ -602,6 +602,14 @@ interface ManualExit {
 }
 
 const manualExitOrders = new Map<number, ManualExit>();
+/** Executions of registered close orders, by execId — so the close's OWN
+ *  commission report reaches the trades it closed. Until 2026-09-09 the
+ *  manual branch of handleExecDetails returned before registering the
+ *  execId, and every deliberate close (EOD triage, 'close', profit-trail)
+ *  booked the ENTRY side only: 'manual' rows carried ~$1.00 where stop
+ *  rows carried ~$2.03 — net P&L overstated by one side on each, while the
+ *  simulator charges both. */
+const byManualExecId = new Map<string, ManualExit>();
 
 /** Review 2026-08-21: is a registered close order for `symbol` still
  *  working? The duplicate-close guard tracks the ORDER's life through
@@ -1044,6 +1052,10 @@ function handleExecDetails(_reqId: number, _contract: Contract, execution: Execu
     // order's own quantity decides completeness, not any one trade's.
     const manual = manualExitOrders.get(orderId);
     if (manual) {
+        // Register BEFORE the completeness check: the commission report
+        // follows this execution and must find the close whatever the fill
+        // state (a partial close's commission is still the close's).
+        if (execution.execId) byManualExecId.set(execution.execId, manual);
         const avg = isIbNumber(execution.avgPrice) ? execution.avgPrice : undefined;
         const cum = isIbNumber(execution.cumQty) ? execution.cumQty : undefined;
         if (avg !== undefined && cum !== undefined && cum >= manual.quantity) {
@@ -1102,11 +1114,24 @@ function handleOrderError(err: Error, code: number, id: number): void {
 
 function handleCommissionReport(report: CommissionReport): void {
     const execId = report.execId;
-    if (!execId) return;
+    if (!execId || !isIbNumber(report.commission)) return;
     const trade = byExecId.get(execId);
-    if (!trade || trade.closed) return;
-    if (isIbNumber(report.commission)) {
-        trade.commissions += report.commission;
+    if (trade) {
+        if (!trade.closed) trade.commissions += report.commission;
+        return;
+    }
+    // A registered close order's execution: the commission is the close's
+    // and is split across the trades it closed by the SAME allocation rule
+    // handleManualExitFill applies to the shares (first trade first, up to
+    // the close order's quantity) — one trade, the usual case, takes it all.
+    const manual = byManualExecId.get(execId);
+    if (!manual || !(manual.quantity > 0)) return;
+    let remaining = manual.quantity;
+    for (const t of manual.trades) {
+        const alloc = Math.min(t.quantity, remaining);
+        remaining = Math.round((remaining - alloc) * 10_000) / 10_000;
+        if (alloc <= 0) continue;
+        if (!t.closed) t.commissions += report.commission * (alloc / manual.quantity);
     }
 }
 
@@ -1489,6 +1514,7 @@ export function stopOutcomeTracker(): void {
 
 export const __handleOrderStatusForTests = handleOrderStatus;
 export const __handleExecDetailsForTests = handleExecDetails;
+export const __handleCommissionReportForTests = handleCommissionReport;
 
 /** Forget all tracked state (per-test isolation). */
 export function __resetTrackerForTests(): void {
@@ -1498,6 +1524,7 @@ export function __resetTrackerForTests(): void {
     byProposalId.clear();
     byOrderId.clear();
     byExecId.clear();
+    byManualExecId.clear();
     manualExitOrders.clear();
 }
 

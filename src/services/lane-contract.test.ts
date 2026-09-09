@@ -3,6 +3,7 @@ import { DEFAULT_RULES } from '@/tools/ibkr/risk-rules.js';
 import {
     deriveStrategyId,
     etDayStartMsOf,
+    intradayEntryCutoffViolation,
     LANE_TABLE,
     laneExitDeadline,
     laneExitPolicy,
@@ -50,11 +51,12 @@ function etWinter(y: number, m: number, d: number, hh: number, mm: number): numb
 }
 
 describe('resolveLaneContract (REQ-LANE-001/003)', () => {
-    const rules = { ...DEFAULT_RULES, overnight_entry_window_min: 60 };
-    const thu = et(2026, 9, 10, 15, 30); // Thursday 15:30 ET
+    const rules = { ...DEFAULT_RULES, overnight_entry_window_min: 60, intraday_entry_cutoff_min: 60 };
+    const thu = et(2026, 9, 10, 15, 30); // Thursday 15:30 ET (inside the overnight window, inside the intraday cutoff)
+    const midday = et(2026, 9, 10, 14, 30); // Thursday 14:30 ET (intraday entries still open)
 
     test('derivation and consistency: an omitted strategy follows the class; a class or TIF the contract does not allow is refused', () => {
-        const r = resolveLaneContract({ tif: 'DAY', createdAtMs: thu, expiresAtMs: thu + 60 * 60_000 }, rules);
+        const r = resolveLaneContract({ tif: 'DAY', createdAtMs: midday, expiresAtMs: midday + 60 * 60_000 }, rules);
         expect(r.ok && r.contract).toMatchObject({ strategyId: 'intraday', tradeClass: 'intraday', tif: 'DAY', holdingHorizon: 'same-session', exitPolicyId: 'take-x', setupId: null });
         const swing = resolveLaneContract({ tradeClass: 'swing', tif: 'GTC', setupId: 'flat base', createdAtMs: thu, expiresAtMs: thu + 60 * 60_000 }, rules);
         expect(swing.ok && swing.contract).toMatchObject({ strategyId: 'swing', setupId: 'flat-base', exitPolicyId: 'structural+deadline' });
@@ -64,8 +66,27 @@ describe('resolveLaneContract (REQ-LANE-001/003)', () => {
             expect(dodge.violations.some((v) => v.includes("rides the 'swing' risk class"))).toBe(true);
             expect(dodge.violations.some((v) => v.includes('requires tif GTC'))).toBe(true);
         }
-        const gtcIntraday = resolveLaneContract({ strategyId: 'intraday', tradeClass: 'intraday', tif: 'GTC', createdAtMs: thu, expiresAtMs: thu + 10 * 60_000 }, rules);
+        const gtcIntraday = resolveLaneContract({ strategyId: 'intraday', tradeClass: 'intraday', tif: 'GTC', createdAtMs: midday, expiresAtMs: midday + 10 * 60_000 }, rules);
         expect(gtcIntraday.ok).toBe(false);
+    });
+
+    test('REQ-LANE-010 intraday cutoff: refused inside the last hour (the DOCN 15:10 entry), open before it, pre-market, after the bell and with cutoff 0', () => {
+        // DOCN 2026-09-08: registered 15:10 ET, filled 15:46, flattened 15:52.
+        const docn = resolveLaneContract({ tif: 'DAY', createdAtMs: et(2026, 9, 8, 15, 10), expiresAtMs: et(2026, 9, 8, 17, 10) }, rules);
+        expect(docn.ok).toBe(false);
+        if (!docn.ok) expect(docn.violations[0]).toContain('stop 60 min before the bell (15:00 ET) — it is 15:10 ET');
+        expect(intradayEntryCutoffViolation(et(2026, 9, 8, 15, 0), rules)).not.toBeNull(); // the boundary minute is inside
+        expect(intradayEntryCutoffViolation(et(2026, 9, 8, 14, 59), rules)).toBeNull();
+        expect(intradayEntryCutoffViolation(et(2026, 9, 8, 7, 30), rules)).toBeNull(); // pre-market DAY brackets rest until the open
+        expect(intradayEntryCutoffViolation(et(2026, 9, 8, 16, 5), rules)).toBeNull(); // the session gate owns post-close placements
+        expect(intradayEntryCutoffViolation(et(2026, 9, 12, 15, 30), rules)).toBeNull(); // Saturday: not a session
+        expect(intradayEntryCutoffViolation(et(2026, 9, 8, 15, 10), { intraday_entry_cutoff_min: 0 })).toBeNull();
+        // Half-day (Black Friday 2026-11-27, EST): the close is 13:00 ET, so the cutoff starts at 12:00 ET.
+        expect(intradayEntryCutoffViolation(etWinter(2026, 11, 27, 12, 5), rules)).toContain('(12:00 ET)');
+        expect(intradayEntryCutoffViolation(etWinter(2026, 11, 27, 11, 55), rules)).toBeNull();
+        // The other lanes are untouched: an overnight setup at 15:10 is exactly what the last hour is for.
+        const on = resolveLaneContract({ strategyId: 'overnight', tradeClass: 'swing', tif: 'GTC', setupId: 'eod-continuation', createdAtMs: et(2026, 9, 8, 15, 10), expiresAtMs: et(2026, 9, 8, 15, 35) }, rules);
+        expect(on.ok).toBe(true);
     });
 
     test('overnight window: refused before 15:00 ET, after the close, on a weekend, or with an expiry past the close; accepted inside', () => {

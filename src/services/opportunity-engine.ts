@@ -319,12 +319,18 @@ export function triggerMaxPerDay(): number {
 // widens the CURRENT window: correlated movers arrive together.
 //
 // OPP_TRIGGER_BUDGET = 'a/b/c/d' (pre-open / open-drive / midday / pre-close),
-// default 8/10/9/3 of the 30 cap. Fingerprinted: editing it ends the epoch.
+// default 8/10/12/0 of the 30 cap. Fingerprinted: editing it ends the epoch.
+// The pre-close quota is ZERO since 2026-09-09: the trigger lane evaluates
+// intraday entries, and the intraday lane refuses new entries inside the
+// last hour (REQ-LANE-010) — a pre-close trigger could only buy an
+// evaluation whose proposal the contract refuses (8/10/9/3 on 2026-09-08
+// bought DOCN: placed 15:10, flattened 15:52 for noise). The last hour
+// belongs to the overnight lane, evaluated by the Pre-Close Review.
 
 export const TRIGGER_BUDGET_WINDOWS = ['pre-open', 'open-drive', 'midday', 'pre-close'] as const;
 export type TriggerBudgetWindow = (typeof TRIGGER_BUDGET_WINDOWS)[number];
 export type TriggerBudget = Readonly<Record<TriggerBudgetWindow, number>>;
-export const DEFAULT_TRIGGER_BUDGET: TriggerBudget = { 'pre-open': 8, 'open-drive': 10, midday: 9, 'pre-close': 3 };
+export const DEFAULT_TRIGGER_BUDGET: TriggerBudget = { 'pre-open': 8, 'open-drive': 10, midday: 12, 'pre-close': 0 };
 
 export function formatTriggerBudget(b: TriggerBudget): string {
     return TRIGGER_BUDGET_WINDOWS.map((w) => b[w]).join('/');

@@ -141,6 +141,14 @@ export interface RiskRules {
      *  session close (60 → from 15:00 ET on a full day, 12:00 ET on a
      *  half-day); the expiry is clamped to the close. */
     overnight_entry_window_min: number;
+    /** No NEW intraday entry may be registered or accepted inside this many
+     *  minutes before the session close (60 → from 15:00 ET on a full day,
+     *  12:00 ET on a half-day; 0 disables). The flat-by-close triage
+     *  flattens the lane at close − 8 min, so a late entry cannot let an
+     *  ATR-sized target play out (DOCN 2026-09-08: placed 15:10, filled
+     *  15:46, flattened 15:52 for noise). The last hour belongs to the
+     *  overnight lane (REQ-LANE-010). */
+    intraday_entry_cutoff_min: number;
     /** The overnight lane exits at this minute of the NEXT trading session
      *  (600 = 10:00 ET) unless its bracket exited first. */
     overnight_exit_minutes_et: number;
@@ -243,6 +251,7 @@ export const DEFAULT_RULES: RiskRules = {
     overnight_risk_pct: 0.5,
     max_overnight_lane_positions: 2,
     overnight_entry_window_min: 60,
+    intraday_entry_cutoff_min: 60,
     overnight_exit_minutes_et: 600,
     swing_max_hold_days: 10,
     cup_max_hold_days: 15,
@@ -326,6 +335,7 @@ const RULE_SCHEMA: Record<keyof RiskRules, RuleSpec> = {
     overnight_risk_pct: num(0, 10, { minExclusive: true }),
     max_overnight_lane_positions: num(0, 10, { integer: true }),
     overnight_entry_window_min: num(1, 240, { integer: true }),
+    intraday_entry_cutoff_min: num(0, 240, { integer: true }),
     overnight_exit_minutes_et: num(0, 1439, { integer: true }),
     swing_max_hold_days: num(1, 60, { integer: true }),
     cup_max_hold_days: num(1, 90, { integer: true }),

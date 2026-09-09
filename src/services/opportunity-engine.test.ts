@@ -170,22 +170,27 @@ describe('trigger defaults (REQ-TRIG-001 — live-loop WP1: bar 60, cap 30)', ()
 describe('session-window trigger budget (REQ-TRIG-005 — the INTC lesson, 2026-09-08)', () => {
     const CAP = 30;
 
-    test('default split is 8/10/9/3 of the 30 cap', () => {
-        expect(DEFAULT_TRIGGER_BUDGET).toEqual({ 'pre-open': 8, 'open-drive': 10, midday: 9, 'pre-close': 3 });
-        expect(formatTriggerBudget(DEFAULT_TRIGGER_BUDGET)).toBe('8/10/9/3');
-        expect(8 + 10 + 9 + 3).toBe(CAP);
+    test('default split is 8/10/12/0 of the 30 cap (pre-close 0 since 2026-09-09: the intraday lane refuses last-hour entries)', () => {
+        expect(DEFAULT_TRIGGER_BUDGET).toEqual({ 'pre-open': 8, 'open-drive': 10, midday: 12, 'pre-close': 0 });
+        expect(formatTriggerBudget(DEFAULT_TRIGGER_BUDGET)).toBe('8/10/12/0');
+        expect(8 + 10 + 12 + 0).toBe(CAP);
     });
 
     test('allowances are CUMULATIVE: unused quota rolls forward, never backward', () => {
-        expect(triggerBudgetAllowance('pre-open', DEFAULT_TRIGGER_BUDGET, CAP)).toBe(8);
-        expect(triggerBudgetAllowance('open-drive', DEFAULT_TRIGGER_BUDGET, CAP)).toBe(18);
-        expect(triggerBudgetAllowance('midday', DEFAULT_TRIGGER_BUDGET, CAP)).toBe(27);
-        expect(triggerBudgetAllowance('pre-close', DEFAULT_TRIGGER_BUDGET, CAP)).toBe(30);
+        const split = parseTriggerBudget('8/10/9/3')!; // the 2026-09-08 split, kept as the roll-over fixture
+        expect(triggerBudgetAllowance('pre-open', split, CAP)).toBe(8);
+        expect(triggerBudgetAllowance('open-drive', split, CAP)).toBe(18);
+        expect(triggerBudgetAllowance('midday', split, CAP)).toBe(27);
+        expect(triggerBudgetAllowance('pre-close', split, CAP)).toBe(30);
         // Three fired pre-open → the open-drive window still has 15 (its 10
         // plus the 5 the dawn watch left on the table).
-        expect(triggerBudgetRemaining('open-drive', 3, { budget: DEFAULT_TRIGGER_BUDGET, cap: CAP, bonus: 0 })).toBe(15);
+        expect(triggerBudgetRemaining('open-drive', 3, { budget: split, cap: CAP, bonus: 0 })).toBe(15);
         // Nothing fired all day → the pre-close window may use the whole cap.
-        expect(triggerBudgetRemaining('pre-close', 0, { budget: DEFAULT_TRIGGER_BUDGET, cap: CAP, bonus: 0 })).toBe(30);
+        expect(triggerBudgetRemaining('pre-close', 0, { budget: split, cap: CAP, bonus: 0 })).toBe(30);
+        // The default: midday reaches the cap; the pre-close window inherits
+        // whatever is left (the cap is structural, the quota is 0).
+        expect(triggerBudgetAllowance('midday', DEFAULT_TRIGGER_BUDGET, CAP)).toBe(30);
+        expect(triggerBudgetAllowance('pre-close', DEFAULT_TRIGGER_BUDGET, CAP)).toBe(30);
     });
 
     test('the INTC day: 30 pre-market evaluations fire 8, the regular session keeps 22', () => {
@@ -196,7 +201,7 @@ describe('session-window trigger budget (REQ-TRIG-005 — the INTC lesson, 2026-
         for (let i = 0; i < 30; i++) if (triggerBudgetRemaining('pre-open', fired, opts) > 0) fired++;
         expect(fired).toBe(8);
         expect(triggerBudgetRemaining('open-drive', fired, opts)).toBe(10);
-        expect(triggerBudgetRemaining('midday', fired, opts)).toBe(19);
+        expect(triggerBudgetRemaining('midday', fired, opts)).toBe(22);
         expect(triggerBudgetRemaining('pre-close', fired, opts)).toBe(22);
     });
 
@@ -231,8 +236,8 @@ describe('session-window trigger budget (REQ-TRIG-005 — the INTC lesson, 2026-
     });
 
     test('parse: four non-negative integers separated by /; anything else is null', () => {
-        expect(parseTriggerBudget('8/10/9/3')).toEqual(DEFAULT_TRIGGER_BUDGET);
-        expect(parseTriggerBudget(' 8 / 10 / 9 / 3 ')).toEqual(DEFAULT_TRIGGER_BUDGET);
+        expect(parseTriggerBudget('8/10/12/0')).toEqual(DEFAULT_TRIGGER_BUDGET);
+        expect(parseTriggerBudget(' 8 / 10 / 12 / 0 ')).toEqual(DEFAULT_TRIGGER_BUDGET);
         expect(parseTriggerBudget(undefined)).toBeNull();
         expect(parseTriggerBudget('')).toBeNull();
         expect(parseTriggerBudget('8/10/9')).toBeNull();

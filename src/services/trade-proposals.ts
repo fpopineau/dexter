@@ -917,6 +917,12 @@ export async function createProposal(
     // setup outside its window is refused here, after the risk gate, before
     // persistence. The lane cap on overnight rows is counted server-side.
     const rules = getRiskRules();
+    // REQ-LANE-010 is wall-clock dependent: the scenario suites create
+    // intraday rows at whatever hour they run, so the cutoff is off under
+    // the test runner unless a creation clock is pinned (the executor's
+    // session gate follows the same discipline). The pure check is pinned
+    // by lane-contract.test.ts at explicit ET instants.
+    const laneRules = process.env.NODE_ENV === 'test' && !testClock ? { ...rules, intraday_entry_cutoff_min: 0 } : rules;
     const lane = resolveLaneContract({
         strategyId: input.strategyId ?? null,
         tradeClass,
@@ -924,7 +930,7 @@ export async function createProposal(
         setupId: input.setupId ?? null,
         createdAtMs: now,
         expiresAtMs: expiry,
-    }, rules);
+    }, laneRules);
     if (!lane.ok) {
         throw new Error(`[lane-contract] REFUSED ${input.symbol.toUpperCase()}: ${lane.violations.join('; ')}`);
     }

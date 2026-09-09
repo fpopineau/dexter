@@ -106,6 +106,7 @@ max_swing_positions: 3 # Max concurrent swing positions (executed + working)
 overnight_risk_pct: 0.5 # overnight lane per-trade budget (% of NetLiq)
 max_overnight_lane_positions: 2 # inside max_swing_positions
 overnight_entry_window_min: 60 # overnight registration opens this many minutes before the close (15:00 ET full day, 12:00 ET half-day); expiry clamps to the close
+intraday_entry_cutoff_min: 60 # no NEW intraday entry inside the last hour (REQ-LANE-010, DOCN 2026-09-08): the 15:52 triage cannot let an ATR-sized target play out; 0 disables
 overnight_exit_minutes_et: 600 # 10:00 ET next trading session — the lane's exit deadline
 swing_max_hold_days: 10 # trading days after the fill, closed at 15:50 ET on the last day
 cup_max_hold_days: 15 # trading days after the fill

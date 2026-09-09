@@ -299,12 +299,16 @@ When a candidate enters the **top 3** with `compositeRank ≥ OPP_TRIGGER_SCORE`
 (default **60** since the live-loop WP1, 2026-09-05 — was 75) during loop
 cycles: debounce per symbol (`OPP_TRIGGER_COOLDOWN_MIN`, default 30) and
 daily cap (`OPP_TRIGGER_MAX_PER_DAY`, default **30** — was 10), split by
-session window (`OPP_TRIGGER_BUDGET`, default **8/10/9/3** for pre-open /
-open-drive / midday / pre-close since 2026-09-08, REQ-TRIG-005): the quotas
-are cumulative allowances, so unused quota rolls forward and the pre-close
-window may use whatever the day left; the breadth bonus widens the current
-window. Before the split the dawn watch spent the whole cap before the bell
-(2026-09-08: cap reached 08:16 ET, INTC's +10 % session blind). A focused,
+session window (`OPP_TRIGGER_BUDGET`, default **8/10/12/0** for pre-open /
+open-drive / midday / pre-close, REQ-TRIG-005): the quotas are cumulative
+allowances, so unused quota rolls forward and a later window may use
+whatever the day left; the breadth bonus widens the current window. Before
+the split the dawn watch spent the whole cap before the bell (2026-09-08:
+cap reached 08:16 ET, INTC's +10 % session blind). The pre-close quota is 0
+since 2026-09-09: new intraday entries are refused inside the last hour
+(`intraday_entry_cutoff_min`, REQ-LANE-010 — DOCN 2026-09-08 was placed
+15:10 and flattened 15:52), so a late trigger could only buy an evaluation
+whose proposal the contract refuses. A focused,
 isolated agent run checks the news catalyst and risk; if actionable it
 registers a proposal and the alert lands on WhatsApp. Non-actionable
 evaluations are suppressed (and ledgered). The firing rank rides the run
@@ -572,11 +576,12 @@ manual acceptance:
 | `OPP_TRIGGER_SCORE` | 60 | composite threshold for event triggers (75 before 2026-09-05) |
 | `OPP_TRIGGER_COOLDOWN_MIN` | 30 | per-symbol trigger debounce |
 | `OPP_TRIGGER_MAX_PER_DAY` | 30 | trigger cap per ET day (10 before 2026-09-05) |
-| `OPP_TRIGGER_BUDGET` | 8/10/9/3 | session-window split of the cap (pre-open/open-drive/midday/pre-close), cumulative with roll-over (REQ-TRIG-005) |
+| `OPP_TRIGGER_BUDGET` | 8/10/12/0 | session-window split of the cap (pre-open/open-drive/midday/pre-close), cumulative with roll-over (REQ-TRIG-005); pre-close 0 since the intraday cutoff (REQ-LANE-010) |
 | `OPP_LARGECAP_LANE` / `_MIN_USD` / `_RESERVE` | true / 1e10 / 5 | large-cap scan lane and its reserved candidate slots (REQ-SCAN-006) |
 | `PREMARKET_SPREAD_HARD_MULT` | 3 | pre-open DAY accepts: spread over the cap but under cap × this is deferred to the 09:31 ET re-check (REQ-RISK-008) |
 | `LIVE_VETO_WINDOW_MIN` | 0 | minutes an announced auto-execution waits for `veto P-XXXX` (REQ-LIVE-002) |
 | `LLM_DAILY_SPEND_CAP_USD` | 10 | evaluation lanes stop for the day at this spend; 0 disables; needs both price knobs (REQ-LLM-001/002) |
+| `LLM_SPEND_CRON_RESERVE_USD` | 2 | USD of the cap kept for the cron lanes: trigger/breadth/mover stop at cap − reserve, `cron:*` at the cap (REQ-LLM-003) |
 | `LLM_PRICE_IN_USD_PER_MTOK` / `LLM_PRICE_OUT_USD_PER_MTOK` | — | USD per million input/output tokens; required while the cap is on |
 | `SIMULATOR` | true | nightly shadow-variant settle at 17:10 ET into `simulator.db` (REQ-SIM-006); observability only |
 | `SIM_COMMISSION_PER_SHARE_USD` / `SIM_COMMISSION_MIN_USD` | 0.005 / 1.00 | the simulator's per-side commission assumption (IBKR fixed tier) |
@@ -585,7 +590,9 @@ manual acceptance:
 Lane parameters live in the risk yamls, not env (WP5, research parameters):
 `overnight_risk_pct` (0.5 base / 0.75 live), `max_overnight_lane_positions`
 (2), `overnight_entry_window_min` (60 → from 15:00 ET on a full day), `overnight_exit_minutes_et`
-(600 = 10:00), `swing_max_hold_days` (10), `cup_max_hold_days` (15).
+(600 = 10:00), `swing_max_hold_days` (10), `cup_max_hold_days` (15),
+`intraday_entry_cutoff_min` (60 → no new intraday entry from 15:00 ET on a
+full day, 12:00 on a half-day, at creation and at acceptance; REQ-LANE-010).
 | `OPP_HEALTH_EMPTY_CYCLES` | 3 | consecutive zero-scan cycles (market open) before a degraded-scanner WhatsApp alert |
 | `UNIVERSE_EXTRA_SYMBOLS` | — | watchlist archived nightly + swing-pattern-scanned regardless of the cap band |
 | `AUTO_EXECUTE_PAPER` | false | paper-only auto-execution of proposals (all sources) |

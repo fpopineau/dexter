@@ -30,6 +30,12 @@ describe('classifyCancelRejection', () => {
     test('10148 with a Cancelled state is cancelled', () => {
         expect(classifyCancelRejection(10148, 'cannot be cancelled, state: Cancelled.')).toBe('cancelled');
     });
+    test('10148 as French TWS really phrases it ("indique : <state>") — the DOCN 2026-09-08 message', () => {
+        // The OCA sibling the close had already killed: benign, not an alarm.
+        expect(classifyCancelRejection(10148, "L'ordre 51 qui doit être annulé, ne peut pas être annulé, indique : Cancelled.")).toBe('cancelled');
+        expect(classifyCancelRejection(10148, "L'ordre 51 qui doit être annulé, ne peut pas être annulé, indique : Rempli.")).toBe('filled');
+        expect(classifyCancelRejection(10148, "L'ordre 51 qui doit être annulé, ne peut pas être annulé, indique : PendingSubmit.")).toBe('not-cancellable');
+    });
     test('10148 with an unknown state is not-cancellable — never assumed gone', () => {
         expect(classifyCancelRejection(10148, 'cannot be cancelled, state: PendingSubmit.')).toBe('not-cancellable');
     });

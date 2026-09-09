@@ -10,7 +10,9 @@
  * creation. The TIF is an execution property fixed by the contract.
  *
  *   intraday        intraday class, DAY, same-session, take-x (the 15:52
- *                   triage owns the close — no deadline of its own)
+ *                   triage owns the close — no deadline of its own); no
+ *                   NEW entry inside the last `intraday_entry_cutoff_min`
+ *                   minutes before the close (REQ-LANE-010, 2026-09-09)
  *   overnight       swing class, GTC exits, next-session; entries in the
  *                   last `overnight_entry_window_min` minutes before the
  *                   close (15:00 ET full day, 12:00 half-day), expiry clamped
@@ -176,7 +178,30 @@ export interface ResolvedLaneContract {
 
 export type LaneResolution = { ok: true; contract: ResolvedLaneContract } | { ok: false; violations: string[] };
 
-/** REQ-LANE-001/002/003: resolve and validate the contract of a new proposal. */
+const hhmm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+
+/** REQ-LANE-010 (2026-09-09): the reason a NEW intraday entry may not be
+ *  registered or accepted at `nowMs`, or null. The same-session lane is
+ *  flattened by the triage at close − 8 min, so an entry inside the last
+ *  `intraday_entry_cutoff_min` minutes has no time for an ATR-sized
+ *  target: DOCN 2026-09-08 was placed 15:10, filled 15:46 and flattened
+ *  15:52 for −0.25 % — a coin flip on six bars, not a trade. Pre-market
+ *  and the rest of the session are untouched; the last hour belongs to
+ *  the overnight lane (whose window opens at the same minute by default).
+ *  Checked at creation (resolveLaneContract) and again at acceptance. */
+export function intradayEntryCutoffViolation(nowMs: number, rules: Pick<RiskRules, 'intraday_entry_cutoff_min'>): string | null {
+    const cutoff = rules.intraday_entry_cutoff_min;
+    if (!(cutoff > 0)) return null;
+    const { dateStr, minutes, dayOfWeek } = etParts(nowMs);
+    if (!isTradingDay(dateStr, dayOfWeek)) return null;
+    const close = sessionCloseMinutes(nowMs);
+    const from = close - cutoff;
+    if (minutes < from || minutes >= close) return null;
+    return `intraday entries stop ${cutoff} min before the bell (${hhmm(from)} ET) — it is ${hhmm(minutes)} ET and the flat-by-close ` +
+        `triage cannot let an ATR-sized target play out; register an overnight setup (strategyId "overnight") if the thesis carries the night, else skip`;
+}
+
+/** REQ-LANE-001/002/003/010: resolve and validate the contract of a new proposal. */
 export function resolveLaneContract(
     input: {
         strategyId?: StrategyId | null;
@@ -186,7 +211,7 @@ export function resolveLaneContract(
         createdAtMs: number;
         expiresAtMs: number;
     },
-    rules: Pick<RiskRules, 'exit_style' | 'overnight_entry_window_min'>,
+    rules: Pick<RiskRules, 'exit_style' | 'overnight_entry_window_min' | 'intraday_entry_cutoff_min'>,
 ): LaneResolution {
     const tradeClass: TradeClass = input.tradeClass ?? 'intraday';
     const strategyId: StrategyId = input.strategyId ?? deriveStrategyId(tradeClass);
@@ -197,6 +222,10 @@ export function resolveLaneContract(
     }
     if (lane.tif !== input.tif) {
         violations.push(`strategy '${strategyId}' requires tif ${lane.tif} (${lane.holdingHorizon}); the TIF is an execution property of the contract, not a choice`);
+    }
+    if (lane.holdingHorizon === 'same-session') {
+        const late = intradayEntryCutoffViolation(input.createdAtMs, rules);
+        if (late) violations.push(late);
     }
     if (strategyId === 'overnight') {
         const { dateStr, minutes, dayOfWeek } = etParts(input.createdAtMs);

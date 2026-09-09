@@ -17,6 +17,8 @@ process.env.DEXTER_DATA_DIR = dir;
 import { createProposal, getProposal, setProposalStatus } from './trade-proposals.js';
 import {
     __attachApiForTests,
+    __handleCommissionReportForTests,
+    __handleExecDetailsForTests,
     __handleOrderStatusForTests,
     __resetTrackerForTests,
     __setAckWindowForTests,
@@ -248,6 +250,69 @@ describe('manual-exit attribution allocates by quantity (WP2)', () => {
         expect(rowB?.status).toBe('closed');
         expect(rowB?.realizedPnl).toBeNull();
         expect(rowB?.note ?? '').toContain('allocation');
+    });
+});
+
+describe('deliberate closes book BOTH commission sides (2026-09-09: the exit side was dropped)', () => {
+    const execDetails = (symbol: string, orderId: number, execId: string, qty: number, price: number) =>
+        __handleExecDetailsForTests(0, { symbol } as never, { orderId, execId, cumQty: qty, shares: qty, avgPrice: price, price } as never);
+
+    test('EOD-triage close: the close order\'s commission report lands on the row it closed', async () => {
+        // P-9149 DOCN 2026-09-08: entry 7 @ 126.5 ($1.00), triage close @ 126.18
+        // ($1.00) — the ledger showed commissions 1.00, net P&L $1 too kind.
+        const t = await trackedProposal('WPCM', 7, 126.5);
+        execDetails('WPCM', t.entryId, 'WPCM-E1', 7, 126.5);
+        __handleCommissionReportForTests({ execId: 'WPCM-E1', commission: 1.0 } as never);
+        __handleOrderStatusForTests(t.entryId, 'Filled', 7, 0, 126.5);
+        await sleep(20);
+
+        trackManualExit('WPCM', 8_889, 7, 'EOD triage');
+        execDetails('WPCM', 8_889, 'WPCM-E2', 7, 126.18);
+        __handleCommissionReportForTests({ execId: 'WPCM-E2', commission: 1.0 } as never);
+        __handleOrderStatusForTests(8_889, 'Filled', 7, 0, 126.18);
+        await sleep(40);
+
+        const row = await getProposal(t.id);
+        expect(row?.status).toBe('closed');
+        expect(row?.exitReason).toBe('manual');
+        expect(row?.realizedPnl).toBeCloseTo(7 * (126.18 - 126.5), 2);
+        expect(row?.commissions).toBeCloseTo(2.0, 2);
+    });
+
+    test('a close covering two stacked (legacy) trades splits its commission by the share allocation', async () => {
+        // Stacks cannot be created any more (one thesis per symbol); legacy
+        // rows still exist — same simulation as the WP2 allocation test.
+        const { __dropOneThesisIndexForTests } = await import('./trade-proposals.js');
+        await __dropOneThesisIndexForTests();
+        const mk = async (qty: number, entry: number) => createProposal({
+            symbol: 'WPCS', direction: 'long', entryType: 'LMT', entry,
+            stop: Math.round(entry * 0.975 * 100) / 100,
+            target: Math.round(entry * 1.06 * 100) / 100,
+            quantity: qty, rationale: 'commission split scenario', source: 'test',
+        }, { dailyAtr: 0.04 * entry });
+        const pa = await mk(10, 100);
+        const pb = await mk(5, 104);
+        const exec = async (p: { id: string }) => {
+            const ids = [seq++, seq++, seq++];
+            await setProposalStatus(p.id, 'executed', { orderIds: ids, executedAt: Date.now() });
+            const row = await getProposal(p.id);
+            trackExecutedProposal(row!);
+            return { id: p.id, entryId: ids[0] };
+        };
+        const a = await exec(pa);
+        const b = await exec(pb);
+        __handleOrderStatusForTests(a.entryId, 'Filled', 10, 0, 100);
+        __handleOrderStatusForTests(b.entryId, 'Filled', 5, 0, 104);
+        await sleep(20);
+        trackManualExit('WPCS', 8_890, 15, 'close command');
+        execDetails('WPCS', 8_890, 'WPCS-E3', 15, 106);
+        __handleCommissionReportForTests({ execId: 'WPCS-E3', commission: 1.5 } as never);
+        __handleOrderStatusForTests(8_890, 'Filled', 15, 0, 106);
+        await sleep(40);
+        const rowA = await getProposal(a.id);
+        const rowB = await getProposal(b.id);
+        expect(rowA?.commissions).toBeCloseTo(1.0, 2); // 10 of 15 shares
+        expect(rowB?.commissions).toBeCloseTo(0.5, 2); // 5 of 15 shares
     });
 });
 

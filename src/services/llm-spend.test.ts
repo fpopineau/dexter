@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import {
     addUsage,
     assertSpendConfig,
+    cronReserveUsd,
     dailySpendCapUsd,
+    isCronLane,
     isEvaluationLane,
     priceUsd,
     readSpendLedger,
@@ -84,6 +86,28 @@ describe('spend cap verdict (REQ-LLM-002 — evaluation lanes stop, exits never)
         expect(spendVerdict({ lane: 'whatsapp', ledger: spent, capUsd: 10 }).ok).toBe(true);
         expect(spendVerdict({ lane: 'trigger', ledger: spent, capUsd: 0 }).ok).toBe(true);
         expect(spendVerdict({ lane: 'trigger', ledger: rollLedger(null, '2026-09-10'), capUsd: 10 }).ok).toBe(true);
+    });
+
+    test('REQ-LLM-003 cron reserve: discovery lanes stop at cap − reserve, cron lanes at the cap (the 2026-09-08 Pre-Close Review refusal)', () => {
+        const at = (usd: number) => addUsage(rollLedger(null, '2026-09-08'), 'trigger', { inputTokens: (usd / 3) * 1e6, outputTokens: 0 }, PRICES);
+        // $8.50 spent, cap 10, reserve 2: the trigger lane is done for the day, the review still runs.
+        const trig = spendVerdict({ lane: 'trigger', ledger: at(8.5), capUsd: 10, reserveUsd: 2 });
+        expect(trig.ok).toBe(false);
+        if (!trig.ok) expect(trig.reason).toMatch(/discovery allowance \$8\.00 .*LLM_SPEND_CRON_RESERVE_USD \$2\.00/);
+        expect(spendVerdict({ lane: 'breadth', ledger: at(8.5), capUsd: 10, reserveUsd: 2 }).ok).toBe(false);
+        expect(spendVerdict({ lane: 'cron:Pre-Close Review', ledger: at(8.5), capUsd: 10, reserveUsd: 2 }).ok).toBe(true);
+        // At the cap everything evaluative stops; operator lanes never do.
+        expect(spendVerdict({ lane: 'cron:Pre-Close Review', ledger: at(10.23), capUsd: 10, reserveUsd: 2 }).ok).toBe(false);
+        expect(spendVerdict({ lane: 'whatsapp', ledger: at(10.23), capUsd: 10, reserveUsd: 2 }).ok).toBe(true);
+        // Reserve 0 (or omitted) is the pre-2026-09-09 behavior; a reserve ≥ cap clamps to the cap (discovery refused from $0).
+        expect(spendVerdict({ lane: 'trigger', ledger: at(8.5), capUsd: 10, reserveUsd: 0 }).ok).toBe(true);
+        expect(spendVerdict({ lane: 'trigger', ledger: at(8.5), capUsd: 10 }).ok).toBe(true);
+        expect(spendVerdict({ lane: 'trigger', ledger: rollLedger(null, '2026-09-08'), capUsd: 10, reserveUsd: 50 }).ok).toBe(false);
+        expect(isCronLane('cron:Midday Check')).toBe(true);
+        expect(isCronLane('trigger')).toBe(false);
+        expect(cronReserveUsd({})).toBe(2);
+        expect(cronReserveUsd({ LLM_SPEND_CRON_RESERVE_USD: '3.5' })).toBe(3.5);
+        expect(cronReserveUsd({ LLM_SPEND_CRON_RESERVE_USD: '-1' })).toBe(2);
     });
 
     test('recordLlmUsage persists to llm-spend.json under the data dir and reads back', () => {

@@ -58,6 +58,26 @@ export function dailySpendCapUsd(env: Env = process.env): number {
     return Number.isFinite(n) && n >= 0 ? n : DEFAULT_DAILY_SPEND_CAP_USD;
 }
 
+/** REQ-LLM-003 (2026-09-09): USD of the daily cap kept for the CRON lanes.
+ *  On 2026-09-08 the discovery lanes (38 trigger runs, $8.09) took the day
+ *  to $10.23 by 15:10 ET and the 15:30 Pre-Close Review — the overnight
+ *  lane's only evaluation — was refused at the cap. Discovery lanes
+ *  (trigger / breadth / mover) now stop at cap − reserve; cron lanes stop
+ *  at the cap. Clamped to the cap (a reserve ≥ cap would silence
+ *  discovery for good). */
+export const DEFAULT_CRON_RESERVE_USD = 2;
+
+export function cronReserveUsd(env: Env = process.env): number {
+    const raw = env.LLM_SPEND_CRON_RESERVE_USD;
+    if (raw === undefined || raw.trim() === '') return DEFAULT_CRON_RESERVE_USD;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : DEFAULT_CRON_RESERVE_USD;
+}
+
+export function isCronLane(lane: string | null | undefined): boolean {
+    return typeof lane === 'string' && lane.startsWith('cron:');
+}
+
 /** Both prices as positive numbers, else null (the cap cannot bill). */
 export function readSpendPrices(env: Env = process.env): SpendPrices | null {
     const inP = Number(env.LLM_PRICE_IN_USD_PER_MTOK);
@@ -127,15 +147,22 @@ export function addUsage(
     };
 }
 
-/** Pure: may a run on `lane` start? */
-export function spendVerdict(input: { lane: string | null; ledger: SpendLedger | null; capUsd: number }): SpendVerdict {
+/** Pure: may a run on `lane` start? Discovery lanes are allowed up to
+ *  cap − reserve, cron lanes up to the cap (REQ-LLM-002/003). */
+export function spendVerdict(input: { lane: string | null; ledger: SpendLedger | null; capUsd: number; reserveUsd?: number }): SpendVerdict {
     if (input.capUsd <= 0) return { ok: true };
     if (!isEvaluationLane(input.lane)) return { ok: true };
     const spent = input.ledger?.totalUsd ?? 0;
-    if (spent < input.capUsd) return { ok: true };
+    const reserve = Math.min(Math.max(0, input.reserveUsd ?? 0), input.capUsd);
+    const cron = isCronLane(input.lane);
+    const allowance = cron ? input.capUsd : input.capUsd - reserve;
+    if (spent < allowance) return { ok: true };
+    const bound = cron || reserve === 0
+        ? `LLM_DAILY_SPEND_CAP_USD $${input.capUsd.toFixed(2)}`
+        : `the discovery allowance $${allowance.toFixed(2)} (LLM_DAILY_SPEND_CAP_USD $${input.capUsd.toFixed(2)} minus LLM_SPEND_CRON_RESERVE_USD $${reserve.toFixed(2)} kept for the cron lanes)`;
     return {
         ok: false,
-        reason: `spend cap: today's LLM spend $${spent.toFixed(2)} has reached LLM_DAILY_SPEND_CAP_USD $${input.capUsd.toFixed(2)} — ` +
+        reason: `spend cap: today's LLM spend $${spent.toFixed(2)} has reached ${bound} — ` +
             `evaluation lane '${input.lane}' refused to start (exits, triage and the guardian are unaffected)`,
     };
 }
@@ -190,6 +217,6 @@ export function recordLlmUsage(
  *  start under today's ledger. */
 export function assertEvaluationAllowed(lane: string | null, opts: { dataDir?: string; today?: string; env?: Env } = {}): void {
     const ledger = rollLedger(readSpendLedger(opts.dataDir), opts.today ?? etToday());
-    const v = spendVerdict({ lane, ledger, capUsd: dailySpendCapUsd(opts.env) });
+    const v = spendVerdict({ lane, ledger, capUsd: dailySpendCapUsd(opts.env), reserveUsd: cronReserveUsd(opts.env) });
     if (!v.ok) throw new SpendCapError(v.reason);
 }

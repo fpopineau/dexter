@@ -435,6 +435,16 @@ export async function acceptProposal(id: string): Promise<ExecutionOutcome> {
             }
         }
 
+        // REQ-LANE-010 at ACCEPTANCE: an intraday idea registered before the
+        // cutoff but accepted inside it has the same problem — the triage
+        // flattens it before an ATR-sized target can play out. Test-gated
+        // like the session gate below (wall-clock dependent).
+        if (process.env.NODE_ENV !== 'test' && (p.strategyId ?? (p.tradeClass === 'intraday' ? 'intraday' : null)) === 'intraday') {
+            const { intradayEntryCutoffViolation } = await import('./lane-contract.js');
+            const late = intradayEntryCutoffViolation(Date.now(), getRiskRules());
+            if (late) throw new Error(`[lane-contract] ${late}`);
+        }
+
         // Risk gate with live account context. Re-runs the static checks too:
         // rules may have been tightened since the proposal was created.
         const exposure = (await listExposure()).filter((t) => t.id !== p.id);

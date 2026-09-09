@@ -144,8 +144,13 @@ export function classifyCancelRejection(code: number, message: string): CancelOu
     if (code === 10148 || code === 161) {
         // Only the STATE TOKEN decides — the sentence itself always says
         // "cannot be cancelled", so a whole-message keyword scan would
-        // classify everything as cancelled.
-        const token = /(?:state|état)\s*:?\s*([A-Za-zé]+)/i.exec(message)?.[1] ?? '';
+        // classify everything as cancelled. The token follows "state:" in
+        // English; French TWS phrases it "…ne peut pas être annulé,
+        // indique : Cancelled." (observed 2026-09-08 on DOCN's OCA sibling
+        // — the missing keyword classified a benign already-cancelled
+        // answer as not-cancellable and pushed the broker text into the
+        // operator's close alert), so "indique" is a keyword too.
+        const token = /(?:state|état|indique)\s*:?\s*([A-Za-zé]+)/i.exec(message)?.[1] ?? '';
         if (/^(filled|rempli)$/i.test(token)) return 'filled';
         if (/^(cancelled|canceled|annulé)$/i.test(token)) return 'cancelled';
         return 'not-cancellable';

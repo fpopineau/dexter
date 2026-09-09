@@ -196,11 +196,12 @@ Everything else has sensible defaults:
 | `OPP_TRIGGER_SCORE` | 60 | composite rank for event triggers (75 until 2026-09-05; proposals carry `trigger_band` '60-74' / '75+') |
 | `OPP_TRIGGER_COOLDOWN_MIN` | 30 | per-symbol trigger debounce |
 | `OPP_TRIGGER_MAX_PER_DAY` | 30 | trigger cap per ET day (10 until 2026-09-05) |
-| `OPP_TRIGGER_BUDGET` | 8/10/9/3 | pre-open/open-drive/midday/pre-close split of the cap; unused quota rolls to later windows (since 2026-09-08) |
+| `OPP_TRIGGER_BUDGET` | 8/10/12/0 | pre-open/open-drive/midday/pre-close split of the cap; unused quota rolls to later windows; pre-close 0 because intraday entries stop an hour before the close (risk rule `intraday_entry_cutoff_min`) |
 | `OPP_LARGECAP_LANE` / `_MIN_USD` / `_RESERVE` | true / 1e10 / 5 | large-cap scan lane + reserved candidate slots |
 | `PREMARKET_SPREAD_HARD_MULT` | 3 | pre-open DAY accept spread deferral bound (09:31 ET re-check) |
 | `LIVE_VETO_WINDOW_MIN` | 0 | veto window before an announced auto-execution places |
 | `LLM_DAILY_SPEND_CAP_USD` | 10 | daily LLM spend cap for evaluation lanes (0 = off; needs `LLM_PRICE_IN_USD_PER_MTOK` + `LLM_PRICE_OUT_USD_PER_MTOK`) |
+| `LLM_SPEND_CRON_RESERVE_USD` | 2 | part of the cap kept for the cron lanes (Pre-Close Review etc.); trigger/breadth/mover stop at cap − reserve |
 | `SIMULATOR` | true | nightly shadow-variant settle (17:10 ET) into `simulator.db`; `SIM_COMMISSION_PER_SHARE_USD` / `SIM_COMMISSION_MIN_USD` set the commission assumption |
 | `CANDIDATE_ARCHIVE` | true | point-in-time capture of the overnight and cup-and-handle universes on every pre-close snapshot into `candidate-archive.db`; the 🌙 overnight benchmark block after the nightly settle replays yesterday's eligible candidates (mechanical twin: MKT at the next bar, take-x target, stop at the gate's minimum R:R, flat 10:00) and compares the universe, the top-5 by rank and the judgment's picks (gross R = the size-invariant label). Observability only; "eligible" is not "admissible". `bun run scripts/overnight-benchmark.ts --day YYYY-MM-DD` prints the table |
 | `OPP_HEALTH_EMPTY_CYCLES` | 3 | zero-scan cycles before the scanner-health WhatsApp alert |
