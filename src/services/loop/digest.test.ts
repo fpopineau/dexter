@@ -45,7 +45,7 @@ const inputs: DigestInputs = {
     ],
     triggersToday: { single: 9, breadth: 1 },
     scannedToday: 143,
-    spend: { date: '2026-09-10', totalUsd: 4.2, byLane: { trigger: { runs: 9, inputTokens: 1, outputTokens: 1, usd: 4.2 } } },
+    spend: { date: '2026-09-10', totalUsd: 4.2, byLane: { trigger: { runs: 9, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0, usd: 4.2 } } },
     twins: new Map([['P-0001', { variant: 'incumbent', sourceKind: 'proposal', sourceId: 'P-0001', symbol: 'MU', direction: 'long', tradeClass: 'intraday', entryType: 'LMT', entry: 100, entryLimit: null, stop: 97, target: 106, quantity: 10, tif: 'DAY', createdAt: T0, barSource: 'archive-1m', fillAt: 1, fillPrice: 100, exitAt: 2, exitPrice: 106, outcome: 'target', commissions: 2, netUsd: 58, netR: 58 / 30, status: 'settled', biasNote: 'p', settledAt: 3, horizonDays: 1, note: null }]]),
 };
 

@@ -4350,3 +4350,72 @@ incumbent policy.
 | REQ-LLM-003 | `llm-spend.test.ts` § REQ-LLM-003 cron reserve |
 
 Harness at landing: `bun test` 1148 pass (103 files), `tsc --noEmit` clean, Jest 1129 pass under Node.
+
+## Decision 2026-09-09 (evening) — cache-aware LLM metering, 1-hour prompt cache; epoch 3 closed
+
+Operator question: a responsive API on a lower LLM budget. Findings on the
+ledger of 2026-09-09 (34 trigger runs, ~89K input / ~950 output tokens and
+$0.19 metered per run at Sonnet 5's $2 / $10 per million):
+
+- The meter billed EVERY input token at the full price. The agent sends
+  `cache_control` on the system prompt and a tail breakpoint on every call,
+  and the run's usage carries the cache read / cache write split
+  (`TokenCounter` sums it), but `priceUsd` ignored it. A trigger run resends
+  its ~20K-token prefix on each of its iterations, so the ledger overstated
+  the day by a multiple and the $10 cap bound on a phantom (the 2026-09-08
+  Pre-Close Review refusal).
+- The cache split was logged at debug level only — invisible in the
+  gateway log — so nobody could see the hit rate.
+- With the default 5-minute TTL, runs more than five minutes apart (the
+  dawn watch runs every 15) re-WROTE the shared prefix at 1.25× and only
+  their own later iterations read it.
+
+### Requirements
+
+- REQ-LLM-004: the spend meter is cache-aware. `priceUsd` bills the
+  uncached input at the input price, cache reads at
+  `CACHE_READ_PRICE_MULT` (0.10) and cache writes at
+  `CACHE_WRITE_PRICE_MULT` (2.00 — the 1-hour rate; the tail breakpoint's
+  5-minute writes are over-billed by 0.75×, conservative for the cap) of
+  the input price, output at the output price; `cacheSplit` clamps cache
+  figures the total cannot cover. The ledger keeps `cacheReadTokens` /
+  `cacheCreationTokens` per lane and reads pre-2026-09-09 ledgers with
+  zeros. `recordLlmUsage` logs ONE INFO line per run: lane, run cost,
+  input split (cache read · written · uncached · hit %), output, the day's
+  total against the cap and the discovery allowance.
+- REQ-LLM-005: the agent's system-prompt breakpoint carries
+  `ttl: '1h'` (`AGENT_SYSTEM_CACHE`, llm.ts). The tail breakpoint keeps the
+  5-minute default. The prefix stays byte-stable within a day (isolated
+  runs carry no memory context; the date line changes once a day); the
+  cache hit rate is verified from the REQ-LLM-004 line, not assumed.
+
+### Epoch 3 closure
+
+- `epoch-3` (fp `7230906cf78f`, started 2026-09-09T15:18:45Z, NetLiq
+  $12,218.11, no trade, no look) is STOPPED via `scripts/epoch-stop.ts` with
+  the reason **cache-aware spend metering + 1h prompt cache** — not a
+  REJECT. Both files are in the fingerprint (the cap decides which trades
+  enter the sample). Epoch 4 opens on this build: restart, `epoch new`.
+
+### Non-goals
+
+- No change to the model, effort, tool set, iteration cap or the prompts;
+  no deterministic pre-gate before the LLM (the next lever, a behavior
+  decision on its own).
+- The per-call cache split stays at debug level in llm.ts.
+
+### Acceptance
+
+- [x] Cache-aware pricing, clamping, ledger columns, legacy ledger read,
+  per-run line pinned (`llm-spend.test.ts`).
+- [x] Epoch 3 stopped with the stated reason; journal line.
+- [ ] Operator: gateway restart, `epoch new` → epoch-4; then read the
+  `[llm-spend]` lines — a hit rate near 0 % on the second run of an hour
+  means a silent invalidator in the prefix.
+
+| Item | Test |
+|---|---|
+| REQ-LLM-004 | `llm-spend.test.ts` § REQ-LLM-004 (pricing, split clamps, ledger columns, legacy read, INFO line) |
+| REQ-LLM-005 | constant pinned by review (`llm.ts` AGENT_SYSTEM_CACHE); verified live from the REQ-LLM-004 line |
+
+Harness at landing: `bun test` 1151 pass (103 files), `tsc --noEmit` clean, Jest 1132 pass under Node.

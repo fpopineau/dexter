@@ -349,6 +349,21 @@ export async function callLlm(prompt: string, options: CallLlmOptions = {}): Pro
 // ---------------------------------------------------------------------------
 
 /**
+ * REQ-LLM-005 (2026-09-09): the agent's system-prompt breakpoint lives ONE
+ * HOUR, not the default five minutes. The prefix it covers (tool schemas +
+ * the ~20K-token system prompt) is the bulk of every iteration, and the
+ * evaluation lanes share it byte for byte (isolated runs carry no memory
+ * context; only the date line changes, once a day). Trigger runs arrive
+ * minutes apart — the dawn watch every 15 — so with a 5-minute TTL most
+ * runs re-WROTE the prefix at 1.25× the input price and only their own
+ * later iterations read it. A 1-hour write costs 2× once, then every run
+ * of the hour reads at 0.1×, and each read renews the hour. The tail
+ * breakpoint (the call option below) keeps the 5-minute default: it covers
+ * the growing conversation, reused only by the run's own next iteration.
+ */
+const AGENT_SYSTEM_CACHE = { type: 'ephemeral' as const, ttl: '1h' as const };
+
+/**
  * Annotate the first SystemMessage with Anthropic's cache_control for prompt
  * caching (~90% input token savings on repeated calls).
  */
@@ -367,7 +382,7 @@ function annotateSystemMessageForCaching(messages: BaseMessage[]): BaseMessage[]
       {
         type: 'text' as const,
         text,
-        cache_control: { type: 'ephemeral' },
+        cache_control: AGENT_SYSTEM_CACHE,
       },
     ],
   });

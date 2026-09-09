@@ -200,7 +200,7 @@ Everything else has sensible defaults:
 | `OPP_LARGECAP_LANE` / `_MIN_USD` / `_RESERVE` | true / 1e10 / 5 | large-cap scan lane + reserved candidate slots |
 | `PREMARKET_SPREAD_HARD_MULT` | 3 | pre-open DAY accept spread deferral bound (09:31 ET re-check) |
 | `LIVE_VETO_WINDOW_MIN` | 0 | veto window before an announced auto-execution places |
-| `LLM_DAILY_SPEND_CAP_USD` | 10 | daily LLM spend cap for evaluation lanes (0 = off; needs `LLM_PRICE_IN_USD_PER_MTOK` + `LLM_PRICE_OUT_USD_PER_MTOK`) |
+| `LLM_DAILY_SPEND_CAP_USD` | 10 | daily LLM spend cap for evaluation lanes (0 = off; needs `LLM_PRICE_IN_USD_PER_MTOK` + `LLM_PRICE_OUT_USD_PER_MTOK`); cache reads bill 10 %, cache writes 200 % of the input price; the gateway log shows one `[llm-spend]` line per run with the cache hit rate |
 | `LLM_SPEND_CRON_RESERVE_USD` | 2 | part of the cap kept for the cron lanes (Pre-Close Review etc.); trigger/breadth/mover stop at cap − reserve |
 | `SIMULATOR` | true | nightly shadow-variant settle (17:10 ET) into `simulator.db`; `SIM_COMMISSION_PER_SHARE_USD` / `SIM_COMMISSION_MIN_USD` set the commission assumption |
 | `CANDIDATE_ARCHIVE` | true | point-in-time capture of the overnight and cup-and-handle universes on every pre-close snapshot into `candidate-archive.db`; the 🌙 overnight benchmark block after the nightly settle replays yesterday's eligible candidates (mechanical twin: MKT at the next bar, take-x target, stop at the gate's minimum R:R, flat 10:00) and compares the universe, the top-5 by rank and the judgment's picks (gross R = the size-invariant label). Observability only; "eligible" is not "admissible". `bun run scripts/overnight-benchmark.ts --day YYYY-MM-DD` prints the table |

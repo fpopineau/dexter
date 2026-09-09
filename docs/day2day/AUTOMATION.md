@@ -580,7 +580,7 @@ manual acceptance:
 | `OPP_LARGECAP_LANE` / `_MIN_USD` / `_RESERVE` | true / 1e10 / 5 | large-cap scan lane and its reserved candidate slots (REQ-SCAN-006) |
 | `PREMARKET_SPREAD_HARD_MULT` | 3 | pre-open DAY accepts: spread over the cap but under cap × this is deferred to the 09:31 ET re-check (REQ-RISK-008) |
 | `LIVE_VETO_WINDOW_MIN` | 0 | minutes an announced auto-execution waits for `veto P-XXXX` (REQ-LIVE-002) |
-| `LLM_DAILY_SPEND_CAP_USD` | 10 | evaluation lanes stop for the day at this spend; 0 disables; needs both price knobs (REQ-LLM-001/002) |
+| `LLM_DAILY_SPEND_CAP_USD` | 10 | evaluation lanes stop for the day at this spend; 0 disables; needs both price knobs (REQ-LLM-001/002). The meter is cache-aware since 2026-09-09 (reads 10 %, writes 200 % of the input price; the agent's system-prompt cache lives 1 h) and logs one `[llm-spend]` line per run with the hit rate (REQ-LLM-004/005) |
 | `LLM_SPEND_CRON_RESERVE_USD` | 2 | USD of the cap kept for the cron lanes: trigger/breadth/mover stop at cap − reserve, `cron:*` at the cap (REQ-LLM-003) |
 | `LLM_PRICE_IN_USD_PER_MTOK` / `LLM_PRICE_OUT_USD_PER_MTOK` | — | USD per million input/output tokens; required while the cap is on |
 | `SIMULATOR` | true | nightly shadow-variant settle at 17:10 ET into `simulator.db` (REQ-SIM-006); observability only |

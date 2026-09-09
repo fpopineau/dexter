@@ -5,6 +5,9 @@ import { join } from 'node:path';
 import {
     addUsage,
     assertSpendConfig,
+    CACHE_READ_PRICE_MULT,
+    CACHE_WRITE_PRICE_MULT,
+    cacheSplit,
     cronReserveUsd,
     dailySpendCapUsd,
     isCronLane,
@@ -14,6 +17,7 @@ import {
     readSpendPrices,
     recordLlmUsage,
     rollLedger,
+    runSpendLine,
     spendVerdict,
     writeSpendLedger,
 } from './llm-spend.js';
@@ -26,6 +30,40 @@ describe('LLM spend meter (REQ-LLM-001)', () => {
         expect(priceUsd({ inputTokens: 0, outputTokens: 1_000_000 }, PRICES)).toBe(15);
         expect(priceUsd({ inputTokens: 200_000, outputTokens: 10_000 }, PRICES)).toBeCloseTo(0.6 + 0.15, 6);
         expect(priceUsd({ inputTokens: 0, outputTokens: 0 }, PRICES)).toBe(0);
+    });
+
+    test('REQ-LLM-004 cache-aware pricing: reads at 10 %, writes at 200 %, only the uncached remainder at the full price', () => {
+        expect(CACHE_READ_PRICE_MULT).toBe(0.1);
+        expect(CACHE_WRITE_PRICE_MULT).toBe(2);
+        // A trigger run: 100K input of which 80K served from the cache, 10K written, 10K fresh.
+        const run = { inputTokens: 100_000, outputTokens: 1_000, cacheReadTokens: 80_000, cacheCreationTokens: 10_000 };
+        expect(cacheSplit(run)).toEqual({ uncached: 10_000, read: 80_000, written: 10_000 });
+        // 10K × $3 + 80K × $0.30 + 10K × $6 = $0.03 + $0.024 + $0.06; output 1K × $15/M = $0.015.
+        expect(priceUsd(run, PRICES)).toBeCloseTo(0.03 + 0.024 + 0.06 + 0.015, 9);
+        // The same run billed the old way (every input token at $3) would read $0.315: 2.4× the truth.
+        expect(priceUsd({ inputTokens: 100_000, outputTokens: 1_000 }, PRICES)).toBeCloseTo(0.315, 9);
+        // Cache figures the total cannot cover clamp instead of going negative.
+        expect(cacheSplit({ inputTokens: 5_000, outputTokens: 0, cacheReadTokens: 9_000, cacheCreationTokens: 9_000 })).toEqual({ uncached: 0, read: 5_000, written: 0 });
+        expect(cacheSplit({ inputTokens: 5_000, outputTokens: 0, cacheReadTokens: -3, cacheCreationTokens: Number.NaN })).toEqual({ uncached: 5_000, read: 0, written: 0 });
+    });
+
+    test('REQ-LLM-004 the ledger keeps the cache columns and reads legacy ledgers without them', () => {
+        const day = rollLedger(null, '2026-09-09');
+        const a = addUsage(day, 'trigger', { inputTokens: 100_000, outputTokens: 1_000, cacheReadTokens: 80_000, cacheCreationTokens: 10_000 }, PRICES);
+        expect(a.byLane.trigger).toMatchObject({ runs: 1, inputTokens: 100_000, cacheReadTokens: 80_000, cacheCreationTokens: 10_000 });
+        const dir = mkdtempSync(join(tmpdir(), 'dexter-spend-legacy-'));
+        writeSpendLedger(dir, { date: '2026-09-08', totalUsd: 10.23, byLane: { trigger: { runs: 38, inputTokens: 3_834_739, outputTokens: 42_388, usd: 8.09 } as never } });
+        const legacy = readSpendLedger(dir);
+        expect(legacy?.byLane.trigger).toEqual({ runs: 38, inputTokens: 3_834_739, outputTokens: 42_388, cacheReadTokens: 0, cacheCreationTokens: 0, usd: 8.09 });
+    });
+
+    test('REQ-LLM-004 the per-run INFO line names the hit rate, the run cost and where the day stands', () => {
+        const line = runSpendLine('trigger', { inputTokens: 100_000, outputTokens: 953, cacheReadTokens: 80_000, cacheCreationTokens: 10_000 }, 0.129, 3.12, { LLM_DAILY_SPEND_CAP_USD: '10', LLM_SPEND_CRON_RESERVE_USD: '2' });
+        expect(line).toContain('[llm-spend] trigger: $0.129 this run');
+        expect(line).toContain('cache read 80,000 · written 10,000 · uncached 10,000 · hit 80%');
+        expect(line).toContain('output 953');
+        expect(line).toContain('day $3.12 of $10.00 (discovery stops at $8.00)');
+        expect(runSpendLine('whatsapp', { inputTokens: 10, outputTokens: 1 }, 0.0001, 0.5, { LLM_DAILY_SPEND_CAP_USD: '0' })).toContain('(no cap)');
     });
 
     test('readSpendPrices needs BOTH knobs as positive numbers; otherwise null', () => {

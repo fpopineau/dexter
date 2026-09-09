@@ -24,10 +24,37 @@ export interface SpendPrices {
     outUsdPerMtok: number;
 }
 
+/** One run's token usage as the agent reports it. `inputTokens` is the
+ *  TOTAL input (uncached + cache read + cache write); the two cache fields
+ *  are the split Anthropic reports (absent on other providers). */
+export interface RunUsage {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+}
+
+/** REQ-LLM-004 (2026-09-09): Anthropic bills a cache READ at 10 % of the
+ *  input price and a cache WRITE at 125 % (5-minute TTL) or 200 % (1-hour
+ *  TTL). Until this date the meter billed every input token at the full
+ *  price although the agent sends `cache_control` on every call and the
+ *  usage report carries the split — a trigger run resends its ~20K-token
+ *  prefix on each of its iterations, so the ledger overstated the day by
+ *  several times and the $10 cap bound on a phantom (the 2026-09-08
+ *  Pre-Close Review refusal). Writes are priced at the 1-hour rate — the
+ *  system-prompt breakpoint's TTL (llm.ts) — which over-bills the tail
+ *  breakpoint's 5-minute writes by 0.75×: conservative, never generous. */
+export const CACHE_READ_PRICE_MULT = 0.1;
+export const CACHE_WRITE_PRICE_MULT = 2.0;
+
 export interface LaneSpend {
     runs: number;
     inputTokens: number;
     outputTokens: number;
+    /** Cached-prefix tokens served from the cache (REQ-LLM-004). */
+    cacheReadTokens: number;
+    /** Tokens written to the cache (REQ-LLM-004). */
+    cacheCreationTokens: number;
     usd: number;
 }
 
@@ -98,10 +125,24 @@ export function assertSpendConfig(env: Env = process.env): void {
     }
 }
 
-export function priceUsd(usage: { inputTokens: number; outputTokens: number }, prices: SpendPrices): number {
-    const inTok = Number.isFinite(usage.inputTokens) ? Math.max(0, usage.inputTokens) : 0;
-    const outTok = Number.isFinite(usage.outputTokens) ? Math.max(0, usage.outputTokens) : 0;
-    return (inTok / 1e6) * prices.inUsdPerMtok + (outTok / 1e6) * prices.outUsdPerMtok;
+const nonNeg = (n: number | undefined): number => (typeof n === 'number' && Number.isFinite(n) ? Math.max(0, n) : 0);
+
+/** Pure: the cache split of a run — uncached input never below zero even
+ *  when a provider reports cache figures the total does not cover. */
+export function cacheSplit(usage: RunUsage): { uncached: number; read: number; written: number } {
+    const input = nonNeg(usage.inputTokens);
+    const read = Math.min(nonNeg(usage.cacheReadTokens), input);
+    const written = Math.min(nonNeg(usage.cacheCreationTokens), input - read);
+    return { uncached: input - read - written, read, written };
+}
+
+/** Pure: USD of one run — uncached input at the input price, cache reads
+ *  and writes at their multipliers, output at the output price. */
+export function priceUsd(usage: RunUsage, prices: SpendPrices): number {
+    const { uncached, read, written } = cacheSplit(usage);
+    const outTok = nonNeg(usage.outputTokens);
+    return ((uncached + read * CACHE_READ_PRICE_MULT + written * CACHE_WRITE_PRICE_MULT) / 1e6) * prices.inUsdPerMtok
+        + (outTok / 1e6) * prices.outUsdPerMtok;
 }
 
 /** Lanes whose runs are DISCOVERY/evaluation and may be refused at the
@@ -123,15 +164,13 @@ export function rollLedger(ledger: SpendLedger | null, today: string): SpendLedg
     return { date: today, totalUsd: 0, byLane: {} };
 }
 
+const EMPTY_LANE: LaneSpend = { runs: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, usd: 0 };
+
 /** Pure: add one run's usage under `lane`. */
-export function addUsage(
-    ledger: SpendLedger,
-    lane: string,
-    usage: { inputTokens: number; outputTokens: number },
-    prices: SpendPrices,
-): SpendLedger {
+export function addUsage(ledger: SpendLedger, lane: string, usage: RunUsage, prices: SpendPrices): SpendLedger {
     const usd = priceUsd(usage, prices);
-    const prev = ledger.byLane[lane] ?? { runs: 0, inputTokens: 0, outputTokens: 0, usd: 0 };
+    const { read, written } = cacheSplit(usage);
+    const prev = ledger.byLane[lane] ?? EMPTY_LANE;
     return {
         date: ledger.date,
         totalUsd: ledger.totalUsd + usd,
@@ -139,8 +178,10 @@ export function addUsage(
             ...ledger.byLane,
             [lane]: {
                 runs: prev.runs + 1,
-                inputTokens: prev.inputTokens + Math.max(0, usage.inputTokens || 0),
-                outputTokens: prev.outputTokens + Math.max(0, usage.outputTokens || 0),
+                inputTokens: prev.inputTokens + nonNeg(usage.inputTokens),
+                outputTokens: prev.outputTokens + nonNeg(usage.outputTokens),
+                cacheReadTokens: prev.cacheReadTokens + read,
+                cacheCreationTokens: prev.cacheCreationTokens + written,
                 usd: prev.usd + usd,
             },
         },
@@ -181,7 +222,15 @@ export function readSpendLedger(dataDir?: string): SpendLedger | null {
     try {
         const raw = JSON.parse(readFileSync(p, 'utf-8')) as Partial<SpendLedger>;
         if (!raw || typeof raw.date !== 'string' || typeof raw.totalUsd !== 'number' || typeof raw.byLane !== 'object' || raw.byLane === null) return null;
-        return { date: raw.date, totalUsd: raw.totalUsd, byLane: raw.byLane as Record<string, LaneSpend> };
+        // Ledgers written before REQ-LLM-004 carry no cache columns.
+        const byLane: Record<string, LaneSpend> = {};
+        for (const [lane, v] of Object.entries(raw.byLane as Record<string, Partial<LaneSpend>>)) {
+            byLane[lane] = {
+                runs: nonNeg(v.runs), inputTokens: nonNeg(v.inputTokens), outputTokens: nonNeg(v.outputTokens),
+                cacheReadTokens: nonNeg(v.cacheReadTokens), cacheCreationTokens: nonNeg(v.cacheCreationTokens), usd: nonNeg(v.usd),
+            };
+        }
+        return { date: raw.date, totalUsd: raw.totalUsd, byLane };
     } catch {
         return null;
     }
@@ -199,18 +248,35 @@ export function writeSpendLedger(dataDir: string | undefined, ledger: SpendLedge
  *  that configuration impossible while a cap is active). */
 export function recordLlmUsage(
     lane: string | null,
-    usage: { inputTokens: number; outputTokens: number } | undefined,
-    opts: { prices?: SpendPrices | null; dataDir?: string; today?: string } = {},
+    usage: RunUsage | undefined,
+    opts: { prices?: SpendPrices | null; dataDir?: string; today?: string; env?: Env } = {},
 ): void {
     if (!usage) return;
     try {
         const prices = opts.prices === undefined ? readSpendPrices() : opts.prices;
         const ledger = rollLedger(readSpendLedger(opts.dataDir), opts.today ?? etToday());
-        const next = addUsage(ledger, lane ?? 'agent', usage, prices ?? { inUsdPerMtok: 0, outUsdPerMtok: 0 });
+        const laneKey = lane ?? 'agent';
+        const next = addUsage(ledger, laneKey, usage, prices ?? { inUsdPerMtok: 0, outUsdPerMtok: 0 });
         writeSpendLedger(opts.dataDir, next);
+        logger.info(runSpendLine(laneKey, usage, next.totalUsd - ledger.totalUsd, next.totalUsd, opts.env));
     } catch (err) {
         logger.warn(`[llm-spend] metering failed: ${err instanceof Error ? err.message : err}`);
     }
+}
+
+/** REQ-LLM-004: one INFO line per run so the cache hit rate and the cost
+ *  per run are observable in the gateway log (the per-call split stays at
+ *  debug in llm.ts). */
+export function runSpendLine(lane: string, usage: RunUsage, runUsd: number, dayUsd: number, env: Env = process.env): string {
+    const { uncached, read, written } = cacheSplit(usage);
+    const input = uncached + read + written;
+    const hit = input > 0 ? Math.round((read / input) * 100) : 0;
+    const cap = dailySpendCapUsd(env);
+    const reserve = Math.min(cronReserveUsd(env), cap);
+    const capNote = cap > 0 ? ` — day $${dayUsd.toFixed(2)} of $${cap.toFixed(2)}${reserve > 0 ? ` (discovery stops at $${(cap - reserve).toFixed(2)})` : ''}` : ` — day $${dayUsd.toFixed(2)} (no cap)`;
+    return `[llm-spend] ${lane}: $${runUsd.toFixed(3)} this run — input ${input.toLocaleString('en-US')} ` +
+        `(cache read ${read.toLocaleString('en-US')} · written ${written.toLocaleString('en-US')} · uncached ${uncached.toLocaleString('en-US')} · hit ${hit}%), ` +
+        `output ${nonNeg(usage.outputTokens).toLocaleString('en-US')}${capNote}`;
 }
 
 /** Gate for the agent runner: throws SpendCapError when the lane may not
