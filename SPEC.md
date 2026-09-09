@@ -4409,9 +4409,15 @@ $0.19 metered per run at Sonnet 5's $2 / $10 per million):
 - [x] Cache-aware pricing, clamping, ledger columns, legacy ledger read,
   per-run line pinned (`llm-spend.test.ts`).
 - [x] Epoch 3 stopped with the stated reason; journal line.
-- [ ] Operator: gateway restart, `epoch new` → epoch-4; then read the
-  `[llm-spend]` lines — a hit rate near 0 % on the second run of an hour
-  means a silent invalidator in the prefix.
+- [x] Operator: gateway restart, `epoch new` → epoch-4 STARTED
+  2026-09-09T15:52:08.518Z (11:52 ET), fp `6bcd5e29f25d`, constants
+  `6f69718c525f`, NetLiq frozen $12,227.16, rung 0.25 %, policy incumbent.
+  Today's ledger ($8.13, metered at full price before this build) already
+  exceeds the $8 discovery allowance, so the trigger and breadth lanes stay
+  refused until the ET day rolls; the cron lanes (Midday Check, Pre-Close
+  Review) run and give the first cache-hit readings.
+- [ ] Read the `[llm-spend]` lines of 2026-09-10 — a hit rate near 0 % on
+  the second run of an hour means a silent invalidator in the prefix.
 
 | Item | Test |
 |---|---|

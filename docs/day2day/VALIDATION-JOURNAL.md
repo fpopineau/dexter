@@ -64,3 +64,5 @@ after the WP1..WP3 gateway restart; from there the control plane
 - 2026-09-09 — ladder RESET to rung 0.25% for epoch-3
 - 2026-09-09 — epoch-3 START 2026-09-09T15:18:45.341Z fp 7230906cf78f constants 6f69718c525f netliq $12218.11 rung 0.25 policy incumbent
 - 2026-09-09 — epoch-3 STOP 2026-09-09T15:45:21.142Z — cache-aware spend metering + 1h prompt cache (not a REJECT)
+- 2026-09-09 — ladder RESET to rung 0.25% for epoch-4
+- 2026-09-09 — epoch-4 START 2026-09-09T15:52:08.518Z fp 6bcd5e29f25d constants 6f69718c525f netliq $12227.16 rung 0.25 policy incumbent
