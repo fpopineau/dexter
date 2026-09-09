@@ -60,3 +60,4 @@ after the WP1..WP3 gateway restart; from there the control plane
 - 2026-09-08 — epoch-1 STOP 2026-09-08T19:01:59.647Z — trigger-coverage correction
 - 2026-09-08 — ladder RESET to rung 0.25% for epoch-2
 - 2026-09-08 — epoch-2 START 2026-09-08T19:06:11.445Z fp 4801bb194d6c constants 6f69718c525f netliq $12228.96 rung 0.25 policy incumbent
+- 2026-09-09 — epoch-2 STOP 2026-09-09T15:16:29.253Z — day-1 corrections: exit commission attribution, 10148 token, intraday entry cutoff, cron spend reserve (not a REJECT)
